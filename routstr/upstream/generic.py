@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import httpx
 
 from .base import BaseUpstreamProvider
+from .model_paths import public_provider_url
 from .pricing_resolver import (
     FallbackPricingResolver,
     ResolvedPricing,
@@ -49,6 +51,22 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
             api_key=api_key,
             provider_fee=provider_fee,
         )
+
+    def _apply_provider_field(self, response_json: object) -> None:
+        """Stamp ``"generic:<upstream host>"`` unless the upstream named itself.
+
+        A generic upstream is not a router, so nothing identifies the serving
+        endpoint in the payload; the base URL host fills that role.
+        """
+        if not isinstance(response_json, dict):
+            return
+        existing = response_json.get("provider")
+        if not (isinstance(existing, str) and existing.strip()):
+            response_json["provider"] = (
+                urlparse(public_provider_url(self.base_url)).hostname
+                or self.upstream_name
+            )
+        super()._apply_provider_field(response_json)
 
     @classmethod
     def _build_from_row(
