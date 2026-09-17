@@ -9,6 +9,7 @@ from typing import Any, TypedDict
 
 import httpx
 from cashu.core.base import MeltQuoteState
+from cashu.core.settings import settings as cashu_settings
 from cashu.wallet.wallet import Proof, Wallet
 
 from ..cashu_compat import install_cashu_httpx_shim
@@ -291,13 +292,20 @@ def _select_melt_proofs(
     Cashu 0.20's ``select_to_send`` may recursively swap when asked to spend a
     wallet's full balance. Melts accept overpayment and return change, so a
     bounded, largest-first selection is both safer and minimizes input fees.
+
+    Mints reject a melt carrying more than ``mint_max_request_length`` inputs,
+    so a dust-heavy wallet can only pay what its largest inputs cover; the
+    caller lowers the amount and the rest goes out on later payouts.
     """
     selected: list[Proof] = []
     selected_amount = 0
     required = quote_amount + fee_reserve
-    for proof in sorted(proofs, key=lambda item: item.amount, reverse=True):
-        if getattr(proof, "reserved", False) is True:
-            continue
+    spendable = [
+        proof
+        for proof in sorted(proofs, key=lambda item: item.amount, reverse=True)
+        if getattr(proof, "reserved", False) is not True
+    ]
+    for proof in spendable[: cashu_settings.mint_max_request_length]:
         selected.append(proof)
         selected_amount += proof.amount
         input_fees = int(wallet.get_fees_for_proofs(selected))
