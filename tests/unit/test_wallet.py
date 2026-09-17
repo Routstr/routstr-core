@@ -144,6 +144,19 @@ async def test_get_wallet_force_reload_bypasses_reload_interval() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_wallet_force_reload_proofs_keeps_cached_keysets() -> None:
+    from routstr.wallet import get_wallet
+
+    mock_wallet = Mock(load_mint=AsyncMock(), load_proofs=AsyncMock())
+    with patch("routstr.wallet.Wallet.with_db", AsyncMock(return_value=mock_wallet)):
+        await get_wallet("http://mint:3338", "sat")
+        await get_wallet("http://mint:3338", "sat", force_reload_proofs=True)
+
+    assert mock_wallet.load_mint.await_count == 1
+    assert mock_wallet.load_proofs.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_public_recieve_token_holds_wallet_operation_guard() -> None:
     inside_guard = False
 
@@ -2017,7 +2030,7 @@ async def test_payout_reloads_wallet_snapshot_under_guard() -> None:
         await _payout_mint_and_unit("https://mint.example.com", "sat")
 
     mock_get_wallet.assert_awaited_once_with(
-        "https://mint.example.com", "sat", force_reload=True
+        "https://mint.example.com", "sat", force_reload_proofs=True
     )
 
 
