@@ -109,7 +109,25 @@ class TestParseTinfoilUsageMetrics:
         assert result["prompt_tokens"] == 69
         assert result["completion_tokens"] == 20
         assert result["total_tokens"] == 89
+        assert result["cache_read_input_tokens"] == 64
+        assert result["uncached_prompt_tokens"] == 5
         assert result["model"] == "kimi-k2-6"
+        assert "cost_usd" not in result
+
+    def test_with_cached_and_cost_usd(self) -> None:
+        result = parse_tinfoil_usage_metrics(
+            "prompt=69,completion=20,total=89,"
+            "cached_prompt_tokens=64,uncached_prompt_tokens=5,"
+            "model=glm-5-2,cost_usd=0.000123456"
+        )
+        assert result is not None
+        assert result["prompt_tokens"] == 69
+        assert result["completion_tokens"] == 20
+        assert result["total_tokens"] == 89
+        assert result["cache_read_input_tokens"] == 64
+        assert result["uncached_prompt_tokens"] == 5
+        assert result["cost_usd"] == 0.000123456
+        assert result["model"] == "glm-5-2"
 
     def test_old_format_still_works(self) -> None:
         """Headers without the model field (pre-PR #385) still parse."""
@@ -290,6 +308,46 @@ class TestComputeEhbpActualCost:
             assert result["output_msats"] == 20
 
     @pytest.mark.asyncio
+    async def test_cache_fields_propagated(self) -> None:
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-glm-5-2"
+        model_obj.forwarded_model_id = "glm-5-2"
+        with patch(
+            "routstr.upstream.ehbp.calculate_cost",
+            new_callable=AsyncMock,
+        ) as mock_calc:
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=20,
+                total_msats=25,
+                total_usd=0.0003,
+                input_tokens=5,
+                output_tokens=20,
+                cache_read_input_tokens=64,
+                cache_creation_input_tokens=0,
+                cache_read_msats=12,
+                cache_creation_msats=0,
+            )
+            result = await _compute_ehbp_actual_cost(
+                "prompt=69,completion=20,total=89,"
+                "cached_prompt_tokens=64,uncached_prompt_tokens=5,"
+                "model=glm-5-2",
+                model_obj,
+                100_000,
+            )
+            assert result["total_msats"] == 25
+            assert result["input_tokens"] == 5
+            assert result["output_tokens"] == 20
+            assert result["cache_read_input_tokens"] == 64
+            assert result["cache_creation_input_tokens"] == 0
+            assert result["cache_read_msats"] == 12
+            assert result["cache_creation_msats"] == 0
+            assert result["total_usd"] == 0.0003
+
+    @pytest.mark.asyncio
     async def test_unpriceable_usage_does_not_charge_authorization_ceiling(
         self,
     ) -> None:
@@ -429,6 +487,230 @@ class TestComputeEhbpActualCost:
             # calculate_cost called with the actual model's client-facing ID
             call_args = mock_calc.call_args
             assert call_args[0][0]["model"] == "tinfoil-llama3-3-70b"
+
+    @pytest.mark.asyncio
+    async def test_namespaced_prefix_served_bare_keeps_requested_pricing(
+        self,
+    ) -> None:
+        """Production shape: the catalog model is ``tinfoil-X`` and its
+        ``forwarded_model_id`` carries the prefix, the SDK strips the prefix
+        for the encrypted body, and the enclave reports bare ``X``. Pricing
+        must stay on the requested Tinfoil model (correct rate + cache
+        discount), not the cheaper cross-provider model the bare id resolves
+        to in the global map."""
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-deepseek-v4-1-flash"
+        model_obj.forwarded_model_id = "tinfoil-deepseek-v4-1-flash"
+
+        tinfoil_model = MagicMock()
+        tinfoil_model.id = "tinfoil-deepseek-v4-1-flash"
+        tinfoil_model.forwarded_model_id = "tinfoil-deepseek-v4-1-flash"
+
+        # The cheaper cross-provider model the bare id resolves to globally.
+        cross_provider_model = MagicMock()
+        cross_provider_model.id = "deepseek-v4-1-flash"
+        cross_provider_model.forwarded_model_id = "deepseek-v4-1-flash"
+
+        registry = {
+            "tinfoil-deepseek-v4-1-flash": tinfoil_model,
+            "deepseek-v4-1-flash": cross_provider_model,
+        }
+
+        with (
+            patch(
+                "routstr.proxy.get_model_instance",
+                side_effect=lambda name: registry.get(name),
+            ),
+            patch(
+                "routstr.upstream.ehbp.calculate_cost",
+                new_callable=AsyncMock,
+            ) as mock_calc,
+        ):
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=5,
+                output_tokens=10,
+                cache_read_input_tokens=64,
+                cache_creation_input_tokens=0,
+                cache_read_msats=1,
+                cache_creation_msats=0,
+            )
+            result = await _compute_ehbp_actual_cost(
+                "prompt=69,completion=10,total=79,"
+                "cached_prompt_tokens=64,uncached_prompt_tokens=5,"
+                "model=deepseek-v4-1-flash",
+                model_obj,
+                100_000,
+            )
+            # No mismatch: pricing stays on the requested Tinfoil model.
+            assert "actual_model" not in result
+            call_args = mock_calc.call_args
+            assert call_args[0][0]["model"] == "tinfoil-deepseek-v4-1-flash"
+
+    @pytest.mark.asyncio
+    async def test_namespaced_prefix_failover_uses_served_tinfoil_model(
+        self,
+    ) -> None:
+        """A genuine failover (asked ``tinfoil-glm-5-3``, enclave served
+        ``glm-5-3-flash``) must bill the served *Tinfoil* model, not the
+        cheaper cross-provider alias the bare id resolves to."""
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-glm-5-3"
+        model_obj.forwarded_model_id = "tinfoil-glm-5-3"
+
+        served_tinfoil = MagicMock()
+        served_tinfoil.id = "tinfoil-glm-5-3-flash"
+        served_tinfoil.forwarded_model_id = "tinfoil-glm-5-3-flash"
+
+        cross_provider = MagicMock()
+        cross_provider.id = "glm-5-3-flash"
+        cross_provider.forwarded_model_id = "glm-5-3-flash"
+
+        registry = {
+            "tinfoil-glm-5-3-flash": served_tinfoil,
+            "glm-5-3-flash": cross_provider,
+        }
+
+        with (
+            patch(
+                "routstr.proxy.get_model_instance",
+                side_effect=lambda name: registry.get(name),
+            ),
+            patch(
+                "routstr.upstream.ehbp.calculate_cost",
+                new_callable=AsyncMock,
+            ) as mock_calc,
+        ):
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=20,
+                output_msats=40,
+                total_msats=60,
+                total_usd=0.0,
+                input_tokens=42,
+                output_tokens=10,
+            )
+            result = await _compute_ehbp_actual_cost(
+                "prompt=42,completion=10,total=52,model=glm-5-3-flash",
+                model_obj,
+                100_000,
+            )
+            assert result["actual_model"] == "glm-5-3-flash"
+            # Billed on the served *Tinfoil* model, not the bare-id alias.
+            call_args = mock_calc.call_args
+            assert call_args[0][0]["model"] == "tinfoil-glm-5-3-flash"
+
+    @pytest.mark.asyncio
+    async def test_calculate_cost_receives_routed_model_obj(self) -> None:
+        """The routed ``Model`` is handed to ``calculate_cost`` so pricing is
+        billed directly. Without it, ``calculate_cost`` re-derives pricing from
+        the response's model *string* through the global alias map, which
+        resolves a bare id to the best-ranked (cheaper) cross-provider
+        candidate rather than the serving one."""
+        model_obj = MagicMock()
+        model_obj.id = "deepseek-v4-1-flash"
+        model_obj.forwarded_model_id = "tinfoil-deepseek-v4-1-flash"
+
+        resolved = MagicMock()
+        resolved.id = "tinfoil-deepseek-v4-1-flash"
+        resolved.forwarded_model_id = "tinfoil-deepseek-v4-1-flash"
+
+        with (
+            patch(
+                "routstr.proxy.get_model_instance",
+                return_value=resolved,
+            ),
+            patch(
+                "routstr.upstream.ehbp.calculate_cost",
+                new_callable=AsyncMock,
+            ) as mock_calc,
+        ):
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=5,
+                output_tokens=10,
+            )
+            await _compute_ehbp_actual_cost(
+                "prompt=12952,completion=1,total=12953,"
+                "cached_prompt_tokens=12800,uncached_prompt_tokens=152,"
+                "model=deepseek-v4-1-flash,cost_usd=0.00176715",
+                model_obj,
+                100_000,
+            )
+            # The routed model object itself must be passed through.
+            assert mock_calc.call_args[0][2] is model_obj
+
+    @pytest.mark.asyncio
+    async def test_routed_model_cache_rate_beats_bare_id_alias(self) -> None:
+        """Production regression: the routed Tinfoil model's id *is* a bare
+        cross-provider alias, so re-deriving pricing from the echoed model
+        string silently swapped in the cheaper candidate's full input rate and
+        the cache discount vanished. Billing must use the routed model's own
+        discounted cache rate."""
+        from routstr.payment.models import Pricing
+
+        model_obj = MagicMock()
+        model_obj.id = "deepseek-v4-1-flash"
+        model_obj.forwarded_model_id = "tinfoil-deepseek-v4-1-flash"
+        # ~688 msat/1k input, ~112 msat/1k cached read (the good Tinfoil rate).
+        model_obj.sats_pricing = Pricing(
+            prompt=6.88e-4,
+            completion=2.0e-3,
+            input_cache_read=1.12e-4,
+        )
+
+        # The cross-provider candidate the bare id resolves to globally: no
+        # cache rate at all, so a re-derivation charges the full input rate.
+        cross_provider_model = MagicMock()
+        cross_provider_model.id = "deepseek-v4-1-flash"
+        cross_provider_model.forwarded_model_id = "deepseek-v4-1-flash"
+        cross_provider_model.sats_pricing = Pricing(
+            prompt=4.9455e-4,
+            completion=2.0e-3,
+            input_cache_read=0.0,
+        )
+
+        registry = {
+            "tinfoil-deepseek-v4-1-flash": model_obj,
+            "deepseek-v4-1-flash": cross_provider_model,
+        }
+
+        with (
+            patch(
+                "routstr.proxy.get_model_instance",
+                side_effect=lambda name: registry.get(name),
+            ),
+            patch(
+                "routstr.payment.cost_calculation.sats_usd_price",
+                return_value=5.0e-5,
+            ),
+        ):
+            result = await _compute_ehbp_actual_cost(
+                "prompt=12952,completion=1,total=12953,"
+                "cached_prompt_tokens=12800,uncached_prompt_tokens=152,"
+                "model=deepseek-v4-1-flash,cost_usd=0.00176715",
+                model_obj,
+                100_000,
+            )
+
+        assert result["cache_read_input_tokens"] == 12800
+        # 12800 cached tokens at the discounted (~112 msat/1k) rate, not the
+        # full input rate (which would be ~8800 msat here).
+        assert result["cache_read_msats"] == pytest.approx(1434, abs=10)
 
     @pytest.mark.asyncio
     async def test_model_mismatch_unknown_model_falls_back(self) -> None:
@@ -709,6 +991,20 @@ class TestTinfoilUpstreamProvider:
         assert tf.id == "llama3-3-70b"
         assert tf.pricing.inputTokenPricePer1M == 1.75
         assert tf.pricing.outputTokenPricePer1M == 2.75
+        assert tf.pricing.cachedInputTokenPricePer1M is None
+
+    def test_tinfoil_model_pricing_parses_cached_rate(self) -> None:
+        data = {
+            "id": "glm-5-2",
+            "pricing": {
+                "inputTokenPricePer1M": 1.5,
+                "outputTokenPricePer1M": 5.25,
+                "cachedInputTokenPricePer1M": 0.375,
+                "requestPrice": 0,
+            },
+        }
+        tf = TinfoilModel.parse_obj(data)
+        assert tf.pricing.cachedInputTokenPricePer1M == 0.375
 
     @pytest.mark.asyncio
     async def test_fetch_models_parses_response(self) -> None:
@@ -747,7 +1043,51 @@ class TestTinfoilUpstreamProvider:
         assert models[0].id == "llama3-3-70b"
         assert models[0].pricing.prompt == 1.75 / 1_000_000
         assert models[0].pricing.completion == 2.75 / 1_000_000
+        # No cachedInputTokenPricePer1M means cache reads are billed at the
+        # full input rate (and cache writes too — no separate write price).
+        assert models[0].pricing.input_cache_read == 1.75 / 1_000_000
+        assert models[0].pricing.input_cache_write == 1.75 / 1_000_000
         assert models[0].context_length == 128000
+
+    @pytest.mark.asyncio
+    async def test_fetch_models_maps_cached_pricing(self) -> None:
+        provider = TinfoilUpstreamProvider(api_key="test")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "data": [
+                {
+                    "id": "glm-5-2",
+                    "context_window": 393216,
+                    "created": 1775088000,
+                    "multimodal": False,
+                    "pricing": {
+                        "inputTokenPricePer1M": 1.5,
+                        "outputTokenPricePer1M": 5.25,
+                        "cachedInputTokenPricePer1M": 0.375,
+                        "requestPrice": 0,
+                    },
+                    "endpoints": ["/v1/chat/completions", "/v1/responses"],
+                    "type": "chat",
+                }
+            ]
+        }
+
+        with patch("routstr.upstream.tinfoil.httpx.AsyncClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            models = await provider.fetch_models()
+
+        assert len(models) == 1
+        assert models[0].pricing.prompt == 1.5 / 1_000_000
+        assert models[0].pricing.completion == 5.25 / 1_000_000
+        assert models[0].pricing.input_cache_read == 0.375 / 1_000_000
+        assert models[0].pricing.input_cache_write == 1.5 / 1_000_000
 
     @pytest.mark.asyncio
     async def test_fetch_models_handles_error(self) -> None:

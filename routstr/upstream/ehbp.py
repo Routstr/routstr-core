@@ -127,28 +127,43 @@ _PROXY_ONLY_HEADERS = frozenset(
     }
 )
 
+# Namespace prefix the routstr catalog applies to Tinfoil models
+# (e.g. ``tinfoil-deepseek-v4-1-flash``). The SDK strips this prefix for the
+# encrypted body (``getTinfoilUpstreamModelId`` in client/TinfoilSecure.ts), so
+# the enclave always reports the *bare* upstream model id in the usage-metrics
+# header even though the routstr model id and ``forwarded_model_id`` carry it.
+TINFOIL_MODEL_PREFIX = "tinfoil-"
+
 
 def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
     """Parse ``X-Tinfoil-Usage-Metrics`` into an OpenAI-style usage dict.
 
     The header format is::
 
-        prompt=<n>,completion=<n>,total=<n>[,model=<name>]
+        prompt=<n>,completion=<n>,total=<n>[,cached_prompt_tokens=<n>,
+        uncached_prompt_tokens=<n>][,model=<name>][,cost_usd=<usd>]
+
+    ``prompt`` is the inclusive prompt total and ``cached_prompt_tokens`` is
+    the cache-read portion included within it. Routstr maps these to
+    ``prompt_tokens`` and ``cache_read_input_tokens`` so ``normalize_usage``
+    can subtract the cached read from the prompt total (OpenAI-family
+    semantics). ``cost_usd`` is parsed as a float and kept for logging/
+    cross-checking only — billing uses the token path.
 
     The ``model`` field (added in tinfoilsh/confidential-model-router PR #385)
-    is extracted as a string and included in the returned dict under the
-    ``"model"`` key so callers can compare the served model against the
-    requested one and adjust pricing.
+    is extracted as a string so callers can compare the served model against
+    the requested one and adjust pricing.
 
-    Returns a dict like ``{"prompt_tokens": n, "completion_tokens": n,
-    "model": "<name>"}`` suitable for :func:`calculate_cost` (which ignores
-    the extra ``model`` key in the usage sub-dict), or ``None`` when the
+    Returns a dict suitable for :func:`calculate_cost`, or ``None`` when the
     header is absent or malformed.
     """
     if not header_value:
         return None
-    parts: dict[str, int] = {}
+
+    int_parts: dict[str, int] = {}
     model: str | None = None
+    cost_usd: float | None = None
+
     for item in header_value.split(","):
         key, sep, value = item.partition("=")
         if not sep:
@@ -158,30 +173,44 @@ def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
         if key == "model":
             model = value
             continue
+        if key == "cost_usd":
+            try:
+                cost_usd = float(value)
+            except (ValueError, TypeError):
+                cost_usd = None
+            continue
         try:
-            parts[key] = int(value)
+            int_parts[key] = int(value)
         except (ValueError, TypeError):
             continue
-    prompt = parts.get("prompt")
-    completion = parts.get("completion")
-    if prompt is not None and completion is not None:
-        result: dict[str, int | str] = {
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-        }
-        if "total" in parts:
-            result["total_tokens"] = parts["total"]
-        if model:
-            result["model"] = model
-        return result
-    logger.warning(
-        "Failed to parse X-Tinfoil-Usage-Metrics header",
-        extra={
-            "header_value": header_value,
-            "parsed_parts": parts,
-        },
-    )
-    return None
+
+    prompt = int_parts.get("prompt")
+    completion = int_parts.get("completion")
+    if prompt is None or completion is None:
+        logger.warning(
+            "Failed to parse X-Tinfoil-Usage-Metrics header",
+            extra={
+                "header_value": header_value,
+                "parsed_parts": int_parts,
+            },
+        )
+        return None
+
+    result: dict[str, int | float | str] = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+    }
+    if "total" in int_parts:
+        result["total_tokens"] = int_parts["total"]
+    if "cached_prompt_tokens" in int_parts:
+        result["cache_read_input_tokens"] = int_parts["cached_prompt_tokens"]
+    if "uncached_prompt_tokens" in int_parts:
+        result["uncached_prompt_tokens"] = int_parts["uncached_prompt_tokens"]
+    if cost_usd is not None:
+        result["cost_usd"] = cost_usd
+    if model:
+        result["model"] = model
+    return result
 
 
 def _get_header_case_insensitive(
@@ -330,6 +359,11 @@ def _build_cost_info(
     output_tokens: int = 0,
     input_msats: int = 0,
     output_msats: int = 0,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_msats: int = 0,
+    cache_creation_msats: int = 0,
+    total_usd: float = 0.0,
     actual_model: str | None = None,
 ) -> dict:
     """Build a cost-info dict with token counts and per-token-type costs.
@@ -338,13 +372,18 @@ def _build_cost_info(
     one), it is included in the returned dict so callers can use it for billing
     finalization and logging.
     """
-    result: dict[str, int | str | None] = {
+    result: dict[str, int | float | str | None] = {
         "total_msats": total_msats,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
         "input_msats": input_msats,
         "output_msats": output_msats,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_msats": cache_read_msats,
+        "cache_creation_msats": cache_creation_msats,
+        "total_usd": total_usd,
     }
     if actual_model:
         result["actual_model"] = actual_model
@@ -363,6 +402,10 @@ def _inject_cost_response_headers(headers: dict[str, str], cost_info: dict) -> N
         headers["X-Routstr-Computed-Cost-Msats"] = str(cost_info["computed_msats"])
     headers["X-Routstr-Input-Cost-Msats"] = str(cost_info["input_msats"])
     headers["X-Routstr-Output-Cost-Msats"] = str(cost_info["output_msats"])
+    headers["X-Routstr-Cache-Read-Msats"] = str(cost_info.get("cache_read_msats", 0))
+    headers["X-Routstr-Cache-Creation-Msats"] = str(
+        cost_info.get("cache_creation_msats", 0)
+    )
 
 
 async def _compute_ehbp_actual_cost(
@@ -400,6 +443,14 @@ async def _compute_ehbp_actual_cost(
     # look up the actual model's pricing.
     actual_model: str | None = usage_dict.pop("model", None)  # type: ignore[arg-type]
     pricing_model_id = model_obj.id
+    # Bill the model we actually routed to. Passing only the model *string*
+    # to calculate_cost makes it re-derive pricing from the global alias map,
+    # which resolves the id to the best-ranked candidate — not the serving
+    # one.  Tinfoil's catalog id (e.g. ``deepseek-v4-1-flash``) is also a
+    # cross-provider alias, and that cheaper candidate has no cache rate, so
+    # the cache discount silently disappeared (and the request was
+    # undercharged).  Hand calculate_cost the identity it cannot reconstruct.
+    pricing_model_obj: Model = model_obj
     expected_upstream_model = model_obj.forwarded_model_id or model_obj.id
     expected_identity = _normalize_upstream_model_id(expected_upstream_model)
     served_identity = _normalize_upstream_model_id(actual_model)
@@ -415,7 +466,24 @@ async def _compute_ehbp_actual_cost(
         # the global model map. The resolved object can belong to a different
         # provider and therefore have a different client-facing ``id`` while
         # still representing the same upstream model.
-        actual_model_obj = get_model_instance(actual_model)
+        #
+        # The enclave reports the *bare* upstream id, but the routstr model is
+        # namespaced ``tinfoil-`` (and the SDK strips that prefix for the
+        # encrypted body). Resolve the served id within the same namespace
+        # first: a same-model report then maps back onto the requested Tinfoil
+        # model, and a genuine failover lands on the actually-served Tinfoil
+        # model — instead of the cheaper cross-provider model the bare id
+        # would resolve to in the global map.
+        namespaced_served = actual_model
+        if (
+            expected_upstream_model.startswith(TINFOIL_MODEL_PREFIX)
+            and not actual_model.startswith(TINFOIL_MODEL_PREFIX)
+        ):
+            namespaced_served = TINFOIL_MODEL_PREFIX + actual_model
+
+        actual_model_obj = get_model_instance(namespaced_served)
+        if actual_model_obj is None and namespaced_served != actual_model:
+            actual_model_obj = get_model_instance(actual_model)
         if actual_model_obj is None:
             logger.warning(
                 "EHBP served model not found in registry, falling back "
@@ -444,6 +512,7 @@ async def _compute_ehbp_actual_cost(
                     },
                 )
                 pricing_model_id = actual_model_obj.id
+                pricing_model_obj = actual_model_obj
             else:
                 # A different registry/client alias resolved to the same
                 # upstream model; retain the requested model's pricing.
@@ -456,6 +525,7 @@ async def _compute_ehbp_actual_cost(
         cost = await calculate_cost(
             {"model": pricing_model_id, "usage": usage_dict},
             max_cost_for_model,
+            pricing_model_obj,
         )
     except Exception as e:
         logger.warning(
@@ -499,6 +569,11 @@ async def _compute_ehbp_actual_cost(
             output_tokens=cost.output_tokens,
             input_msats=cost.input_msats,
             output_msats=cost.output_msats,
+            cache_read_input_tokens=cost.cache_read_input_tokens,
+            cache_creation_input_tokens=cost.cache_creation_input_tokens,
+            cache_read_msats=cost.cache_read_msats,
+            cache_creation_msats=cost.cache_creation_msats,
+            total_usd=cost.total_usd,
             actual_model=actual_model,
         )
     # CostDataError
@@ -632,6 +707,16 @@ async def finalize_ehbp_actual_cost_payment(
             "cost_charged": total_cost_msats,
             "input_tokens": cost_info.get("input_tokens", 0),
             "output_tokens": cost_info.get("output_tokens", 0),
+            # Cache splits are only knowable when the enclave reports
+            # ``cached_prompt_tokens``; absent that they are a measured zero on
+            # the token counts the provider did report (not an unknown), so the
+            # event key set stays stable for usage-analytics consumers.
+            "cache_read_input_tokens": cost_info.get("cache_read_input_tokens", 0),
+            "cache_creation_input_tokens": cost_info.get(
+                "cache_creation_input_tokens", 0
+            ),
+            "cache_read_msats": cost_info.get("cache_read_msats", 0),
+            "cache_creation_msats": cost_info.get("cache_creation_msats", 0),
             "balance": key.balance,
             "reserved_balance": key.reserved_balance,
             "total_spent": key.total_spent,
@@ -855,7 +940,7 @@ async def forward_ehbp_request(
                 **cost_info,
                 "total_msats": charged_msats,
                 "charged_msats": charged_msats,
-                "total_usd": 0.0,
+                "total_usd": cost_info.get("total_usd", 0.0),
             }
             if computed_msats != charged_msats:
                 cost_data["computed_msats"] = computed_msats
@@ -894,6 +979,12 @@ async def forward_ehbp_request(
             + cost_data.get("output_tokens", 0),
             "input_msats": cost_data.get("input_msats", 0),
             "output_msats": cost_data.get("output_msats", 0),
+            "cache_read_input_tokens": cost_data.get("cache_read_input_tokens", 0),
+            "cache_creation_input_tokens": cost_data.get(
+                "cache_creation_input_tokens", 0
+            ),
+            "cache_read_msats": cost_data.get("cache_read_msats", 0),
+            "cache_creation_msats": cost_data.get("cache_creation_msats", 0),
         }
         if "computed_msats" in cost_data:
             cost_info["computed_msats"] = cost_data["computed_msats"]
