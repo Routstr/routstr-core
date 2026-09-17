@@ -609,6 +609,110 @@ class TestComputeEhbpActualCost:
             assert call_args[0][0]["model"] == "tinfoil-glm-5-3-flash"
 
     @pytest.mark.asyncio
+    async def test_calculate_cost_receives_routed_model_obj(self) -> None:
+        """The routed ``Model`` is handed to ``calculate_cost`` so pricing is
+        billed directly. Without it, ``calculate_cost`` re-derives pricing from
+        the response's model *string* through the global alias map, which
+        resolves a bare id to the best-ranked (cheaper) cross-provider
+        candidate rather than the serving one."""
+        model_obj = MagicMock()
+        model_obj.id = "deepseek-v4-1-flash"
+        model_obj.forwarded_model_id = "tinfoil-deepseek-v4-1-flash"
+
+        resolved = MagicMock()
+        resolved.id = "tinfoil-deepseek-v4-1-flash"
+        resolved.forwarded_model_id = "tinfoil-deepseek-v4-1-flash"
+
+        with (
+            patch(
+                "routstr.proxy.get_model_instance",
+                return_value=resolved,
+            ),
+            patch(
+                "routstr.upstream.ehbp.calculate_cost",
+                new_callable=AsyncMock,
+            ) as mock_calc,
+        ):
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=5,
+                output_tokens=10,
+            )
+            await _compute_ehbp_actual_cost(
+                "prompt=12952,completion=1,total=12953,"
+                "cached_prompt_tokens=12800,uncached_prompt_tokens=152,"
+                "model=deepseek-v4-1-flash,cost_usd=0.00176715",
+                model_obj,
+                100_000,
+            )
+            # The routed model object itself must be passed through.
+            assert mock_calc.call_args[0][2] is model_obj
+
+    @pytest.mark.asyncio
+    async def test_routed_model_cache_rate_beats_bare_id_alias(self) -> None:
+        """Production regression: the routed Tinfoil model's id *is* a bare
+        cross-provider alias, so re-deriving pricing from the echoed model
+        string silently swapped in the cheaper candidate's full input rate and
+        the cache discount vanished. Billing must use the routed model's own
+        discounted cache rate."""
+        from routstr.payment.models import Pricing
+
+        model_obj = MagicMock()
+        model_obj.id = "deepseek-v4-1-flash"
+        model_obj.forwarded_model_id = "tinfoil-deepseek-v4-1-flash"
+        # ~688 msat/1k input, ~112 msat/1k cached read (the good Tinfoil rate).
+        model_obj.sats_pricing = Pricing(
+            prompt=6.88e-4,
+            completion=2.0e-3,
+            input_cache_read=1.12e-4,
+        )
+
+        # The cross-provider candidate the bare id resolves to globally: no
+        # cache rate at all, so a re-derivation charges the full input rate.
+        cross_provider_model = MagicMock()
+        cross_provider_model.id = "deepseek-v4-1-flash"
+        cross_provider_model.forwarded_model_id = "deepseek-v4-1-flash"
+        cross_provider_model.sats_pricing = Pricing(
+            prompt=4.9455e-4,
+            completion=2.0e-3,
+            input_cache_read=0.0,
+        )
+
+        registry = {
+            "tinfoil-deepseek-v4-1-flash": model_obj,
+            "deepseek-v4-1-flash": cross_provider_model,
+        }
+
+        with (
+            patch(
+                "routstr.proxy.get_model_instance",
+                side_effect=lambda name: registry.get(name),
+            ),
+            patch(
+                "routstr.payment.cost_calculation.sats_usd_price",
+                return_value=5.0e-5,
+            ),
+        ):
+            result = await _compute_ehbp_actual_cost(
+                "prompt=12952,completion=1,total=12953,"
+                "cached_prompt_tokens=12800,uncached_prompt_tokens=152,"
+                "model=deepseek-v4-1-flash,cost_usd=0.00176715",
+                model_obj,
+                100_000,
+            )
+
+        assert result["cache_read_input_tokens"] == 12800
+        # 12800 cached tokens at the discounted (~112 msat/1k) rate, not the
+        # full input rate (which would be ~8800 msat here).
+        assert result["cache_read_msats"] == pytest.approx(1434, abs=10)
+
+    @pytest.mark.asyncio
     async def test_model_mismatch_unknown_model_falls_back(self) -> None:
         """When the served model is not in the registry, use requested model."""
         model_obj = MagicMock()

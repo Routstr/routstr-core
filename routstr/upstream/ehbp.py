@@ -443,6 +443,14 @@ async def _compute_ehbp_actual_cost(
     # look up the actual model's pricing.
     actual_model: str | None = usage_dict.pop("model", None)  # type: ignore[arg-type]
     pricing_model_id = model_obj.id
+    # Bill the model we actually routed to. Passing only the model *string*
+    # to calculate_cost makes it re-derive pricing from the global alias map,
+    # which resolves the id to the best-ranked candidate — not the serving
+    # one.  Tinfoil's catalog id (e.g. ``deepseek-v4-1-flash``) is also a
+    # cross-provider alias, and that cheaper candidate has no cache rate, so
+    # the cache discount silently disappeared (and the request was
+    # undercharged).  Hand calculate_cost the identity it cannot reconstruct.
+    pricing_model_obj: Model = model_obj
     expected_upstream_model = model_obj.forwarded_model_id or model_obj.id
     expected_identity = _normalize_upstream_model_id(expected_upstream_model)
     served_identity = _normalize_upstream_model_id(actual_model)
@@ -504,6 +512,7 @@ async def _compute_ehbp_actual_cost(
                     },
                 )
                 pricing_model_id = actual_model_obj.id
+                pricing_model_obj = actual_model_obj
             else:
                 # A different registry/client alias resolved to the same
                 # upstream model; retain the requested model's pricing.
@@ -516,6 +525,7 @@ async def _compute_ehbp_actual_cost(
         cost = await calculate_cost(
             {"model": pricing_model_id, "usage": usage_dict},
             max_cost_for_model,
+            pricing_model_obj,
         )
     except Exception as e:
         logger.warning(
