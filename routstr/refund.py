@@ -144,16 +144,15 @@ async def _close(
     return bool(result.rowcount)
 
 
-async def renew_lease(refund: Refund) -> None:
+async def renew_lease(session: AsyncSession, refund: Refund) -> None:
     """Push the reconciler lease forward before a slow mint step."""
-    async with create_session() as session:
-        await session.exec(  # type: ignore[call-overload]
-            update(Refund)
-            .where(col(Refund.id) == refund.id)
-            .where(col(Refund.status).in_(REFUND_OPEN_STATUSES))
-            .values(claimed_at=int(time.time()))
-        )
-        await session.commit()
+    await session.exec(  # type: ignore[call-overload]
+        update(Refund)
+        .where(col(Refund.id) == refund.id)
+        .where(col(Refund.status).in_(REFUND_OPEN_STATUSES))
+        .values(claimed_at=int(time.time()))
+    )
+    await session.commit()
 
 
 async def record_quote(refund: Refund, quote_id: str, mint_url: str) -> None:
@@ -349,7 +348,7 @@ async def _pay_lightning(session: AsyncSession, refund: Refund) -> bool:
 
 async def _pay_cashu(session: AsyncSession, refund: Refund) -> bool:
     amount = amount_in_unit(refund.amount_msats, refund.unit)
-    await renew_lease(refund)
+    await renew_lease(session, refund)
     token = await send_token(amount, refund.unit, refund.mint_url)
     # From here the token is bearer money: keep it on the claim so a failed
     # settle withholds the balance instead of restoring it.
