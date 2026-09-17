@@ -28,6 +28,7 @@ from ..nostr.discovery import providers_router
 from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
+from ..refund import periodic_refund_reconcile
 from ..upstream.auto_topup import periodic_auto_topup
 from ..upstream.deepseek_v4_pricing_shim import register_deepseek_v4_pricing
 from ..upstream.litellm_routing import configure_litellm
@@ -68,6 +69,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     dead_key_prune_task = None
     auto_topup_task = None
     refund_sweep_task = None
+    refund_reconcile_task = None
     routstr_fee_task = None
     invoice_watcher_task = None
 
@@ -160,6 +162,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         dead_key_prune_task = asyncio.create_task(periodic_dead_key_prune())
         auto_topup_task = asyncio.create_task(periodic_auto_topup())
         refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
+        refund_reconcile_task = asyncio.create_task(periodic_refund_reconcile())
         routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
         invoice_watcher_task = asyncio.create_task(periodic_invoice_watcher())
 
@@ -203,6 +206,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             auto_topup_task.cancel()
         if refund_sweep_task is not None:
             refund_sweep_task.cancel()
+        if refund_reconcile_task is not None:
+            refund_reconcile_task.cancel()
         if routstr_fee_task is not None:
             routstr_fee_task.cancel()
         if invoice_watcher_task is not None:
@@ -236,6 +241,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(auto_topup_task)
             if refund_sweep_task is not None:
                 tasks_to_wait.append(refund_sweep_task)
+            if refund_reconcile_task is not None:
+                tasks_to_wait.append(refund_reconcile_task)
             if routstr_fee_task is not None:
                 tasks_to_wait.append(routstr_fee_task)
             if invoice_watcher_task is not None:

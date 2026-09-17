@@ -293,3 +293,33 @@ async def test_periodic_prune_disabled_returns_immediately(
     await auth.periodic_dead_key_prune()
 
     sleep_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_refund_claim_protects_key(patched_db_engine: None) -> None:
+    """A key with a refund row is the audit anchor for its payout and holds a
+    non-null FK, so the janitor must leave it alone."""
+    from routstr.core.db import Refund
+
+    key = _dead_key(LONG_AGO)
+    async with create_session() as session:
+        session.add(key)
+        await session.commit()
+        session.add(
+            Refund(
+                api_key_hashed_key=key.hashed_key,
+                method="lightning",
+                destination="user@ln.example.com",
+                amount_msats=1000,
+                unit="sat",
+                mint_url="https://mint.example.com",
+                status="paid",
+            )
+        )
+        await session.commit()
+
+    async with create_session() as session:
+        pruned = await prune_dead_api_keys(session, OLD)
+
+    assert pruned == 0
+    assert await _exists(key.hashed_key)

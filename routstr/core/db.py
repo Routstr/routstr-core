@@ -12,7 +12,7 @@ from typing import AsyncGenerator
 from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
-from sqlalchemy import Index, UniqueConstraint, case, delete, event, or_
+from sqlalchemy import Index, UniqueConstraint, case, delete, event, or_, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -300,9 +300,7 @@ async def release_stale_reservations(
             col(ApiKey.reserved_at) < cutoff
         )
     else:
-        legacy_query = legacy_query.where(
-            col(ApiKey.hashed_key) == key_hash
-        ).where(
+        legacy_query = legacy_query.where(col(ApiKey.hashed_key) == key_hash).where(
             or_(col(ApiKey.reserved_at).is_(None), col(ApiKey.reserved_at) < cutoff)
         )
 
@@ -369,6 +367,12 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
         )
     ).exists()
 
+    has_refund_claim = (
+        select(Refund.id).where(
+            col(Refund.api_key_hashed_key) == col(ApiKey.hashed_key)
+        )
+    ).exists()
+
     eligible_hashes = (
         select(ApiKey.hashed_key)
         .where(col(ApiKey.balance) == 0)
@@ -377,6 +381,8 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
         .where(col(ApiKey.total_requests) == 0)
         .where((col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff))
         .where(~settleable_invoice)
+        # refunds holds a non-null FK to the key.
+        .where(~has_refund_claim)
     )
 
     # Unlink transactions rather than cascade-deleting them, so the financial
@@ -560,6 +566,53 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
         index=True,
         description="Associated API key hash for wallet history",
     )
+
+
+REFUND_OPEN_STATUSES = ("pending", "ambiguous")
+
+# Debited from the key but neither paid out nor restored, so still owed.
+REFUND_UNRESOLVED_STATUSES = ("pending", "ambiguous", "stuck")
+
+_REFUND_OPEN_PREDICATE = "status IN ('pending', 'ambiguous')"
+
+
+class Refund(SQLModel, table=True):  # type: ignore
+    """One payout claim; the partial unique index allows one open claim per key."""
+
+    __tablename__ = "refunds"
+    __table_args__ = (
+        Index(
+            "ux_refunds_open_per_key",
+            "api_key_hashed_key",
+            unique=True,
+            sqlite_where=text(_REFUND_OPEN_PREDICATE),
+            postgresql_where=text(_REFUND_OPEN_PREDICATE),
+        ),
+    )
+
+    id: str = Field(primary_key=True, default_factory=lambda: uuid.uuid4().hex)
+    api_key_hashed_key: str = Field(foreign_key="api_keys.hashed_key", index=True)
+    method: str = Field(description="Payout method: lightning or cashu")
+    destination: str | None = Field(
+        default=None, description="Lightning address or LNURL, NULL for cashu"
+    )
+    amount_msats: int = Field(description="Balance debited when the claim opened")
+    unit: str = Field(description="Mint unit the payout is denominated in")
+    mint_url: str = Field(description="Mint the payout is drawn from")
+    status: str = Field(
+        default="pending",
+        index=True,
+        description="pending, paid, failed, ambiguous, or stuck",
+    )
+    quote_id: str | None = Field(
+        default=None, description="Melt quote id, for reconciling an ambiguous payout"
+    )
+    token: str | None = Field(default=None, description="Issued cashu token")
+    claimed_at: int | None = Field(
+        default=None, description="Reconciler lease timestamp"
+    )
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    updated_at: int = Field(default_factory=lambda: int(time.time()))
 
 
 async def store_cashu_transaction(
@@ -953,8 +1006,18 @@ async def complete_routstr_fee_payout(
 
 
 async def total_user_liability(db_session: AsyncSession) -> int:
-    """Return all outstanding API-key balances in millisatoshis."""
-    result = await db_session.exec(select(func.sum(ApiKey.balance)))
+    """Return all outstanding user funds in millisatoshis.
+
+    Key balances and unresolved refunds are summed in one statement so a
+    claim opened between two reads cannot be missed by both.
+    """
+    key_balances = select(func.coalesce(func.sum(ApiKey.balance), 0)).scalar_subquery()
+    unresolved_refunds = (
+        select(func.coalesce(func.sum(Refund.amount_msats), 0))
+        .where(col(Refund.status).in_(REFUND_UNRESOLVED_STATUSES))
+        .scalar_subquery()
+    )
+    result = await db_session.exec(select(key_balances + unresolved_refunds))
     return int(result.one() or 0)
 
 
