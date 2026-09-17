@@ -349,7 +349,10 @@ async def test_apikey_refund_stores_cashu_transaction_with_apikey_source() -> No
     session.rollback = AsyncMock()
 
     with (
-        patch("routstr.refund.send_token", AsyncMock(return_value=refund_token)),
+        patch("routstr.refund.renew_lease", AsyncMock()),
+        patch(
+            "routstr.refund.send_token", AsyncMock(return_value=refund_token)
+        ) as mock_send_token,
         patch("routstr.refund.store_cashu_transaction", AsyncMock()) as mock_store,
     ):
         result = await refund_wallet_endpoint(
@@ -358,6 +361,7 @@ async def test_apikey_refund_stores_cashu_transaction_with_apikey_source() -> No
             session=session,
         )
 
+    mock_send_token.assert_awaited_once()
     assert isinstance(result, dict)
     assert result["token"] == refund_token
 
@@ -382,7 +386,10 @@ async def test_apikey_refund_logs_token() -> None:
     session.rollback = AsyncMock()
 
     with (
-        patch("routstr.refund.send_token", AsyncMock(return_value=refund_token)),
+        patch("routstr.refund.renew_lease", AsyncMock()),
+        patch(
+            "routstr.refund.send_token", AsyncMock(return_value=refund_token)
+        ) as mock_send_token,
         patch("routstr.refund.store_cashu_transaction", AsyncMock()),
         patch("routstr.refund.logger") as mock_logger,
     ):
@@ -392,6 +399,7 @@ async def test_apikey_refund_logs_token() -> None:
             session=session,
         )
 
+    mock_send_token.assert_awaited_once()
     calls = [str(c) for c in mock_logger.info.call_args_list]
     assert any("refund paid" in c for c in calls)
 
@@ -409,7 +417,10 @@ async def test_apikey_refund_log_identifies_the_claim() -> None:
     session.rollback = AsyncMock()
 
     with (
-        patch("routstr.refund.send_token", AsyncMock(return_value=refund_token)),
+        patch("routstr.refund.renew_lease", AsyncMock()),
+        patch(
+            "routstr.refund.send_token", AsyncMock(return_value=refund_token)
+        ) as mock_send_token,
         patch("routstr.refund.store_cashu_transaction", AsyncMock()),
         patch("routstr.refund.logger") as mock_logger,
     ):
@@ -419,6 +430,7 @@ async def test_apikey_refund_log_identifies_the_claim() -> None:
             session=session,
         )
 
+    mock_send_token.assert_awaited_once()
     paid_calls = [
         c
         for c in mock_logger.info.call_args_list
@@ -508,10 +520,11 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
     session.rollback = AsyncMock()
 
     with (
+        patch("routstr.refund.renew_lease", AsyncMock()),
         patch(
             "routstr.refund.send_token",
             AsyncMock(side_effect=MintConnectionError("raw mint outage detail")),
-        ),
+        ) as mock_send_token,
         patch("routstr.refund.store_cashu_transaction", AsyncMock()),
         patch("routstr.refund.logger"),
     ):
@@ -522,6 +535,7 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
                 session=session,
             )
 
+    mock_send_token.assert_awaited_once()
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Mint service unavailable"
     assert "raw mint outage detail" not in exc_info.value.detail
@@ -545,9 +559,10 @@ async def test_apikey_refund_generic_failure_is_sanitized_500() -> None:
     session.rollback = AsyncMock()
 
     with (
+        patch("routstr.refund.renew_lease", AsyncMock()),
         patch(
             "routstr.refund.send_token", AsyncMock(side_effect=RuntimeError(raw_error))
-        ),
+        ) as mock_send_token,
         patch("routstr.refund.store_cashu_transaction", AsyncMock()),
         patch("routstr.refund.logger"),
     ):
@@ -558,6 +573,7 @@ async def test_apikey_refund_generic_failure_is_sanitized_500() -> None:
                 session=session,
             )
 
+    mock_send_token.assert_awaited_once()
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == "Refund failed"
     assert raw_error not in exc_info.value.detail
@@ -892,6 +908,7 @@ async def test_apikey_refund_ambiguous_melt_does_not_restore_balance() -> None:
             AsyncMock(side_effect=MeltOutcomeAmbiguousError("outcome is ambiguous")),
         ),
         patch("routstr.refund.release", AsyncMock()) as mock_restore,
+        patch("routstr.refund.get_lnurl_data", AsyncMock()),
     ):
         with pytest.raises(HTTPException) as exc_info:
             await refund_wallet_endpoint(
@@ -923,6 +940,7 @@ async def test_apikey_refund_clean_failure_still_restores_balance() -> None:
             AsyncMock(side_effect=RuntimeError("mint rejected melt")),
         ),
         patch("routstr.refund.release", AsyncMock()) as mock_restore,
+        patch("routstr.refund.get_lnurl_data", AsyncMock()),
     ):
         with pytest.raises(HTTPException):
             await refund_wallet_endpoint(

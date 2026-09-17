@@ -599,7 +599,10 @@ async def test_endpoint_replays_paid_lightning_refund_on_empty_balance(
     integration_session: AsyncSession, patched_db_engine: None
 ) -> None:
     await _seed_key(integration_session, address=ADDRESS)
-    with patch("routstr.refund.send_to_lnurl", _lnurl_stub()):
+    with (
+        patch("routstr.refund.get_lnurl_data", AsyncMock()),
+        patch("routstr.refund.send_to_lnurl", _lnurl_stub()),
+    ):
         first = await refund_wallet_endpoint(
             authorization=f"Bearer sk-{KEY_HASH}",
             x_cashu=None,
@@ -785,7 +788,10 @@ async def test_open_claim_is_reported_over_an_older_paid_claim(
     """A paid claim from a previous cycle must not be replayed as the outcome
     of the claim that is still settling."""
     await _seed_key(integration_session, address=ADDRESS)
-    with patch("routstr.refund.send_to_lnurl", _lnurl_stub()):
+    with (
+        patch("routstr.refund.get_lnurl_data", AsyncMock()),
+        patch("routstr.refund.send_to_lnurl", _lnurl_stub()),
+    ):
         paid = await refund_wallet_endpoint(
             authorization=f"Bearer sk-{KEY_HASH}",
             x_cashu=None,

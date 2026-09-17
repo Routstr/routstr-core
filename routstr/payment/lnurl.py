@@ -50,6 +50,14 @@ class MeltOutcomeAmbiguousError(LNURLError):
     """
 
 
+class MeltUnpaidError(LNURLError):
+    """The mint answered the melt request itself with ``unpaid``.
+
+    Unlike :class:`MeltOutcomeAmbiguousError` this is proof that no Lightning
+    payment was made, so callers may restore what they debited.
+    """
+
+
 _MAX_LNURL_REDIRECTS = 3
 _MAX_LNURL_RESPONSE_BYTES = 64 * 1024
 _NON_PUBLIC_HOST_SUFFIXES = (".localhost", ".local", ".internal")
@@ -97,9 +105,7 @@ async def _require_public_https_destination(url: httpx.URL) -> None:
         try:
             resolved = ipaddress.ip_address(info[4][0])
         except ValueError as e:
-            raise LNURLError(
-                "LNURL destination resolved to an invalid address"
-            ) from e
+            raise LNURLError("LNURL destination resolved to an invalid address") from e
         if not resolved.is_global:
             raise LNURLError("LNURL destination is not a public host")
 
@@ -446,7 +452,7 @@ async def raw_send_to_lnurl(
         return final_amount
     if melt_state == MeltQuoteState.unpaid:
         await wallet.set_reserved_for_send(proofs, reserved=False)
-        raise LNURLError("Cashu mint confirmed that the melt was unpaid")
+        raise MeltUnpaidError("Cashu mint confirmed that the melt was unpaid")
 
     try:
         quote = await run_mint_operation(

@@ -11,6 +11,7 @@ from sqlmodel import col, func, select, update
 
 from .core.db import (
     REFUND_OPEN_STATUSES,
+    REFUND_UNRESOLVED_STATUSES,
     ApiKey,
     AsyncSession,
     Refund,
@@ -21,7 +22,12 @@ from .core.db import (
 )
 from .core.logging import get_logger
 from .core.settings import settings
-from .payment.lnurl import LNURLError, MeltOutcomeAmbiguousError, get_lnurl_data
+from .payment.lnurl import (
+    LNURLError,
+    MeltOutcomeAmbiguousError,
+    MeltUnpaidError,
+    get_lnurl_data,
+)
 from .wallet import (
     check_bolt11_payment_status,
     is_mint_connection_error,
@@ -118,20 +124,36 @@ async def _close(
     refund: Refund,
     *,
     require_no_quote: bool = False,
+    require_no_token: bool = False,
+    from_statuses: tuple[str, ...] = REFUND_OPEN_STATUSES,
     **values: object,
 ) -> bool:
     stmt = (
         update(Refund)
         .where(col(Refund.id) == refund.id)
-        .where(col(Refund.status).in_(REFUND_OPEN_STATUSES))
+        .where(col(Refund.status).in_(from_statuses))
     )
     if require_no_quote:
         # A quote recorded since the row was read means a melt may be in flight.
         stmt = stmt.where(col(Refund.quote_id).is_(None))
+    if require_no_token:
+        stmt = stmt.where(col(Refund.token).is_(None))
     result = await session.exec(  # type: ignore[call-overload]
         stmt.values(claimed_at=None, updated_at=int(time.time()), **values)
     )
     return bool(result.rowcount)
+
+
+async def renew_lease(refund: Refund) -> None:
+    """Push the reconciler lease forward before a slow mint step."""
+    async with create_session() as session:
+        await session.exec(  # type: ignore[call-overload]
+            update(Refund)
+            .where(col(Refund.id) == refund.id)
+            .where(col(Refund.status).in_(REFUND_OPEN_STATUSES))
+            .values(claimed_at=int(time.time()))
+        )
+        await session.commit()
 
 
 async def record_quote(refund: Refund, quote_id: str, mint_url: str) -> None:
@@ -174,7 +196,11 @@ async def settle(
         values["token"] = token
     if mint_url is not None:
         values["mint_url"] = mint_url
-    settled = await _close(session, refund, **values)
+    # The payout side knows the money moved, so a claim the reconciler gave up
+    # on (stuck) is closed as paid too.
+    settled = await _close(
+        session, refund, from_statuses=REFUND_UNRESOLVED_STATUSES, **values
+    )
     await session.commit()
     if not settled:
         logger.warning(
@@ -211,8 +237,19 @@ async def release(
     return True
 
 
-async def hold(session: AsyncSession, refund: Refund, quote_id: str | None) -> None:
-    await _close(session, refund, status="ambiguous", quote_id=quote_id)
+async def hold(
+    session: AsyncSession,
+    refund: Refund,
+    quote_id: str | None,
+    *,
+    token: str | None = None,
+) -> None:
+    """Withhold the balance; the quote or token names what the mint may have paid."""
+    values: dict[str, Any] = {"status": "ambiguous", "quote_id": quote_id}
+    if token is not None:
+        values["token"] = token
+        values["mint_url"] = refund.mint_url
+    await _close(session, refund, **values)
     await session.commit()
 
 
@@ -283,7 +320,7 @@ def describe(refund: Refund) -> dict[str, str]:
     return body
 
 
-async def _pay_lightning(session: AsyncSession, refund: Refund) -> None:
+async def _pay_lightning(session: AsyncSession, refund: Refund) -> bool:
     async def capture_quote(quote: str, mint_url: str) -> None:
         await record_quote(refund, quote, mint_url)
 
@@ -307,16 +344,18 @@ async def _pay_lightning(session: AsyncSession, refund: Refund) -> None:
             },
         )
         raise
-    await settle(session, refund, quote_id=refund.quote_id)
+    return await settle(session, refund, quote_id=refund.quote_id)
 
 
-async def _pay_cashu(session: AsyncSession, refund: Refund) -> None:
+async def _pay_cashu(session: AsyncSession, refund: Refund) -> bool:
     amount = amount_in_unit(refund.amount_msats, refund.unit)
+    await renew_lease(refund)
     token = await send_token(amount, refund.unit, refund.mint_url)
-    mint_url = token_mint_url(token, refund.mint_url)
-    await settle(session, refund, token=token, mint_url=mint_url)
+    # From here the token is bearer money: keep it on the claim so a failed
+    # settle withholds the balance instead of restoring it.
     refund.token = token
-    refund.mint_url = mint_url
+    refund.mint_url = token_mint_url(token, refund.mint_url)
+    return await settle(session, refund, token=token, mint_url=refund.mint_url)
 
 
 async def _record_cashu_payout(refund: Refund) -> None:
@@ -356,22 +395,23 @@ def unresolved_refund_error() -> HTTPException:
 
 
 async def _abort(session: AsyncSession, refund: Refund) -> None:
-    """Fail the claim, or withhold it once a melt quote exists.
+    """Fail the claim, or withhold it once a melt quote or token exists.
 
-    A recorded quote means the mint may already have paid, so the balance
-    must not be restored.
+    A recorded quote means the mint may already have paid; an issued token is
+    already bearer money. In both cases the balance must not be restored.
     """
-    if refund.quote_id is None:
+    if refund.quote_id is None and refund.token is None:
         await release(session, refund)
         return
-    await hold(session, refund, refund.quote_id)
+    await hold(session, refund, refund.quote_id, token=refund.token)
     logger.error(
-        "refund failed after its melt quote was recorded; balance withheld "
+        "refund failed after its payout was dispatched; balance withheld "
         "pending reconciliation",
         extra={
             "refund_id": refund.id,
             "key_hash": refund.api_key_hashed_key[:8],
             "quote_id": refund.quote_id,
+            "has_token": refund.token is not None,
             "mint_url": refund.mint_url,
         },
     )
@@ -379,18 +419,41 @@ async def _abort(session: AsyncSession, refund: Refund) -> None:
 
 
 async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
+    attached_refund = refund
+    # Keep payout evidence outside the identity map: a failed flush/commit can
+    # expire attached attributes, including the only copy of an issued token.
+    refund = Refund(**refund.model_dump())
     try:
         if refund.method == "lightning":
-            await _pay_lightning(session, refund)
+            settled = await _pay_lightning(session, refund)
         else:
-            await _pay_cashu(session, refund)
+            settled = await _pay_cashu(session, refund)
     except MeltOutcomeAmbiguousError:
         # Already held by _pay_lightning; releasing here would pay out twice.
         raise unresolved_refund_error()
+    except MeltUnpaidError as e:
+        # The mint answered the melt itself with unpaid: proof that nothing was
+        # sent, so the balance goes back now rather than after reconciliation.
+        await release(session, refund)
+        logger.warning(
+            "refund melt unpaid at the mint; balance restored",
+            extra={
+                "refund_id": refund.id,
+                "error": str(e),
+                "key_hash": refund.api_key_hashed_key[:8],
+                "quote_id": refund.quote_id,
+            },
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Lightning payment failed at the mint; balance restored. Retry later.",
+        )
     except HTTPException:
+        await session.rollback()
         await _abort(session, refund)
         raise
     except Exception as e:
+        await session.rollback()
         await _abort(session, refund)
         logger.error(
             "refund payout failed",
@@ -410,8 +473,13 @@ async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
     if refund.method == "cashu":
         await _record_cashu_payout(refund)
 
-    refund.status = "paid"
-    refund.claimed_at = None
+    if settled:
+        refund.status = "paid"
+        refund.claimed_at = None
+    else:
+        # Report the row as it stands rather than a status that was not written.
+        await session.refresh(attached_refund)
+        refund = attached_refund
     logger.info(
         "refund paid",
         extra={
@@ -442,9 +510,14 @@ async def _lease(refund_id: str, now: int, lease_cutoff: int) -> bool:
 
 async def _reconcile(refund: Refund, now: int) -> None:
     if refund.method != "lightning":
+        if refund.token is not None:
+            # The token was issued and kept on the claim; the payout is done.
+            async with create_session() as session:
+                await settle(session, refund)
+            return
         # No quote to query for cashu; withhold the balance and alert once.
         async with create_session() as session:
-            if await _close(session, refund, status="stuck"):
+            if await _close(session, refund, require_no_token=True, status="stuck"):
                 await session.commit()
                 logger.critical(
                     "cashu refund stuck; balance withheld, manual reconciliation required",
@@ -454,6 +527,11 @@ async def _reconcile(refund: Refund, now: int) -> None:
                         "amount_msats": refund.amount_msats,
                     },
                 )
+            else:
+                await session.commit()
+                current = await session.get(Refund, refund.id)
+                if current is not None and current.token is not None:
+                    await settle(session, current)
         return
 
     if refund.quote_id is None:

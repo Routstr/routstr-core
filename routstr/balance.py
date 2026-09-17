@@ -406,9 +406,10 @@ async def refund_wallet_endpoint(
         raise HTTPException(status_code=400, detail="No balance to refund")
 
     requested = refund_request.lightning_address if refund_request else None
-    if requested:
-        await refund.validate_lightning_destination(requested)
     destination = requested or key.refund_address
+    if destination:
+        # Stored addresses can rot too; reject before any balance is debited.
+        await refund.validate_lightning_destination(destination)
 
     claim = await refund.open_claim(
         session,
