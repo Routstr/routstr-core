@@ -15,6 +15,7 @@ from fastapi.responses import Response
 from routstr.upstream.request_correction import (
     Correction,
     correct_request,
+    demote_unknown_message_role,
     extract_error_message,
     strip_unsupported_param,
 )
@@ -137,6 +138,98 @@ class TestStripUnsupportedParam:
     def test_spend_shaping_guard_is_case_insensitive(self) -> None:
         body = {"model": "m", "Max_Tokens": 4}
         assert strip_unsupported_param(body, "`Max_Tokens` is deprecated") is None
+
+
+class TestDemoteUnknownMessageRole:
+    _DEVSERIAL_ERROR = (
+        "Failed to deserialize the JSON body into the target type: "
+        "messages[0].role: unknown variant `developer`, expected one of "
+        "`system`, `user`, `assistant`, `tool`, `latest_reminder` "
+        "at line 1 column 61"
+    )
+
+    def test_renames_developer_to_system(self) -> None:
+        body = {
+            "model": "deepseek-v4.1-flash",
+            "messages": [
+                {"role": "developer", "content": "You are helpful."},
+                {"role": "user", "content": "Hi"},
+            ],
+        }
+        result = demote_unknown_message_role(body, self._DEVSERIAL_ERROR)
+        assert result is not None
+        new_body, label = result
+        assert label == "role-developer-system"
+        assert new_body["messages"][0]["role"] == "system"
+        assert new_body["messages"][0]["content"] == "You are helpful."
+        assert new_body["messages"][1] == {"role": "user", "content": "Hi"}
+        # Original untouched
+        assert body["messages"][0]["role"] == "developer"
+
+    def test_renames_every_developer_message(self) -> None:
+        body = {
+            "messages": [
+                {"role": "developer", "content": "a"},
+                {"role": "user", "content": "b"},
+                {"role": "developer", "content": "c"},
+            ]
+        }
+        result = demote_unknown_message_role(body, self._DEVSERIAL_ERROR)
+        assert result is not None
+        roles = [m["role"] for m in result[0]["messages"]]
+        assert roles == ["system", "user", "system"]
+
+    def test_declines_when_no_developer_messages_present(self) -> None:
+        body = {"messages": [{"role": "user", "content": "hi"}]}
+        assert demote_unknown_message_role(body, self._DEVSERIAL_ERROR) is None
+
+    def test_declines_when_no_messages_key(self) -> None:
+        assert demote_unknown_message_role({"model": "m"}, self._DEVSERIAL_ERROR) is None
+
+    def test_declines_when_error_names_unknown_role_without_fallback(self) -> None:
+        error = (
+            "messages[2].role: unknown variant `latest_reminder`, expected one "
+            "of `system`, `user`, `assistant`, `tool`"
+        )
+        body = {"messages": [{"role": "latest_reminder", "content": "x"}]}
+        assert demote_unknown_message_role(body, error) is None
+
+    def test_loose_wording_fallback_matches(self) -> None:
+        body = {"messages": [{"role": "developer", "content": "s"}]}
+        result = demote_unknown_message_role(
+            body, "role `developer` is not supported by this model"
+        )
+        assert result is not None
+        assert result[0]["messages"][0]["role"] == "system"
+
+    def test_loose_wording_ignores_unrelated_developer_mention(self) -> None:
+        body = {"messages": [{"role": "user", "content": "hi"}]}
+        assert (
+            demote_unknown_message_role(
+                body, "Model `some-developer-preview` requires a role hint"
+            )
+            is None
+        )
+
+    def test_correct_request_end_to_end(self) -> None:
+        body = _body(
+            model="deepseek-v4.1-flash",
+            messages=[{"role": "developer", "content": "sys"}],
+        )
+        result = correct_request(body, self._DEVSERIAL_ERROR, set())
+        assert isinstance(result, Correction)
+        assert result.label == "role-developer-system"
+        assert json.loads(result.body)["messages"][0]["role"] == "system"
+
+    def test_correct_request_respects_applied_label(self) -> None:
+        body = _body(
+            model="m",
+            messages=[{"role": "developer", "content": "sys"}],
+        )
+        assert (
+            correct_request(body, self._DEVSERIAL_ERROR, {"role-developer-system"})
+            is None
+        )
 
 
 class TestExtractErrorMessage:

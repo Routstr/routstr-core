@@ -129,8 +129,77 @@ def strip_unsupported_param(body: dict, error_message: str) -> tuple[dict, str] 
     return new_body, param
 
 
+# Matches upstream errors that reject a message role outright, e.g.
+# "messages[0].role: unknown variant `developer`, expected one of `system`,
+# `user`, `assistant`, `tool` ...". Keys off the upstream's own wording.
+_UNKNOWN_ROLE_VARIANT_RE = re.compile(
+    r"messages\[\d+\]\.role:\s*unknown\s+variant\s+`(?P<role>[a-zA-Z_]+)`",
+    re.IGNORECASE,
+)
+
+# Roles we can translate to a universally-accepted equivalent instead of
+# dropping the message. ``developer`` is OpenAI's newer spelling of ``system``
+# (used by Codex-style coding agents for the system prompt) and semantically
+# identical in the OpenAI chat schema, so renaming is lossless. Roles without
+# a safe fallback are left for the original error to propagate.
+_ROLE_FALLBACKS: dict[str, str] = {"developer": "system"}
+
+
+def _rejected_message_role(error_message: str) -> str | None:
+    """Identify the message role an upstream rejected, if it named one."""
+    match = _UNKNOWN_ROLE_VARIANT_RE.search(error_message)
+    if match:
+        return match.group("role").lower()
+    # Looser fallback for upstreams that word the rejection differently
+    # (e.g. "role `developer` is not supported by this model"). Safe to
+    # over-match slightly: the rewrite below is a no-op unless the body
+    # actually carries messages with that role.
+    lowered = error_message.lower()
+    if "role" in lowered and "developer" in lowered:
+        return "developer"
+    return None
+
+
+def demote_unknown_message_role(
+    body: dict, error_message: str
+) -> tuple[dict, str] | None:
+    """Rewrite a rejected message role to its accepted equivalent.
+
+    Some clients send the system prompt as ``role: "developer"`` (OpenAI's
+    newer spelling). Upstreams that predate that spelling — or strict
+    deserializers that never adopted it — reject the whole body before the
+    model is even called. Since ``developer`` maps 1:1 onto ``system``, rename
+    every such message and retry the same upstream.
+
+    Returns ``(new_body, label)`` (a new dict, original untouched) when the
+    error names a role with a known fallback present in the body, otherwise
+    ``None``.
+    """
+    role = _rejected_message_role(error_message)
+    if role is None:
+        return None
+    replacement = _ROLE_FALLBACKS.get(role)
+    if replacement is None:
+        return None
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return None
+    new_messages = [
+        {**message, "role": replacement}
+        if isinstance(message, dict) and message.get("role") == role
+        else message
+        for message in messages
+    ]
+    if new_messages == messages:
+        return None
+    return {**body, "messages": new_messages}, f"role-{role}-{replacement}"
+
+
 # Ordered pipeline of correctors tried on each recoverable rejection.
-DEFAULT_CORRECTORS: tuple[Corrector, ...] = (strip_unsupported_param,)
+DEFAULT_CORRECTORS: tuple[Corrector, ...] = (
+    strip_unsupported_param,
+    demote_unknown_message_role,
+)
 
 
 def correct_request(
