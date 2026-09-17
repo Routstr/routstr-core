@@ -489,6 +489,126 @@ class TestComputeEhbpActualCost:
             assert call_args[0][0]["model"] == "tinfoil-llama3-3-70b"
 
     @pytest.mark.asyncio
+    async def test_namespaced_prefix_served_bare_keeps_requested_pricing(
+        self,
+    ) -> None:
+        """Production shape: the catalog model is ``tinfoil-X`` and its
+        ``forwarded_model_id`` carries the prefix, the SDK strips the prefix
+        for the encrypted body, and the enclave reports bare ``X``. Pricing
+        must stay on the requested Tinfoil model (correct rate + cache
+        discount), not the cheaper cross-provider model the bare id resolves
+        to in the global map."""
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-deepseek-v4-1-flash"
+        model_obj.forwarded_model_id = "tinfoil-deepseek-v4-1-flash"
+
+        tinfoil_model = MagicMock()
+        tinfoil_model.id = "tinfoil-deepseek-v4-1-flash"
+        tinfoil_model.forwarded_model_id = "tinfoil-deepseek-v4-1-flash"
+
+        # The cheaper cross-provider model the bare id resolves to globally.
+        cross_provider_model = MagicMock()
+        cross_provider_model.id = "deepseek-v4-1-flash"
+        cross_provider_model.forwarded_model_id = "deepseek-v4-1-flash"
+
+        registry = {
+            "tinfoil-deepseek-v4-1-flash": tinfoil_model,
+            "deepseek-v4-1-flash": cross_provider_model,
+        }
+
+        with (
+            patch(
+                "routstr.proxy.get_model_instance",
+                side_effect=lambda name: registry.get(name),
+            ),
+            patch(
+                "routstr.upstream.ehbp.calculate_cost",
+                new_callable=AsyncMock,
+            ) as mock_calc,
+        ):
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=5,
+                output_tokens=10,
+                cache_read_input_tokens=64,
+                cache_creation_input_tokens=0,
+                cache_read_msats=1,
+                cache_creation_msats=0,
+            )
+            result = await _compute_ehbp_actual_cost(
+                "prompt=69,completion=10,total=79,"
+                "cached_prompt_tokens=64,uncached_prompt_tokens=5,"
+                "model=deepseek-v4-1-flash",
+                model_obj,
+                100_000,
+            )
+            # No mismatch: pricing stays on the requested Tinfoil model.
+            assert "actual_model" not in result
+            call_args = mock_calc.call_args
+            assert call_args[0][0]["model"] == "tinfoil-deepseek-v4-1-flash"
+
+    @pytest.mark.asyncio
+    async def test_namespaced_prefix_failover_uses_served_tinfoil_model(
+        self,
+    ) -> None:
+        """A genuine failover (asked ``tinfoil-glm-5-3``, enclave served
+        ``glm-5-3-flash``) must bill the served *Tinfoil* model, not the
+        cheaper cross-provider alias the bare id resolves to."""
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-glm-5-3"
+        model_obj.forwarded_model_id = "tinfoil-glm-5-3"
+
+        served_tinfoil = MagicMock()
+        served_tinfoil.id = "tinfoil-glm-5-3-flash"
+        served_tinfoil.forwarded_model_id = "tinfoil-glm-5-3-flash"
+
+        cross_provider = MagicMock()
+        cross_provider.id = "glm-5-3-flash"
+        cross_provider.forwarded_model_id = "glm-5-3-flash"
+
+        registry = {
+            "tinfoil-glm-5-3-flash": served_tinfoil,
+            "glm-5-3-flash": cross_provider,
+        }
+
+        with (
+            patch(
+                "routstr.proxy.get_model_instance",
+                side_effect=lambda name: registry.get(name),
+            ),
+            patch(
+                "routstr.upstream.ehbp.calculate_cost",
+                new_callable=AsyncMock,
+            ) as mock_calc,
+        ):
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=20,
+                output_msats=40,
+                total_msats=60,
+                total_usd=0.0,
+                input_tokens=42,
+                output_tokens=10,
+            )
+            result = await _compute_ehbp_actual_cost(
+                "prompt=42,completion=10,total=52,model=glm-5-3-flash",
+                model_obj,
+                100_000,
+            )
+            assert result["actual_model"] == "glm-5-3-flash"
+            # Billed on the served *Tinfoil* model, not the bare-id alias.
+            call_args = mock_calc.call_args
+            assert call_args[0][0]["model"] == "tinfoil-glm-5-3-flash"
+
+    @pytest.mark.asyncio
     async def test_model_mismatch_unknown_model_falls_back(self) -> None:
         """When the served model is not in the registry, use requested model."""
         model_obj = MagicMock()

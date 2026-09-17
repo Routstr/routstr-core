@@ -127,6 +127,13 @@ _PROXY_ONLY_HEADERS = frozenset(
     }
 )
 
+# Namespace prefix the routstr catalog applies to Tinfoil models
+# (e.g. ``tinfoil-deepseek-v4-1-flash``). The SDK strips this prefix for the
+# encrypted body (``getTinfoilUpstreamModelId`` in client/TinfoilSecure.ts), so
+# the enclave always reports the *bare* upstream model id in the usage-metrics
+# header even though the routstr model id and ``forwarded_model_id`` carry it.
+TINFOIL_MODEL_PREFIX = "tinfoil-"
+
 
 def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
     """Parse ``X-Tinfoil-Usage-Metrics`` into an OpenAI-style usage dict.
@@ -451,7 +458,24 @@ async def _compute_ehbp_actual_cost(
         # the global model map. The resolved object can belong to a different
         # provider and therefore have a different client-facing ``id`` while
         # still representing the same upstream model.
-        actual_model_obj = get_model_instance(actual_model)
+        #
+        # The enclave reports the *bare* upstream id, but the routstr model is
+        # namespaced ``tinfoil-`` (and the SDK strips that prefix for the
+        # encrypted body). Resolve the served id within the same namespace
+        # first: a same-model report then maps back onto the requested Tinfoil
+        # model, and a genuine failover lands on the actually-served Tinfoil
+        # model — instead of the cheaper cross-provider model the bare id
+        # would resolve to in the global map.
+        namespaced_served = actual_model
+        if (
+            expected_upstream_model.startswith(TINFOIL_MODEL_PREFIX)
+            and not actual_model.startswith(TINFOIL_MODEL_PREFIX)
+        ):
+            namespaced_served = TINFOIL_MODEL_PREFIX + actual_model
+
+        actual_model_obj = get_model_instance(namespaced_served)
+        if actual_model_obj is None and namespaced_served != actual_model:
+            actual_model_obj = get_model_instance(actual_model)
         if actual_model_obj is None:
             logger.warning(
                 "EHBP served model not found in registry, falling back "
