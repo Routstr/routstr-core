@@ -149,8 +149,10 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             refresh_model_paths_periodically(get_upstreams)
         )
         payout_task = asyncio.create_task(periodic_payout())
-        if global_settings.nsec:
-            nip91_task = asyncio.create_task(announce_provider())
+        # Always started: the loop idles until an NSEC is configured and re-reads
+        # it every iteration, so a key saved (or cleared) through the admin UI
+        # takes effect without a restart.
+        nip91_task = asyncio.create_task(announce_provider())
         analytics_task = asyncio.create_task(publish_usage_analytics())
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())

@@ -9,6 +9,19 @@ Routstr uses **Nostr** as a decentralized directory for service discovery. Your 
 1. **Provider Advertisement (Kind 38421)**: Your node periodically publishes an event with its URL, models, and pricing
 2. **Client Discovery**: Clients query relays for these events to find suitable providers
 
+### When announcements are published
+
+Your node publishes an advertisement as soon as it has both a **Nsec** and at least one
+reachable endpoint (a public `HTTP_URL`, or an `.onion` address). Saving the Nsec in the
+dashboard is enough — the announcement follows within a minute, and **no restart is
+required**. After the first publish it re-announces every 24 hours, and immediately
+whenever the Nsec, endpoints, mints or relays change.
+
+A node that has no Nsec yet simply waits, and starts announcing the moment one is
+configured. Note that `HTTP_URL` defaults to `http://localhost:8000`, which is not a
+reachable endpoint: a node with the default value and no onion address has nothing to
+advertise and will not publish until one is set.
+
 ---
 
 ## Configuration
