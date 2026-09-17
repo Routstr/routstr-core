@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import litellm
 from fastapi.responses import Response
 
 from ..core import get_logger
@@ -31,6 +30,15 @@ from ..payment.helpers import (
 from ..payment.models import Model
 
 logger = get_logger(__name__)
+
+
+def __getattr__(name: str) -> Any:
+    """Preserve the patchable module attribute without eagerly importing it."""
+    if name == "litellm":
+        import litellm
+
+        return litellm
+    raise AttributeError(name)
 
 
 def _parse_request_body(request_body: bytes | None) -> dict[str, Any]:
@@ -53,6 +61,8 @@ def _model_name(model_obj: Model | None, body: dict[str, Any]) -> str:
 def _count_with_litellm(
     model: str, body: dict[str, Any], include_legacy_prompt: bool = False
 ) -> int:
+    import litellm
+
     messages = body.get("messages")
     if not isinstance(messages, list):
         messages = []
@@ -127,6 +137,8 @@ def _count_with_litellm(
 
 
 def _count_text_with_litellm(model: str, text: str) -> int:
+    import litellm
+
     return int(
         litellm.token_counter(
             model=model,

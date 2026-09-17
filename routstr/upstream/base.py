@@ -5587,28 +5587,52 @@ class BaseUpstreamProvider:
                     )
                     models.append(found_db_model)
 
-                models_with_fees = [
-                    self._apply_provider_fee_to_model(m) for m in models
-                ]
-
-                try:
-                    sats_to_usd = sats_usd_price()
-                    self._models_cache = [
-                        _update_model_sats_pricing(m, sats_to_usd)
-                        for m in models_with_fees
-                    ]
-                except Exception:
-                    self._models_cache = models_with_fees
-
-                self._models_by_id = {
-                    m.forwarded_model_id or m.id: m for m in self._models_cache
-                }
+                self._store_models_cache(models)
 
         except Exception as e:
             logger.error(
                 f"Failed to refresh models cache for {self.provider_type or self.base_url}",
                 extra={"error": repr(e), "error_type": type(e).__name__},
             )
+
+    async def load_models_cache_from_db(self) -> None:
+        """Warm the models cache from stored rows without calling the upstream."""
+        if self.db_id is None:
+            return
+        try:
+            async with create_session() as session:
+                provider = await session.get(UpstreamProviderRow, self.db_id)
+                if not provider or not provider.id:
+                    return
+
+                self._store_models_cache(
+                    await list_models(
+                        session=session,
+                        upstream_id=provider.id,
+                        include_disabled=False,
+                        apply_fees=False,
+                    )
+                )
+        except Exception as e:
+            logger.error(
+                f"Failed to load stored models for {self.provider_type or self.base_url}",
+                extra={"error": repr(e), "error_type": type(e).__name__},
+            )
+
+    def _store_models_cache(self, models: list[Model]) -> None:
+        models_with_fees = [self._apply_provider_fee_to_model(m) for m in models]
+
+        try:
+            sats_to_usd = sats_usd_price()
+            self._models_cache = [
+                _update_model_sats_pricing(m, sats_to_usd) for m in models_with_fees
+            ]
+        except Exception:
+            self._models_cache = models_with_fees
+
+        self._models_by_id = {
+            m.forwarded_model_id or m.id: m for m in self._models_cache
+        }
 
     def get_cached_models(self) -> list[Model]:
         """Get cached models for this provider.
