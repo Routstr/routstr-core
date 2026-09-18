@@ -10,6 +10,8 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+from aiohttp import StreamReader
+from aiohttp.base_protocol import BaseProtocol
 from nostr_sdk import Keys
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, col, select
@@ -383,8 +385,10 @@ async def test_websocket_send_preserves_frame_and_requires_exact_readback(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("split_body", [False, True])
 async def test_nip11_lookup_is_pinned_bounded_and_disables_redirects(
     monkeypatch: pytest.MonkeyPatch,
+    split_body: bool,
 ) -> None:
     maximum = delivery_module.NIP11_MAX_DOCUMENT_BYTES
     valid_body = json.dumps({"limitation": {"max_message_length": 123}}).encode()
@@ -396,15 +400,6 @@ async def test_nip11_lookup_is_pinned_bounded_and_disables_redirects(
     ]
     requests: list[tuple[str, dict[str, Any]]] = []
     connector_arguments: list[dict[str, Any]] = []
-    read_sizes: list[int] = []
-
-    class FakeContent:
-        def __init__(self, body: bytes) -> None:
-            self._body = body
-
-        async def read(self, size: int) -> bytes:
-            read_sizes.append(size)
-            return self._body
 
     class FakeResponse:
         def __init__(
@@ -412,7 +407,17 @@ async def test_nip11_lookup_is_pinned_bounded_and_disables_redirects(
         ) -> None:
             self.status = status
             self.content_length = content_length
-            self.content = FakeContent(body)
+            loop = asyncio.get_running_loop()
+            protocol = BaseProtocol(loop)
+            protocol.connection_made(asyncio.Transport())
+            self.content = StreamReader(protocol, limit=maximum + 1)
+            if split_body:
+                self.content.feed_data(body[:1])
+                loop.call_soon(self.content.feed_data, body[1:])
+                loop.call_soon(self.content.feed_eof)
+            else:
+                self.content.feed_data(body)
+                self.content.feed_eof()
 
         async def __aenter__(self) -> FakeResponse:
             return self
@@ -456,8 +461,6 @@ async def test_nip11_lookup_is_pinned_bounded_and_disables_redirects(
         and request["headers"] == {"Accept": "application/nostr+json"}
         for _, request in requests
     )
-    assert read_sizes == [maximum + 1, maximum + 1]
-
     resolver = connector_arguments[0]["resolver"]
     resolved_addresses = await resolver.resolve("relay.valid.net", 443)
     assert resolved_addresses[0]["host"] == "8.8.8.8"
