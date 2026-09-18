@@ -710,6 +710,60 @@ async def test_unclean_restart_preserves_days_before_last_durable_flush(
         assert await writer.stop(timeout=1)
 
 
+async def test_sharing_disabled_startup_resumes_private_coverage_after_gap(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nostr_sdk import Keys
+
+    from routstr.nostr import analytics_runtime as runtime
+
+    _, sessions = ledger
+    day = date(2026, 9, 1)
+    clock = MutableClock(_timestamp(day))
+    writer = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    assert await writer.start()
+    await runtime.claim_analytics_v2_identity(
+        sessions,
+        pubkey=Keys.parse("11" * 32).public_key().to_hex(),
+        provider_d="provider",
+        at_ms=clock.value,
+    )
+    await runtime.activate_analytics_v2_sharing(
+        sessions, coverage_day=day, at_ms=clock.value
+    )
+    clock.value = _timestamp(day + timedelta(days=2))
+    assert await writer.flush(timeout=1)
+    assert await writer.stop(timeout=1)
+    clock.value = _timestamp(day + timedelta(days=5))
+    stopped_writer = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", stopped_writer)
+    monkeypatch.setattr(runtime, "terminal_outcome_writer", stopped_writer)
+    monkeypatch.setattr(runtime, "create_session", sessions)
+    monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", False)
+    coordinator = runtime.AnalyticsCoordinator()
+    await coordinator.prepare_startup()
+    assert stopped_writer.running
+    await coordinator.close()
+    assert not (await runtime.get_analytics_v2_delivery_state(sessions)).sharing_enabled
+    async with sessions() as session:
+        epochs = (
+            await session.exec(
+                select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
+            )
+        ).all()
+    assert all(epoch.current_slot is None for epoch in epochs[:-1])
+    assert epochs[0].coverage_end_day == day + timedelta(days=1)
+    assert all(
+        epoch.coverage_end_day is not None
+        and epoch.coverage_start_day > epoch.coverage_end_day
+        for epoch in epochs[1:-1]
+    )
+    assert epochs[-1].current_slot == 1
+    assert epochs[-1].coverage_start_day == day + timedelta(days=6)
+    assert epochs[-1].coverage_end_day is None
+
+
 @pytest.mark.parametrize("fresh_process", [False, True])
 async def test_failed_writer_start_cannot_backfill_missed_days_as_zero(
     ledger: tuple[AsyncEngine, SessionFactory],

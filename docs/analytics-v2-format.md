@@ -1,8 +1,16 @@
 # Completed-day analytics reports
 
-Public sharing is an explicit operator choice. Reports contain aggregate usage for completed UTC days. They do not contain prompts, customer identifiers, request identifiers, served upstream model identifiers, or private pricing diagnostics.
+Public sharing follows the node's existing analytics setting. Reports contain aggregate usage for completed UTC days. They do not contain prompts, customer identifiers, request identifiers, served upstream model identifiers, or private pricing diagnostics.
 
 A public-sharing activation begins coverage on the next full UTC day. Toggle days and collection-loss days are excluded. Private terminal records remain stored when public sharing is disabled. An omitted day means unavailable coverage; an included all-zero day means the collector covered the day and recorded no completed requests.
+
+## Operator controls and upgrades
+
+The existing "Share analytics to Nostr" switch controls public reports through `ENABLE_ANALYTICS_SHARING`. Its existing default remains `true`; an explicitly saved `false` remains off after upgrading or restarting. There is no separate format opt-in.
+
+Local collection starts automatically for the private dashboard and continues when public sharing is off. An upgraded node uses completed-day reports whenever its existing sharing setting is on. New coverage begins with the next full UTC day, so private history from before activation is not published. The runtime no longer starts the legacy publisher; consumers can still read legacy reports already on relays.
+
+A provider's signing identity must remain stable, and an identity change creates a new publication transition. Turning sharing off stops pending delivery but cannot retract reports already published.
 
 ## Signed event
 

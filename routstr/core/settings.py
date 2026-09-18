@@ -493,22 +493,53 @@ class SettingsService:
                 for k, v in _normalize_settings_data(partial).items()
                 if k not in FIXED_FIELDS
             }
-            candidate_dict = {**current.dict(), **sanitized_partial}
-            candidate = Settings(**candidate_dict)
             from sqlmodel import text
 
-            # Ensure primary_mint reflects candidate mints if missing
-            if not candidate.primary_mint:
-                candidate.primary_mint = _compute_primary_mint(candidate.cashu_mints)
-
-            await db_session.exec(  # type: ignore
-                text(
-                    "UPDATE settings SET data = :data, updated_at = :updated_at WHERE id = 1"
-                ).bindparams(
-                    data=json.dumps(_strip_secret_fields(candidate.dict())),
-                    updated_at=datetime.now(timezone.utc),
+            while True:
+                row = await db_session.exec(  # type: ignore
+                    text("SELECT data FROM settings WHERE id = 1")
                 )
-            )
+                row = row.first()
+                seen = row[0] if row else None
+                # Build on the saved document: another worker may have saved
+                # since this one loaded, and its choices must survive this edit.
+                stored = (
+                    _strip_secret_fields(_normalize_settings_data(json.loads(seen)))
+                    if isinstance(seen, str)
+                    else {}
+                )
+                candidate = Settings(
+                    **{**current.dict(), **stored, **sanitized_partial}
+                )
+
+                # Ensure primary_mint reflects candidate mints if missing
+                if not candidate.primary_mint:
+                    candidate.primary_mint = _compute_primary_mint(
+                        candidate.cashu_mints
+                    )
+
+                saved = await db_session.exec(  # type: ignore
+                    text(
+                        "UPDATE settings SET data = :data, updated_at = :updated_at "
+                        "WHERE id = 1 AND data = :seen"
+                    ).bindparams(
+                        data=json.dumps(_strip_secret_fields(candidate.dict())),
+                        updated_at=datetime.now(timezone.utc),
+                        seen=seen,
+                    )
+                )
+                if seen is None or saved.rowcount == 1:
+                    break
+                await db_session.rollback()
+            if (
+                "enable_analytics_sharing" in sanitized_partial
+                and not candidate.enable_analytics_sharing
+            ):
+                # Saved with the opt-out, so a worker that read older flags
+                # cannot activate sharing after it.
+                from ..nostr.analytics_v2_delivery import fence_analytics_v2_opt_out
+
+                await fence_analytics_v2_opt_out(db_session)
             await db_session.commit()
             # Update in-place. Env-only fields (e.g. DB pool sizing) are never
             # applied here: the engine pool is already built at boot from env,
@@ -520,6 +551,21 @@ class SettingsService:
                 setattr(settings, k, v)
             cls._current = settings
             return settings
+
+    @classmethod
+    async def refresh(cls, db_session: AsyncSession, fields: tuple[str, ...]) -> None:
+        """Adopt saved fields; an update only reaches the worker that made it."""
+        from sqlmodel import text
+
+        async with cls._lock:
+            row = await db_session.exec(text("SELECT data FROM settings WHERE id = 1"))  # type: ignore
+            row = row.first()
+            if row is None:
+                return
+            data = json.loads(row[0]) if isinstance(row[0], str) else dict(row[0])
+            for name in fields:
+                if name in data:
+                    setattr(settings, name, data[name])
 
     @classmethod
     async def reload_from_db(cls, db_session: AsyncSession) -> Settings:
