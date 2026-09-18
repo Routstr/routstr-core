@@ -759,6 +759,84 @@ async def test_disable_closes_coverage_after_background_rotation_is_stopped(
     assert await writer.stop(timeout=1, close_coverage=True)
 
 
+@pytest.mark.parametrize("failed_startup", [False, True])
+async def test_fresh_restart_does_not_publish_zero_for_unattended_days(
+    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    failed_startup: bool,
+) -> None:
+    import json
+
+    from nostr_sdk import Keys
+
+    from routstr.core.db import AnalyticsV2Outbox
+    from routstr.nostr.analytics_v2_delivery import (
+        AnalyticsV2Producer,
+        activate_analytics_v2_sharing,
+        claim_analytics_v2_identity,
+    )
+
+    _, sessions = ledger
+    first_day, clean_day, recovery_day = (
+        date(2026, 9, 1),
+        date(2026, 9, 3),
+        date(2026, 9, 7),
+    )
+    clock = MutableClock(_timestamp(first_day))
+    pubkey = Keys.parse("11" * 32).public_key().to_hex()
+    await claim_analytics_v2_identity(
+        sessions, pubkey=pubkey, provider_d="provider", at_ms=clock.value
+    )
+    await activate_analytics_v2_sharing(
+        sessions, coverage_day=first_day, at_ms=clock.value
+    )
+    first = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    assert await first.start()
+    clock.value = _timestamp(clean_day)
+    assert await first.flush(timeout=1)
+    assert await first.stop(timeout=1)
+
+    if failed_startup:
+
+        @asynccontextmanager
+        async def unavailable() -> AsyncGenerator[AsyncSession, None]:
+            raise OSError("synthetic stats database unavailable at startup")
+            yield  # pragma: no cover
+
+        failed = TerminalOutcomeWriter(
+            session_factory=unavailable,
+            clock=MutableClock(_timestamp(clean_day + timedelta(days=1))),
+        )
+        assert not await failed.start()
+        assert failed.loss_pending
+
+    clock.value = _timestamp(recovery_day)
+    recovered = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    assert await recovered.start()
+    producer = AnalyticsV2Producer(
+        sessions,
+        private_key_hex="11" * 32,
+        public_key_hex=pubkey,
+        provider_d="provider",
+    )
+    try:
+        assert (
+            await producer.produce_once(
+                now=datetime.fromtimestamp(clock.value / 1000, UTC)
+            )
+            == 1
+        )
+        async with sessions() as session:
+            reports = (await session.exec(select(AnalyticsV2Outbox))).all()
+        reported_days = {
+            day
+            for report in reports
+            for day in json.loads(json.loads(report.frame)[1]["content"])["days"]
+        }
+        assert reported_days == {"2026-09-02"}
+    finally:
+        assert await recovered.stop(timeout=1)
+
+
 async def test_restart_alongside_live_writer_preserves_continuous_coverage(
     ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
 ) -> None:
