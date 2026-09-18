@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -10,14 +12,17 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel, col, select, text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.core import terminal_outcomes
-from routstr.core.db import TerminalOutcomeEpoch
-from routstr.core.settings import SettingsService
+from routstr.core import admin, terminal_outcomes, vault
+from routstr.core.db import Secret, TerminalOutcomeEpoch
+from routstr.core.main import app
+from routstr.core.settings import Settings, SettingsService
 from routstr.nostr import analytics_runtime as runtime
+from routstr.nostr import listing
 
 
 @pytest_asyncio.fixture
@@ -163,6 +168,79 @@ async def test_identity_rotation_cancels_previous_publisher(
     assert state.identity_pubkey == keypair[1]
     assert node.events == ["start:daily", "stop:daily", "start:daily"]
     assert node.writer.running
+
+
+@pytest.mark.asyncio
+async def test_saved_identity_reaches_other_workers_without_disabling_sharing(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_module = importlib.import_module("routstr.core.settings")
+    first = runtime.settings.copy(deep=True)
+    first.nsec = ""
+    first.npub = ""
+    first.enable_analytics_sharing = True
+    second = first.copy(deep=True)
+
+    def bind_worker(settings: Settings) -> None:
+        for module in (runtime, admin, listing, settings_module):
+            monkeypatch.setattr(module, "settings", settings)
+        monkeypatch.setattr(SettingsService, "_current", settings)
+
+    async with node.sessions() as session:
+        await session.exec(  # type: ignore[call-overload]
+            text("INSERT INTO settings (id, data) VALUES (1, :data)").bindparams(
+                data=json.dumps(settings_module._strip_secret_fields(first.dict()))
+            )
+        )
+        await session.commit()
+    monkeypatch.setattr(admin, "create_session", node.sessions)
+    token = "stats-identity-test"
+    monkeypatch.setitem(admin.admin_sessions, token, int(time.time()) + 60)
+    other = runtime.AnalyticsCoordinator()
+    try:
+        for coordinator, settings in ((node.coordinator, first), (other, second)):
+            bind_worker(settings)
+            await coordinator.prepare_startup()
+            await coordinator.sync_once()
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            for key in ("11" * 32, "22" * 32, ""):
+                bind_worker(first)
+                response = await client.patch("/admin/api/nsec", json={"nsec": key})
+                assert response.status_code == 200
+                saved = await client.patch(
+                    "/admin/api/settings", json={"npub": response.json()["npub"]}
+                )
+                assert saved.status_code == 200
+                async with node.sessions() as session:
+                    secret = await session.get(Secret, 1)
+                    assert secret is not None
+                    assert (
+                        vault.decrypt(secret.encrypted_nsec)
+                        if secret.encrypted_nsec
+                        else ""
+                    ) == key
+                await node.coordinator.sync_once()
+                state = await runtime.get_analytics_v2_delivery_state(node.sessions)
+                for coordinator, settings in (
+                    (other, second),
+                    (node.coordinator, first),
+                    (other, second),
+                ):
+                    bind_worker(settings)
+                    await coordinator.sync_once()
+                    current = await runtime.get_analytics_v2_delivery_state(
+                        node.sessions
+                    )
+                    assert current.sharing_enabled is bool(key)
+                    assert current.generation == state.generation
+                    assert settings.nsec == key
+                    assert settings.npub == response.json()["npub"]
+    finally:
+        await other.close()
 
 
 @pytest.mark.asyncio
