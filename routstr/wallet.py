@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncGenerator, TypedDict
+from typing import AsyncGenerator, Awaitable, Callable, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -1993,7 +1993,25 @@ async def periodic_routstr_fee_payout() -> None:
             )
 
 
-async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
+def _quote_callback(
+    notify: Callable[[str, str], Awaitable[None]], mint: str
+) -> Callable[[str], Awaitable[None]]:
+    async def callback(quote_id: str) -> None:
+        await notify(quote_id, mint)
+
+    return callback
+
+
+async def send_to_lnurl(
+    amount: int,
+    unit: str,
+    mint: str,
+    address: str,
+    *,
+    on_melt_quote: Callable[[str, str], Awaitable[None]] | None = None,
+) -> int:
+    """``on_melt_quote`` gets the quote id and the mint that issued it, since
+    fallback may pick a different mint than requested."""
     async with wallet_operation_guard():
         mint = await find_trusted_mint_with_funds(amount, unit, mint, force_reload=True)
         wallet = await get_wallet(mint, unit)
@@ -2001,7 +2019,16 @@ async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
         # Hand over unreserved proofs: raw_send_to_lnurl reserves only once the
         # destination, the invoice amount and the melt quote have all been
         # accepted, so a rejected refund cannot strand locked proofs.
-        return await raw_send_to_lnurl(wallet, available, address, unit, amount=amount)
+        return await raw_send_to_lnurl(
+            wallet,
+            available,
+            address,
+            unit,
+            amount=amount,
+            on_melt_quote=(
+                None if on_melt_quote is None else _quote_callback(on_melt_quote, mint)
+            ),
+        )
 
 
 # class Payment:

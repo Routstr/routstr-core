@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
+import json
+import socket
 from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
 
@@ -48,16 +51,27 @@ class MeltOutcomeAmbiguousError(LNURLError):
     """
 
 
+class MeltUnpaidError(LNURLError):
+    """The mint answered the melt request itself with ``unpaid``.
+
+    Unlike :class:`MeltOutcomeAmbiguousError` this is proof that no Lightning
+    payment was made, so callers may restore what they debited.
+    """
+
+
 _MAX_LNURL_REDIRECTS = 3
+_MAX_LNURL_RESPONSE_BYTES = 64 * 1024
 _NON_PUBLIC_HOST_SUFFIXES = (".localhost", ".local", ".internal")
 
 
-def _require_public_https_destination(url: httpx.URL) -> None:
+async def _require_public_https_destination(url: httpx.URL) -> None:
     """Reject anything that is not a public HTTPS endpoint.
 
     LNURL destinations and their redirect targets are attacker-influenced, so
     every hop has to be re-checked: a single ``https://`` origin says nothing
-    about where a 302 points.
+    about where a 302 points. A bare hostname check is not enough either: a
+    public-looking name can resolve to a loopback/link-local/private address
+    (SSRF), so DNS is resolved here and every resulting address must be global.
     """
     if url.scheme != "https":
         raise LNURLError("LNURL destination must be an HTTPS URL")
@@ -67,14 +81,34 @@ def _require_public_https_destination(url: httpx.URL) -> None:
         raise LNURLError("LNURL destination has no host")
 
     try:
-        address = ipaddress.ip_address(host)
+        literal = ipaddress.ip_address(host)
     except ValueError:
-        if host == "localhost" or host.endswith(_NON_PUBLIC_HOST_SUFFIXES):
-            raise LNURLError("LNURL destination is not a public host") from None
+        literal = None
+
+    if literal is not None:
+        if not literal.is_global:
+            raise LNURLError("LNURL destination is not a public host")
         return
 
-    if not address.is_global:
+    if host == "localhost" or host.endswith(_NON_PUBLIC_HOST_SUFFIXES):
         raise LNURLError("LNURL destination is not a public host")
+
+    port = url.port or 443
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            host, port, proto=socket.IPPROTO_TCP
+        )
+    except socket.gaierror as e:
+        raise LNURLError("LNURL destination could not be resolved") from e
+    if not infos:
+        raise LNURLError("LNURL destination could not be resolved")
+    for info in infos:
+        try:
+            resolved = ipaddress.ip_address(info[4][0])
+        except ValueError as e:
+            raise LNURLError("LNURL destination resolved to an invalid address") from e
+        if not resolved.is_global:
+            raise LNURLError("LNURL destination is not a public host")
 
 
 async def _fetch_lnurl_json(
@@ -89,21 +123,34 @@ async def _fetch_lnurl_json(
         target = httpx.URL(url, params=params) if params else httpx.URL(url)
     except httpx.InvalidURL as e:
         raise LNURLError("LNURL destination is not a usable URL") from e
-    _require_public_https_destination(target)
+    await _require_public_https_destination(target)
 
+    raw: bytes | None = None
     async with httpx.AsyncClient() as client:
         for _ in range(_MAX_LNURL_REDIRECTS + 1):
-            response = await client.get(target, follow_redirects=False, timeout=10)
-            if not response.is_redirect:
-                break
-            target = target.join(response.headers.get("location", ""))
-            _require_public_https_destination(target)
+            async with client.stream(
+                "GET", target, follow_redirects=False, timeout=10
+            ) as response:
+                if response.is_redirect:
+                    target = target.join(response.headers.get("location", ""))
+                    await _require_public_https_destination(target)
+                    continue
+                response.raise_for_status()
+                chunks = bytearray()
+                async for chunk in response.aiter_bytes():
+                    chunks.extend(chunk)
+                    if len(chunks) > _MAX_LNURL_RESPONSE_BYTES:
+                        raise LNURLError("LNURL response exceeded the size limit")
+                raw = bytes(chunks)
+            break
         else:
             raise LNURLError("LNURL destination exceeded the redirect limit")
-        response.raise_for_status()
+
+    if raw is None:
+        raise LNURLError("LNURL destination exceeded the redirect limit")
 
     try:
-        data = response.json()
+        data = json.loads(raw)
     except ValueError as e:
         raise LNURLError("LNURL response was not valid JSON") from e
 
@@ -191,9 +238,10 @@ async def get_lnurl_data(lnurl: str) -> LNURLData:
     if not isinstance(callback_url, str):
         raise LNURLError("Invalid LNURL payRequest: missing callback URL")
     try:
-        _require_public_https_destination(httpx.URL(callback_url))
+        callback_target = httpx.URL(callback_url)
     except httpx.InvalidURL as e:
         raise LNURLError("Invalid LNURL callback URL") from e
+    await _require_public_https_destination(callback_target)
 
     min_sendable = lnurl_data.get("minSendable", 1000)  # Default 1 sat
     max_sendable = lnurl_data.get("maxSendable", 1000000000)  # Default 1000 BTC
@@ -412,7 +460,7 @@ async def raw_send_to_lnurl(
         return final_amount
     if melt_state == MeltQuoteState.unpaid:
         await wallet.set_reserved_for_send(proofs, reserved=False)
-        raise LNURLError("Cashu mint confirmed that the melt was unpaid")
+        raise MeltUnpaidError("Cashu mint confirmed that the melt was unpaid")
 
     try:
         quote = await run_mint_operation(

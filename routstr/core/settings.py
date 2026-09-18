@@ -124,13 +124,20 @@ class Settings(BaseSettings):
     enable_model_paths_refresh: bool = Field(
         default=True, env="ENABLE_MODEL_PATHS_REFRESH"
     )
-    refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")
     # Uncollected refund tokens are swept after ~6 months (180 days).
     # Fixed for now: not configurable via env or the settings DB/admin API
     # (empty env list disables env binding; see FIXED_FIELDS).
     refund_sweep_ttl_seconds: int = Field(default=15_552_000, env=[])
     refund_sweep_claim_timeout_seconds: int = Field(
         default=900, gt=0, env="REFUND_SWEEP_CLAIM_TIMEOUT_SECONDS"
+    )
+    # How long an open refund claim may sit before the reconciler asks the mint
+    # what became of it. Doubles as the reconciler's per-row lease.
+    refund_claim_timeout_seconds: int = Field(
+        default=300, gt=0, env="REFUND_CLAIM_TIMEOUT_SECONDS"
+    )
+    refund_reconcile_interval_seconds: int = Field(
+        default=60, gt=0, env="REFUND_RECONCILE_INTERVAL_SECONDS"
     )
 
     # Database connection-pool controls (advanced). Capacity defaults provide

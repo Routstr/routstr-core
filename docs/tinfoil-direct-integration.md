@@ -260,7 +260,13 @@ During local PPQ testing, PPQ responses included this CORS exposure header:
 Access-Control-Expose-Headers: Ehbp-Response-Nonce, X-Private-Usage-Metrics, X-Encrypted-Usage-Metrics, X-Tinfoil-Usage-Metrics
 ```
 
-However, the actual tested non-streaming response did not include any of these usage headers, even when `X-Tinfoil-Request-Usage-Metrics: true` was sent.
+However, when this was tested against PPQ's `/private/` endpoint
+(`private/gpt-oss-120b`) on 2026-06-21, the non-streaming response did not
+include any of these usage headers, even when
+`X-Tinfoil-Request-Usage-Metrics: true` was sent. That observation does *not*
+hold for the direct Tinfoil enclave upstream that Routstr ships: see
+[Usage metrics header format](#usage-metrics-header-format) below, where the
+response header and the streaming trailer are both verified present.
 
 The decrypted body did include normal OpenAI usage, but only the decrypting Tinfoil client can see that body.
 
@@ -385,7 +391,9 @@ and `routstr/upstream/ehbp.py`.
   - Base URL: `https://inference.tinfoil.sh`
   - Fetches models from the public `GET /v1/models` endpoint (no auth needed).
   - Parses Tinfoil's pricing (`inputTokenPricePer1M`, `outputTokenPricePer1M`,
-    `requestPrice`) into the standard `Model`/`Pricing` schema.
+    `cachedInputTokenPricePer1M`, `requestPrice`) into the standard
+    `Model`/`Pricing` schema. Cached reads use the cached rate when present,
+    otherwise the full input rate; cache writes always use the full input rate.
   - `supports_ehbp = True` — acts as a blind EHBP relay.
   - `get_ehbp_forwarding_target()` returns a target that includes
     `X-Tinfoil-Request-Usage-Metrics: true`.
@@ -396,9 +404,12 @@ and `routstr/upstream/ehbp.py`.
 
 - `routstr/upstream/ehbp.py`:
   - `parse_tinfoil_usage_metrics()` parses
-    `prompt=N,completion=N[,total=N][,model=<name>]` into an OpenAI-style
-    usage dict. The `model` field (added in tinfoilsh/confidential-model-router
-    PR #385) is extracted as a string.
+    `prompt=N,completion=N[,total=N][,cached_prompt_tokens=N,
+    uncached_prompt_tokens=N][,model=<name>][,cost_usd=<usd>]` into an
+    OpenAI-style usage dict. Cache reads map to ``cache_read_input_tokens``
+    so ``calculate_cost`` can bill them at the cached rate. The ``model``
+    field (added in tinfoilsh/confidential-model-router PR #385) is extracted
+    as a string; ``cost_usd`` is parsed for logging only.
   - `_resolve_ehbp_target_url()` overrides the forwarding URL with
     `X-Tinfoil-Enclave-Url` when the SDK sends it.
   - `_strip_proxy_headers()` removes `X-Routstr-Model`,
@@ -444,6 +455,8 @@ Routstr returns cost info as response headers:
 | `X-Routstr-Cost-Usd` | Bearer | USD equivalent of the computed usage |
 | `X-Routstr-Input-Cost-Msats` | Bearer, X-Cashu | msats attributed to input tokens |
 | `X-Routstr-Output-Cost-Msats` | Bearer, X-Cashu | msats attributed to output tokens |
+| `X-Routstr-Cache-Read-Msats` | Bearer, X-Cashu | msats attributed to cached input (cache reads) |
+| `X-Routstr-Cache-Creation-Msats` | Bearer, X-Cashu | msats attributed to cache creation (0 for Tinfoil today) |
 
 The client/Tinfoil SDK can read these headers from the HTTP response without
 needing to decrypt the body. A duplicate or rejected finalization can therefore
@@ -467,8 +480,22 @@ Tinfoil returns usage metrics in the `X-Tinfoil-Usage-Metrics` response header
 true` is sent. As of tinfoilsh/confidential-model-router PR #385, the format is:
 
 ```
-prompt=<prompt_tokens>,completion=<completion_tokens>,total=<total_tokens>,model=<served_model>
+prompt=<prompt_tokens>,completion=<completion_tokens>,total=<total_tokens>[,cached_prompt_tokens=<n>,uncached_prompt_tokens=<n>][,model=<served_model>][,cost_usd=<usd>]
 ```
+
+`prompt` is the inclusive prompt total; `cached_prompt_tokens` is the portion
+already in Tinfoil's prefix cache and is billed at the model's
+`cachedInputTokenPricePer1M` rate (or the full input rate when the model has
+no cached rate). `cost_usd` is Tinfoil's own computed request cost and is
+currently parsed for observability only — Routstr bills from token counts.
+
+Note that the header/trailer value is not always a single occurrence: for
+streaming responses the trailer is emitted twice, so a client that reads the
+trailer directly may see the same `prompt=...,completion=...,...` string twice
+in one field, comma-joined. Parsers must be tolerant of the duplicate rather
+than assuming exactly one occurrence. `parse_tinfoil_usage_metrics()` is
+unaffected: it assigns each `key=value` part as it walks the comma-separated
+value, and both occurrences carry identical numbers.
 
 The `model` field carries the actual model name served by the enclave.
 Routstr uses this to:
@@ -496,4 +523,6 @@ back to the requested model's pricing.
   finalizers for bearer and X-Cashu requests. This provides actual-cost billing
   today, at the cost of full time-to-last-byte latency for streaming responses.
 - Whether Tinfoil's `/v1/responses` endpoint also returns usage metrics
-  headers or trailers.
+  headers or trailers. Verified: yes — `/v1/responses` returns
+  `X-Tinfoil-Usage-Metrics` as a plaintext response header, with the same field
+  set as `/v1/chat/completions` (including `cost_usd`).

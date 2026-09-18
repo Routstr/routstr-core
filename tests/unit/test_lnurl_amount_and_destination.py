@@ -6,6 +6,7 @@ is what stops a pre-dispatch failure from stranding proofs.
 """
 
 import math
+import socket
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -345,6 +346,61 @@ async def test_send_to_lnurl_does_not_reserve_before_lnurl_validation() -> None:
     assert raw_send.await_args is not None
     assert raw_send.await_args.args[1] is proofs
     assert raw_send.await_args.kwargs["amount"] == 1000
+
+
+def _patch_getaddrinfo(ip: str) -> Any:
+    """Force DNS resolution of any hostname to a single fixed IP."""
+
+    async def fake_getaddrinfo(host: str, port: int, **_kw: object) -> list[Any]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port))
+        ]
+
+    loop = MagicMock()
+    loop.getaddrinfo = fake_getaddrinfo
+    return patch.object(
+        lnurl_module.asyncio, "get_running_loop", return_value=loop
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "private_ip", ["127.0.0.1", "10.0.0.5", "169.254.169.254", "192.168.1.1"]
+)
+async def test_guard_rejects_public_hostname_resolving_to_private(
+    private_ip: str,
+) -> None:
+    """A public-looking name must be rejected when DNS points it inward (SSRF)."""
+    with (
+        _patch_getaddrinfo(private_ip),
+        pytest.raises(LNURLError, match="public host"),
+    ):
+        await lnurl_module._require_public_https_destination(
+            httpx.URL("https://totally-public.example.com/cb")
+        )
+
+
+@pytest.mark.asyncio
+async def test_guard_allows_public_hostname_resolving_to_public() -> None:
+    with _patch_getaddrinfo("93.184.216.34"):
+        await lnurl_module._require_public_https_destination(
+            httpx.URL("https://totally-public.example.com/cb")
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_lnurl_data_rejects_oversized_response() -> None:
+    big = b"x" * (lnurl_module._MAX_LNURL_RESPONSE_BYTES + 1)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=big)
+
+    with (
+        _patch_getaddrinfo("93.184.216.34"),
+        _mock_client(handler),
+        pytest.raises(LNURLError, match="size limit"),
+    ):
+        await get_lnurl_data("owner@ln.tld")
 
 
 def test_select_melt_proofs_ignores_fees_for_unneeded_wallet_proofs() -> None:
