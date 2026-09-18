@@ -22,7 +22,11 @@ from ..lightning import lightning_router, periodic_invoice_watcher
 from ..nostr import (
     announce_provider,
     providers_cache_refresher,
-    publish_usage_analytics,
+)
+from ..nostr.analytics_runtime import (
+    prepare_analytics,
+    run_analytics,
+    shutdown_analytics,
 )
 from ..nostr.discovery import providers_router
 from ..payment.models import models_router, update_sats_pricing
@@ -112,6 +116,11 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
                 await reset_all_reserved_balances(session)
 
+        try:
+            await prepare_analytics()
+        except Exception:
+            logger.exception("Stats collection could not start; requests remain available")
+
         # Apply app metadata from settings
         try:
             app.title = s.name
@@ -155,7 +164,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # it every iteration, so a key saved (or cleared) through the admin UI
         # takes effect without a restart.
         nip91_task = asyncio.create_task(announce_provider())
-        analytics_task = asyncio.create_task(publish_usage_analytics())
+        analytics_task = asyncio.create_task(run_analytics())
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
         stale_reservation_task = asyncio.create_task(periodic_stale_reservation_sweep())
@@ -256,6 +265,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 "Error stopping background tasks",
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
+        await shutdown_analytics()
 
 
 class _ImmutableStaticFiles(StaticFiles):
