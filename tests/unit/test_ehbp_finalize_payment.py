@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Iterator
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,13 +13,19 @@ from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 import routstr.auth as auth_module
+import routstr.core.terminal_outcomes as outcomes_module
 from routstr.auth import get_reservation_snapshot, pay_for_request
 from routstr.core.db import ApiKey, ReservationRelease
+from routstr.core.terminal_outcomes import TerminalOutcomeContext
 from routstr.upstream.ehbp import (
+    EHBPForwardingTarget,
+    _context_with_served_model,
     _inject_cost_response_headers,
     finalize_ehbp_actual_cost_payment,
     finalize_ehbp_max_cost_payment,
+    forward_ehbp_x_cashu_request,
 )
+from routstr.upstream.tinfoil_trailer import TrailerResponse
 
 
 def _make_engine() -> AsyncEngine:
@@ -27,6 +34,16 @@ def _make_engine() -> AsyncEngine:
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
+
+
+def test_unresolved_served_model_does_not_publish_requested_identity() -> None:
+    context = TerminalOutcomeContext("ehbp-unknown-model", "requested/model")
+    cost_info = {"actual_model_unresolved": True}
+
+    resolved = _context_with_served_model(context, cost_info)
+
+    assert resolved.model_identifier is None
+    assert cost_info == {}
 
 
 @pytest.fixture
@@ -77,12 +94,19 @@ def _fail_nth_api_key_update(
 @pytest.mark.asyncio
 async def test_finalize_actual_cost_payment_updates_balance_and_releases_reserve(
     session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     key = ApiKey(hashed_key="ehbp-actual", balance=10_000)
     session.add(key)
     await session.commit()
     await pay_for_request(key, 3_000, session)
     reservation = await get_reservation_snapshot(key, session)
+    record_outcome = MagicMock()
+    monkeypatch.setattr("routstr.upstream.ehbp.record_terminal_outcome", record_outcome)
+    terminal_outcome = TerminalOutcomeContext(
+        outcome_id="ehbp-actual-outcome",
+        model_identifier="tinfoil/model",
+    )
 
     charged = await finalize_ehbp_actual_cost_payment(
         key,
@@ -95,8 +119,13 @@ async def test_finalize_actual_cost_payment_updates_balance_and_releases_reserve
             "output_tokens": 20,
             "input_msats": 500,
             "output_msats": 700,
+            "input_observed": True,
+            "output_observed": True,
+            "cache_read_observed": True,
+            "cache_creation_observed": False,
         },
         reservation_snapshot=reservation,
+        terminal_outcome=terminal_outcome,
     )
 
     assert charged == 1_200
@@ -106,6 +135,26 @@ async def test_finalize_actual_cost_payment_updates_balance_and_releases_reserve
     assert updated.reserved_balance == 0
     assert updated.reserved_at is None
     assert updated.total_spent == 1_200
+    record_outcome.assert_called_once_with(
+        TerminalOutcomeContext(
+            outcome_id="ehbp-actual-outcome",
+            model_identifier="tinfoil/model",
+            pricing_source="missing",
+            input_source="reported",
+            output_source="reported",
+            cache_read_source="reported",
+            cache_creation_source="missing",
+            input_observed=True,
+            output_observed=True,
+            cache_read_observed=True,
+            cache_creation_observed=False,
+        ),
+        input_tokens=10,
+        output_tokens=20,
+        cache_read_input_tokens=0,
+        cache_creation_input_tokens=0,
+        revenue_msats=1_200,
+    )
 
 
 @contextmanager
@@ -216,12 +265,19 @@ async def test_finalize_actual_cost_payment_logs_zero_cache_when_absent(
 @pytest.mark.asyncio
 async def test_unmeasured_ehbp_releases_reservation(
     session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     key = ApiKey(hashed_key="ehbp-key", balance=10_000)
     session.add(key)
     await session.commit()
     await pay_for_request(key, 3_000, session)
     reservation = await get_reservation_snapshot(key, session)
+    record_outcome = MagicMock()
+    monkeypatch.setattr("routstr.upstream.ehbp.record_terminal_outcome", record_outcome)
+    terminal_outcome = TerminalOutcomeContext(
+        outcome_id="ehbp-unmeasured-outcome",
+        model_identifier="tinfoil/model",
+    )
 
     charged = await finalize_ehbp_max_cost_payment(
         key,
@@ -229,6 +285,7 @@ async def test_unmeasured_ehbp_releases_reservation(
         max_cost_for_model=3_000,
         model_id="tinfoil/model",
         reservation_snapshot=reservation,
+        terminal_outcome=terminal_outcome,
     )
 
     assert charged == 0
@@ -238,6 +295,25 @@ async def test_unmeasured_ehbp_releases_reservation(
     assert updated.reserved_balance == 0
     assert updated.reserved_at is None
     assert updated.total_spent == 0
+    record_outcome.assert_called_once_with(
+        TerminalOutcomeContext(
+            outcome_id="ehbp-unmeasured-outcome",
+            model_identifier="tinfoil/model",
+            input_source="missing",
+            output_source="missing",
+            cache_read_source="missing",
+            cache_creation_source="missing",
+            input_observed=False,
+            output_observed=False,
+            cache_read_observed=False,
+            cache_creation_observed=False,
+        ),
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_input_tokens=0,
+        cache_creation_input_tokens=0,
+        revenue_msats=0,
+    )
 
 
 @pytest.mark.asyncio
@@ -324,3 +400,101 @@ def test_zero_debit_ehbp_headers_preserve_computed_cost() -> None:
 
     assert headers["X-Routstr-Cost-Msats"] == "0"
     assert headers["X-Routstr-Computed-Cost-Msats"] == "1500"
+
+
+@pytest.mark.asyncio
+async def test_x_cashu_ledger_failure_cannot_trigger_full_refund(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingWriter:
+        def __init__(self) -> None:
+            self.losses: list[str] = []
+            self.submissions: list[object] = []
+
+        def submit(self, outcome: object) -> bool:
+            self.submissions.append(outcome)
+            raise RuntimeError("ledger unavailable")
+
+        def declare_loss(self, reason: str, lost_day: object = None) -> None:
+            self.losses.append(reason)
+
+    writer = FailingWriter()
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+    monkeypatch.setattr(
+        "routstr.upstream.ehbp.recieve_token",
+        AsyncMock(return_value=(10, "sat", "https://mint.example")),
+    )
+    monkeypatch.setattr("routstr.upstream.ehbp.store_cashu_transaction", AsyncMock())
+    monkeypatch.setattr(
+        "routstr.upstream.ehbp.forward_with_trailer",
+        AsyncMock(
+            return_value=TrailerResponse(
+                status_code=200,
+                headers=[],
+                body=b"encrypted-response",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "routstr.upstream.ehbp._compute_ehbp_actual_cost",
+        AsyncMock(
+            return_value={
+                "total_msats": 1_999,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "input_msats": 1_000,
+                "output_msats": 999,
+                "input_observed": True,
+                "output_observed": True,
+                "cache_read_observed": False,
+                "cache_creation_observed": False,
+                "actual_model": "served-model",
+                "actual_model_identifier": "served/canonical-model",
+            }
+        ),
+    )
+    send_refund = AsyncMock(return_value="cashu-refund")
+    monkeypatch.setattr("routstr.upstream.ehbp.send_cashu_refund", send_refund)
+
+    request = MagicMock()
+    request.state = SimpleNamespace(request_id="ehbp-xcashu-ledger-failure")
+    request.headers = {}
+    request.method = "POST"
+    request.query_params = {}
+    request.body = AsyncMock(return_value=b"encrypted-request")
+    upstream = MagicMock()
+    upstream.provider_type = "tinfoil"
+    upstream.prepare_headers.return_value = {}
+    upstream.get_ehbp_forwarding_target.return_value = EHBPForwardingTarget(
+        url="https://enclave.tinfoil.sh/v1/chat/completions"
+    )
+    upstream.get_confidential_inference_profile.return_value = None
+    upstream.prepare_params.return_value = {}
+    model = MagicMock()
+    model.id = "tinfoil/model"
+    model.canonical_slug = "author/model"
+
+    response = await forward_ehbp_x_cashu_request(
+        request=request,
+        x_cashu_token="cashu-input",
+        path="v1/chat/completions",
+        max_cost_for_model=10_000,
+        model_obj=model,
+        upstream=upstream,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-cashu"] == "cashu-refund"
+    send_refund.assert_awaited_once_with(
+        8,
+        "sat",
+        "https://mint.example",
+        "ehbp-xcashu-ledger-failure",
+    )
+    assert writer.losses == ["terminal outcome submission raised"]
+    assert len(writer.submissions) == 1
+    submission = writer.submissions[0]
+    assert getattr(submission, "model_identifier") == "served/canonical-model"
+    assert getattr(submission, "revenue_msats") == 2_000
+    assert getattr(submission, "input_observed") is True
+    assert getattr(submission, "output_observed") is True

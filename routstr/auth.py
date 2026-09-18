@@ -5,7 +5,7 @@ import time
 import uuid
 from contextlib import suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Optional
 
 from fastapi import HTTPException
@@ -22,12 +22,19 @@ from .core.db import (
     create_session,
 )
 from .core.settings import settings
+from .core.terminal_outcomes import (
+    TerminalOutcomeContext,
+    mark_terminal_outcome_loss,
+    record_terminal_outcome,
+)
 from .payment.cost_calculation import (
     CostData,
     CostDataError,
     MaxCostData,
     calculate_cost,
+    unpriced_cost,
 )
+from .payment.usage import UsageFieldPresence
 from .redemption_cache import (
     TERMINAL_REDEMPTION_CODES,
     CachedRedemptionFailure,
@@ -1024,6 +1031,8 @@ async def release_reservation(
     snapshot: ReservationSnapshot,
     session: AsyncSession,
     reserved_msats: int,
+    *,
+    idempotent_success: bool = True,
 ) -> bool:
     """Release one durable reservation exactly once without charging."""
     if reserved_msats <= 0 or reserved_msats != snapshot.reserved_msats:
@@ -1032,7 +1041,7 @@ async def release_reservation(
         snapshot,
         session,
         decrement_requests=False,
-        idempotent_success=True,
+        idempotent_success=idempotent_success,
     )
 
 
@@ -1112,6 +1121,8 @@ async def adjust_payment_for_tokens(
     model_obj: "Model | None" = None,
     provider_fee: float | None = None,
     reservation_snapshot: ReservationSnapshot | None = None,
+    terminal_outcome: TerminalOutcomeContext | None = None,
+    usage_presence: UsageFieldPresence | None = None,
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
@@ -1188,8 +1199,41 @@ async def adjust_payment_for_tokens(
                     extra={"error": str(e), "fee_msats": fee_msats},
                 )
 
+    async def _commit_settlement(cost: CostData, revenue_msats: int) -> None:
+        try:
+            await session.commit()
+        except BaseException:
+            if terminal_outcome is not None:
+                mark_terminal_outcome_loss("prepaid_commit_ambiguous")
+            raise
+        if terminal_outcome is not None:
+            record_terminal_outcome(
+                replace(
+                    terminal_outcome,
+                    pricing_source=cost.pricing_source,
+                    input_source=cost.input_source,
+                    output_source=cost.output_source,
+                    cache_read_source=cost.cache_read_source,
+                    cache_creation_source=cost.cache_creation_source,
+                    input_observed=cost.input_observed,
+                    output_observed=cost.output_observed,
+                    cache_read_observed=cost.cache_read_observed,
+                    cache_creation_observed=cost.cache_creation_observed,
+                ),
+                input_tokens=cost.input_tokens,
+                output_tokens=cost.output_tokens,
+                cache_read_input_tokens=cost.cache_read_input_tokens,
+                cache_creation_input_tokens=cost.cache_creation_input_tokens,
+                revenue_msats=revenue_msats,
+                usage=response_data.get("usage"),
+            )
+
     calculated_cost = await calculate_cost(
-        response_data, deducted_max_cost, model_obj, provider_fee
+        response_data,
+        deducted_max_cost,
+        model_obj,
+        provider_fee,
+        usage_presence,
     )
     if isinstance(calculated_cost, CostDataError):
         # Content was already served, so release instead of raising a 400.
@@ -1202,9 +1246,7 @@ async def adjust_payment_for_tokens(
                 "error_code": calculated_cost.code,
             },
         )
-        calculated_cost = MaxCostData(
-            base_msats=0, input_msats=0, output_msats=0, total_msats=0
-        )
+        calculated_cost = unpriced_cost(response_data, usage_presence)
 
     if not await _claim_reservation_for_charge(reservation, session):
         # A prior charge or release already owns this reservation. Returning
@@ -1232,7 +1274,7 @@ async def adjust_payment_for_tokens(
                 charge_msats=cost.total_msats,
             )
             if charged:
-                await session.commit()
+                await _commit_settlement(cost, cost.total_msats)
                 await _stop_reservation_heartbeat(reservation.release_id)
             if not charged:
                 logger.error(
@@ -1333,7 +1375,7 @@ async def adjust_payment_for_tokens(
                     await release_reservation_only()
                     return cost.dict()
 
-                await session.commit()
+                await _commit_settlement(cost, total_cost_msats)
                 await _stop_reservation_heartbeat(reservation.release_id)
                 cost.charged_msats = total_cost_msats
                 await session.refresh(billing_key)
@@ -1416,7 +1458,7 @@ async def adjust_payment_for_tokens(
                     await session.rollback()
                     raise RuntimeError("Could not atomically finalize cost overrun")
 
-                await session.commit()
+                await _commit_settlement(cost, actual_charge_msats)
                 await _stop_reservation_heartbeat(reservation.release_id)
 
                 await session.refresh(billing_key)
@@ -1482,7 +1524,7 @@ async def adjust_payment_for_tokens(
                     charge_msats=total_cost_msats,
                 )
                 if charged:
-                    await session.commit()
+                    await _commit_settlement(cost, total_cost_msats)
                     await _stop_reservation_heartbeat(reservation.release_id)
 
                 if not charged:
