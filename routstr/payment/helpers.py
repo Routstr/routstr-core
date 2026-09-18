@@ -1,8 +1,12 @@
+import asyncio
 import base64
+import ipaddress
 import json
 import math
+import socket
 from io import BytesIO
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import HTTPException, Response
@@ -14,9 +18,21 @@ from ..core import get_logger
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..core.settings import settings
-from ..wallet import deserialize_token_from_string
+from ..wallet import (
+    UntrustedSourceMintError,
+    classify_redemption_error,
+    deserialize_token_from_string,
+    is_trusted_source_mint,
+)
+from .responses_input import (
+    FILE_ID_URL_PREFIX,
+    count_input_images,
+    input_image_part_to_image_url,
+    responses_input_to_messages,
+)
 
 logger = get_logger(__name__)
+
 
 def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
     if x_cashu := headers.get("x-cashu", None):
@@ -66,6 +82,19 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
         raise HTTPException(
             status_code=401,
             detail="Invalid authentication token format",
+        )
+
+    if not is_trusted_source_mint(token_obj.mint):
+        classified = classify_redemption_error(
+            UntrustedSourceMintError(f"Untrusted source mint: {token_obj.mint}")
+        )
+        assert classified is not None
+        error_type, status_code, message, error_code = classified
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "error": {"message": message, "type": error_type, "code": error_code}
+            },
         )
 
     amount_msat = (
@@ -156,7 +185,12 @@ async def calculate_discounted_max_cost(
     body: dict,
     model_obj: Any | None = None,
 ) -> int:
-    """Calculate the discounted max cost for a request using model pricing when available."""
+    """Calculate the discounted max cost for a request using model pricing when available.
+
+    Completion discounts are trimmed from the largest declared cap among
+    ``max_tokens`` and ``max_completion_tokens`` (chat/completions) or
+    ``max_output_tokens`` (responses).
+    """
     if settings.fixed_pricing:
         return max_cost_for_model
 
@@ -196,41 +230,75 @@ async def calculate_discounted_max_cost(
 
     adjusted = max_cost_for_model
 
-    if messages := body.get("messages"):
-        prompt_tokens = estimate_tokens(messages)
+    messages = body.get("messages")
+    # Estimated over the whole body: a discount driven by message text alone lets
+    # a caller hide prompt weight elsewhere, shrink the reservation, and be billed
+    # for work the reservation never covered.
+    prompt_tokens = estimate_prompt_tokens(body)
 
-        image_tokens = await estimate_image_tokens_in_messages(messages)
-        if image_tokens > 0:
-            logger.debug(
-                "Found images in request",
-                extra={
-                    "model": model,
-                    "image_tokens": image_tokens,
-                },
-            )
-            prompt_tokens += image_tokens
+    # Images are billed as tokens by the upstream but carry no text for
+    # ``estimate_prompt_tokens`` to count, so they are estimated separately and
+    # added on both the chat (``messages``) and Responses (``input``) paths.
+    image_tokens = 0
+    if isinstance(messages, list):
+        image_tokens += await estimate_image_tokens_in_messages(messages)
+    input_data = body.get("input")
+    if isinstance(input_data, list):
+        converted = responses_input_to_messages(input_data)
+        if converted is None:
+            image_tokens += count_input_images(input_data) * _MAX_ORIGINAL_IMAGE_TOKENS
+        else:
+            image_tokens += await estimate_image_tokens_in_messages(converted)
+    if image_tokens > 0:
+        logger.debug(
+            "Found images in request",
+            extra={
+                "model": model,
+                "image_tokens": image_tokens,
+            },
+        )
+        prompt_tokens += image_tokens
 
+    if prompt_tokens > 0:
         estimated_prompt_delta_sats = (
             max_prompt_allowed_sats - prompt_tokens * model_pricing.prompt
         )
         if estimated_prompt_delta_sats > 0:
             adjusted = adjusted - math.floor(estimated_prompt_delta_sats * 1000)
 
-    max_tokens_raw = body.get("max_tokens", None)
-    if max_tokens_raw is not None:
+    # Completion caps arrive under several names: ``max_tokens`` (legacy
+    # chat), ``max_completion_tokens`` (modern chat) and ``max_output_tokens``
+    # (Responses API). When a request declares more than one, reserve against
+    # the largest: upstream precedence between the fields varies by provider,
+    # so the smaller cap may not be honored and the reservation must never
+    # under-cover what the upstream could bill.
+    max_tokens_int: int | None = None
+    for cap_field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+        cap_raw = body.get(cap_field)
+        if cap_raw is None:
+            continue
         try:
-            max_tokens_int = int(max_tokens_raw)
+            cap_int = int(cap_raw)
         except (TypeError, ValueError):
             logger.warning(
-                "Invalid max_tokens; ignoring in cost adjustment",
-                extra={"max_tokens": str(max_tokens_raw)[:64], "model": model},
+                "Invalid completion token cap; ignoring in cost adjustment",
+                extra={
+                    "field": cap_field,
+                    "value": str(cap_raw)[:64],
+                    "model": model,
+                },
             )
-        else:
-            estimated_completion_delta_sats = (
-                max_completion_allowed_sats - max_tokens_int * model_pricing.completion
-            )
-            if estimated_completion_delta_sats > 0:
-                adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
+            continue
+        max_tokens_int = (
+            cap_int if max_tokens_int is None else max(max_tokens_int, cap_int)
+        )
+
+    if max_tokens_int is not None:
+        estimated_completion_delta_sats = (
+            max_completion_allowed_sats - max_tokens_int * model_pricing.completion
+        )
+        if estimated_completion_delta_sats > 0:
+            adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
 
     logger.debug(
         "Discounted max cost computed",
@@ -262,6 +330,51 @@ def estimate_tokens(messages: list) -> int:
     return total // 3
 
 
+def _sum_string_chars(node: Any) -> int:
+    """Recursively sum the length of every string in the tree, keys included.
+
+    Nothing is excluded. Keys count because JSON-schema property names are
+    forwarded to the provider, and no exclusion rule can be trusted here: every
+    part of the body is caller-controlled, so any carve-out (by key name or by
+    value shape) is a place to hide prompt weight for free. Inline image data is
+    therefore counted as text too, which only makes the discount smaller.
+    """
+    if isinstance(node, str):
+        return len(node)
+    if isinstance(node, dict):
+        return sum(
+            len(str(key)) + _sum_string_chars(value) for key, value in node.items()
+        )
+    if isinstance(node, list):
+        return sum(_sum_string_chars(item) for item in node)
+    return 0
+
+
+def _count_prompt_token_ids(node: Any) -> int:
+    if isinstance(node, int) and not isinstance(node, bool):
+        return 1
+    if isinstance(node, list):
+        return sum(_count_prompt_token_ids(item) for item in node)
+    return 0
+
+
+def estimate_prompt_tokens(body: dict) -> int:
+    """Conservatively estimate prompt tokens for the whole provider-bound body.
+
+    Every string counts, as do token IDs in legacy ``prompt`` arrays, so no
+    forwarded field can hide prompt weight and shrink its reservation.
+    """
+    return _sum_string_chars(body) // 3 + _count_prompt_token_ids(body.get("prompt"))
+
+
+IMAGE_FETCH_TIMEOUT_SECONDS = 10.0
+# Dimensions live in the header, so a prefix suffices and an endless body cannot
+# pin memory.
+IMAGE_FETCH_MAX_BYTES = 512 * 1024
+# Fetches are sequential, so an unbounded URL list is a request-time amplifier.
+IMAGE_FETCH_MAX_PER_REQUEST = 8
+
+
 def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
     """Extract image dimensions from image bytes."""
     try:
@@ -275,13 +388,81 @@ def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
         return (512, 512)
 
 
-async def _fetch_image_from_url(url: str) -> bytes | None:
-    """Fetch image from URL."""
+def _is_blocked_address(address: str) -> bool:
+    """Allow only globally reachable addresses (RFC 6890)."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            return response.content
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address):
+        # An embedded v4 address would otherwise smuggle a rejected target past
+        # the v6 checks.
+        for embedded in (ip.ipv4_mapped, ip.sixtofour):
+            if embedded is not None:
+                return _is_blocked_address(str(embedded))
+    return not ip.is_global or ip.is_multicast
+
+
+async def _validated_fetch_target(url: str) -> tuple[str, str]:
+    """Return the URL to request and its ``Host`` header.
+
+    Cost estimation runs on the unauthenticated request body, so a caller can
+    otherwise aim the node at internal hosts. HTTP is rewritten to the resolved
+    address so the name cannot rebind between check and connect; HTTPS keeps its
+    hostname because certificate validation already binds the connection.
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(f"unsupported scheme: {parts.scheme or 'none'}")
+    host = parts.hostname
+    if not host:
+        raise ValueError("missing host")
+
+    default_port = 443 if parts.scheme == "https" else 80
+    port = parts.port or default_port
+    host_header = f"[{host}]" if ":" in host else host
+    if parts.port is not None:
+        host_header = f"{host_header}:{parts.port}"
+
+    infos = await asyncio.get_running_loop().getaddrinfo(
+        host, port, proto=socket.IPPROTO_TCP
+    )
+    if not infos:
+        raise ValueError("host did not resolve")
+    for info in infos:
+        if _is_blocked_address(str(info[4][0])):
+            raise ValueError("host resolves to a blocked address")
+
+    if parts.scheme == "https":
+        return url, host_header
+
+    family, _, _, _, sockaddr = infos[0]
+    address = str(sockaddr[0])
+    pinned = f"[{address}]" if family == socket.AF_INET6 else address
+    if parts.port is not None:
+        pinned = f"{pinned}:{parts.port}"
+    return urlunsplit((parts.scheme, pinned, parts.path, parts.query, "")), host_header
+
+
+async def _fetch_image_from_url(url: str) -> bytes | None:
+    """Fetch the leading bytes of an image, enough to read its dimensions."""
+    try:
+        target, host_header = await _validated_fetch_target(url)
+        async with httpx.AsyncClient(
+            timeout=IMAGE_FETCH_TIMEOUT_SECONDS, follow_redirects=False
+        ) as client:
+            async with client.stream(
+                "GET", target, headers={"Host": host_header}
+            ) as response:
+                response.raise_for_status()
+                chunks: list[bytes] = []
+                downloaded = 0
+                async for chunk in response.aiter_bytes():
+                    chunks.append(chunk)
+                    downloaded += len(chunk)
+                    if downloaded >= IMAGE_FETCH_MAX_BYTES:
+                        break
+                return b"".join(chunks)[:IMAGE_FETCH_MAX_BYTES]
     except Exception as e:
         logger.warning(
             "Failed to fetch image from URL",
@@ -290,14 +471,45 @@ async def _fetch_image_from_url(url: str) -> bytes | None:
         return None
 
 
+# Patch-based image pricing (OpenAI ``detail: "original"``): the image is
+# covered with 32x32px patches and billed as ceil(patches * multiplier)
+# tokens, with no 512px-tile downscaling. The API rejects images above
+# 30,000 patches, so at the 1.2x multiplier documented for the
+# original-capable model families (gpt-5.4/5.5/5.6) the worst case a
+# single image can bill is 36,000 tokens.
+_IMAGE_PATCH_PX = 32
+_MAX_IMAGE_PATCHES = 30_000
+_MAX_ORIGINAL_IMAGE_TOKENS = (_MAX_IMAGE_PATCHES * 6 + 4) // 5  # 36,000
+
+
+def _calculate_original_image_tokens(width: int, height: int) -> int:
+    """Estimate tokens for an image billed at ``detail: "original"``.
+
+    Patch-based models cover the image with 32x32px patches and bill
+    ``ceil(patches * 1.2)`` tokens. The estimate is bounded by the
+    30,000-patch rejection limit, which is more conservative than the
+    per-model resizing patch budgets (e.g. 10,000 patches on gpt-5.4/5.5)
+    so it never under-reserves.
+    """
+    patches = ((width + _IMAGE_PATCH_PX - 1) // _IMAGE_PATCH_PX) * (
+        (height + _IMAGE_PATCH_PX - 1) // _IMAGE_PATCH_PX
+    )
+    bounded = min(patches, _MAX_IMAGE_PATCHES)
+    return (bounded * 6 + 4) // 5  # ceil(bounded * 1.2) in exact integer math
+
+
 def _calculate_image_tokens(width: int, height: int, detail: str = "auto") -> int:
     """Calculate image tokens based on OpenAI's vision pricing.
 
     For low detail: 85 tokens
     For high detail/auto: 85 base tokens + 170 tokens per 512px tile
+    For original detail: patch-based pricing at the original resolution
     """
     if detail == "low":
         return 85
+
+    if detail == "original":
+        return _calculate_original_image_tokens(width, height)
 
     if width > 2048 or height > 2048:
         aspect_ratio = width / height
@@ -330,6 +542,7 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
     Supports both base64 encoded images and image URLs.
     """
     total_image_tokens = 0
+    fetches = 0
 
     for message in messages:
         if not isinstance(message, dict):
@@ -350,7 +563,9 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
                 continue
 
             content_type = content_item.get("type")
-            if content_type not in ("image_url", "input_image"):
+            if content_type == "input_image":
+                content_item = input_image_part_to_image_url(content_item)
+            elif content_type != "image_url":
                 continue
 
             image_url_data = content_item.get("image_url")
@@ -362,7 +577,7 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
                 detail = "auto"
             elif isinstance(image_url_data, dict):
                 url = image_url_data.get("url", "")
-                detail = image_url_data.get("detail", "auto")
+                detail = image_url_data.get("detail") or "auto"
             else:
                 continue
 
@@ -370,47 +585,65 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
                 continue
 
             if url.startswith("data:image/"):
-                try:
-                    header, base64_data = url.split(",", 1)
-                    image_bytes = base64.b64decode(base64_data)
-                    width, height = _get_image_dimensions(image_bytes)
-                    tokens = _calculate_image_tokens(width, height, detail)
-                    total_image_tokens += tokens
-                    logger.debug(
-                        "Calculated tokens for base64 image",
-                        extra={
-                            "width": width,
-                            "height": height,
-                            "detail": detail,
-                            "tokens": tokens,
-                        },
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to process base64 image",
-                        extra={"error": str(e)},
-                    )
-                    total_image_tokens += 85
+                total_image_tokens += _data_url_image_tokens(url, detail)
+            elif url.startswith(FILE_ID_URL_PREFIX):
+                total_image_tokens += _worst_case_image_tokens(detail)
+            elif fetches >= IMAGE_FETCH_MAX_PER_REQUEST:
+                logger.warning(
+                    "Skipping image URL fetch above per-request limit",
+                    extra={"url": url[:100], "limit": IMAGE_FETCH_MAX_PER_REQUEST},
+                )
+                total_image_tokens += _worst_case_image_tokens(detail)
             else:
+                fetches += 1
                 image_bytes_or_none = await _fetch_image_from_url(url)
-                if image_bytes_or_none:
-                    width, height = _get_image_dimensions(image_bytes_or_none)
-                    tokens = _calculate_image_tokens(width, height, detail)
-                    total_image_tokens += tokens
-                    logger.debug(
-                        "Calculated tokens for URL image",
-                        extra={
-                            "url": url[:100],
-                            "width": width,
-                            "height": height,
-                            "detail": detail,
-                            "tokens": tokens,
-                        },
-                    )
-                else:
-                    total_image_tokens += 85
+                total_image_tokens += _image_bytes_tokens(
+                    image_bytes_or_none, detail, source=url[:100]
+                )
 
     return total_image_tokens
+
+
+def _worst_case_image_tokens(detail: str) -> int:
+    """Dimensions unknown: reserve the most ``detail`` can bill."""
+    if detail == "original":
+        return _MAX_ORIGINAL_IMAGE_TOKENS
+    return _calculate_image_tokens(2048, 2048, detail)
+
+
+def _data_url_image_tokens(url: str, detail: str) -> int:
+    try:
+        _, base64_data = url.split(",", 1)
+        image_bytes = base64.b64decode(base64_data, validate=True)
+    except Exception as e:
+        logger.warning("Failed to decode base64 image", extra={"error": str(e)})
+        return _worst_case_image_tokens(detail)
+    return _image_bytes_tokens(image_bytes, detail, source="data-url")
+
+
+def _image_bytes_tokens(image_bytes: bytes | None, detail: str, source: str) -> int:
+    if not image_bytes:
+        return _worst_case_image_tokens(detail)
+    try:
+        width, height = Image.open(BytesIO(image_bytes)).size
+    except Exception as e:
+        logger.warning(
+            "Failed to read image dimensions",
+            extra={"error": str(e), "source": source},
+        )
+        return _worst_case_image_tokens(detail)
+    tokens = _calculate_image_tokens(width, height, detail)
+    logger.debug(
+        "Calculated image tokens",
+        extra={
+            "source": source,
+            "width": width,
+            "height": height,
+            "detail": detail,
+            "tokens": tokens,
+        },
+    )
+    return tokens
 
 
 def create_error_response(

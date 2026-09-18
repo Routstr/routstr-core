@@ -23,7 +23,6 @@ import {
 } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
   Empty,
@@ -96,6 +95,8 @@ export function TemporaryBalances({
   const total = data?.total ?? 0;
   const totals = data?.totals ?? {
     total_balance: 0,
+    total_reserved_balance: 0,
+    total_available_balance: 0,
     total_spent: 0,
     total_requests: 0,
   };
@@ -180,7 +181,7 @@ export function TemporaryBalances({
               <Card>
                 <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
                   <CardTitle className='text-muted-foreground text-sm font-medium'>
-                    Total Balance
+                    Total Available
                   </CardTitle>
                   <span className='inline-flex size-8 items-center justify-center'>
                     <DollarSign className='size-4 text-green-600 dark:text-green-300' />
@@ -188,7 +189,11 @@ export function TemporaryBalances({
                 </CardHeader>
                 <CardContent className='pt-0'>
                   <p className='text-2xl font-semibold tracking-tight tabular-nums'>
-                    {formatBalance(totals.total_balance)}
+                    {formatBalance(totals.total_available_balance)}
+                  </p>
+                  <p className='text-muted-foreground mt-1 text-xs'>
+                    {formatBalance(totals.total_balance)} raw ·{' '}
+                    {formatBalance(totals.total_reserved_balance)} reserved
                   </p>
                 </CardContent>
               </Card>
@@ -263,7 +268,7 @@ export function TemporaryBalances({
                     <TableHeader>
                       <TableRow>
                         <TableHead>Hashed Key</TableHead>
-                        <TableHead className='text-right'>Balance</TableHead>
+                        <TableHead className='text-right'>Available</TableHead>
                         <TableHead className='text-right'>
                           Total Spent
                         </TableHead>
@@ -279,36 +284,31 @@ export function TemporaryBalances({
                     </TableHeader>
                     <TableBody>
                       {rows.map((balance, index) => {
-                        const isChild = Boolean(balance.parent_key_hash);
                         return (
                           <TableRow
-                            key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-${index}`}
+                            key={`${balance.hashed_key}-${index}`}
                             className={cn(
-                              balance.balance === 0 && !isChild && 'opacity-60',
-                              isChild && 'bg-muted/30'
+                              balance.available_balance === 0 && 'opacity-60'
                             )}
                           >
                             <TableCell className='max-w-[16rem] font-mono text-xs break-all whitespace-normal'>
-                              <div className='flex items-center gap-2'>
-                                {isChild && (
-                                  <Badge
-                                    variant='outline'
-                                    className='h-4 px-1 text-[10px] uppercase'
-                                  >
-                                    Child
-                                  </Badge>
-                                )}
-                                <span>{balance.hashed_key}</span>
-                              </div>
+                              <span>{balance.hashed_key}</span>
                             </TableCell>
                             <TableCell className='text-right font-mono'>
-                              {isChild ? (
-                                <span className='text-muted-foreground italic'>
-                                  (Parent)
-                                </span>
-                              ) : (
-                                formatBalance(balance.balance)
-                              )}
+                              <div>
+                                <div>
+                                  {formatBalance(
+                                    balance.available_balance ?? balance.balance
+                                  )}
+                                </div>
+                                <div className='text-muted-foreground text-xs'>
+                                  {formatBalance(balance.balance)} raw
+                                </div>
+                                <div className='text-muted-foreground text-xs'>
+                                  {formatBalance(balance.reserved_balance)}{' '}
+                                  reserved
+                                </div>
+                              </div>
                             </TableCell>
                             <TableCell className='text-right font-mono'>
                               {formatBalance(balance.total_spent)}
@@ -345,13 +345,11 @@ export function TemporaryBalances({
 
                 <div className='space-y-2 md:hidden'>
                   {rows.map((balance, index) => {
-                    const isChild = Boolean(balance.parent_key_hash);
                     return (
                       <Card
-                        key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-mobile-${index}`}
+                        key={`${balance.hashed_key}-mobile-${index}`}
                         className={cn(
-                          balance.balance === 0 && !isChild && 'opacity-80',
-                          isChild && 'bg-muted/30'
+                          balance.available_balance === 0 && 'opacity-80'
                         )}
                       >
                         <CardHeader className='p-4 pb-2'>
@@ -359,26 +357,25 @@ export function TemporaryBalances({
                             <CardDescription className='font-mono text-xs break-all'>
                               {balance.hashed_key}
                             </CardDescription>
-                            {isChild && (
-                              <Badge
-                                variant='outline'
-                                className='h-4 px-1.5 text-[10px] uppercase'
-                              >
-                                Child
-                              </Badge>
-                            )}
                           </div>
                         </CardHeader>
                         <CardContent className='grid grid-cols-2 gap-3 p-4 pt-0'>
                           <div>
                             <p className='text-muted-foreground text-xs'>
-                              Balance
+                              Available
                             </p>
                             <p className='font-mono text-sm'>
-                              {isChild
-                                ? '(Uses Parent)'
-                                : formatBalance(balance.balance)}
+                              {formatBalance(
+                                balance.available_balance ?? balance.balance
+                              )}
                             </p>
+                            <div className='text-muted-foreground text-xs'>
+                              <p>{formatBalance(balance.balance)} raw</p>
+                              <p>
+                                {formatBalance(balance.reserved_balance)}{' '}
+                                reserved
+                              </p>
+                            </div>
                           </div>
                           <div>
                             <p className='text-muted-foreground text-xs'>

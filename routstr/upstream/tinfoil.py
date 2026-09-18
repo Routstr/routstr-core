@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import httpx
 from fastapi import Request
@@ -28,6 +28,7 @@ logger = get_logger(__name__)
 class TinfoilModelPricing(BaseModel):
     inputTokenPricePer1M: float = 0.0
     outputTokenPricePer1M: float = 0.0
+    cachedInputTokenPricePer1M: Optional[float] = None
     requestPrice: float = 0.0
 
 
@@ -186,6 +187,14 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
                         output_price = tf.pricing.outputTokenPricePer1M
                         request_price = tf.pricing.requestPrice
 
+                        # Tinfoil bills cache reads at the cached rate when the
+                        # model exposes one, otherwise at the full input rate.
+                        # Cache writes are never priced separately — a miss is
+                        # just regular input prefill.
+                        cached_price = tf.pricing.cachedInputTokenPricePer1M
+                        if cached_price is None or cached_price <= 0.0:
+                            cached_price = input_price
+
                         modality = "text->text"
                         input_modalities = ["text"]
                         output_modalities = ["text"]
@@ -214,6 +223,8 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
                                     image=0.0,
                                     web_search=0.0,
                                     internal_reasoning=0.0,
+                                    input_cache_read=cached_price / 1_000_000,
+                                    input_cache_write=input_price / 1_000_000,
                                 ),
                             )
                         )

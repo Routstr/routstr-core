@@ -307,23 +307,6 @@ ANALYTICS_KEY = os.getenv("ROUTSTR_ANALYTICS_KEY")
 api_key = PROD_KEY if is_production() else DEV_KEY
 ```
 
-### Delegated Authentication
-
-Create sub-keys with limited permissions:
-
-```bash
-POST /v1/wallet/create/subkey
-Authorization: Bearer sk-parent-key
-Content-Type: application/json
-
-{
-  "name": "Limited Subkey",
-  "balance_limit": 1000,
-  "allowed_models": ["gpt-3.5-turbo"],
-  "expires_in_hours": 24
-}
-```
-
 ## Rate Limiting
 
 Rate limits are applied per API key:
@@ -387,22 +370,6 @@ Content-Type: application/json
 ```
 
 ## Monitoring
-
-### Usage Alerts
-
-Set up usage notifications:
-
-```bash
-POST /v1/wallet/alerts
-Authorization: Bearer sk-...
-Content-Type: application/json
-
-{
-  "low_balance_threshold": 1000,
-  "daily_spend_limit": 5000,
-  "webhook_url": "https://your-app.com/webhook"
-}
-```
 
 ### Audit Logging
 

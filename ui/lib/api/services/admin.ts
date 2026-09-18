@@ -1082,11 +1082,12 @@ export interface CliTokenCreated {
 export const TemporaryBalanceSchema = z.object({
   hashed_key: z.string(),
   balance: z.number(),
+  reserved_balance: z.number(),
+  available_balance: z.number().nullable(),
   total_spent: z.number(),
   total_requests: z.number(),
   refund_address: z.string().nullable(),
   key_expiry_time: z.number().nullable(),
-  parent_key_hash: z.string().nullable().optional(),
   created_at: z.number().nullable().optional(),
 });
 
@@ -1097,6 +1098,8 @@ export interface TemporaryBalancesResponse {
   total: number;
   totals: {
     total_balance: number;
+    total_reserved_balance: number;
+    total_available_balance: number;
     total_spent: number;
     total_requests: number;
   };
@@ -1261,7 +1264,8 @@ export interface Transaction {
   created_at: number;
   collected: boolean;
   swept: boolean;
-  source: 'x-cashu' | 'apikey';
+  status: 'issued' | 'collected' | 'swept' | 'pending';
+  source: 'x-cashu' | 'apikey' | 'admin';
   api_key_hashed_key?: string;
 }
 

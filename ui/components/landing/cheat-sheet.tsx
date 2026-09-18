@@ -20,7 +20,6 @@ import {
 } from './cashu-payment-workflow';
 import { LightningPaymentWorkflow } from './lightning-payment-workflow';
 import { KeyInfoDetails, type WalletSnapshot } from './key-info-details';
-import { ChildKeyCreator } from '@/components/child-key-creator';
 
 type NodeInfo = {
   name?: string;
@@ -30,7 +29,6 @@ type NodeInfo = {
   onion_url?: string;
   npub?: string;
   mints?: string[];
-  child_key_cost_msats?: number;
   token?: string;
   recipient?: string;
   sats?: string;
@@ -387,10 +385,9 @@ export function CheatSheet(): JSX.Element {
         </section>
 
         <Tabs defaultValue='cashu' className='w-full'>
-          <TabsList className='grid w-full grid-cols-4'>
+          <TabsList className='grid w-full grid-cols-3'>
             <TabsTrigger value='cashu'>Cashu</TabsTrigger>
             <TabsTrigger value='lightning'>Lightning</TabsTrigger>
-            <TabsTrigger value='child-keys'>Child Keys</TabsTrigger>
             <TabsTrigger value='management'>Key Management</TabsTrigger>
           </TabsList>
 
@@ -447,15 +444,6 @@ export function CheatSheet(): JSX.Element {
                 </CardContent>
               </Card>
             )}
-          </TabsContent>
-
-          <TabsContent value='child-keys' className='space-y-4'>
-            <ChildKeyCreator
-              baseUrl={normalizedBaseUrl}
-              apiKey={apiKeyInput}
-              onApiKeyChange={handleApiKeyChanged}
-              costPerKeyMsats={nodeInfo?.child_key_cost_msats}
-            />
           </TabsContent>
         </Tabs>
       </main>

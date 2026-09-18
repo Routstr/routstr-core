@@ -26,6 +26,7 @@ from .core.db import (
 )
 from .core.exceptions import UpstreamError
 from .core.not_found import build_not_found_response
+from .core.settings import settings
 from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
@@ -37,9 +38,18 @@ from .payment.models import Model
 from .upstream import BaseUpstreamProvider
 from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
+from .upstream.model_paths import (
+    ModelPathSelector,
+    decode_model_path,
+    is_openrouter_base_url,
+    public_model_id,
+    public_provider_url,
+)
 from .upstream.request_correction import correct_request, extract_error_message
 
 logger = get_logger(__name__)
+
+MODEL_PATH_HEADER = "x-routstr-model-path"
 proxy_router = APIRouter()
 
 _upstreams: list[BaseUpstreamProvider] = []
@@ -109,6 +119,25 @@ def get_candidates(
         if candidates := _provider_map.get(base_model_id):
             return candidates
 
+    return None
+
+
+def _model_ids_match(requested: str, selected: str) -> bool:
+    if requested.lower() == selected.lower():
+        return True
+    return public_model_id(requested).lower() == public_model_id(selected).lower()
+
+
+def _candidate_for_selector(
+    selector: ModelPathSelector,
+    candidates: list[tuple[Model, BaseUpstreamProvider]],
+) -> tuple[Model, BaseUpstreamProvider] | None:
+    for model_obj, upstream in candidates:
+        if (
+            upstream.db_id == selector.provider_id
+            and public_provider_url(upstream.base_url) == selector.base_url
+        ):
+            return model_obj, upstream
     return None
 
 
@@ -221,20 +250,139 @@ async def refresh_model_maps_periodically() -> None:
             )
 
 
-_API_PATH_PREFIXES = (
-    "v1/",
-    "responses",
-    "chat/",
-    "completions",
-    "models",
-    "embeddings",
-    "audio/",
-    "images/",
-    "moderations",
-    "providers",
-    "tee/",
-    "attestation",
+# Canonical endpoints this proxy will forward, keyed by the path with any
+# leading "v1/" and trailing slash removed, mapped to the methods allowed on
+# each. The provider credential is attached during forwarding, so endpoint
+# permission has to come from this table rather than from the client-supplied
+# path: an upstream's key-management, organization, or billing routes live
+# under the same origin and must never be reachable through the proxy.
+_ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
+    "chat/completions": frozenset({"POST"}),
+    "completions": frozenset({"POST"}),
+    "responses": frozenset({"POST"}),
+    "messages": frozenset({"POST"}),
+    "embeddings": frozenset({"POST"}),
+    "models": frozenset({"GET"}),
+    "attestation": frozenset({"GET"}),
+    "tee/attestation": frozenset({"GET"}),
+}
+
+_ALLOWED_METHODS = frozenset({"GET", "POST"})
+
+
+def _canonical_api_path(path: str) -> str:
+    """Reduce a request path to its allowlist key.
+
+    OpenAI-style clients reach the same endpoint with or without the ``v1/``
+    prefix and with or without a trailing slash, so both spellings collapse to
+    one key. Callers must screen the path with
+    :func:`_is_ambiguously_spelled_path` first — this function assumes the path
+    has no dot segments, empty segments, or encoded separators left to resolve.
+    """
+    core = path[:-1] if path.endswith("/") else path
+    if core.startswith("v1/"):
+        core = core[len("v1/") :]
+    return core
+
+
+def _parse_extra_allowed_endpoints(raw: str) -> dict[str, frozenset[str]]:
+    """Parse operator-configured additions to the endpoint allowlist.
+
+    Deployments whose provider exposes an endpoint outside the canonical set
+    opt in explicitly with ``PROXY_EXTRA_ALLOWED_PATHS``, a comma-separated
+    list of ``METHOD:path`` pairs (e.g. ``POST:v1/rerank,GET:batches``). Every
+    entry must name one concrete method and one unambiguous path; wildcards
+    and bare prefixes are deliberately unsupported, so widening the proxy's
+    reach is always a per-endpoint decision. Malformed entries are dropped
+    with a warning rather than silently widening or narrowing the surface.
+    """
+    extra: dict[str, frozenset[str]] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        method, separator, endpoint = entry.partition(":")
+        method = method.strip().upper()
+        endpoint = endpoint.strip()
+        if not separator or method not in _ALLOWED_METHODS or not endpoint:
+            logger.warning(
+                "Ignoring malformed PROXY_EXTRA_ALLOWED_PATHS entry",
+                extra={"entry": entry},
+            )
+            continue
+        if _is_ambiguously_spelled_path(endpoint):
+            logger.warning(
+                "Ignoring ambiguously spelled PROXY_EXTRA_ALLOWED_PATHS entry",
+                extra={"entry": entry},
+            )
+            continue
+        if any(character in endpoint for character in "*?["):
+            # Refuse glob syntax outright. Kept as a literal endpoint name it
+            # would never match a real request, so the operator would think
+            # they had widened the proxy when they had not.
+            logger.warning(
+                "Ignoring wildcard PROXY_EXTRA_ALLOWED_PATHS entry; "
+                "list each endpoint explicitly",
+                extra={"entry": entry},
+            )
+            continue
+        key = _canonical_api_path(endpoint)
+        extra[key] = extra.get(key, frozenset()) | {method}
+    return extra
+
+
+def _is_ambiguously_spelled_path(path: str) -> bool:
+    """Reject paths whose spelling could resolve somewhere the allowlist did not.
+
+    ``{path:path}`` arrives percent-decoded, so a client that sent ``%2e%2e`` or
+    ``%2f`` shows up here as ``..`` / ``/``. Dot segments, backslashes, duplicate
+    or leading separators, NUL bytes, and any residual encoded separator are
+    treated as unsafe: they let a caller walk off the canonical API surface (and
+    onto a sensitive upstream endpoint) even though the literal prefix check
+    would pass. Reject rather than trying to rewrite the path.
+    """
+    if not path or path != path.strip() or path.startswith("/"):
+        return True
+    if "\x00" in path or "\\" in path:
+        return True
+    # A single trailing slash is canonical (e.g. "attestation/"); ignore it,
+    # then no remaining segment may be empty (covers "//") or a dot segment.
+    core = path[:-1] if path.endswith("/") else path
+    if any(segment in ("", ".", "..") for segment in core.split("/")):
+        return True
+    lowered = path.lower()
+    return "%2e" in lowered or "%2f" in lowered or "%5c" in lowered
+
+
+_EXTRA_ALLOWED_ENDPOINTS = _parse_extra_allowed_endpoints(
+    settings.proxy_extra_allowed_paths
 )
+
+
+def _allowed_methods_for(endpoint: str) -> frozenset[str]:
+    """Return the methods allowed on a canonical endpoint, empty if unknown."""
+    methods = _ALLOWED_ENDPOINTS.get(endpoint, frozenset())
+    methods |= _EXTRA_ALLOWED_ENDPOINTS.get(endpoint, frozenset())
+    return methods
+
+
+def _forwarding_allowed(path: str, method: str) -> bool:
+    """Gate which method/path pairs may reach an upstream at all.
+
+    The provider credential is attached during forwarding, so an unknown
+    endpoint must never be forwarded on the caller's say-so. The path is
+    reduced to its canonical form and looked up in the endpoint table; there is
+    no prefix match, so a known prefix no longer carries an unknown endpoint
+    (``v1/organization/api_keys`` is rejected even though ``v1/`` is familiar).
+
+    EHBP requests are gated by the same table. Their body is opaque to the
+    proxy, which is a reason to constrain the destination more tightly, not to
+    trust the caller's path: the encrypted contract covers the body, never the
+    endpoint the credential is spent against.
+    """
+    if method not in _ALLOWED_METHODS:
+        return False
+    return method in _allowed_methods_for(_canonical_api_path(path))
 
 
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
@@ -255,14 +403,17 @@ async def proxy(
 async def _proxy(
     request: Request, path: str, session: AsyncSession
 ) -> Response | StreamingResponse:
-    # GET requests must hit a known API prefix; otherwise return a 404 (HTML
-    # for browsers, JSON for API clients). POST requests are always forwarded
-    # so that OpenAI-style endpoints work with or without the `v1/` prefix
-    # (e.g. `/chat/completions` as well as `/v1/chat/completions`).
-    if request.method == "GET" and not path.startswith(_API_PATH_PREFIXES):
+    # Screen the path before any routing decision: reject ambiguous spellings,
+    # then require a known API prefix so nothing unknown is forwarded with the
+    # provider credential attached.
+    if _is_ambiguously_spelled_path(path):
         return build_not_found_response(request, path)
 
     headers = dict(request.headers)
+    is_ehbp = "ehbp-encapsulated-key" in headers
+
+    if not _forwarding_allowed(path, request.method):
+        return build_not_found_response(request, path)
 
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
     request_body = await request.body()
@@ -272,7 +423,6 @@ async def _proxy(
     # extract the model id, so the SDK sends it in X-Routstr-Model. Forward the
     # raw encrypted body to the upstream's /private/ endpoint and stream the
     # encrypted response back untouched — the SDK's SecureClient decrypts it.
-    is_ehbp = "ehbp-encapsulated-key" in headers
     if is_ehbp:
         request_body_dict = {}
         model_id = headers.get("x-routstr-model", "")
@@ -294,6 +444,13 @@ async def _proxy(
     # without model/cost/auth lookups. Do not prefix-match here: paths such as
     # /attestationjunk must continue through normal authentication.
     if request.method == "GET" and _is_tinfoil_attestation_path(path):
+        if MODEL_PATH_HEADER in headers:
+            return create_error_response(
+                "unsupported_request",
+                "Model paths do not apply to attestation",
+                400,
+                request=request,
+            )
         selected_upstreams = _select_unauthenticated_get_upstreams(path, _upstreams)
         if not selected_upstreams:
             return create_error_response(
@@ -334,12 +491,92 @@ async def _proxy(
             "upstream_error", "All upstreams failed", 502, request=request
         )
 
+    selector: ModelPathSelector | None = None
+    if MODEL_PATH_HEADER in headers:
+        selector = decode_model_path(headers[MODEL_PATH_HEADER])
+        if (
+            selector is None
+            or sum(
+                name.lower() == MODEL_PATH_HEADER for name, _ in request.headers.items()
+            )
+            != 1
+        ):
+            return create_error_response(
+                "invalid_request",
+                f"Malformed {MODEL_PATH_HEADER} header",
+                400,
+                request=request,
+            )
+        if not isinstance(model_id, str) or not _model_ids_match(
+            model_id, selector.model_id
+        ):
+            return create_error_response(
+                "invalid_request",
+                f"{MODEL_PATH_HEADER} selects model '{selector.model_id}' but the "
+                f"request asks for '{model_id}'",
+                400,
+                request=request,
+            )
+        if "models" in request_body_dict:
+            return create_error_response(
+                "invalid_request",
+                "Model paths cannot be combined with model fallbacks",
+                400,
+                request=request,
+            )
+        model_id = selector.model_id
+
     candidates = get_candidates(model_id)
 
     if not candidates:
         return create_error_response(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
         )
+
+    if selector is not None:
+        pinned = _candidate_for_selector(selector, candidates)
+        if pinned is None:
+            return create_error_response(
+                "invalid_model_path",
+                f"Model '{selector.model_id}' is not routable through provider "
+                f"{selector.provider_id}",
+                404,
+                request=request,
+            )
+        # Explicit routes must never enter cross-provider failover.
+        candidates = [pinned]
+
+        if selector.endpoint_tag:
+            if (
+                is_ehbp
+                or not request_body_dict
+                or not is_openrouter_base_url(pinned[1].base_url)
+                or _canonical_api_path(path)
+                not in {"chat/completions", "completions", "responses"}
+            ):
+                return create_error_response(
+                    "unsupported_request",
+                    "Endpoint pinning requires an OpenRouter completion or Responses JSON request",
+                    400,
+                    request=request,
+                )
+            provider_options = request_body_dict.get("provider", {})
+            if not isinstance(provider_options, dict):
+                return create_error_response(
+                    "invalid_request",
+                    "provider must be an object",
+                    400,
+                    request=request,
+                )
+            request_body_dict = {
+                **request_body_dict,
+                "provider": {
+                    **provider_options,
+                    "order": [selector.endpoint_tag],
+                    "allow_fallbacks": False,
+                },
+            }
+            request_body = json.dumps(request_body_dict).encode()
 
     if is_ehbp:
         candidates = [
@@ -391,11 +628,21 @@ async def _proxy(
                     )
                 elif is_responses_api:
                     return await upstream.handle_x_cashu_responses(
-                        request, x_cashu, path, max_cost_for_model, model_obj
+                        request,
+                        x_cashu,
+                        path,
+                        max_cost_for_model,
+                        model_obj,
+                        request_body=request_body,
                     )
                 else:
                     return await upstream.handle_x_cashu(
-                        request, x_cashu, path, max_cost_for_model, model_obj
+                        request,
+                        x_cashu,
+                        path,
+                        max_cost_for_model,
+                        model_obj,
+                        request_body=request_body,
                     )
             except UpstreamError as e:
                 logger.warning(
@@ -593,17 +840,20 @@ async def _proxy(
                     )
                     raise
 
-                # Reactive recovery: some models reject one specific request
-                # param (e.g. newer Anthropic models deprecating `temperature`).
-                # When the upstream 400s naming such a param, strip it from the
-                # body and retry the SAME upstream. ``already_stripped`` bounds
-                # this to one retry per distinct param so it always terminates.
+                # Same-provider recovery must not relax an explicit route.
                 if response.status_code == 400 and not is_ehbp:
                     correction = correct_request(
                         request_body,
                         extract_error_message(response),
                         already_stripped,
                     )
+                    if correction is not None and selector is not None:
+                        corrected_body = json.loads(correction.body)
+                        if any(
+                            corrected_body.get(field) != request_body_dict.get(field)
+                            for field in ("model", "provider")
+                        ):
+                            correction = None
                     if correction is not None:
                         request_body, bad_param = correction.body, correction.label
                         already_stripped.add(bad_param)

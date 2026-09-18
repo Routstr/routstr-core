@@ -59,6 +59,23 @@ def calculate_model_cost_score(model: "Model") -> float:
     return total_cost
 
 
+def calculate_model_reservation_score(model: "Model") -> float:
+    """Context-based reservation ceiling for ranking same-model candidates.
+
+    The balance gate reserves on ``sats_pricing.max_cost``, which scales with
+    ``context_length``. Ranking on the same ceiling keeps the advertised,
+    routed, and reserved candidate consistent. Lower is better.
+    """
+    from .payment.models import _calculate_usd_max_costs
+
+    try:
+        _, _, max_cost = _calculate_usd_max_costs(model)
+        return float(max_cost)
+    except Exception:
+        # Pricing shape missing/invalid; per-token score keeps order deterministic
+        return calculate_model_cost_score(model)
+
+
 def get_provider_penalty(provider: "BaseUpstreamProvider") -> float:
     """Calculate a penalty multiplier for certain providers.
 
@@ -118,8 +135,20 @@ def create_model_mappings(
     Returns:
         Tuple of (model_instances, provider_map, unique_models)
     """
-    from .payment.models import _row_to_model
+    from .payment.models import _row_to_model, has_usable_pricing
     from .upstream.helpers import resolve_model_alias
+
+    def _unusable_price(model: "Model") -> bool:
+        """A candidate may only route on rates a request can be billed against.
+
+        Mirrors the served-catalog backstop in ``list_models``: a negative or
+        non-finite rate is not a price, and the cost calculation cannot bill on
+        one, so every request on the model would be charged the full maximum
+        reservation instead. Applies to provider-discovered models as well as
+        persisted overrides — no override row need exist for a malformed price
+        to be built into the candidate map.
+        """
+        return not has_usable_pricing(model.pricing)
 
     candidates: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
     unique_models: dict[str, "Model"] = {}
@@ -208,11 +237,32 @@ def create_model_mappings(
             # Apply overrides only for this provider's model row.
             if model_key is not None and model_key in overrides_by_key:
                 override_row, provider_fee = overrides_by_key[model_key]
-                model_to_use = _row_to_model(
-                    override_row, apply_provider_fee=True, provider_fee=provider_fee
-                )
+                try:
+                    model_to_use = _row_to_model(
+                        override_row, apply_provider_fee=True, provider_fee=provider_fee
+                    )
+                except Exception as exc:
+                    # Stored pricing is JSON from whatever wrote the row, so
+                    # converting it can raise. Doing that inside this loop let
+                    # one such row unwind the whole map build: at boot the node
+                    # came up routing nothing, and on a later refresh the map it
+                    # already had went permanently stale. The sibling loop over
+                    # override-only rows already skips and logs such a row.
+                    logger.warning(
+                        "Skipping invalid model override while building model mappings",
+                        extra={
+                            "model_id": model.id,
+                            "upstream_provider_id": upstream_db_id,
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    continue
             else:
                 model_to_use = model
+
+            if _unusable_price(model_to_use):
+                continue
 
             forwarded_model_id = get_effective_forwarded_model_id(model_to_use)
 
@@ -280,6 +330,8 @@ def create_model_mappings(
             continue
         if not model_to_use.enabled:
             continue
+        if _unusable_price(model_to_use):
+            continue
 
         forwarded_model_id = get_effective_forwarded_model_id(model_to_use)
 
@@ -323,20 +375,24 @@ def create_model_mappings(
     def alias_priority(model: "Model", alias: str) -> int:
         """Rank how strong the mapping of alias->model is.
 
-        An exact model ID is authoritative and must be cost-ranked against the
-        other exact matches before considering forwarded aliases. This keeps a
-        provider-specific forwarded ID from shadowing a directly available,
+        A provider that serves the requested ID directly is authoritative and
+        must be cost-ranked before providers that only reach it through a
+        forwarded alias, so a forwarded ID cannot shadow a directly available,
         cheaper model with the requested ID.
+
+        "Directly served" covers both the exact model ID and the same ID behind
+        a provider prefix (e.g. ``gpt-oss-120b`` on Tinfoil vs
+        ``openai/gpt-oss-120b`` on OpenRouter). Both name the same model, so
+        they share the top tier and cost decides between them; otherwise the
+        provider whose catalog omits the org prefix would always win on ID
+        spelling regardless of price.
         """
-        if model.id and model.id.lower() == alias:
-            return 5
+        model_base = get_base_model_id(model.id)
+        if (model.id and model.id.lower() == alias) or model_base.lower() == alias:
+            return 4
 
         forwarded_model_id = get_effective_forwarded_model_id(model)
         if forwarded_model_id and forwarded_model_id.lower() == alias:
-            return 4
-
-        model_base = get_base_model_id(model.id)
-        if model_base == alias:
             return 3
         if model.canonical_slug:
             canonical_base = get_base_model_id(model.canonical_slug)
@@ -345,15 +401,19 @@ def create_model_mappings(
         return 1
 
     for alias, items in candidates.items():
-        # Sort key: (priority DESC, cost ASC)
-        # Using negative cost for DESC sort overall to keep high priority first
-        def sort_key(item: tuple["Model", "BaseUpstreamProvider"]) -> tuple[int, float]:
+        # Sort key: (priority DESC, reservation ASC, cost ASC)
+        # Using negative costs for DESC sort overall to keep high priority first
+        def sort_key(
+            item: tuple["Model", "BaseUpstreamProvider"],
+        ) -> tuple[int, float, float]:
             model, provider = item
             priority = alias_priority(model, alias)
-            cost = calculate_model_cost_score(model)
             penalty = get_provider_penalty(provider)
-            adjusted_cost = cost * penalty
-            return (priority, -adjusted_cost)
+            # Rank on the reservation ceiling the balance gate enforces, with
+            # per-token typical-usage cost as tiebreaker
+            adjusted_reservation = calculate_model_reservation_score(model) * penalty
+            adjusted_cost = calculate_model_cost_score(model) * penalty
+            return (priority, -adjusted_reservation, -adjusted_cost)
 
         items.sort(key=sort_key, reverse=True)
 

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,10 +14,10 @@ from starlette.types import Scope
 
 from ..auth import (
     periodic_dead_key_prune,
-    periodic_key_reset,
     periodic_stale_reservation_sweep,
 )
 from ..balance import balance_router, deprecated_wallet_router
+from ..cashu_compat import install_cashu_httpx_shim
 from ..lightning import (
     lightning_router,
     periodic_invoice_watcher,
@@ -31,13 +32,18 @@ from ..nostr.discovery import providers_router
 from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
+from ..refund import periodic_refund_reconcile
 from ..upstream.auto_topup import periodic_auto_topup
 from ..upstream.deepseek_v4_pricing_shim import register_deepseek_v4_pricing
 from ..upstream.litellm_routing import configure_litellm
 from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
 from .admin import admin_router
 from .db import create_session, init_db, run_migrations
-from .exceptions import general_exception_handler, http_exception_handler
+from .exceptions import (
+    general_exception_handler,
+    http_exception_handler,
+    validation_exception_handler,
+)
 from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
 from .not_found import _NOT_FOUND_HTML, not_found_catch_all  # noqa: F401
@@ -63,15 +69,21 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     models_refresh_task = None
     model_maps_refresh_task = None
     model_paths_refresh_task = None
-    key_reset_task = None
     stale_reservation_task = None
     dead_key_prune_task = None
     auto_topup_task = None
     refund_sweep_task = None
+    refund_reconcile_task = None
     routstr_fee_task = None
     invoice_watcher_task = None
 
     try:
+        # cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28.
+        # routstr.wallet and routstr.payment.lnurl also install this at import;
+        # repeating it here keeps startup correct for any future module that
+        # reaches cashu's mint client without going through those two.
+        install_cashu_httpx_shim()
+
         # Apply litellm-wide settings (drop_params, chat-completions URL,
         # debug logging) before any upstream provider dispatches a request.
         configure_litellm()
@@ -143,16 +155,18 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             refresh_model_paths_periodically(get_upstreams)
         )
         payout_task = asyncio.create_task(periodic_payout())
-        if global_settings.nsec:
-            nip91_task = asyncio.create_task(announce_provider())
+        # Always started: the loop idles until an NSEC is configured and re-reads
+        # it every iteration, so a key saved (or cleared) through the admin UI
+        # takes effect without a restart.
+        nip91_task = asyncio.create_task(announce_provider())
         analytics_task = asyncio.create_task(publish_usage_analytics())
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
-        key_reset_task = asyncio.create_task(periodic_key_reset())
         stale_reservation_task = asyncio.create_task(periodic_stale_reservation_sweep())
         dead_key_prune_task = asyncio.create_task(periodic_dead_key_prune())
         auto_topup_task = asyncio.create_task(periodic_auto_topup())
         refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
+        refund_reconcile_task = asyncio.create_task(periodic_refund_reconcile())
         routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
         invoice_watcher_task = asyncio.create_task(periodic_invoice_watcher())
 
@@ -188,8 +202,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             model_maps_refresh_task.cancel()
         if model_paths_refresh_task is not None:
             model_paths_refresh_task.cancel()
-        if key_reset_task is not None:
-            key_reset_task.cancel()
         if stale_reservation_task is not None:
             stale_reservation_task.cancel()
         if dead_key_prune_task is not None:
@@ -198,6 +210,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             auto_topup_task.cancel()
         if refund_sweep_task is not None:
             refund_sweep_task.cancel()
+        if refund_reconcile_task is not None:
+            refund_reconcile_task.cancel()
         if routstr_fee_task is not None:
             routstr_fee_task.cancel()
         if invoice_watcher_task is not None:
@@ -223,8 +237,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(model_maps_refresh_task)
             if model_paths_refresh_task is not None:
                 tasks_to_wait.append(model_paths_refresh_task)
-            if key_reset_task is not None:
-                tasks_to_wait.append(key_reset_task)
             if stale_reservation_task is not None:
                 tasks_to_wait.append(stale_reservation_task)
             if dead_key_prune_task is not None:
@@ -233,6 +245,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(auto_topup_task)
             if refund_sweep_task is not None:
                 tasks_to_wait.append(refund_sweep_task)
+            if refund_reconcile_task is not None:
+                tasks_to_wait.append(refund_reconcile_task)
             if routstr_fee_task is not None:
                 tasks_to_wait.append(routstr_fee_task)
             if invoice_watcher_task is not None:
@@ -293,6 +307,7 @@ app.add_middleware(LoggingMiddleware)
 
 # Add exception handlers
 app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
 
@@ -306,7 +321,6 @@ async def info() -> dict:
         "mints": global_settings.cashu_mints,
         "http_url": global_settings.http_url,
         "onion_url": global_settings.onion_url,
-        "child_key_cost_msats": global_settings.child_key_cost,
     }
 
 

@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, Iterator, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -68,6 +68,14 @@ os.environ.pop("ADMIN_PASSWORD", None)
 
 from routstr.core.db import ApiKey, get_session  # noqa: E402
 from routstr.core.main import app, lifespan  # noqa: E402
+from routstr.mint import MintRateGuard  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def isolate_mint_rate_guards() -> Iterator[None]:
+    MintRateGuard._guards.clear()
+    yield
+    MintRateGuard._guards.clear()
 
 
 @pytest.fixture(scope="session")
@@ -508,6 +516,10 @@ async def integration_app(
     # Copy all routes from the main app
     test_app.router = app.router
 
+    # ...and its exception handlers, so a request that fails here fails the way
+    # it would in production rather than escaping as a bare exception.
+    test_app.exception_handlers.update(app.exception_handlers)
+
     # Override the get_session dependency
     async def override_get_session() -> AsyncGenerator[AsyncSession, None]:
         yield integration_session
@@ -542,8 +554,8 @@ async def integration_app(
             patch("routstr.wallet.send_to_lnurl", testmint_wallet.send_to_lnurl),
             patch("routstr.wallet.recieve_token", testmint_wallet.redeem_token),
             patch("routstr.wallet.get_balance", testmint_wallet.get_balance),
-            patch("routstr.balance.send_token", testmint_wallet.send_token),
-            patch("routstr.balance.send_to_lnurl", testmint_wallet.send_to_lnurl),
+            patch("routstr.refund.send_token", testmint_wallet.send_token),
+            patch("routstr.refund.send_to_lnurl", testmint_wallet.send_to_lnurl),
             patch("websockets.connect") as mock_websockets,
             patch("routstr.payment.price.btc_usd_price", return_value=50000.0),
             patch("routstr.payment.price.sats_usd_price", return_value=0.0005),

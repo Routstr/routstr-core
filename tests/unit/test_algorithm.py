@@ -499,7 +499,14 @@ def test_create_model_mappings_exact_model_id_beats_forwarded_id_collision(
 def test_models_endpoint_preserves_catalog_id_when_winner_forwards_elsewhere(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each catalog row keeps its requested ID while using its routing winner."""
+    """Each catalog row keeps its requested ID while using its routing winner.
+
+    ``foo`` is served directly by two providers: the cheaper one prefixes the ID
+    (``vendor/foo``) and the pricier one exposes the bare ID while forwarding
+    upstream to ``bar``. Prefix vs bare spelling must not decide the winner, so
+    the cheaper prefixed provider wins ``foo`` while ``bar`` still appears as its
+    own catalog row served by the forwarding provider.
+    """
     base_alias = create_test_model(
         "vendor/foo", prompt_price=0.001, completion_price=0.001
     )
@@ -518,9 +525,9 @@ def test_models_endpoint_preserves_catalog_id_when_winner_forwards_elsewhere(
         disabled_model_keys=set(),
     )
 
-    assert provider_map["foo"][0] == (redirected_exact, redirect_provider)
+    assert provider_map["foo"][0] == (base_alias, base_provider)
     assert unique_models["foo"].id == "foo"
-    assert unique_models["foo"].upstream_provider_id == "redirect"
+    assert unique_models["foo"].upstream_provider_id == "base"
 
     import routstr.proxy as proxy
 
@@ -876,3 +883,175 @@ def test_create_model_mappings_disables_only_matching_provider() -> None:
     )
 
     assert [p for _, p in provider_map["same-id"]] == [provider_a]
+
+
+def test_create_model_mappings_prefixed_openrouter_beats_bare_tinfoil_id() -> None:
+    """Prefix-vs-bare ID spelling must not outrank price for the same model.
+
+    Tinfoil advertises bare model IDs (``gpt-oss-120b``) while OpenRouter keeps
+    the org prefix (``openai/gpt-oss-120b``). Both serve the same model, so the
+    cheaper OpenRouter deployment must win the public ``gpt-oss-120b`` catalog
+    row and route; the bare-ID exact match must not shadow it on spelling alone.
+    """
+    tinfoil_expensive = create_test_model(
+        "gpt-oss-120b", prompt_price=0.01, completion_price=0.01
+    )
+    openrouter_cheap = create_test_model(
+        "openai/gpt-oss-120b", prompt_price=0.001, completion_price=0.001
+    )
+    tinfoil = create_test_provider(
+        "tinfoil",
+        "https://inference.tinfoil.sh/v1",
+        db_id=1,
+        models=[tinfoil_expensive],
+    )
+    openrouter = create_test_provider(
+        "openrouter",
+        "https://openrouter.ai/api/v1",
+        db_id=2,
+        models=[openrouter_cheap],
+    )
+
+    # Discovery order should not matter: Tinfoil (non-OpenRouter) is processed
+    # first, yet the cheaper OpenRouter candidate must still win.
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[tinfoil, openrouter],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert provider_map["gpt-oss-120b"][0] == (openrouter_cheap, openrouter)
+    assert unique_models["gpt-oss-120b"].upstream_provider_id == "openrouter"
+    assert unique_models["gpt-oss-120b"].pricing.prompt == 0.001
+
+
+def test_create_model_mappings_uppercase_prefixed_base_keeps_top_tier() -> None:
+    """Uppercase prefixed IDs still match the public alias at the direct tier.
+
+    ``Qwen/Qwen2.5-72B`` lowercases to alias ``qwen2.5-72b``; its base name
+    must be compared case-insensitively so it stays a direct match instead of
+    falling to the weakest tier and losing to a forwarded alias on spelling.
+    """
+    prefixed_cheap = create_test_model(
+        "Qwen/Qwen2.5-72B", prompt_price=0.001, completion_price=0.001
+    )
+    forwarded_expensive = create_test_model(
+        "deployment-x", prompt_price=0.1, completion_price=0.1
+    )
+    forwarded_expensive.forwarded_model_id = "qwen2.5-72b"
+    prefixed_provider = create_test_provider(
+        "prefixed", "https://prefixed.example/v1", db_id=1, models=[prefixed_cheap]
+    )
+    forwarded_provider = create_test_provider(
+        "forwarded", "https://forwarded.example/v1", db_id=2, models=[forwarded_expensive]
+    )
+
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[forwarded_provider, prefixed_provider],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert provider_map["qwen2.5-72b"][0] == (prefixed_cheap, prefixed_provider)
+    assert unique_models["qwen2.5-72b"].upstream_provider_id == "prefixed"
+
+
+def test_create_model_mappings_excludes_a_malformed_price() -> None:
+    """A rate that is not a number must not be routable.
+
+    A negative or non-finite rate reads as a real price to every truthiness
+    check, so the candidate was built into the map and served. The cost
+    calculation cannot price on such a rate, so every request on the model fell
+    through to the flat maximum reservation — or, for a negative rate, billed a
+    negative amount that settlement credits back to the caller.
+    """
+    healthy = create_test_model("healthy-model")
+    for bad_rate in (float("nan"), float("inf"), -1.0):
+        broken = create_test_model("broken-model", prompt_price=bad_rate)
+        provider = create_test_provider(
+            "custom",
+            "https://custom.example/v1",
+            db_id=1,
+            models=[broken, healthy],
+        )
+
+        _, provider_map, unique_models = create_model_mappings(
+            upstreams=[provider],
+            overrides_by_key={},
+            disabled_model_keys=set(),
+        )
+
+        assert "broken-model" not in provider_map, bad_rate
+        assert "broken-model" not in unique_models, bad_rate
+        # One unroutable candidate must not cost the provider its other models.
+        assert "healthy-model" in provider_map, bad_rate
+
+
+def test_create_model_mappings_excludes_an_override_with_a_malformed_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An override row carrying a malformed rate is unroutable too.
+
+    An override replaces the discovered model's price, so a provider whose
+    catalog is sound still routes at whatever the row says. The guard has to sit
+    after the override is applied, not before it.
+    """
+    discovered = create_test_model("shared-model")
+    provider = create_test_provider(
+        "custom", "https://custom.example/v1", db_id=3, models=[discovered]
+    )
+    override_model = create_test_model("shared-model", prompt_price=float("-inf"))
+
+    monkeypatch.setattr(
+        "routstr.payment.models._row_to_model",
+        lambda *args, **kwargs: override_model,
+    )
+    override_row = SimpleNamespace(
+        id="shared-model", upstream_provider_id=3, enabled=True
+    )
+
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={("shared-model", 3): (override_row, 1.0)},
+        disabled_model_keys=set(),
+    )
+
+    assert "shared-model" not in provider_map
+    assert "shared-model" not in unique_models
+
+
+def test_create_model_mappings_survives_an_unreadable_override_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One row that cannot be read must not empty the whole routing map.
+
+    Converting an override while walking a provider's catalog let the exception
+    unwind the entire map build: the node came up routing nothing. The sibling
+    loop over override-only rows already skips and logs such a row.
+    """
+    broken = create_test_model("broken-model")
+    healthy = create_test_model("healthy-model")
+    provider = create_test_provider(
+        "custom",
+        "https://custom.example/v1",
+        db_id=5,
+        models=[broken, healthy],
+    )
+
+    def raising_row_to_model(row: Any, *args: Any, **kwargs: Any) -> Model:
+        raise ValueError("value is not a valid float")
+
+    monkeypatch.setattr("routstr.payment.models._row_to_model", raising_row_to_model)
+    override_row = SimpleNamespace(
+        id="broken-model", upstream_provider_id=5, enabled=True
+    )
+
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={("broken-model", 5): (override_row, 1.0)},
+        disabled_model_keys=set(),
+    )
+
+    assert "broken-model" not in provider_map
+    assert "healthy-model" in provider_map
+    assert "healthy-model" in unique_models

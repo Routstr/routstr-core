@@ -3,6 +3,7 @@ Integration tests for wallet authentication system including API key generation 
 Tests POST /v1/wallet/topup endpoint and authorization header validation.
 """
 
+import asyncio
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -113,38 +114,32 @@ async def test_api_key_generation_invalid_token(
 async def test_duplicate_token_handling(
     integration_client: AsyncClient, testmint_wallet: Any, db_snapshot: Any
 ) -> None:
-    """Test that duplicate tokens return the same API key without double-spending"""
-
-    # Generate a valid token
-    amount = 500  # 500 sats
+    amount = 500
     token = await testmint_wallet.mint_tokens(amount)
-
-    # First use of token
     integration_client.headers["Authorization"] = f"Bearer {token}"
-    response1 = await integration_client.get("/v1/wallet/info")
-    assert response1.status_code == 200
+
+    response1, response2 = await asyncio.gather(
+        integration_client.get("/v1/wallet/info"),
+        integration_client.get("/v1/wallet/info"),
+    )
+    assert response1.status_code < 500
+    assert response2.status_code < 500
+    assert response1.status_code == response2.status_code == 200
     api_key1 = response1.json()["api_key"]
-    balance1 = response1.json()["balance"]
-
-    # Capture state after first submission
-    await db_snapshot.capture()
-
-    # Second use of same token - should return same API key since it's already created
-    response2 = await integration_client.get("/v1/wallet/info")
-    assert response2.status_code == 200
     api_key2 = response2.json()["api_key"]
+    balance1 = response1.json()["balance"]
     balance2 = response2.json()["balance"]
-
-    # Should return the same API key and balance
     assert api_key1 == api_key2
-    assert balance1 == balance2
+    assert balance1 == balance2 == amount * 1000
 
-    # Verify no additional database changes
+    await db_snapshot.capture()
+    replay = await integration_client.get("/v1/wallet/info")
+    assert replay.status_code == 200
+    assert replay.json()["api_key"] == api_key1
     diff = await db_snapshot.diff()
     assert len(diff["api_keys"]["added"]) == 0
     assert len(diff["api_keys"]["modified"]) == 0
 
-    # Original API key should still work with original balance
     integration_client.headers["Authorization"] = f"Bearer {api_key1}"
     wallet_response = await integration_client.get("/v1/wallet/")
     assert wallet_response.status_code == 200

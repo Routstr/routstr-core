@@ -56,7 +56,38 @@ def test_non_sqlite_backend_enables_pre_ping_automatically(
 
     assert created is fake_engine
     assert factory.call_args.kwargs["pool_pre_ping"] is True
+    assert "timeout" not in factory.call_args.kwargs["connect_args"]
     assert listen.call_count == 2
+
+
+def test_file_sqlite_sets_busy_timeout_connect_arg(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    monkeypatch.setattr(settings, "database_busy_timeout", 42.0)
+    fake_engine = MagicMock()
+
+    with (
+        patch.object(db, "create_async_engine", return_value=fake_engine) as factory,
+        patch.object(db.event, "listen"),
+    ):
+        create_db_engine(f"sqlite+aiosqlite:///{tmp_path}/busy.db")
+
+    assert factory.call_args.kwargs["connect_args"]["timeout"] == 42.0
+
+
+def test_memory_sqlite_omits_busy_timeout_connect_arg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "database_busy_timeout", 42.0)
+    fake_engine = MagicMock()
+
+    with (
+        patch.object(db, "create_async_engine", return_value=fake_engine) as factory,
+        patch.object(db.event, "listen"),
+    ):
+        create_db_engine("sqlite+aiosqlite://")
+
+    assert "timeout" not in factory.call_args.kwargs["connect_args"]
 
 
 @pytest.mark.asyncio

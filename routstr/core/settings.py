@@ -77,7 +77,6 @@ class Settings(BaseSettings):
     exchange_fee: float = Field(default=1.005, env="EXCHANGE_FEE")
     upstream_provider_fee: float = Field(default=1.05, env="UPSTREAM_PROVIDER_FEE")
     tolerance_percentage: float = Field(default=1.0, env="TOLERANCE_PERCENTAGE")
-    child_key_cost: int = Field(default=0, env="CHILD_KEY_COST")
     # Minimum per-request charge in millisatoshis when model pricing is free/zero
     min_request_msat: int = Field(default=1, env="MIN_REQUEST_MSAT")
     reset_reserved_balance_on_startup: bool = Field(
@@ -101,6 +100,12 @@ class Settings(BaseSettings):
 
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
+    # Comma-separated METHOD:path pairs adding to the proxy's canonical
+    # endpoint allowlist, e.g. "POST:v1/rerank,GET:batches". Only for upstreams
+    # exposing an endpoint outside the OpenAI-compatible set; each addition
+    # widens what the provider credential can be spent against, so wildcards
+    # and prefixes are not supported.
+    proxy_extra_allowed_paths: str = Field(default="", env="PROXY_EXTRA_ALLOWED_PATHS")
     tor_proxy_url: str = Field(default="socks5://127.0.0.1:9050", env="TOR_PROXY_URL")
     providers_refresh_interval_seconds: int = Field(
         default=0, env="PROVIDERS_REFRESH_INTERVAL_SECONDS"
@@ -119,13 +124,20 @@ class Settings(BaseSettings):
     enable_model_paths_refresh: bool = Field(
         default=True, env="ENABLE_MODEL_PATHS_REFRESH"
     )
-    refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")
     # Uncollected refund tokens are swept after ~6 months (180 days).
     # Fixed for now: not configurable via env or the settings DB/admin API
     # (empty env list disables env binding; see FIXED_FIELDS).
     refund_sweep_ttl_seconds: int = Field(default=15_552_000, env=[])
     refund_sweep_claim_timeout_seconds: int = Field(
         default=900, gt=0, env="REFUND_SWEEP_CLAIM_TIMEOUT_SECONDS"
+    )
+    # How long an open refund claim may sit before the reconciler asks the mint
+    # what became of it. Doubles as the reconciler's per-row lease.
+    refund_claim_timeout_seconds: int = Field(
+        default=300, gt=0, env="REFUND_CLAIM_TIMEOUT_SECONDS"
+    )
+    refund_reconcile_interval_seconds: int = Field(
+        default=60, gt=0, env="REFUND_RECONCILE_INTERVAL_SECONDS"
     )
 
     # Database connection-pool controls (advanced). Capacity defaults provide
@@ -141,6 +153,9 @@ class Settings(BaseSettings):
     database_pool_pre_ping: bool = Field(default=False, env="DATABASE_POOL_PRE_PING")
     database_pool_hold_warn_seconds: float = Field(
         default=10.0, gt=0, env="DATABASE_POOL_HOLD_WARN_SECONDS"
+    )
+    database_busy_timeout: float = Field(
+        default=30.0, gt=0, env="DATABASE_BUSY_TIMEOUT"
     )
 
     # Logging
@@ -192,12 +207,18 @@ SECRET_FIELDS = frozenset({"admin_password", "nsec"})
 # neither store nor shadow them; env is always authoritative.
 ENV_ONLY_FIELDS = frozenset(
     {
+        # Widening the proxy's reachable upstream surface is a deployment
+        # decision, not a runtime toggle: it changes what the provider
+        # credential can be spent against. Keeping it env-only also lets the
+        # proxy parse it once at import without going stale.
+        "proxy_extra_allowed_paths",
         "database_pool_size",
         "database_max_overflow",
         "database_pool_timeout",
         "database_pool_recycle",
         "database_pool_pre_ping",
         "database_pool_hold_warn_seconds",
+        "database_busy_timeout",
     }
 )
 
@@ -248,7 +269,7 @@ def derive_npub_from_nsec(nsec: str) -> str | None:
     boot.
     """
     try:
-        from nostr.key import PublicKey  # type: ignore
+        from nostr_sdk import PublicKey
 
         from ..nostr.listing import nsec_to_keypair
     except ImportError:
@@ -260,7 +281,7 @@ def derive_npub_from_nsec(nsec: str) -> str | None:
     _privkey_hex, pubkey_hex = keypair
 
     try:
-        return PublicKey(bytes.fromhex(pubkey_hex)).bech32()
+        return PublicKey.parse(pubkey_hex).to_bech32()
     except (ValueError, AttributeError):
         return None
 

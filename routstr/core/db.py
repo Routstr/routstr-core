@@ -12,12 +12,11 @@ from typing import AsyncGenerator
 from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
-from sqlalchemy import Index, UniqueConstraint, case, delete, event, or_
+from sqlalchemy import Index, UniqueConstraint, case, delete, event, or_, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio.engine import create_async_engine
-from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -37,6 +36,9 @@ def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
     is_memory_sqlite = is_sqlite and url.database in {None, "", ":memory:"}
     pool_pre_ping = settings.database_pool_pre_ping or not is_sqlite
     options: dict[str, int | float | bool] = {"pool_pre_ping": pool_pre_ping}
+    connect_args: dict[str, object] = {}
+    if is_sqlite and not is_memory_sqlite:
+        connect_args["timeout"] = settings.database_busy_timeout
     if not is_memory_sqlite:
         options.update(
             pool_size=settings.database_pool_size,
@@ -51,9 +53,12 @@ def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
             "database_url_backend": backend,
             "in_memory_sqlite": is_memory_sqlite,
             **options,
+            "connect_args": connect_args,
         },
     )
-    created_engine = create_async_engine(database_url, echo=False, **options)
+    created_engine = create_async_engine(
+        database_url, echo=False, connect_args=connect_args, **options
+    )
     hold_warn_seconds = settings.database_pool_hold_warn_seconds
 
     def record_pool_checkout(
@@ -132,21 +137,6 @@ class ApiKey(SQLModel, table=True):  # type: ignore
         default=None,
         description="Currency of the cashu-token",
     )
-    parent_key_hash: str | None = Field(
-        default=None, foreign_key="api_keys.hashed_key", index=True
-    )
-    balance_limit: int | None = Field(
-        default=None,
-        description="Max spendable balance in msats for this key (mostly for child keys)",
-    )
-    balance_limit_reset: str | None = Field(
-        default=None,
-        description="Reset policy for balance limit (manual, daily, monthly, etc.)",
-    )
-    balance_limit_reset_date: int | None = Field(
-        default=None,
-        description="Unix timestamp of the last time the balance limit was reset",
-    )
     validity_date: int | None = Field(
         default=None,
         description="Unix timestamp after which the key is no longer valid",
@@ -171,6 +161,55 @@ async def reset_all_reserved_balances(session: AsyncSession) -> None:
     logger.info("Reset reserved balances on startup")
 
 
+async def _transition_stale_reservation(
+    session: AsyncSession, reservation_id: str, cutoff: int
+) -> bool:
+    """Mark one reservation released iff its lease is still older than cutoff.
+
+    ``created_at`` doubles as the heartbeat lease timestamp, so the guard must
+    be part of this update: a reservation renewed between the sweeper's select
+    and this transition is in flight and must survive.
+    """
+    transition = await session.exec(  # type: ignore[call-overload]
+        update(ReservationRelease)
+        .where(col(ReservationRelease.id) == reservation_id)
+        .where(col(ReservationRelease.status) == "active")
+        .where(col(ReservationRelease.created_at) < cutoff)
+        .values(status="released")
+    )
+    return bool(transition.rowcount == 1)
+
+
+async def _release_legacy_aggregate(
+    session: AsyncSession,
+    key_hash: str,
+    observed_reserved: int,
+    observed_reserved_at: int | None,
+) -> bool:
+    """Zero one legacy aggregate reservation iff it is exactly as observed.
+
+    A new reservation committing between the sweeper's read and this update
+    changes ``reserved_balance``/``reserved_at`` in the same transaction that
+    creates its durable row, so this compare-and-swap fails instead of erasing
+    the newcomer's reserved funds.
+    """
+    if observed_reserved <= 0:
+        return False
+    reserved_at_guard = (
+        col(ApiKey.reserved_at).is_(None)
+        if observed_reserved_at is None
+        else col(ApiKey.reserved_at) == observed_reserved_at
+    )
+    result = await session.exec(  # type: ignore[call-overload]
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == key_hash)
+        .where(col(ApiKey.reserved_balance) == observed_reserved)
+        .where(reserved_at_guard)
+        .values(reserved_balance=0, reserved_at=None)
+    )
+    return bool(result.rowcount == 1)
+
+
 async def release_stale_reservations(
     session: AsyncSession,
     max_age_seconds: int,
@@ -191,25 +230,22 @@ async def release_stale_reservations(
                 col(ReservationRelease.billing_key_hash) == key_hash,
             )
         )
-    reservations = (await session.exec(query)).all()
+    # Capture primitives: a repair rollback below would expire ORM instances.
+    reservation_rows = [
+        (r.id, r.key_hash, r.billing_key_hash, r.reserved_msats)
+        for r in (await session.exec(query)).all()
+    ]
     released = 0
 
-    for reservation in reservations:
-        transition = await session.exec(  # type: ignore[call-overload]
-            update(ReservationRelease)
-            .where(col(ReservationRelease.id) == reservation.id)
-            .where(col(ReservationRelease.status) == "active")
-            .values(status="released")
-        )
-        if transition.rowcount != 1:
+    for res_id, res_key_hash, res_billing_hash, res_msats in reservation_rows:
+        if not await _transition_stale_reservation(session, res_id, cutoff):
             continue
 
         values = {
-            "reserved_balance": col(ApiKey.reserved_balance)
-            - reservation.reserved_msats,
+            "reserved_balance": col(ApiKey.reserved_balance) - res_msats,
             "reserved_at": case(
                 (
-                    col(ApiKey.reserved_balance) - reservation.reserved_msats > 0,
+                    col(ApiKey.reserved_balance) - res_msats > 0,
                     col(ApiKey.reserved_at),
                 ),
                 else_=None,
@@ -217,24 +253,42 @@ async def release_stale_reservations(
         }
         parent_result = await session.exec(  # type: ignore[call-overload]
             update(ApiKey)
-            .where(col(ApiKey.hashed_key) == reservation.billing_key_hash)
-            .where(col(ApiKey.reserved_balance) >= reservation.reserved_msats)
+            .where(col(ApiKey.hashed_key) == res_billing_hash)
+            .where(col(ApiKey.reserved_balance) >= res_msats)
             .values(**values)
         )
-        if parent_result.rowcount != 1:
-            await session.rollback()
-            return 0
-
-        if reservation.billing_key_hash != reservation.key_hash:
+        aggregates_ok = parent_result.rowcount == 1
+        if aggregates_ok and res_billing_hash != res_key_hash:
             child_result = await session.exec(  # type: ignore[call-overload]
                 update(ApiKey)
-                .where(col(ApiKey.hashed_key) == reservation.key_hash)
-                .where(col(ApiKey.reserved_balance) >= reservation.reserved_msats)
+                .where(col(ApiKey.hashed_key) == res_key_hash)
+                .where(col(ApiKey.reserved_balance) >= res_msats)
                 .values(**values)
             )
-            if child_result.rowcount != 1:
-                await session.rollback()
-                return 0
+            aggregates_ok = child_result.rowcount == 1
+
+        if not aggregates_ok:
+            # The aggregates no longer hold this reservation's msats — the
+            # durable row is corrupt. Repair by terminalizing it WITHOUT
+            # subtracting uncertain aggregates (legacy cleanup below reconciles
+            # any stale remainder) and keep sweeping the rest of the batch:
+            # one corrupt row must not poison all stale cleanup.
+            await session.rollback()
+            if await _transition_stale_reservation(session, res_id, cutoff):
+                await session.commit()
+                released += 1
+                logger.error(
+                    "Released corrupt stale reservation without aggregate subtraction",
+                    extra={
+                        "reservation_id": res_id,
+                        "billing_key_hash": res_billing_hash[:8] + "...",
+                        "reserved_msats": res_msats,
+                    },
+                )
+            continue
+        # Commit each release on its own so a later corrupt record's rollback
+        # cannot discard the healthy releases already processed in this batch.
+        await session.commit()
         released += 1
 
     # Rolling upgrades can leave aggregate reservations created before durable
@@ -246,16 +300,13 @@ async def release_stale_reservations(
             col(ApiKey.reserved_at) < cutoff
         )
     else:
-        legacy_query = legacy_query.where(
-            or_(
-                col(ApiKey.hashed_key) == key_hash,
-                col(ApiKey.parent_key_hash) == key_hash,
-            )
-        ).where(
+        legacy_query = legacy_query.where(col(ApiKey.hashed_key) == key_hash).where(
             or_(col(ApiKey.reserved_at).is_(None), col(ApiKey.reserved_at) < cutoff)
         )
 
     for legacy_key in (await session.exec(legacy_query)).all():
+        observed_reserved = legacy_key.reserved_balance
+        observed_reserved_at = legacy_key.reserved_at
         active_owner = (
             await session.exec(
                 select(ReservationRelease.id)
@@ -272,10 +323,10 @@ async def release_stale_reservations(
         ).first()
         if active_owner is not None:
             continue
-        legacy_key.reserved_balance = 0
-        legacy_key.reserved_at = None
-        session.add(legacy_key)
-        released += 1
+        if await _release_legacy_aggregate(
+            session, legacy_key.hashed_key, observed_reserved, observed_reserved_at
+        ):
+            released += 1
 
     await session.commit()
     if released:
@@ -290,21 +341,15 @@ async def release_stale_reservations(
 
 
 async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> int:
-    """Delete dead parentless API keys; return the count removed.
+    """Delete dead API keys; return the count removed.
 
-    Dead = 0 balance/reservation/spend/requests, older than the grace period,
-    no parent, no children, no invoice that could still settle. Cashu rows are
+    Dead = 0 balance/reservation/spend/requests, older than the grace
+    period, no invoice that could still settle. Cashu rows are
     unlinked (not deleted) first to keep the audit trail.
     """
     now = int(time.time())
     cutoff = now - min_age_seconds
 
-    child = aliased(ApiKey)
-    has_children = (
-        select(child.hashed_key).where(
-            col(child.parent_key_hash) == col(ApiKey.hashed_key)
-        )
-    ).exists()
     # An expired invoice stays creditable for the grace window, and crediting it
     # after its target key is gone strands the payment at the mint.
     settleable_invoice = (
@@ -322,16 +367,22 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
         )
     ).exists()
 
+    has_refund_claim = (
+        select(Refund.id).where(
+            col(Refund.api_key_hashed_key) == col(ApiKey.hashed_key)
+        )
+    ).exists()
+
     eligible_hashes = (
         select(ApiKey.hashed_key)
         .where(col(ApiKey.balance) == 0)
         .where(col(ApiKey.reserved_balance) == 0)
         .where(col(ApiKey.total_spent) == 0)
         .where(col(ApiKey.total_requests) == 0)
-        .where(col(ApiKey.parent_key_hash).is_(None))
         .where((col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff))
         .where(~settleable_invoice)
-        .where(~has_children)
+        # refunds holds a non-null FK to the key.
+        .where(~has_refund_claim)
     )
 
     # Unlink transactions rather than cascade-deleting them, so the financial
@@ -386,9 +437,10 @@ class ModelRow(SQLModel, table=True):  # type: ignore
 class ModelPathRow(SQLModel, table=True):  # type: ignore
     """Upstream provider path a model is reachable through.
 
-    Discovery/visibility data only. ``model_id`` is intentionally NOT globally
-    unique: it is the client-visible ``/v1/models`` id (``forwarded_model_id or
-    id``) grouped across every provider that exposes the model. A single model
+    Discovery data plus provider-specific model metadata. ``model_id`` is
+    intentionally NOT globally unique: it is the client-visible ``/v1/models``
+    id (``forwarded_model_id or id``) grouped across every provider that exposes
+    the model. A single model
     can therefore have several rows — one per direct provider path plus one per
     OpenRouter sub-provider endpoint.
     """
@@ -424,6 +476,10 @@ class ModelPathRow(SQLModel, table=True):  # type: ignore
     )
     endpoint_name: str | None = Field(
         default=None, description="Human-readable endpoint display name"
+    )
+    model_metadata: str = Field(
+        default="{}",
+        description="JSON model metadata specific to this provider path",
     )
     upstream_provider_id: int = Field(
         index=True,
@@ -470,14 +526,6 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     )
     expires_at: int = Field(description="Unix timestamp when invoice expires")
     paid_at: int | None = Field(default=None, description="Unix timestamp when paid")
-    balance_limit: int | None = Field(
-        default=None,
-        description="Max spendable msats for the created key",
-    )
-    balance_limit_reset: str | None = Field(
-        default=None,
-        description="Reset policy for balance limit (daily, weekly, monthly)",
-    )
     validity_date: int | None = Field(
         default=None,
         description="Unix timestamp after which the created key expires",
@@ -518,6 +566,53 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
         index=True,
         description="Associated API key hash for wallet history",
     )
+
+
+REFUND_OPEN_STATUSES = ("pending", "ambiguous")
+
+# Debited from the key but neither paid out nor restored, so still owed.
+REFUND_UNRESOLVED_STATUSES = ("pending", "ambiguous", "stuck")
+
+_REFUND_OPEN_PREDICATE = "status IN ('pending', 'ambiguous')"
+
+
+class Refund(SQLModel, table=True):  # type: ignore
+    """One payout claim; the partial unique index allows one open claim per key."""
+
+    __tablename__ = "refunds"
+    __table_args__ = (
+        Index(
+            "ux_refunds_open_per_key",
+            "api_key_hashed_key",
+            unique=True,
+            sqlite_where=text(_REFUND_OPEN_PREDICATE),
+            postgresql_where=text(_REFUND_OPEN_PREDICATE),
+        ),
+    )
+
+    id: str = Field(primary_key=True, default_factory=lambda: uuid.uuid4().hex)
+    api_key_hashed_key: str = Field(foreign_key="api_keys.hashed_key", index=True)
+    method: str = Field(description="Payout method: lightning or cashu")
+    destination: str | None = Field(
+        default=None, description="Lightning address or LNURL, NULL for cashu"
+    )
+    amount_msats: int = Field(description="Balance debited when the claim opened")
+    unit: str = Field(description="Mint unit the payout is denominated in")
+    mint_url: str = Field(description="Mint the payout is drawn from")
+    status: str = Field(
+        default="pending",
+        index=True,
+        description="pending, paid, failed, ambiguous, or stuck",
+    )
+    quote_id: str | None = Field(
+        default=None, description="Melt quote id, for reconciling an ambiguous payout"
+    )
+    token: str | None = Field(default=None, description="Issued cashu token")
+    claimed_at: int | None = Field(
+        default=None, description="Reconciler lease timestamp"
+    )
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    updated_at: int = Field(default_factory=lambda: int(time.time()))
 
 
 async def store_cashu_transaction(
@@ -911,8 +1006,18 @@ async def complete_routstr_fee_payout(
 
 
 async def total_user_liability(db_session: AsyncSession) -> int:
-    """Return all outstanding API-key balances in millisatoshis."""
-    result = await db_session.exec(select(func.sum(ApiKey.balance)))
+    """Return all outstanding user funds in millisatoshis.
+
+    Key balances and unresolved refunds are summed in one statement so a
+    claim opened between two reads cannot be missed by both.
+    """
+    key_balances = select(func.coalesce(func.sum(ApiKey.balance), 0)).scalar_subquery()
+    unresolved_refunds = (
+        select(func.coalesce(func.sum(Refund.amount_msats), 0))
+        .where(col(Refund.status).in_(REFUND_UNRESOLVED_STATUSES))
+        .scalar_subquery()
+    )
+    result = await db_session.exec(select(key_balances + unresolved_refunds))
     return int(result.one() or 0)
 
 

@@ -80,8 +80,6 @@ class _InvoiceSettlement:
     purpose: str
     api_key_hash: str | None
     mint_url: str | None
-    balance_limit: int | None
-    balance_limit_reset: str | None
     validity_date: int | None
 
     @classmethod
@@ -93,8 +91,6 @@ class _InvoiceSettlement:
             purpose=invoice.purpose,
             api_key_hash=invoice.api_key_hash,
             mint_url=invoice.mint_url,
-            balance_limit=invoice.balance_limit,
-            balance_limit_reset=invoice.balance_limit_reset,
             validity_date=invoice.validity_date,
         )
 
@@ -118,8 +114,6 @@ class InvoiceCreateRequest(BaseModel):
         default=None,
         description="Deprecated: legacy field for topup. Prefer Authorization header.",
     )
-    balance_limit: int | None = Field(default=None)
-    balance_limit_reset: str | None = Field(default=None)
     validity_date: int | None = Field(default=None)
 
 
@@ -220,11 +214,18 @@ async def _request_mint_with_fallback(
             )
             continue
         try:
-            wallet = await get_wallet(mint_url, "sat", retry_on_rate_limit=False)
+            wallet = await get_wallet(
+                mint_url,
+                "sat",
+                retry_on_rate_limit=False,
+                load_proofs=False,
+            )
             quote = await run_mint_operation(
                 lambda: wallet.request_mint(amount_sats),
                 op_name="request_mint_invoice",
                 mint_url=mint_url,
+                # Quote creation is unsafe to retry without idempotency.
+                retry_timeouts=False,
                 retry_on_rate_limit=False,
             )
             return quote.request, quote.quote, mint_url
@@ -400,8 +401,6 @@ async def create_invoice(
             api_key_hash=api_key_token[3:] if api_key_token else None,
             purpose=request.purpose,
             mint_url=mint_url,
-            balance_limit=request.balance_limit,
-            balance_limit_reset=request.balance_limit_reset,
             validity_date=request.validity_date,
             expires_at=expires_at,
         )
@@ -582,7 +581,7 @@ async def check_invoice_payment(
             await session.commit()
 
             mint_url = settlement.mint_url or settings.primary_mint
-            wallet = await get_wallet(mint_url, "sat")
+            wallet = await get_wallet(mint_url, "sat", load_proofs=False)
             try:
                 mint_status = await run_mint_operation(
                     lambda: wallet.get_mint_quote(settlement.payment_hash),
@@ -797,8 +796,6 @@ async def _create_api_key_record(
         balance=invoice.amount_sats * 1000,
         refund_currency="sat",
         refund_mint_url=mint_url,
-        balance_limit=invoice.balance_limit,
-        balance_limit_reset=invoice.balance_limit_reset,
         validity_date=invoice.validity_date,
     )
     session.add(api_key)

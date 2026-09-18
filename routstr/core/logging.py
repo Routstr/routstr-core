@@ -16,7 +16,7 @@ DO NOT modify or remove these messages without updating the usage tracking logic
    - The 'token_cost', 'model', 'input_tokens', and 'output_tokens' fields are extracted for dashboard metrics
 
 3. "Max cost payment finalized" (INFO) - routstr/auth.py
-   - Used as the successful completion fallback when token usage is unavailable
+   - Used for explicit flat-price/MaxCostData settlements; missing usage alone must not create this charge
    - The 'charged_amount', 'model', 'input_tokens', and 'output_tokens' fields are extracted for dashboard metrics
 
 4. "Payment processed successfully" (INFO) - routstr/auth.py
@@ -51,7 +51,7 @@ from pythonjsonlogger import jsonlogger
 from rich.console import Console
 from rich.logging import RichHandler
 
-from .redaction import redact_obj, redact_org_ids
+from .redaction import redact_field, redact_org_ids
 
 # Only use RichHandler when stdout is a real TTY. In non-TTY contexts
 # (docker logs, pipes, CI) Rich pads every line to width and wraps long
@@ -100,8 +100,10 @@ class DailyRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
         self.baseFilename = new_filename
         self.current_date = new_date
 
-        # FIX ME: not sure if we need this
-        # self._cleanup_old_files()
+        # `backupCount` alone never prunes these files: the base filename moves
+        # with the date, so the inherited rollover finds no siblings to expire
+        # and every day of logged credentials is retained indefinitely.
+        self._cleanup_old_files()
 
         if not self.delay:
             self.stream = self._open()
@@ -179,6 +181,18 @@ class RequestIdFilter(logging.Filter):
         except ImportError:
             # If middleware isn't available yet, just use default
             record.request_id = "no-request-id"
+        return True
+
+
+class ClientAppFilter(logging.Filter):
+    """Attach request-local app attribution to log records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Import here to avoid circular imports
+        from .middleware import UNKNOWN_CLIENT_APP, client_app_context
+
+        client_app = client_app_context.get(None)
+        record.client_app = client_app if client_app else UNKNOWN_CLIENT_APP
         return True
 
 
@@ -260,13 +274,11 @@ class SecurityFilter(logging.Filter):
 
             # Structured `extra={...}` fields are emitted by the JSON formatter
             # straight from the record dict and never pass through the message
-            # formatting above. Redact organization IDs from any string-valued
-            # extra so they cannot leak via structured logs.
+            # formatting above, so they need their own recursive pass.
             for attr, value in list(record.__dict__.items()):
                 if attr in _NON_EXTRA_RECORD_ATTRS:
                     continue
-                if isinstance(value, (str, dict, list, tuple)):
-                    record.__dict__[attr] = redact_obj(value)
+                record.__dict__[attr] = redact_field(attr, value)
 
         except Exception:
             pass
@@ -323,7 +335,7 @@ def setup_logging() -> None:
             "rich_tracebacks": True,
             "markup": True,
             "console": _console,
-            "filters": ["request_id_filter", "security_filter"],
+            "filters": ["request_id_filter", "client_app_filter", "security_filter"],
         }
     else:
         console_handler = {
@@ -331,7 +343,7 @@ def setup_logging() -> None:
             "level": log_level,
             "formatter": "plain",
             "stream": "ext://sys.stdout",
-            "filters": ["request_id_filter", "security_filter"],
+            "filters": ["request_id_filter", "client_app_filter", "security_filter"],
         }
 
     LOGGING_CONFIG = {
@@ -340,7 +352,7 @@ def setup_logging() -> None:
         "formatters": {
             "json": {
                 "()": jsonlogger.JsonFormatter,
-                "format": "%(asctime)s %(name)s %(levelname)s %(message)s %(pathname)s %(lineno)d %(version)s %(request_id)s",
+                "format": "%(asctime)s %(name)s %(levelname)s %(message)s %(pathname)s %(lineno)d %(version)s %(request_id)s %(client_app)s",
                 "datefmt": "%Y-%m-%d %H:%M:%S",
             },
             "plain": {
@@ -351,6 +363,7 @@ def setup_logging() -> None:
         "filters": {
             "version_filter": {"()": VersionFilter},
             "request_id_filter": {"()": RequestIdFilter},
+            "client_app_filter": {"()": ClientAppFilter},
             "security_filter": {"()": SecurityFilter},
         },
         "handlers": {
@@ -364,7 +377,12 @@ def setup_logging() -> None:
                 "interval": 1,  # Every 1 day
                 "backupCount": 30,  # Keep 30 days of logs
                 "atTime": None,  # Rotate at midnight (00:00)
-                "filters": ["version_filter", "request_id_filter", "security_filter"],
+                "filters": [
+                    "version_filter",
+                    "request_id_filter",
+                    "client_app_filter",
+                    "security_filter",
+                ],
             },
         },
         "loggers": {

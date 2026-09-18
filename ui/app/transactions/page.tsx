@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
+import { downloadText } from '@/lib/utils';
 import { AppPageShell } from '@/components/app-page-shell';
 import { PageHeader } from '@/components/page-header';
 import {
@@ -53,6 +54,7 @@ import {
   Zap,
   ChevronLeft,
   ChevronRight,
+  Download,
 } from 'lucide-react';
 import {
   AdminService,
@@ -63,6 +65,28 @@ import { format } from 'date-fns';
 import { toast } from 'sonner';
 
 const STORAGE_KEY = 'routstr-transaction-filters';
+
+const STATUS_BADGES: Record<
+  Transaction['status'],
+  { label: string; className: string }
+> = {
+  issued: {
+    label: 'Issued',
+    className: 'border-gray-500/20 bg-gray-500/10 text-gray-500',
+  },
+  collected: {
+    label: 'Collected',
+    className: 'border-green-500/20 bg-green-500/10 text-green-500',
+  },
+  swept: {
+    label: 'Swept',
+    className: 'border-orange-500/20 bg-orange-500/10 text-orange-500',
+  },
+  pending: {
+    label: 'Pending',
+    className: 'border-blue-500/20 bg-blue-500/10 text-blue-500',
+  },
+};
 
 function TransactionTable({
   transactions,
@@ -181,19 +205,36 @@ function TransactionTable({
                   {format(tx.created_at * 1000, 'yyyy-MM-dd HH:mm:ss')}
                 </TableCell>
                 <TableCell className='text-right'>
-                  <Button
-                    variant='ghost'
-                    size='icon'
-                    className='h-8 w-8'
-                    onClick={() => onCopy(tx.token, tx.id + '-token')}
-                    title='Copy Token'
-                  >
-                    {copiedId === tx.id + '-token' ? (
-                      <Check className='h-4 w-4' />
-                    ) : (
-                      <Copy className='h-4 w-4' />
+                  <div className='flex items-center justify-end gap-1'>
+                    <Button
+                      variant='ghost'
+                      size='icon'
+                      className='h-8 w-8'
+                      onClick={() => onCopy(tx.token, tx.id + '-token')}
+                      title='Copy Token'
+                    >
+                      {copiedId === tx.id + '-token' ? (
+                        <Check className='h-4 w-4' />
+                      ) : (
+                        <Copy className='h-4 w-4' />
+                      )}
+                    </Button>
+                    {/* The token is never rendered in the table, so the
+                        clipboard must not be the only way to get it out. */}
+                    {tx.status === 'issued' && (
+                      <Button
+                        variant='ghost'
+                        size='icon'
+                        className='h-8 w-8'
+                        onClick={() =>
+                          downloadText(`cashu-token-${tx.id}.txt`, tx.token)
+                        }
+                        title='Download Token'
+                      >
+                        <Download className='h-4 w-4' />
+                      </Button>
                     )}
-                  </Button>
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
@@ -402,6 +443,7 @@ export default function TransactionsPage() {
   const [activeTab, setActiveTab] = useState<string>('x-cashu');
   const [xcashuPage, setXcashuPage] = useState(0);
   const [apikeyPage, setApikeyPage] = useState(0);
+  const [withdrawalsPage, setWithdrawalsPage] = useState(0);
   const [lightningPage, setLightningPage] = useState(0);
 
   const typeParam = type === 'all' ? undefined : type;
@@ -450,6 +492,28 @@ export default function TransactionsPage() {
     placeholderData: keepPreviousData,
   });
 
+  // Withdrawals are stored with source "admin" and keep their one-time token.
+  const withdrawalsQuery = useQuery({
+    queryKey: [
+      'transactions',
+      'admin',
+      typeParam,
+      statusParam,
+      searchParam,
+      withdrawalsPage,
+    ],
+    queryFn: () =>
+      AdminService.getTransactions(
+        typeParam,
+        statusParam,
+        searchParam,
+        'admin',
+        PAGE_SIZE,
+        withdrawalsPage * PAGE_SIZE
+      ),
+    placeholderData: keepPreviousData,
+  });
+
   const LIGHTNING_STATUSES = ['pending', 'paid', 'expired', 'cancelled'];
   const lightningStatusParam = LIGHTNING_STATUSES.includes(status)
     ? status
@@ -480,6 +544,7 @@ export default function TransactionsPage() {
     setStatus('all');
     setXcashuPage(0);
     setApikeyPage(0);
+    setWithdrawalsPage(0);
     setLightningPage(0);
   };
 
@@ -490,30 +555,10 @@ export default function TransactionsPage() {
   };
 
   const getStatusBadge = (tx: Transaction) => {
-    if (tx.swept)
-      return (
-        <Badge
-          variant='outline'
-          className='border-orange-500/20 bg-orange-500/10 text-orange-500'
-        >
-          Swept
-        </Badge>
-      );
-    if (tx.collected)
-      return (
-        <Badge
-          variant='outline'
-          className='border-green-500/20 bg-green-500/10 text-green-500'
-        >
-          Collected
-        </Badge>
-      );
+    const { label, className } = STATUS_BADGES[tx.status];
     return (
-      <Badge
-        variant='outline'
-        className='border-blue-500/20 bg-blue-500/10 text-blue-500'
-      >
-        Pending
+      <Badge variant='outline' className={className}>
+        {label}
       </Badge>
     );
   };
@@ -533,12 +578,14 @@ export default function TransactionsPage() {
   useEffect(() => {
     setXcashuPage(0);
     setApikeyPage(0);
+    setWithdrawalsPage(0);
     setLightningPage(0);
   }, [type, status, search]);
 
   const isRefetching =
     xcashuQuery.isRefetching ||
     apikeyQuery.isRefetching ||
+    withdrawalsQuery.isRefetching ||
     lightningQuery.isRefetching;
 
   const renderCardContent = (
@@ -617,6 +664,7 @@ export default function TransactionsPage() {
               onClick={() => {
                 xcashuQuery.refetch();
                 apikeyQuery.refetch();
+                withdrawalsQuery.refetch();
                 lightningQuery.refetch();
               }}
               variant='outline'
@@ -675,6 +723,7 @@ export default function TransactionsPage() {
                   <SelectContent>
                     <SelectItem value='all'>All Statuses</SelectItem>
                     <SelectItem value='pending'>Pending</SelectItem>
+                    <SelectItem value='issued'>Issued</SelectItem>
                     <SelectItem value='collected'>Collected</SelectItem>
                     <SelectItem value='swept'>Swept</SelectItem>
                     <SelectItem value='paid'>Paid (Lightning)</SelectItem>
@@ -703,7 +752,7 @@ export default function TransactionsPage() {
           value={activeTab}
           onValueChange={setActiveTab}
         >
-          <TabsList className='mb-4'>
+          <TabsList className='mb-4 max-w-full justify-start overflow-x-auto'>
             <TabsTrigger value='x-cashu' className='flex items-center gap-2'>
               <Zap className='h-4 w-4' />
               X-Cashu
@@ -719,6 +768,18 @@ export default function TransactionsPage() {
               {apikeyQuery.data && (
                 <Badge variant='secondary' className='ml-1'>
                   {apikeyQuery.data.total}
+                </Badge>
+              )}
+            </TabsTrigger>
+            <TabsTrigger
+              value='withdrawals'
+              className='flex items-center gap-2'
+            >
+              <ArrowUpRight className='h-4 w-4' />
+              Withdrawals
+              {withdrawalsQuery.data && (
+                <Badge variant='secondary' className='ml-1'>
+                  {withdrawalsQuery.data.total}
                 </Badge>
               )}
             </TabsTrigger>
@@ -765,6 +826,28 @@ export default function TransactionsPage() {
               </CardHeader>
               <CardContent className='overflow-hidden'>
                 {renderCardContent(apikeyQuery, apikeyPage, setApikeyPage)}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value='withdrawals'>
+            <Card>
+              <CardHeader>
+                <div className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                  <CardTitle>Withdrawal History</CardTitle>
+                  {hasActiveFilters && (
+                    <CardDescription>
+                      Filtered by {activeFilterDescription}
+                    </CardDescription>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent className='overflow-hidden'>
+                {renderCardContent(
+                  withdrawalsQuery,
+                  withdrawalsPage,
+                  setWithdrawalsPage
+                )}
               </CardContent>
             </Card>
           </TabsContent>

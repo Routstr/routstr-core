@@ -1,4 +1,8 @@
+import math
+
 from fastapi import Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .logging import get_logger
@@ -30,6 +34,26 @@ class UpstreamError(Exception):
         super().__init__(message)
 
 
+class EhbpTimeoutError(UpstreamError):
+    """Raised when an EHBP upstream times out waiting for a response.
+
+    Distinct from a generic :class:`UpstreamError` so callers can map the
+    failure to a ``504 Gateway Timeout`` with a stable ``UPSTREAM_TIMEOUT``
+    code instead of a misleading ``500`` internal server error.
+
+    ``details`` carries optional structured, redaction-safe context and is
+    forwarded to the client by ``create_upstream_error_response``.
+    """
+
+    def __init__(self, message: str, details: dict[str, object] | None = None):
+        super().__init__(
+            message,
+            status_code=504,
+            code="UPSTREAM_TIMEOUT",
+            details=details,
+        )
+
+
 async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle HTTP exceptions and include request ID in response."""
     request_id = getattr(request.state, "request_id", "unknown")
@@ -40,15 +64,25 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
     path = request.url.path
 
     # 4xx is client behaviour; the uvicorn access log already records it.
-    # Only 5xx warrants a server-side warning/error log here.
     if status_code >= 500:
-        logger.error(
+        error_type = None
+        if isinstance(detail, dict):
+            error = detail.get("error")
+            if isinstance(error, dict):
+                error_type = error.get("type")
+        log = (
+            logger.warning
+            if error_type in {"mint_unreachable", "mint_rate_limited"}
+            else logger.error
+        )
+        log(
             f"HTTP {status_code} on {path}: {detail}",
             extra={
                 "request_id": request_id,
                 "status_code": status_code,
                 "detail": detail,
                 "path": path,
+                "error_type": error_type,
             },
         )
 
@@ -59,6 +93,45 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
     content["request_id"] = request_id
 
     return JSONResponse(status_code=status_code, content=content)
+
+
+def json_compliant(value: object) -> object:
+    """Render non-finite floats as text so a reply carrying them can serialize.
+
+    ``json`` parses the bare ``NaN``/``Infinity``/``-Infinity`` literals into
+    real floats, so a request body — and a stored row written from one — may
+    hold one anywhere. ``JSONResponse`` encodes with ``allow_nan=False`` and
+    raises on them, which would turn a reply that merely *quotes* the offending
+    value into a 500.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value)
+    if isinstance(value, dict):
+        return {key: json_compliant(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_compliant(item) for item in value]
+    return value
+
+
+async def validation_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    """Answer a request-validation failure with a 422 that always serializes.
+
+    Pydantic echoes the rejected value back in each error's ``input`` field. A
+    non-finite float there breaks the encoder, so the 422 escapes as a 500 and
+    reports a client's bad rate as a server fault.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": json_compliant(jsonable_encoder(errors)),
+            "request_id": request_id,
+        },
+    )
 
 
 async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:

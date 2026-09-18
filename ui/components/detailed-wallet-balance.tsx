@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw, AlertCircle, Wallet, User, Coins } from 'lucide-react';
 import { WalletService, BalanceDetail } from '@/lib/api/services/wallet';
 import { getApiErrorMessage } from '@/lib/api/errors';
@@ -45,6 +45,7 @@ export function DetailedWalletBalance({
   usdPerSat: number | null;
 }) {
   const [withdrawModalOpen, setWithdrawModalOpen] = useState(false);
+  const queryClient = useQueryClient();
 
   const { data, isLoading, isError, error, isFetching, refetch } = useQuery({
     queryKey: ['detailed-wallet-balance'],
@@ -391,6 +392,11 @@ export function DetailedWalletBalance({
         balances={data || []}
         onSuccess={() => {
           refetch();
+          // The success dialog tells the operator the token is in the
+          // Withdrawals tab; without this the cached tab stays stale for 5 min.
+          queryClient.invalidateQueries({
+            queryKey: ['transactions', 'admin'],
+          });
         }}
       />
     </>

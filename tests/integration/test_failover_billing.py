@@ -17,7 +17,7 @@ from httpx import AsyncClient
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.core.db import ApiKey, ReservationRelease
+from routstr.core.db import ReservationRelease
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.proxy import refresh_model_maps
 from routstr.upstream.base import BaseUpstreamProvider
@@ -531,103 +531,6 @@ async def test_failover_beyond_balance_envelope_is_rejected(
     # fallback must be rejected before its upstream is ever contacted.
     assert response.status_code == 402
     assert [r.url.host for r in sent_requests] == ["cheap.example.com"]
-
-
-@pytest.fixture
-async def three_candidate_child_maps(
-    patched_db_engine: None,
-) -> AsyncGenerator[None, None]:
-    """Second candidate cannot fit the child limit; third restores and serves."""
-    first = _StaticProvider(
-        CHEAP_BASE_URL,
-        "key-first",
-        1.0,
-        _make_model("dual-model", 0.001, 0.002, max_cost=50.0),
-    )
-    too_large = _StaticProvider(
-        EXPENSIVE_BASE_URL,
-        "key-too-large",
-        1.0,
-        _make_model("dual-model", 0.002, 0.003, max_cost=100.0),
-    )
-    third = _StaticProvider(
-        THIRD_BASE_URL,
-        "key-third",
-        1.0,
-        _make_model("dual-model", 0.003, 0.004, max_cost=50.0),
-    )
-    async for _ in _install_providers([first, too_large, third]):
-        yield
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_child_failover_rolls_back_failed_larger_reserve_before_restoring(
-    authenticated_client: AsyncClient,
-    three_candidate_child_maps: None,
-    integration_session: AsyncSession,
-) -> None:
-    """A failed child guard cannot leak its parent update into restoration."""
-    key_hash = authenticated_client._test_api_key.removeprefix("sk-")  # type: ignore[attr-defined]
-    child = await integration_session.get(ApiKey, key_hash)
-    assert child is not None
-    parent = ApiKey(hashed_key="failover-parent", balance=10_000_000)
-    child.parent_key_hash = parent.hashed_key
-    child.balance_limit = 75_000
-    integration_session.add(parent)
-    integration_session.add(child)
-    await integration_session.commit()
-
-    sent_requests: list[httpx.Request] = []
-
-    async def fake_transport(
-        request: httpx.Request, *args: Any, **kwargs: Any
-    ) -> httpx.Response:
-        sent_requests.append(request)
-        return _upstream_response(request)
-
-    with (
-        patch(
-            "httpx.AsyncHTTPTransport.handle_async_request",
-            side_effect=fake_transport,
-        ),
-        patch(
-            "routstr.payment.cost_calculation.sats_usd_price",
-            return_value=0.0005,
-        ),
-    ):
-        response = await authenticated_client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "dual-model",
-                "messages": [{"role": "user", "content": "hello"}],
-            },
-        )
-
-    assert response.status_code == 200
-    # The 100-sat candidate is rejected before forwarding; the third serves.
-    assert [request.url.host for request in sent_requests] == [
-        "cheap.example.com",
-        "third.example.com",
-    ]
-
-    await integration_session.refresh(parent)
-    await integration_session.refresh(child)
-    assert parent.reserved_balance == 0
-    assert child.reserved_balance == 0
-    assert parent.total_spent == response.json()["cost"]["total_msats"]
-
-    records = (
-        await integration_session.exec(
-            select(ReservationRelease).where(ReservationRelease.key_hash == key_hash)
-        )
-    ).all()
-    assert len(records) == 2
-    assert sorted(record.status for record in records) == ["charged", "released"]
-    assert len({record.reserved_msats for record in records}) == 1
-    assert all(record.status != "active" for record in records)
-
-
 @pytest.fixture
 async def raised_envelope_provider_maps(
     patched_db_engine: None,

@@ -58,6 +58,7 @@ def _assert_cost_contract(response: Any) -> None:
         "input_msats": 1_200,
         "output_msats": 300,
         "total_msats": 1_500,
+        "charged_msats": 1_500,
         "total_usd": 0.0001,
         "cache_read_input_tokens": 8,
         "cache_creation_input_tokens": 2,
@@ -67,6 +68,36 @@ def _assert_cost_contract(response: Any) -> None:
     assert response.headers["X-Routstr-Cost-Msats"] == "1500"
     assert response.headers["X-Routstr-Input-Cost-Msats"] == "1200"
     assert response.headers["X-Routstr-Output-Cost-Msats"] == "300"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_finalization_publishes_zero_debit_and_computed_usage() -> None:
+    provider = _provider()
+    duplicate_cost = {**COST_DATA, "charged_msats": 0}
+    with patch(
+        "routstr.upstream.base.adjust_payment_for_tokens",
+        new=AsyncMock(return_value=duplicate_cost),
+    ):
+        response = await provider.handle_non_streaming_chat_completion(
+            _upstream_response(
+                {
+                    "model": "test-model",
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+                }
+            ),
+            _key(),
+            _session(),
+            deducted_max_cost=10_000,
+        )
+
+    body = json.loads(response.body)
+    assert response.headers["X-Routstr-Cost-Msats"] == "0"
+    assert response.headers["X-Routstr-Computed-Cost-Msats"] == "1500"
+    assert body["usage"]["cost"]["total_msats"] == 0
+    assert body["usage"]["cost"]["charged_msats"] == 0
+    assert body["usage"]["cost"]["computed_msats"] == 1_500
+    assert body["cost"]["total_msats"] == 0
+    assert body["cost"]["computed_msats"] == 1_500
 
 
 @pytest.mark.asyncio

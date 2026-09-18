@@ -15,9 +15,6 @@ from ..core.db import (
     UpstreamProviderRow,
     create_session,
 )
-from ..core.db import (
-    store_cashu_transaction_with_retry as store_cashu_transaction,
-)
 from ..payment.price import sats_usd_price
 from ..wallet import (
     Bolt11PaymentAmbiguous,
@@ -27,7 +24,7 @@ from ..wallet import (
     maximum_owner_cashu_balance_sats,
     prepare_bolt11_payment,
     release_token_reservation,
-    send_token,
+    send_token_from_owner_locked,
     token_mint_url,
     wallet_operation_guard,
 )
@@ -49,6 +46,7 @@ PPQ_PHASES = frozenset({PPQ_PHASE_CLAIMED, PPQ_PHASE_IN_FLIGHT, PPQ_PHASE_RECONC
 PPQ_SETTLEMENT_ATTEMPTS = 5
 PPQ_SETTLEMENT_POLL_SECONDS = 2
 PPQ_PENDING_TTL_SECONDS = 15 * 60
+PPQ_SETTLED_COOLDOWN_SECONDS = 5 * 60
 PPQ_MAX_INVOICE_PREMIUM = 1.10
 PPQ_MIN_TOPUP_USD = 1
 PPQ_MAX_TOPUP_USD = 500
@@ -58,6 +56,33 @@ PPQ_MAX_TOPUP_USD = 500
 # the damage instead of letting the worker drain the owner's mint funds one
 # per-transaction-capped payment at a time.
 PPQ_MAX_DAILY_TOPUP_USD = 300
+# Routstr-to-Routstr claim lifecycle. "claimed" holds the slot while the token
+# is being minted; nothing has left the wallet yet. "sent" means a bearer token
+# was handed to the peer and only the peer's balance can say whether it landed.
+# "backoff" holds the failure count between attempts, and "halted" stops the
+# provider entirely until an admin releases it.
+ROUTSTR_PHASE_CLAIMED = "claimed"
+ROUTSTR_PHASE_SENT = "sent"
+ROUTSTR_PHASE_BACKOFF = "backoff"
+ROUTSTR_PHASE_HALTED = "halted"
+ROUTSTR_PHASES = frozenset(
+    {
+        ROUTSTR_PHASE_CLAIMED,
+        ROUTSTR_PHASE_SENT,
+        ROUTSTR_PHASE_BACKOFF,
+        ROUTSTR_PHASE_HALTED,
+    }
+)
+ROUTSTR_PENDING_TTL_SECONDS = 15 * 60
+ROUTSTR_BACKOFF_BASE_SECONDS = 15 * 60
+ROUTSTR_MAX_TOPUP_FAILURES = 3
+ROUTSTR_MIN_TOPUP_SATS = 1
+ROUTSTR_MAX_TOPUP_SATS = 1_000_000
+# Rolling 24h ceiling on total Routstr auto top-up spend across all peers. The
+# per-attempt claim already stops a peer from being paid twice for the same
+# uncredited token; this bounds the total even when every attempt is credited
+# and the peer simply keeps reporting a below-threshold balance.
+ROUTSTR_MAX_DAILY_TOPUP_SATS = 2_000_000
 
 
 async def periodic_auto_topup() -> None:
@@ -72,7 +97,7 @@ async def periodic_auto_topup() -> None:
         except Exception as e:
             logger.error(
                 "Auto top-up cycle failed",
-                extra={"error": str(e), "error_type": type(e).__name__},
+                extra={"error": repr(e), "error_type": type(e).__name__},
             )
 
         await asyncio.sleep(AUTO_TOPUP_INTERVAL_SECONDS)
@@ -103,7 +128,7 @@ async def _run_auto_topup_cycle() -> None:
                 extra={
                     "provider_id": row.id,
                     "base_url": row.base_url,
-                    "error": str(e),
+                    "error": repr(e),
                     "error_type": type(e).__name__,
                 },
             )
@@ -134,12 +159,16 @@ async def _reconcile_all_ppq_claims() -> set[int]:
         except Exception as e:
             logger.error(
                 "PPQ claim reconciliation failed",
-                extra={"provider_id": row.id, "error": str(e)},
+                extra={
+                    "provider_id": row.id,
+                    "error": repr(e),
+                    "error_type": type(e).__name__,
+                },
             )
     return active_provider_ids
 
 
-def _invalid_ppq_number(value: object, *, integer: bool = False) -> bool:
+def _invalid_topup_number(value: object, *, integer: bool = False) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return True
     try:
@@ -160,9 +189,9 @@ def validate_ppq_auto_topup_settings(settings: dict | None) -> str | None:
 
     threshold = settings.get("topup_threshold")
     amount = settings.get("topup_amount_limit")
-    if _invalid_ppq_number(threshold):
+    if _invalid_topup_number(threshold):
         return "PPQ auto top-up threshold must be a positive number"
-    if _invalid_ppq_number(amount, integer=True):
+    if _invalid_topup_number(amount, integer=True):
         return "PPQ auto top-up amount must be a positive whole number"
     amount_usd = int(typing.cast(int | float, amount))
     if not PPQ_MIN_TOPUP_USD <= amount_usd <= PPQ_MAX_TOPUP_USD:
@@ -170,6 +199,62 @@ def validate_ppq_auto_topup_settings(settings: dict | None) -> str | None:
             f"PPQ auto top-up amount must be between {PPQ_MIN_TOPUP_USD} "
             f"and {PPQ_MAX_TOPUP_USD} USD"
         )
+    return None
+
+
+_legacy_threshold_hinted: set[int] = set()
+
+
+def _routstr_threshold_sats(row: UpstreamProviderRow, settings: dict) -> float:
+    """Balance, in sats, below which a top-up fires.
+
+    ``topup_threshold_sats`` is used as written. A legacy ``topup_threshold``
+    keeps the thousandfold it has always been compared with — reinterpreting it
+    as sats would drop an operator's trigger point by a factor of 1000 on
+    upgrade and leave the peer to run dry. The hint names the value to migrate
+    to, once per provider rather than once per scheduler tick.
+    """
+    explicit = settings.get("topup_threshold_sats")
+    if explicit is not None:
+        return float(typing.cast(int | float, explicit))
+
+    threshold_sats = float(typing.cast(int | float, settings["topup_threshold"])) * 1000
+    if row.id is not None and row.id not in _legacy_threshold_hinted:
+        _legacy_threshold_hinted.add(row.id)
+        logger.warning(
+            "Routstr auto top-up uses the legacy unitless threshold; set "
+            "topup_threshold_sats to state the unit",
+            extra={"provider_id": row.id, "threshold_sats": threshold_sats},
+        )
+    return threshold_sats
+
+
+def validate_routstr_auto_topup_settings(settings: dict | None) -> str | None:
+    """Return why enabled Routstr auto top-up settings are invalid, if anything."""
+    if not settings or not settings.get("auto_topup"):
+        return None
+
+    threshold_sats = settings.get("topup_threshold_sats")
+    legacy_threshold = settings.get("topup_threshold")
+    amount = settings.get("topup_amount_limit")
+    mint_url = settings.get("topup_mint_url")
+    if threshold_sats is not None:
+        if _invalid_topup_number(threshold_sats):
+            return "Routstr auto top-up threshold must be a positive number of sats"
+    elif legacy_threshold is None:
+        return "Routstr auto top-up requires a threshold"
+    elif _invalid_topup_number(legacy_threshold):
+        return "Routstr auto top-up threshold must be a positive number"
+    if _invalid_topup_number(amount, integer=True):
+        return "Routstr auto top-up amount must be a positive whole number"
+    amount_sats = int(typing.cast(int | float, amount))
+    if not ROUTSTR_MIN_TOPUP_SATS <= amount_sats <= ROUTSTR_MAX_TOPUP_SATS:
+        return (
+            f"Routstr auto top-up amount must be between {ROUTSTR_MIN_TOPUP_SATS} "
+            f"and {ROUTSTR_MAX_TOPUP_SATS} sats"
+        )
+    if not isinstance(mint_url, str) or not mint_url.strip():
+        return "Routstr auto top-up requires a mint URL"
     return None
 
 
@@ -212,21 +297,17 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
     if not settings.get("auto_topup"):
         return
 
-    threshold = settings.get("topup_threshold")
-    amount = settings.get("topup_amount_limit")
-    mint_url = settings.get("topup_mint_url")
-
-    if not threshold or not amount or not mint_url:
+    problem = validate_routstr_auto_topup_settings(settings)
+    if problem is not None:
         logger.warning(
-            "Auto top-up enabled but missing configuration",
-            extra={
-                "provider_id": row.id,
-                "has_threshold": bool(threshold),
-                "has_amount": bool(amount),
-                "has_mint": bool(mint_url),
-            },
+            "Auto top-up enabled but its configuration is invalid",
+            extra={"provider_id": row.id, "problem": problem},
         )
         return
+
+    threshold_sats = _routstr_threshold_sats(row, settings)
+    amount = int(settings["topup_amount_limit"])
+    mint_url = str(settings["topup_mint_url"])
 
     if not row.api_key:
         return
@@ -235,16 +316,40 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
     provider = RoutstrUpstreamProvider.from_db_row(row)
     if provider is None:
         return
+    if await _reconcile_routstr_state(row, provider):
+        return
+
     balance = await provider.get_balance()
 
-    if balance is None:
+    if balance is None or not math.isfinite(balance) or balance < 0:
         logger.warning(
             "Could not fetch balance for auto top-up",
             extra={"provider_id": row.id, "base_url": row.base_url},
         )
         return
 
-    if balance >= threshold * 1000:
+    if balance >= threshold_sats:
+        return
+
+    spent_24h_sats = await _routstr_spent_last_24h_sats()
+    if spent_24h_sats + amount > ROUTSTR_MAX_DAILY_TOPUP_SATS:
+        logger.critical(
+            "Auto top-up skipped: rolling 24h spend cap reached",
+            extra={
+                "provider_id": row.id,
+                "spent_24h_sats": spent_24h_sats,
+                "topup_amount": amount,
+                "daily_cap_sats": ROUTSTR_MAX_DAILY_TOPUP_SATS,
+            },
+        )
+        return
+
+    # The balance the peer must report before another token may be sent. Any
+    # shortfall is treated as "not credited": the token is a bearer instrument
+    # and a peer that took one without crediting it must not be handed another.
+    expected_sats = math.floor(balance) + amount
+    operation_id = await _claim_routstr_topup(row, expected_sats=expected_sats)
+    if operation_id is None:
         return
 
     # Balance is below threshold - create token and top up
@@ -253,58 +358,64 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         extra={
             "provider_id": row.id,
             "balance": balance,
-            "threshold": threshold,
+            "threshold_sats": threshold_sats,
             "topup_amount": amount,
             "mint_url": mint_url,
         },
     )
 
     try:
-        token = await send_token(amount, "sat", mint_url)
+        async with wallet_operation_guard():
+            # Keep the spend cap and audit mutation in one wallet lock.
+            spent_24h_sats = await _routstr_spent_last_24h_sats()
+            if spent_24h_sats + amount > ROUTSTR_MAX_DAILY_TOPUP_SATS:
+                raise ValueError("Routstr auto top-up daily spend cap reached")
+            token = await send_token_from_owner_locked(amount, "sat", mint_url)
+            actual_mint_url = token_mint_url(token, mint_url)
+            try:
+                await _persist_routstr_token_and_mark_sent(
+                    row,
+                    operation_id,
+                    expected_sats=expected_sats,
+                    token=token,
+                    amount=amount,
+                    mint_url=actual_mint_url,
+                )
+            except Exception:
+                logger.critical(
+                    "Aborting auto top-up because its token and sent claim "
+                    "could not be persisted atomically",
+                    extra={"provider_id": row.id, "mint_url": actual_mint_url},
+                )
+                try:
+                    await release_token_reservation(token)
+                except Exception as error:
+                    logger.critical(
+                        "Failed to release untracked auto-topup token",
+                        extra={
+                            "provider_id": row.id,
+                            "mint_url": actual_mint_url,
+                            "error": repr(error),
+                        },
+                    )
+                else:
+                    logger.warning(
+                        "Auto-topup token was released after persistence failed",
+                        extra={"provider_id": row.id, "mint_url": actual_mint_url},
+                    )
+                raise
     except Exception as e:
-        logger.error(
-            "Failed to create cashu token for auto top-up",
+        logger.warning(
+            "Failed to create or persist cashu token for auto top-up",
             extra={
                 "provider_id": row.id,
                 "amount": amount,
                 "mint_url": mint_url,
-                "error": str(e),
+                "error": repr(e),
+                "error_type": type(e).__name__,
             },
         )
-        return
-
-    actual_mint_url = token_mint_url(token, mint_url)
-    try:
-        await store_cashu_transaction(
-            token=token,
-            amount=amount,
-            unit="sat",
-            mint_url=actual_mint_url,
-            typ="out",
-            collected=False,
-            source="auto_topup",
-        )
-    except Exception:
-        logger.critical(
-            "Aborting auto top-up because its cashu token could not be persisted",
-            extra={"provider_id": row.id, "mint_url": actual_mint_url},
-        )
-        try:
-            await release_token_reservation(token)
-        except Exception as error:
-            logger.critical(
-                "Failed to release untracked auto-topup token",
-                extra={
-                    "provider_id": row.id,
-                    "mint_url": actual_mint_url,
-                    "error": str(error),
-                },
-            )
-        else:
-            logger.warning(
-                "Auto-topup token was released after persistence failed",
-                extra={"provider_id": row.id, "mint_url": actual_mint_url},
-            )
+        await _release_routstr_claim(row, operation_id)
         return
 
     result = await provider.topup(token)
@@ -346,6 +457,481 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
                 "new_balance_approx": balance + amount,
             },
         )
+
+
+def _routstr_state_id(row: UpstreamProviderRow) -> str:
+    if row.id is None:
+        raise ValueError("Routstr auto top-up requires a persisted provider row")
+    return _routstr_state_id_for_provider(row.id)
+
+
+def _routstr_state_id_for_provider(provider_id: int | str) -> str:
+    return f"routstr-auto-topup-{provider_id}"
+
+
+class RoutstrClaim(typing.NamedTuple):
+    operation_id: str
+    # Worker lease for "claimed"/"sent", retry-not-before for "backoff", and
+    # meaningless for "halted".
+    deadline: int
+    phase: str
+    # Peer balance in sats that proves this attempt was credited.
+    expected_sats: int
+    failures: int
+
+
+def _routstr_request_id(
+    operation_id: str,
+    deadline: int,
+    phase: str,
+    expected_sats: int,
+    failures: int,
+) -> str:
+    return f"routstr:{operation_id}:{deadline}:{phase}:{expected_sats}:{failures}"
+
+
+def _parse_routstr_request_id(request_id: str | None) -> RoutstrClaim | None:
+    parts = (request_id or "").split(":", 5)
+    if len(parts) != 6 or parts[0] != "routstr" or parts[3] not in ROUTSTR_PHASES:
+        return None
+    try:
+        deadline = int(parts[2])
+        expected_sats = int(parts[4])
+        failures = int(parts[5])
+    except (TypeError, ValueError):
+        return None
+    return RoutstrClaim(parts[1], deadline, parts[3], expected_sats, failures)
+
+
+async def _routstr_spent_last_24h_sats() -> int:
+    """Total sats committed to Routstr auto top-ups in the last 24 hours.
+
+    Uncollected rows count too: a token whose delivery is unconfirmed is spent
+    for capping purposes. Rows marked ``collected=False, swept=True`` record
+    tokens that were provably returned to the wallet and are excluded.
+    """
+    cutoff = int(time.time()) - 24 * 60 * 60
+    async with create_session() as session:
+        rows = (
+            await session.exec(
+                select(CashuTransaction.amount, CashuTransaction.unit).where(
+                    col(CashuTransaction.source) == "auto_topup",
+                    col(CashuTransaction.type) == "out",
+                    col(CashuTransaction.created_at) >= cutoff,
+                    or_(
+                        col(CashuTransaction.collected) == True,  # noqa: E712
+                        col(CashuTransaction.swept) == False,  # noqa: E712
+                    ),
+                )
+            )
+        ).all()
+    return sum(
+        amount if unit == "sat" else math.ceil(amount / 1000) for amount, unit in rows
+    )
+
+
+async def _routstr_provider_is_claimable(
+    session: AsyncSession, provider_id: int | str | None
+) -> bool:
+    """Re-read the provider inside the claim transaction.
+
+    Same reasoning as :func:`_ppq_provider_is_claimable`: a provider deleted or
+    retyped concurrently must either be visible here or lose the race against
+    the claim we are about to write.
+    """
+    if provider_id is None:
+        return False
+    current = await session.get(UpstreamProviderRow, provider_id)
+    return current is not None and current.provider_type == "routstr"
+
+
+async def _claim_routstr_topup(
+    row: UpstreamProviderRow, *, expected_sats: int
+) -> str | None:
+    """Acquire the provider's single durable auto top-up slot.
+
+    An expired backoff hands its failure count to the new attempt, so repeated
+    non-crediting peers still walk towards the halt instead of resetting the
+    counter every cycle.
+    """
+    state_id = _routstr_state_id(row)
+    operation_id = uuid.uuid4().hex
+    deadline = int(time.time()) + ROUTSTR_PENDING_TTL_SECONDS
+
+    async with create_session() as session:
+        if not await _routstr_provider_is_claimable(session, row.id):
+            return None
+        existing = await session.get(CashuTransaction, state_id)
+        if existing is not None:
+            failures = 0
+            if not (existing.collected or existing.swept):
+                claim = _parse_routstr_request_id(existing.request_id)
+                if (
+                    claim is None
+                    or claim.phase != ROUTSTR_PHASE_BACKOFF
+                    or time.time() < claim.deadline
+                ):
+                    return None
+                failures = claim.failures
+            result = await session.exec(  # type: ignore[call-overload]
+                update(CashuTransaction)
+                .where(
+                    col(CashuTransaction.id) == state_id,
+                    # Fence on the exact row that was read: any concurrent
+                    # writer that moved the claim must win instead of us.
+                    col(CashuTransaction.request_id) == existing.request_id,
+                )
+                .values(
+                    token="pending",
+                    amount=0,
+                    unit="sat",
+                    mint_url=None,
+                    request_id=_routstr_request_id(
+                        operation_id,
+                        deadline,
+                        ROUTSTR_PHASE_CLAIMED,
+                        expected_sats,
+                        failures,
+                    ),
+                    collected=False,
+                    swept=False,
+                    created_at=int(time.time()),
+                    source="routstr_auto_topup_claim",
+                )
+            )
+            await session.commit()
+            if (getattr(result, "rowcount", 0) or 0) != 1:
+                return None
+            return operation_id
+
+    try:
+        async with create_session() as session:
+            if not await _routstr_provider_is_claimable(session, row.id):
+                return None
+            session.add(
+                CashuTransaction(
+                    id=state_id,
+                    token="pending",
+                    amount=0,
+                    unit="sat",
+                    type="out",
+                    request_id=_routstr_request_id(
+                        operation_id,
+                        deadline,
+                        ROUTSTR_PHASE_CLAIMED,
+                        expected_sats,
+                        0,
+                    ),
+                    collected=False,
+                    source="routstr_auto_topup_claim",
+                )
+            )
+            await session.commit()
+    except IntegrityError:
+        return None
+    return operation_id
+
+
+async def _advance_routstr_claim(
+    row: UpstreamProviderRow,
+    operation_id: str,
+    *,
+    deadline: int,
+    phase: str,
+    expected_sats: int,
+    failures: int,
+    token: str | None = None,
+    amount: int | None = None,
+    mint_url: str | None = None,
+) -> bool:
+    """Move this worker's claim to another phase, if it still owns it."""
+    values: dict[str, object] = {
+        "request_id": _routstr_request_id(
+            operation_id, deadline, phase, expected_sats, failures
+        )
+    }
+    if token is not None:
+        values.update(token=token, amount=amount, mint_url=mint_url)
+
+    async with create_session() as session:
+        result = await session.exec(  # type: ignore[call-overload]
+            update(CashuTransaction)
+            .where(
+                col(CashuTransaction.id) == _routstr_state_id(row),
+                col(CashuTransaction.request_id).like(f"routstr:{operation_id}:%"),
+                col(CashuTransaction.collected) == False,  # noqa: E712
+                col(CashuTransaction.swept) == False,  # noqa: E712
+            )
+            .values(**values)
+        )
+        await session.commit()
+        return (getattr(result, "rowcount", 0) or 0) == 1
+
+
+async def _set_routstr_state_terminal(
+    row: UpstreamProviderRow, operation_id: str, *, collected: bool, swept: bool
+) -> bool:
+    """Finish an attempt only if this worker still owns the claim."""
+    async with create_session() as session:
+        result = await session.exec(  # type: ignore[call-overload]
+            update(CashuTransaction)
+            .where(
+                col(CashuTransaction.id) == _routstr_state_id(row),
+                col(CashuTransaction.request_id).like(f"routstr:{operation_id}:%"),
+                col(CashuTransaction.collected) == False,  # noqa: E712
+                col(CashuTransaction.swept) == False,  # noqa: E712
+            )
+            .values(collected=collected, swept=swept)
+        )
+        await session.commit()
+        return (getattr(result, "rowcount", 0) or 0) == 1
+
+
+async def _release_routstr_claim(row: UpstreamProviderRow, operation_id: str) -> None:
+    """Hand back a claim whose token never left the wallet."""
+    if not await _set_routstr_state_terminal(
+        row, operation_id, collected=False, swept=True
+    ):
+        logger.warning(
+            "Could not release the auto top-up claim after a pre-send failure; "
+            "it is owned by another attempt",
+            extra={"provider_id": row.id},
+        )
+
+
+async def _persist_routstr_token_and_mark_sent(
+    row: UpstreamProviderRow,
+    operation_id: str,
+    *,
+    expected_sats: int,
+    token: str,
+    amount: int,
+    mint_url: str,
+) -> None:
+    state_id = _routstr_state_id(row)
+    async with create_session() as session:
+        state = await session.get(CashuTransaction, state_id)
+        claim = _parse_routstr_request_id(state.request_id if state else None)
+        if (
+            state is None
+            or state.collected
+            or state.swept
+            or claim is None
+            or claim.operation_id != operation_id
+            or claim.phase != ROUTSTR_PHASE_CLAIMED
+        ):
+            raise RuntimeError("Routstr auto top-up claim ownership was lost")
+
+        result = await session.exec(  # type: ignore[call-overload]
+            update(CashuTransaction)
+            .where(
+                col(CashuTransaction.id) == state_id,
+                col(CashuTransaction.request_id) == state.request_id,
+                col(CashuTransaction.collected) == False,  # noqa: E712
+                col(CashuTransaction.swept) == False,  # noqa: E712
+            )
+            .values(
+                request_id=_routstr_request_id(
+                    operation_id,
+                    int(time.time()) + ROUTSTR_PENDING_TTL_SECONDS,
+                    ROUTSTR_PHASE_SENT,
+                    expected_sats,
+                    claim.failures,
+                ),
+                token=token,
+                amount=amount,
+                unit="sat",
+                mint_url=mint_url,
+            )
+        )
+        if (getattr(result, "rowcount", 0) or 0) != 1:
+            await session.rollback()
+            raise RuntimeError("Routstr auto top-up claim ownership was lost")
+
+        session.add(
+            CashuTransaction(
+                id=uuid.uuid4().hex,
+                token=token,
+                amount=amount,
+                unit="sat",
+                mint_url=mint_url,
+                type="out",
+                collected=False,
+                source="auto_topup",
+            )
+        )
+        await session.commit()
+
+
+async def _current_routstr_claim(row: UpstreamProviderRow) -> RoutstrClaim | None:
+    async with create_session() as session:
+        transaction = await session.get(CashuTransaction, _routstr_state_id(row))
+    if transaction is None:
+        return None
+    return _parse_routstr_request_id(transaction.request_id)
+
+
+async def _reconcile_routstr_state(
+    row: UpstreamProviderRow, provider: RoutstrUpstreamProvider
+) -> bool:
+    """Return True while a prior attempt must suppress a new payment."""
+    async with create_session() as session:
+        transaction = await session.get(CashuTransaction, _routstr_state_id(row))
+    if transaction is None or transaction.collected or transaction.swept:
+        return False
+
+    claim = _parse_routstr_request_id(transaction.request_id)
+    if claim is None:
+        logger.critical(
+            "Malformed auto top-up state; suppressing duplicate payment",
+            extra={"provider_id": row.id},
+        )
+        return True
+
+    now = time.time()
+    if claim.phase == ROUTSTR_PHASE_HALTED:
+        return True
+    if claim.phase == ROUTSTR_PHASE_BACKOFF:
+        return now < claim.deadline
+    if claim.phase == ROUTSTR_PHASE_CLAIMED:
+        # Nothing left the wallet, so a dead worker's slot is free to reuse.
+        if now < claim.deadline:
+            return True
+        return not await _set_routstr_state_terminal(
+            row, claim.operation_id, collected=False, swept=True
+        )
+
+    balance = await provider.get_balance()
+    if (
+        balance is not None
+        and math.isfinite(balance)
+        and balance >= claim.expected_sats
+    ):
+        if not await _set_routstr_state_terminal(
+            row, claim.operation_id, collected=True, swept=False
+        ):
+            logger.critical(
+                "Auto top-up was credited but its claim was already released; "
+                "a duplicate top-up is possible on the next cycle",
+                extra={"provider_id": row.id},
+            )
+        return True
+    if now < claim.deadline:
+        return True
+
+    failures = claim.failures + 1
+    if failures >= ROUTSTR_MAX_TOPUP_FAILURES:
+        await _advance_routstr_claim(
+            row,
+            claim.operation_id,
+            deadline=claim.deadline,
+            phase=ROUTSTR_PHASE_HALTED,
+            expected_sats=claim.expected_sats,
+            failures=failures,
+        )
+        logger.critical(
+            "Auto top-up halted: the peer repeatedly failed to credit a token",
+            extra={
+                "provider_id": row.id,
+                "base_url": row.base_url,
+                "failures": failures,
+                "admin_action": (
+                    f"POST /admin/api/upstream-providers/{row.id}"
+                    "/routstr-auto-topup/release"
+                ),
+            },
+        )
+        return True
+
+    await _advance_routstr_claim(
+        row,
+        claim.operation_id,
+        deadline=int(now) + ROUTSTR_BACKOFF_BASE_SECONDS * 2 ** (failures - 1),
+        phase=ROUTSTR_PHASE_BACKOFF,
+        expected_sats=claim.expected_sats,
+        failures=failures,
+    )
+    logger.warning(
+        "Auto top-up was not credited by the peer; backing off",
+        extra={
+            "provider_id": row.id,
+            "base_url": row.base_url,
+            "expected_sats": claim.expected_sats,
+            "failures": failures,
+        },
+    )
+    return True
+
+
+async def get_routstr_auto_topup_state(provider_id: int) -> dict[str, object]:
+    """Return admin-safe state for a provider's durable Routstr claim."""
+    async with create_session() as session:
+        transaction = await session.get(
+            CashuTransaction, _routstr_state_id_for_provider(provider_id)
+        )
+    if transaction is None or transaction.collected or transaction.swept:
+        return {"active": False}
+
+    claim = _parse_routstr_request_id(transaction.request_id)
+    return {
+        "active": True,
+        # Echoed back verbatim on release so a claim that moved on since the
+        # admin reviewed it fails the write instead of being swept unseen.
+        "state_token": transaction.request_id,
+        "operation_id": claim.operation_id if claim else None,
+        "phase": claim.phase if claim else None,
+        "expected_sats": claim.expected_sats if claim else None,
+        "failures": claim.failures if claim else None,
+        "deadline": claim.deadline if claim else None,
+        "created_at": transaction.created_at,
+        "amount": transaction.amount,
+        "unit": transaction.unit,
+        "mint_url": transaction.mint_url,
+        "malformed": claim is None,
+    }
+
+
+class RoutstrReleaseOutcome(typing.NamedTuple):
+    released: bool
+    reason: str
+
+
+async def release_routstr_auto_topup_state(
+    provider_id: int, *, state_token: str | None
+) -> RoutstrReleaseOutcome:
+    """Clear a halted or stuck claim after an admin reconciles the peer.
+
+    Unlike a Lightning melt there is no in-flight window to protect: the token
+    is already with the peer or still in the wallet either way. What the fence
+    does protect is the admin's decision — the row must be byte-identical to
+    the one they reviewed, so a claim that advanced in the meantime is not
+    swept on the strength of stale information.
+    """
+    state_id = _routstr_state_id_for_provider(provider_id)
+    async with create_session() as session:
+        transaction = await session.get(CashuTransaction, state_id)
+
+    if transaction is None or transaction.collected or transaction.swept:
+        return RoutstrReleaseOutcome(False, "no_active_claim")
+    if transaction.request_id != state_token:
+        return RoutstrReleaseOutcome(False, "stale_state")
+
+    async with create_session() as session:
+        result = await session.exec(  # type: ignore[call-overload]
+            update(CashuTransaction)
+            .where(
+                col(CashuTransaction.id) == state_id,
+                col(CashuTransaction.request_id) == state_token,
+                col(CashuTransaction.collected) == False,  # noqa: E712
+                col(CashuTransaction.swept) == False,  # noqa: E712
+            )
+            .values(swept=True)
+        )
+        if (getattr(result, "rowcount", 0) or 0) == 1:
+            await session.commit()
+            return RoutstrReleaseOutcome(True, "released")
+        await session.rollback()
+        return RoutstrReleaseOutcome(False, "claim_changed")
 
 
 def _ppq_state_id(row: UpstreamProviderRow) -> str:
@@ -528,7 +1114,11 @@ async def _set_ppq_state_terminal(
                 col(CashuTransaction.collected) == False,  # noqa: E712
                 col(CashuTransaction.swept) == False,  # noqa: E712
             )
-            .values(collected=collected, swept=swept)
+            .values(
+                collected=collected,
+                swept=swept,
+                created_at=int(time.time()) if collected else CashuTransaction.created_at,
+            )
         )
         updated = (getattr(result, "rowcount", 0) or 0) == 1
         if updated:
@@ -553,8 +1143,10 @@ async def _reconcile_ppq_state(
     """
     async with create_session() as session:
         transaction = await session.get(CashuTransaction, _ppq_state_id(row))
-    if transaction is None or transaction.collected or transaction.swept:
+    if transaction is None or transaction.swept:
         return False
+    if transaction.collected:
+        return int(time.time()) - transaction.created_at < PPQ_SETTLED_COOLDOWN_SECONDS
 
     claim = _parse_ppq_request_id(transaction.request_id)
     if claim is None:
@@ -620,7 +1212,7 @@ async def _reconcile_ppq_state(
 
 
 async def _ppq_provider_is_claimable(
-    session: AsyncSession, provider_id: int | None
+    session: AsyncSession, row: UpstreamProviderRow
 ) -> bool:
     """Re-read the provider inside the claim transaction.
 
@@ -631,10 +1223,16 @@ async def _ppq_provider_is_claimable(
     this the worker could create a claim for a provider that no longer
     exists, orphaning it forever.
     """
-    if provider_id is None:
+    if row.id is None:
         return False
-    current = await session.get(UpstreamProviderRow, provider_id)
-    return current is not None and current.provider_type == "ppqai"
+    current = await session.get(UpstreamProviderRow, row.id)
+    return bool(
+        current is not None
+        and current.enabled
+        and current.provider_type == "ppqai"
+        and current.api_key == row.api_key
+        and current.provider_settings == row.provider_settings
+    )
 
 
 async def _claim_ppq_topup(row: UpstreamProviderRow) -> str | None:
@@ -645,10 +1243,17 @@ async def _claim_ppq_topup(row: UpstreamProviderRow) -> str | None:
     request_id = _ppq_request_id(operation_id, expires_at, PPQ_PHASE_CLAIMED, "pending")
 
     async with create_session() as session:
-        if not await _ppq_provider_is_claimable(session, row.id):
+        if not await _ppq_provider_is_claimable(session, row):
             return None
         existing = await session.get(CashuTransaction, state_id)
         if existing is not None:
+            if (
+                existing.collected
+                and not existing.swept
+                and int(time.time()) - existing.created_at
+                < PPQ_SETTLED_COOLDOWN_SECONDS
+            ):
+                return None
             result = await session.exec(  # type: ignore[call-overload]
                 update(CashuTransaction)
                 .where(
@@ -679,7 +1284,7 @@ async def _claim_ppq_topup(row: UpstreamProviderRow) -> str | None:
         async with create_session() as session:
             # Same fencing as the update path: the provider must still exist
             # inside the transaction that creates the claim.
-            if not await _ppq_provider_is_claimable(session, row.id):
+            if not await _ppq_provider_is_claimable(session, row):
                 return None
             session.add(
                 CashuTransaction(
@@ -899,6 +1504,26 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
         return
     if balance >= threshold_usd:
         return
+
+    # Require two low-balance reads before creating an invoice.
+    confirmed_balance = await provider.get_balance()
+    if (
+        confirmed_balance is None
+        or not math.isfinite(confirmed_balance)
+        or confirmed_balance < 0
+        or confirmed_balance >= threshold_usd
+    ):
+        logger.info(
+            "PPQ auto top-up aborted by balance confirmation",
+            extra={
+                "provider_id": row.id,
+                "first_balance_usd": balance,
+                "confirmed_balance_usd": confirmed_balance,
+                "threshold_usd": threshold_usd,
+            },
+        )
+        return
+    balance = confirmed_balance
 
     # Perform local pricing and owner-funds checks before asking PPQ to create
     # an invoice. The exact mint quote still has to be checked afterward, but

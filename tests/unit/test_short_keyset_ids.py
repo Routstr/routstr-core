@@ -1,11 +1,8 @@
-from typing import cast
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 from cashu.core.base import (
-    MeltQuoteState,
-    Proof,
     TokenV4,
     TokenV4Proof,
     TokenV4Token,
@@ -16,7 +13,6 @@ from routstr.wallet import (
     Wallet,
     _redeem_same_mint,
     classify_redemption_error,
-    swap_to_trusted_mint,
 )
 
 MINT_URL = "https://mint.example"
@@ -163,54 +159,3 @@ async def test_cached_keysets_do_not_mask_a_refresh_failure(
     assert classified is not None
     assert classified[1] == 503
     assert classified[3] == "cashu_source_mint_unreachable"
-
-
-@pytest.mark.asyncio
-async def test_cross_mint_swap_uses_resolved_proofs_and_active_output_keyset() -> None:
-    token = _token(amounts=(7,))
-    source_wallet = _wallet_with_keysets(FULL_V2_ID)
-    source_wallet.melt_quote = AsyncMock(
-        return_value=Mock(quote="melt-quote", amount=5, fee_reserve=2)
-    )
-
-    async def assert_melt_boundary(**kwargs: object) -> Mock:
-        assert kwargs["fee_reserve_sat"] == 2
-        assert source_wallet.keyset_id == FULL_V2_ID
-        return Mock(state=MeltQuoteState.paid)
-
-    source_wallet.melt = AsyncMock(side_effect=assert_melt_boundary)
-
-    destination_url = "https://trusted-mint.example"
-    destination_wallet = Mock(
-        load_proofs=AsyncMock(),
-        available_balance=Mock(amount=0),
-        mint=AsyncMock(),
-    )
-    mint_quote = Mock(quote="mint-quote", request="lnbc-test-invoice")
-    calculate_amount = AsyncMock(return_value=5)
-
-    with (
-        patch("routstr.wallet.settings.primary_mint", destination_url),
-        patch("routstr.wallet.settings.primary_mint_unit", "sat"),
-        patch("routstr.wallet.settings.cashu_mints", [destination_url]),
-        patch(
-            "routstr.wallet._calculate_swap_amount",
-            calculate_amount,
-        ),
-        patch(
-            "routstr.wallet._request_mint_with_fallback",
-            AsyncMock(return_value=(destination_wallet, destination_url, mint_quote)),
-        ),
-    ):
-        assert await swap_to_trusted_mint(token, source_wallet) == (
-            5,
-            "sat",
-            destination_url,
-        )
-
-    calculate_call = calculate_amount.await_args
-    assert calculate_call is not None
-    resolved = cast(list[Proof], calculate_call.args[5])
-    assert resolved[0].id == FULL_V2_ID
-    assert source_wallet.get_fees_for_proofs.call_args.args[0] is resolved
-    assert source_wallet.melt.await_args.kwargs["proofs"] is resolved

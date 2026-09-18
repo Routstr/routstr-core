@@ -1,4 +1,3 @@
-import asyncio
 import json
 import re
 import secrets
@@ -6,12 +5,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, RootModel, field_validator
 from pydantic.v1 import ValidationError as PydanticValidationError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from ..payment.models import _row_to_model, list_models
+from ..payment.models import (
+    REQUIRED_PRICING_FIELDS,
+    _row_to_model,
+    list_models,
+)
+from ..payment.rates import BILLABLE_PRICING_FIELDS, coerce_rate
 from ..proxy import refresh_model_maps, reinitialize_upstreams
 from ..wallet import fetch_all_balances, send_token, token_mint_url
 from . import vault
@@ -30,6 +34,7 @@ from .db import (
 from .db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
+from .exceptions import json_compliant
 from .log_manager import log_manager
 from .logging import get_logger
 from .provider_slugs import allocate_unique_provider_slug
@@ -69,7 +74,9 @@ async def require_admin_api(request: Request) -> None:
     async with create_session() as session:
         result = await session.exec(select(CliToken).where(CliToken.token == token))
         cli_token = result.first()
-        if cli_token and (cli_token.expires_at is None or cli_token.expires_at > now_ts):
+        if cli_token and (
+            cli_token.expires_at is None or cli_token.expires_at > now_ts
+        ):
             cli_token.last_used_at = now_ts
             session.add(cli_token)
             await session.commit()
@@ -104,25 +111,28 @@ async def get_temporary_balances_api(
         )
         total = count_result.one()
 
-        # Aggregate totals across the whole (search-filtered) set, not just the
-        # current page. Balance counts only parent (non-child) keys to avoid
-        # double-counting, since child keys draw from their parent's balance.
-        totals_result = await session.exec(
+        # Aggregate totals across the whole search-filtered set, not just this page.
+        balance_totals_result = await session.exec(
             select(
+                func.coalesce(func.sum(ApiKey.balance), 0),
+                func.coalesce(func.sum(ApiKey.reserved_balance), 0),
                 func.coalesce(
-                    func.sum(
-                        case(
-                            (col(ApiKey.parent_key_hash).is_(None), ApiKey.balance),
-                            else_=0,
-                        )
-                    ),
-                    0,
+                    func.sum(col(ApiKey.balance) - col(ApiKey.reserved_balance)), 0
                 ),
+            ).where(*filters)
+        )
+        (
+            total_balance,
+            total_reserved_balance,
+            total_available_balance,
+        ) = balance_totals_result.one()
+        usage_totals_result = await session.exec(
+            select(
                 func.coalesce(func.sum(ApiKey.total_spent), 0),
                 func.coalesce(func.sum(ApiKey.total_requests), 0),
             ).where(*filters)
         )
-        total_balance, total_spent, total_requests = totals_result.one()
+        total_spent, total_requests = usage_totals_result.one()
 
         # Latest created first; keys with no created_at (legacy rows) sort last.
         # Use an explicit CASE rather than relying on dialect NULL-ordering so
@@ -143,13 +153,12 @@ async def get_temporary_balances_api(
             {
                 "hashed_key": key.hashed_key,
                 "balance": key.balance,
+                "reserved_balance": key.reserved_balance,
+                "available_balance": key.total_balance,
                 "total_spent": key.total_spent,
                 "total_requests": key.total_requests,
                 "refund_address": key.refund_address,
                 "key_expiry_time": key.key_expiry_time,
-                "parent_key_hash": key.parent_key_hash,
-                "balance_limit": key.balance_limit,
-                "balance_limit_reset": key.balance_limit_reset,
                 "validity_date": key.validity_date,
                 "created_at": key.created_at,
             }
@@ -158,6 +167,8 @@ async def get_temporary_balances_api(
         "total": total,
         "totals": {
             "total_balance": total_balance,
+            "total_reserved_balance": total_reserved_balance,
+            "total_available_balance": total_available_balance,
             "total_spent": total_spent,
             "total_requests": total_requests,
         },
@@ -165,8 +176,6 @@ async def get_temporary_balances_api(
 
 
 class ApiKeyUpdate(BaseModel):
-    balance_limit: int | None = None
-    balance_limit_reset: str | None = None
     validity_date: int | None = None
 
 
@@ -181,10 +190,6 @@ async def update_apikey(
         if not key:
             raise HTTPException(status_code=404, detail="API key not found")
 
-        if update.balance_limit is not None:
-            key.balance_limit = update.balance_limit
-        if update.balance_limit_reset is not None:
-            key.balance_limit_reset = update.balance_limit_reset
         if update.validity_date is not None:
             key.validity_date = update.validity_date
 
@@ -194,8 +199,6 @@ async def update_apikey(
 
     return {
         "hashed_key": key.hashed_key,
-        "balance_limit": key.balance_limit,
-        "balance_limit_reset": key.balance_limit_reset,
         "validity_date": key.validity_date,
     }
 
@@ -256,16 +259,12 @@ async def update_password(request: Request, password_update: PasswordUpdate) -> 
         secret = await get_secret(session)
 
         if not secret.admin_password_hash:
-            raise HTTPException(
-                status_code=500, detail="Admin password not configured"
-            )
+            raise HTTPException(status_code=500, detail="Admin password not configured")
 
         if not vault.verify_password(
             password_update.current_password, secret.admin_password_hash
         ):
-            raise HTTPException(
-                status_code=401, detail="Current password is incorrect"
-            )
+            raise HTTPException(status_code=401, detail="Current password is incorrect")
 
         # Validate new password
         new_password = password_update.new_password.strip()
@@ -483,6 +482,38 @@ class ModelCreate(BaseModel):
     enabled: bool = True
     forwarded_model_id: str | None = None
 
+    @field_validator("pricing")
+    @classmethod
+    def _validate_pricing(cls, value: dict[str, object]) -> dict[str, object]:
+        """Reject a rate that is malformed, non-finite, negative or not there.
+
+        A present-but-invalid rate would otherwise slip through: a non-numeric
+        string coerces to $0 on the read path (an unpriced-looking row), while a
+        negative or ``NaN``/``inf`` value is truthy and reads back as a real
+        price, so the model could be enabled and bill a nonsensical amount.
+        Surfacing a 422 reports the client bug as a client bug instead of
+        persisting it. Numeric strings (``"0.000005"``) stay valid, and so does
+        an omitted auxiliary rate — the stored JSON accepts both.
+        """
+        for field in BILLABLE_PRICING_FIELDS:
+            if field not in value:
+                # ``dict.get`` cannot tell this from an explicit ``null``, so
+                # both were skipped and a row that ``Pricing`` cannot parse was
+                # written — and then raised out of the response that reads it
+                # back, after the row had been committed.
+                if field in REQUIRED_PRICING_FIELDS:
+                    raise ValueError(f"{field} is required")
+                continue
+            # The shared coercion also absorbs the OverflowError an oversized
+            # integer raises, which pydantic does not convert into a validation
+            # error — unhandled it escaped as a 500 for a bad client value.
+            if coerce_rate(value[field]) is None:
+                raise ValueError(
+                    f"{field} must be a finite, non-negative number, "
+                    f"got {value[field]!r}"
+                )
+        return value
+
 
 def _normalize_forwarded_model_id(value: str | None) -> str | None:
     if value is None:
@@ -609,9 +640,13 @@ async def get_provider_model(provider_id: str, model_id: str) -> dict[str, objec
             raise HTTPException(
                 status_code=404, detail="Model not found for this provider"
             )
-        return _row_to_model(
-            row, apply_provider_fee=False, provider_fee=provider.provider_fee
-        ).dict()  # type: ignore
+        # Same duty as the listing this view is opened from: a stored rate that
+        # is not a usable number must be shown as it is, not encoded as `null`.
+        return json_compliant(  # type: ignore[return-value]
+            _row_to_model(
+                row, apply_provider_fee=False, provider_fee=provider.provider_fee
+            ).dict()
+        )
 
 
 @admin_router.delete(
@@ -870,29 +905,43 @@ class UpstreamProviderUpdateBySlug(BaseModel):
     provider_settings: dict | None = None
 
 
-async def _active_ppq_claim_in_session(session: AsyncSession, provider_id: int) -> bool:
+async def _active_auto_topup_claim_in_session(
+    session: AsyncSession, provider_id: int, provider_type: str
+) -> bool:
     """Check for an active claim inside the caller's transaction.
 
     Must share the transaction of whatever destructive write it is guarding —
     a check in its own session leaves a window for a worker to create the
     claim between the check and the commit.
     """
-    from ..upstream.auto_topup import _ppq_state_id_for_provider
+    from ..upstream.auto_topup import (
+        _ppq_state_id_for_provider,
+        _routstr_state_id_for_provider,
+    )
 
-    claim = await session.get(CashuTransaction, _ppq_state_id_for_provider(provider_id))
+    state_id = (
+        _ppq_state_id_for_provider(provider_id)
+        if provider_type == "ppqai"
+        else _routstr_state_id_for_provider(provider_id)
+    )
+    claim = await session.get(CashuTransaction, state_id)
     return claim is not None and not claim.collected and not claim.swept
 
 
-def _require_valid_ppq_auto_topup(
-    provider_type: str, settings: dict | None
-) -> None:
-    """Reject PPQ auto top-up settings the worker would later refuse."""
-    if provider_type != "ppqai":
+def _require_valid_auto_topup(provider_type: str, settings: dict | None) -> None:
+    """Reject auto top-up settings the worker would later refuse."""
+    from ..upstream.auto_topup import (
+        validate_ppq_auto_topup_settings,
+        validate_routstr_auto_topup_settings,
+    )
+
+    if provider_type == "ppqai":
+        problem = validate_ppq_auto_topup_settings(settings)
+    elif provider_type == "routstr":
+        problem = validate_routstr_auto_topup_settings(settings)
+    else:
         return
 
-    from ..upstream.auto_topup import validate_ppq_auto_topup_settings
-
-    problem = validate_ppq_auto_topup_settings(settings)
     if problem is not None:
         raise HTTPException(status_code=400, detail=problem)
 
@@ -917,16 +966,18 @@ async def _apply_provider_update(
     )
     if (
         provider_type_changed
-        and provider.provider_type == "ppqai"
+        and provider.provider_type in ("ppqai", "routstr")
         and provider.id is not None
-        and await _active_ppq_claim_in_session(session, provider.id)
+        and await _active_auto_topup_claim_in_session(
+            session, provider.id, provider.provider_type
+        )
     ):
-        # Changing the type would orphan the claim: the PPQ endpoints refuse
-        # non-ppqai providers, so nobody could ever inspect or release it.
+        # Changing the type would orphan the claim: the claim endpoints refuse
+        # providers of the wrong type, so nobody could inspect or release it.
         raise HTTPException(
             status_code=409,
             detail=(
-                "This provider has an active PPQ auto top-up claim. Release "
+                "This provider has an active auto top-up claim. Release "
                 "it before changing the provider type"
             ),
         )
@@ -977,7 +1028,7 @@ async def _apply_provider_update(
         except (json.JSONDecodeError, TypeError):
             effective_settings = None
     if effective_settings is not None:
-        _require_valid_ppq_auto_topup(provider.provider_type, effective_settings)
+        _require_valid_auto_topup(provider.provider_type, effective_settings)
     if payload.provider_settings is not None:
         provider.provider_settings = json.dumps(payload.provider_settings)
 
@@ -1017,9 +1068,7 @@ async def create_upstream_provider(
         else:
             slug = await allocate_unique_provider_slug(session, payload.provider_type)
 
-        _require_valid_ppq_auto_topup(
-            payload.provider_type, payload.provider_settings
-        )
+        _require_valid_auto_topup(payload.provider_type, payload.provider_settings)
 
         provider = UpstreamProviderRow(
             slug=slug,
@@ -1078,9 +1127,7 @@ async def update_upstream_provider_by_slug(
     lookup = _validate_slug(payload.slug)
     async with create_session() as session:
         result = await session.exec(
-            select(UpstreamProviderRow).where(
-                UpstreamProviderRow.slug == lookup
-            )
+            select(UpstreamProviderRow).where(UpstreamProviderRow.slug == lookup)
         )
         provider = result.first()
         if not provider:
@@ -1117,16 +1164,19 @@ async def delete_upstream_provider(provider_id: str) -> dict[str, object]:
         # re-reads the provider inside its own transaction, so these two
         # writes serialise — either the claim lands first and this 409s, or
         # the delete lands first and the worker refuses to claim.
-        if provider.provider_type == "ppqai" and await _active_ppq_claim_in_session(
-            session, deleted_id
+        if provider.provider_type in (
+            "ppqai",
+            "routstr",
+        ) and await _active_auto_topup_claim_in_session(
+            session, deleted_id, provider.provider_type
         ):
             # Deleting now would orphan the claim and any funds it tracks:
-            # the PPQ endpoints 404 without the provider row, so the claim
+            # the claim endpoints 404 without the provider row, so the claim
             # could never again be inspected or released.
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "This provider has an active PPQ auto top-up claim. "
+                    "This provider has an active auto top-up claim. "
                     "Resolve and release it before deleting the provider"
                 ),
             )
@@ -1186,8 +1236,13 @@ async def get_provider_models(provider_id: str) -> dict[str, object]:
                 "provider_type": provider.provider_type,
                 "base_url": provider.base_url,
             },
-            "db_models": [m.dict() for m in db_models],
-            "remote_models": [m.dict() for m in filtered_remote_models],
+            # This listing includes disabled models, so it is the one view that
+            # still carries a row the served-catalog backstop holds back —
+            # including one whose stored rate is not a usable number. The
+            # encoder would report that rate as `null`, indistinguishable from a
+            # missing one; show the operator the value that needs fixing.
+            "db_models": [json_compliant(m.dict()) for m in db_models],
+            "remote_models": [json_compliant(m.dict()) for m in filtered_remote_models],
         }
 
 
@@ -1316,50 +1371,37 @@ async def initiate_provider_topup(
                         else {}
                     )
 
-                    last_status_code = 500
-                    last_error_detail: object = "Failed to create top-up invoice"
+                    # Quote creation is unsafe to retry without idempotency.
+                    resp = await client.post(
+                        f"{clean_url}/v1/balance/lightning/invoice",
+                        json=request_json,
+                        headers=headers,
+                    )
 
-                    # Some upstream Routstr nodes fail the first invoice request after warm-up
-                    # and succeed immediately on retry. Retry once here so the UI stays single-click.
-                    for attempt in range(2):
-                        resp = await client.post(
-                            f"{clean_url}/v1/balance/lightning/invoice",
-                            json=request_json,
-                            headers=headers,
-                        )
-
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            return {
-                                "ok": True,
-                                "topup_data": {
-                                    "payment_request": data.get("bolt11"),
-                                    "invoice_id": data.get("invoice_id"),
-                                    "status": "pending",
-                                },
-                            }
-
-                        logger.error(
-                            f"Upstream topup request failed: {resp.text}",
-                            extra={
-                                "provider_id": provider_id,
-                                "attempt": attempt + 1,
-                                "status_code": resp.status_code,
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        return {
+                            "ok": True,
+                            "topup_data": {
+                                "payment_request": data.get("bolt11"),
+                                "invoice_id": data.get("invoice_id"),
+                                "status": "pending",
                             },
-                        )
-                        try:
-                            last_error_detail = resp.json()
-                        except Exception:
-                            last_error_detail = resp.text
-                        last_status_code = resp.status_code
+                        }
 
-                        if resp.status_code < 500 or attempt == 1:
-                            break
-
-                        await asyncio.sleep(0.2)
-
+                    logger.error(
+                        f"Upstream topup request failed: {resp.text}",
+                        extra={
+                            "provider_id": provider_id,
+                            "status_code": resp.status_code,
+                        },
+                    )
+                    try:
+                        error_detail: object = resp.json()
+                    except Exception:
+                        error_detail = resp.text
                     raise HTTPException(
-                        status_code=last_status_code, detail=last_error_detail
+                        status_code=resp.status_code, detail=error_detail
                     )
 
             upstream_instance = _instantiate_provider(provider)
@@ -1718,6 +1760,34 @@ async def get_logs_api(
     }
 
 
+@admin_router.get(
+    "/api/logs/request/{request_id}", dependencies=[Depends(require_admin_api)]
+)
+async def get_logs_by_request_id_api(
+    request: Request,
+    request_id: str,
+    date: str | None = None,
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, object]:
+    """
+    Get every log entry belonging to a single request ID, oldest first.
+    """
+    log_entries = log_manager.search_logs(
+        date=date,
+        request_id=request_id,
+        limit=limit,
+    )
+    log_entries.sort(key=lambda entry: str(entry.get("asctime", "")))
+
+    return {
+        "logs": log_entries,
+        "total": len(log_entries),
+        "request_id": request_id,
+        "date": date,
+        "limit": limit,
+    }
+
+
 @admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
 async def get_log_dates_api(request: Request) -> dict[str, object]:
     logs_dir = Path("logs")
@@ -1811,6 +1881,87 @@ async def release_ppq_auto_topup_api(
     return {"ok": True, "released": True}
 
 
+_ROUTSTR_RELEASE_ERRORS = {
+    "no_active_claim": "No active Routstr auto top-up claim to release",
+    "stale_state": "The claim changed since it was reviewed; reload and check again",
+    "claim_changed": (
+        "The claim changed while the release was being applied; reload and check again"
+    ),
+}
+
+
+class ReleaseRoutstrAutoTopupRequest(BaseModel):
+    confirmed_peer_reconciled: bool
+    state_token: str | None = None
+
+
+async def _require_routstr_provider(provider_id: int) -> UpstreamProviderRow:
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    if provider.provider_type != "routstr":
+        raise HTTPException(status_code=400, detail="Provider is not a Routstr node")
+    return provider
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}/routstr-auto-topup",
+    dependencies=[Depends(require_admin_api)],
+)
+async def get_routstr_auto_topup_api(provider_id: int) -> dict[str, object]:
+    await _require_routstr_provider(provider_id)
+    from ..upstream.auto_topup import get_routstr_auto_topup_state
+
+    return {"ok": True, **await get_routstr_auto_topup_state(provider_id)}
+
+
+@admin_router.post(
+    "/api/upstream-providers/{provider_id}/routstr-auto-topup/release",
+    dependencies=[Depends(require_admin_api)],
+)
+async def release_routstr_auto_topup_api(
+    provider_id: int, payload: ReleaseRoutstrAutoTopupRequest
+) -> dict[str, object]:
+    await _require_routstr_provider(provider_id)
+    if not payload.confirmed_peer_reconciled:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirm the peer credited or returned the token before releasing",
+        )
+
+    from ..upstream.auto_topup import release_routstr_auto_topup_state
+
+    outcome = await release_routstr_auto_topup_state(
+        provider_id, state_token=payload.state_token
+    )
+    if not outcome.released:
+        raise HTTPException(
+            status_code=409, detail=_ROUTSTR_RELEASE_ERRORS[outcome.reason]
+        )
+
+    logger.warning(
+        "Admin released Routstr auto top-up claim after manual reconciliation",
+        extra={"provider_id": provider_id, "state_token": payload.state_token},
+    )
+    return {"ok": True, "released": True}
+
+
+def _transaction_status(tx: CashuTransaction) -> str:
+    """An outgoing admin withdrawal ends at "issued": the node hands the bearer
+    token over and never learns whether it was redeemed, so its flags stay false
+    and it would otherwise read pending forever. Incoming admin rows are redeemed
+    by the node itself and keep the normal collected/swept lifecycle.
+    """
+    if tx.swept:
+        return "swept"
+    if tx.collected:
+        return "collected"
+    if tx.source == "admin" and tx.type == "out":
+        return "issued"
+    return "pending"
+
+
 @admin_router.get("/api/transactions", dependencies=[Depends(require_admin_api)])
 async def get_transactions_api(
     type: str | None = None,
@@ -1823,10 +1974,11 @@ async def get_transactions_api(
     async with create_session() as session:
         from sqlmodel import col, func
 
-        # Hide only the deterministic PPQ claim-lock rows. Append-only PPQ
-        # payment rows remain visible as the audit trail for irreversible melts.
+        # Hide only the deterministic claim-lock rows. Append-only PPQ payment
+        # rows and auto-topup token rows remain visible as the audit trail.
         base = select(CashuTransaction).where(
-            ~col(CashuTransaction.id).like("ppq-auto-topup-%")
+            ~col(CashuTransaction.id).like("ppq-auto-topup-%"),
+            ~col(CashuTransaction.id).like("routstr-auto-topup-%"),
         )
         if type:
             base = base.where(CashuTransaction.type == type)
@@ -1840,13 +1992,25 @@ async def get_transactions_api(
                 base = base.where(CashuTransaction.source == source)
         if status:
             if status == "collected":
-                base = base.where(CashuTransaction.collected == True)  # noqa: E712
+                base = base.where(
+                    CashuTransaction.collected == True,  # noqa: E712
+                    CashuTransaction.swept == False,  # noqa: E712
+                )
             elif status == "swept":
                 base = base.where(CashuTransaction.swept == True)  # noqa: E712
+            elif status == "issued":
+                base = base.where(
+                    CashuTransaction.source == "admin",
+                    CashuTransaction.type == "out",
+                    CashuTransaction.collected == False,  # noqa: E712
+                    CashuTransaction.swept == False,  # noqa: E712
+                )
             elif status == "pending":
                 base = base.where(
                     CashuTransaction.collected == False,  # noqa: E712
                     CashuTransaction.swept == False,  # noqa: E712
+                    (CashuTransaction.source != "admin")
+                    | (CashuTransaction.type != "out"),
                 )
 
         if search:
@@ -1873,15 +2037,17 @@ async def get_transactions_api(
 
         return {
             "transactions": [
-                tx.dict(exclude={"sweep_started_at"}) for tx in transactions
+                {
+                    **tx.dict(exclude={"sweep_started_at"}),
+                    "status": _transaction_status(tx),
+                }
+                for tx in transactions
             ],
             "total": total,
         }
 
 
-@admin_router.get(
-    "/api/lightning-invoices", dependencies=[Depends(require_admin_api)]
-)
+@admin_router.get("/api/lightning-invoices", dependencies=[Depends(require_admin_api)])
 async def get_lightning_invoices_api(
     status: str | None = None,
     purpose: str | None = None,

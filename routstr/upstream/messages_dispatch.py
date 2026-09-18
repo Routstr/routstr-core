@@ -32,6 +32,7 @@ from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..payment.models import Model
 from .rate_limit import classify_rate_limit
+from .reasoning_effort import adapt_messages_body_for_litellm
 
 logger = get_logger(__name__)
 
@@ -40,6 +41,10 @@ logger = get_logger(__name__)
 # unsupported params; these newer/extension fields get passed through
 # verbatim and the upstream rejects them with a 400. Pop them here so the
 # request reaches the upstream cleanly.
+#
+# Note: ``dispatch_anthropic_messages`` additionally enforces
+# ``ALLOWED_MESSAGES_REQUEST_FIELDS``, which already excludes all of these.
+# This tuple remains for ``gemini_messages``, which pops them explicitly.
 ANTHROPIC_ONLY_FIELDS: tuple[str, ...] = (
     "thinking",
     "cache_control",
@@ -49,6 +54,27 @@ ANTHROPIC_ONLY_FIELDS: tuple[str, ...] = (
     "service_tier",
     "anthropic_version",
     "anthropic_beta",
+)
+
+# Anthropic Messages API request fields forwarded from the client body
+# into the upstream call. Only these are passed on; anything else is
+# dropped so the forwarded request is deterministic and limited to the
+# documented Messages surface.
+ALLOWED_MESSAGES_REQUEST_FIELDS: frozenset[str] = frozenset(
+    {
+        "messages",
+        "max_tokens",
+        "system",
+        "temperature",
+        "top_p",
+        "top_k",
+        "stop_sequences",
+        "tools",
+        "tool_choice",
+        "metadata",
+        # OpenAI-shaped effort after thinking is lifted off Anthropic bodies.
+        "reasoning_effort",
+    }
 )
 
 
@@ -108,9 +134,7 @@ def parse_sse_blocks(buffer: bytes) -> tuple[list[dict], bytes]:
     return events, buffer
 
 
-def events_from_chunk(
-    chunk: object, sse_buffer: bytes
-) -> tuple[list[dict], bytes]:
+def events_from_chunk(chunk: object, sse_buffer: bytes) -> tuple[list[dict], bytes]:
     """Normalize a stream chunk into one or more event dicts.
 
     ``litellm.anthropic.messages.acreate(stream=True)`` yields raw SSE
@@ -201,9 +225,7 @@ async def aggregate_anthropic_events_to_message(
                 raw_json = partial_json.pop(idx, None)
                 if raw_json is not None and idx < len(blocks):
                     try:
-                        blocks[idx]["input"] = (
-                            json.loads(raw_json) if raw_json else {}
-                        )
+                        blocks[idx]["input"] = json.loads(raw_json) if raw_json else {}
                     except json.JSONDecodeError:
                         blocks[idx]["input"] = raw_json
             elif etype == "message_delta":
@@ -445,9 +467,7 @@ async def dispatch_anthropic_messages(
     on bad input or upstream failure.
     """
     if not request_body:
-        raise UpstreamError(
-            "Missing request body for /v1/messages", status_code=400
-        )
+        raise UpstreamError("Missing request body for /v1/messages", status_code=400)
 
     try:
         body: dict = json.loads(request_body)
@@ -466,15 +486,18 @@ async def dispatch_anthropic_messages(
     client_stream = bool(body.pop("stream", False))
     upstream_stream = True
 
-    dropped: dict[str, Any] = {}
-    for field in ANTHROPIC_ONLY_FIELDS:
-        if field in body:
-            dropped[field] = body.pop(field)
+    adapt_messages_body_for_litellm(body, model_obj)
+
+    # Forward only allowlisted Anthropic Messages request fields. Any
+    # other client-supplied key is dropped so it cannot leak into the
+    # upstream request. See ALLOWED_MESSAGES_REQUEST_FIELDS.
+    dropped = sorted(set(body) - ALLOWED_MESSAGES_REQUEST_FIELDS)
     if dropped:
         logger.debug(
-            "Dropped anthropic-only fields before litellm dispatch",
-            extra={"dropped_keys": sorted(dropped.keys())},
+            "Dropped non-forwardable fields before litellm dispatch",
+            extra={"dropped_keys": dropped},
         )
+    body = {k: v for k, v in body.items() if k in ALLOWED_MESSAGES_REQUEST_FIELDS}
 
     # Convention: `model.id` is the canonical upstream model name;
     # `forwarded_model_id` is the public alias the internal API exposes

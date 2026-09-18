@@ -305,6 +305,10 @@ async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
             "service_tier": "auto",
             "anthropic_beta": "abc",
             "anthropic_version": "2023-06-01",
+            "api_base": "https://attacker.invalid",
+            "api_key": "client-controlled-key",
+            "custom_llm_provider": "client-controlled-provider",
+            "unexpected_field": "must-not-leak",
         }
     ).encode()
 
@@ -342,6 +346,8 @@ async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
         "service_tier",
         "anthropic_beta",
         "anthropic_version",
+        "custom_llm_provider",
+        "unexpected_field",
     ):
         assert stripped not in forwarded, (
             f"Anthropic-only field {stripped!r} leaked through to litellm"
@@ -349,6 +355,64 @@ async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
     # Core fields preserved
     assert forwarded["max_tokens"] == 64
     assert forwarded["messages"] == [{"role": "user", "content": "hi"}]
+    # Dispatch-controlled values cannot be overridden by the client body.
+    assert forwarded["model"] == "openai/openai/gpt-4o-mini"
+    assert forwarded["api_base"] == "http://test"
+    assert forwarded["api_key"] == "upstream-key"
+    assert forwarded["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_forwards_all_allowlisted_messages_fields() -> None:
+    provider = _make_provider()
+    key = _make_key()
+    model = _make_model()
+    session = _make_session()
+    allowed = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 64,
+        "system": "Be concise",
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "top_k": 20,
+        "stop_sequences": ["STOP"],
+        "tools": [
+            {
+                "name": "lookup",
+                "description": "Look something up",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ],
+        "tool_choice": {"type": "tool", "name": "lookup"},
+        "metadata": {"user_id": "test-user"},
+    }
+    body = json.dumps({"model": model.id, **allowed}).encode()
+    captured: dict[str, Any] = {}
+
+    async def fake_acreate(**kwargs: Any) -> dict:
+        captured["kwargs"] = kwargs
+        return _anthropic_non_stream_response()
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(side_effect=fake_acreate),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
+        ),
+    ):
+        await provider._forward_messages_via_litellm(
+            request_body=body,
+            key=key,
+            session=session,
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    forwarded = captured["kwargs"]
+    assert {field: forwarded[field] for field in allowed} == allowed
 
 
 @pytest.mark.asyncio
@@ -1070,18 +1134,30 @@ async def test_forward_x_cashu_request_handles_count_tokens_locally() -> None:
             "prepare_request_body",
             side_effect=AssertionError("upstream should not be called"),
         ):
-            response = await provider.forward_x_cashu_request(
-                request=request,
-                path="v1/messages/count_tokens",
-                headers={},
-                amount=5_000,
-                unit="sat",
-                max_cost_for_model=10_000,
-                model_obj=model,
-                mint="https://mint",
-            )
+            with patch.object(
+                provider,
+                "send_refund",
+                new=AsyncMock(return_value="refund-token"),
+            ) as send_refund:
+                response = await provider.forward_x_cashu_request(
+                    request=request,
+                    path="v1/messages/count_tokens",
+                    headers={},
+                    amount=5_000,
+                    unit="sat",
+                    max_cost_for_model=10_000,
+                    model_obj=model,
+                    mint="https://mint",
+                )
 
+    send_refund.assert_awaited_once_with(
+        5_000,
+        "sat",
+        "https://mint",
+        request_id="req-test",
+    )
     assert response.status_code == 200
+    assert response.headers["X-Cashu"] == "refund-token"
     body = response.body if isinstance(response.body, bytes) else bytes(response.body)
     payload = json.loads(body.decode())
     assert "input_tokens" in payload
@@ -1361,15 +1437,34 @@ async def test_dispatch_uses_url_detected_prefix_for_fireworks_custom_row() -> N
     ["handle_x_cashu", "handle_x_cashu_responses"],
 )
 @pytest.mark.parametrize(
-    "error",
+    ("error", "expected_type", "expected_code", "expected_message"),
     [
-        httpx.ConnectError("All connection attempts failed"),
-        MintConnectionError("Cashu mint is unreachable"),
-        TimeoutError("timed out connecting to mint"),
+        (
+            httpx.ConnectError("All connection attempts failed"),
+            "mint_unreachable",
+            "cashu_mint_unreachable",
+            "Cashu mint is unreachable; retry later",
+        ),
+        (
+            MintConnectionError("connect to http://mint:3338 refused"),
+            "mint_unreachable",
+            "cashu_mint_unreachable",
+            "Cashu mint is unreachable; retry later",
+        ),
+        (
+            TimeoutError("timed out connecting to mint"),
+            "mint_timeout",
+            "cashu_mint_timeout",
+            "Cashu mint did not respond in time; retry later",
+        ),
     ],
 )
 async def test_x_cashu_mint_unreachable_returns_503(
-    handler_name: str, error: Exception
+    handler_name: str,
+    error: Exception,
+    expected_type: str,
+    expected_code: str,
+    expected_message: str,
 ) -> None:
     """Both X-Cashu entrypoints classify a down mint as 503 mint_unreachable,
     not a generic 400 cashu_error."""
@@ -1391,9 +1486,9 @@ async def test_x_cashu_mint_unreachable_returns_503(
 
     assert response.status_code == 503
     body = json.loads(bytes(response.body))
-    assert body["error"]["type"] == "mint_unreachable"
-    assert body["error"]["message"] == "Cashu mint is unreachable"
-    assert body["error"]["code"] == "cashu_mint_unreachable"
+    assert body["error"]["type"] == expected_type
+    assert body["error"]["message"] == expected_message
+    assert body["error"]["code"] == expected_code
     if str(error) != body["error"]["message"]:
         assert str(error) not in body["error"]["message"]
 
@@ -1436,13 +1531,6 @@ async def test_x_cashu_mint_unreachable_returns_503(
             "mint_error",
             "Token value is too small to cover swap fees",
             "cashu_token_swap_fees_exceed_amount",
-        ),
-        (
-            ValueError("Failed to melt token from foreign mint http://m: boom"),
-            422,
-            "mint_error",
-            "Failed to swap token from foreign mint",
-            "cashu_foreign_mint_swap_failed",
         ),
         (
             ValueError("some unexpected wallet condition"),

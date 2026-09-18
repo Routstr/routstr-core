@@ -1,11 +1,12 @@
 import math
 from typing import TYPE_CHECKING
 
-from pydantic.v1 import BaseModel
+from pydantic.v1 import BaseModel, Field
 
 from ..core import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
+from .rates import coerce_rate, is_usable_rate
 from .usage import normalize_usage, parse_token_count
 
 if TYPE_CHECKING:
@@ -34,6 +35,9 @@ class CostData(BaseModel):
     cache_creation_input_tokens: int = 0
     cache_read_msats: int = 0
     cache_creation_msats: int = 0
+    # Actual debit after finalization; None means settlement has not run yet.
+    charged_msats: int | None = None
+    upstream_usd: float = Field(default=0.0, exclude=True)
 
 
 class MaxCostData(CostData):
@@ -107,11 +111,11 @@ async def calculate_cost(
 
     if usage is None:
         logger.warning(
-            "No usage data in response — billing at MaxCostData with zero "
-            "tokens. Dashboard will show this request as `(0+0)`. Most "
-            "common cause: upstream stream did not include a final usage "
-            "chunk (OpenAI-compat backends require "
-            "`stream_options.include_usage=true`).",
+            "No usage data or local estimate in response — releasing the "
+            "reservation without charging it as usage. Dashboard will show "
+            "this request as `(0+0)` tokens. Most common cause: upstream "
+            "stream did not include a final usage chunk (OpenAI-compat "
+            "backends require `stream_options.include_usage=true`).",
             extra={
                 "max_cost_msats": max_cost,
                 "model": response_data.get("model", "unknown"),
@@ -175,13 +179,14 @@ async def calculate_cost(
             cost_details = usage_data.get("cost_details", {})
             if not isinstance(cost_details, dict):
                 cost_details = {}
-            input_usd = _coerce_usd(
-                cost_details.get("input_cost")
-                or cost_details.get("upstream_inference_prompt_cost")
+            # Coerce each spelling before choosing between them: `inf` and `NaN`
+            # are truthy, so a malformed first field would otherwise win the
+            # fallback and the usable figure beside it would never be read.
+            input_usd = _coerce_usd(cost_details.get("input_cost")) or _coerce_usd(
+                cost_details.get("upstream_inference_prompt_cost")
             )
-            output_usd = _coerce_usd(
-                cost_details.get("output_cost")
-                or cost_details.get("upstream_inference_completions_cost")
+            output_usd = _coerce_usd(cost_details.get("output_cost")) or _coerce_usd(
+                cost_details.get("upstream_inference_completions_cost")
             )
             cache_pricing_rates: tuple[float, float, float, float] | None = None
             if cache_read_tokens > 0 or cache_creation_tokens > 0:
@@ -241,27 +246,32 @@ async def calculate_cost(
     else:
         input_rate, output_rate, cache_read_rate, cache_creation_rate = pricing_rates
 
-    if not (input_rate and output_rate):
+    # Truthiness is not the question: `NaN` and a negative rate are both truthy
+    # and sailed past this gate into the token math, while a rate of zero is a
+    # price — free — and reading it as a missing one charged the whole
+    # reservation for a request the model serves for nothing.
+    rates = (input_rate, output_rate, cache_read_rate, cache_creation_rate)
+    if not all(is_usable_rate(rate) for rate in rates):
         logger.warning(
-            "No token pricing configured — billing at flat MaxCostData. "
-            "Token counts %s in the upstream response but cannot be "
-            "priced; the request will appear in dashboards with the "
-            "raw counts and a fixed max-cost charge.",
-            "are present"
-            if (input_tokens > 0 or output_tokens > 0)
-            else "are zero",
+            "No usable token pricing — releasing the reservation instead of "
+            "treating its ceiling as the charge. Token counts %s in the "
+            "upstream response but cannot be converted to money; the request "
+            "will appear in dashboards with raw counts and a zero charge.",
+            "are present" if (input_tokens > 0 or output_tokens > 0) else "are zero",
             extra={
                 "base_cost_msats": max_cost,
                 "model": response_data.get("model", "unknown"),
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "input_rate": input_rate,
+                "output_rate": output_rate,
             },
         )
         return MaxCostData(
-            base_msats=max_cost,
+            base_msats=0,
             input_msats=0,
             output_msats=0,
-            total_msats=max_cost,
+            total_msats=0,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_input_tokens=cache_read_tokens,
@@ -289,15 +299,25 @@ async def calculate_cost(
 
 
 def _coerce_usd(value: object) -> float:
-    """Coerce a value to USD float, handling various formats safely."""
-    if value is None or isinstance(value, bool):
-        return 0.0
-    if not isinstance(value, (int, float, str)):
-        return 0.0
-    try:
-        return max(0.0, float(value))
-    except (TypeError, ValueError):
-        return 0.0
+    """Coerce an upstream-reported USD figure to a usable amount, else ``0.0``.
+
+    These values come straight off the upstream response, where ``json.loads``
+    accepts the bare ``NaN``/``Infinity`` literals and overflows ``1e999`` to
+    ``inf``. A non-finite figure is not a cost, and letting one through poisoned
+    the proportional split in ``_calculate_from_usd_cost`` (``inf / inf`` is
+    ``NaN``): the resulting exception was absorbed by the broad handler around
+    the USD path, so a request whose *total* cost was perfectly valid fell
+    through to token-estimated pricing and was billed a fraction of what the
+    upstream charged.
+
+    ``0.0`` means "no usable figure" to every caller, which is the same thing an
+    absent field means, so the caller's existing ``> 0`` checks handle it.
+    """
+    # A cost figure is coerced exactly like a rate; only the way an unusable one
+    # is reported differs. A negative is rejected here, where the previous
+    # `max(0.0, …)` clamped it.
+    amount = coerce_rate(value)
+    return amount if amount is not None else 0.0
 
 
 def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
@@ -326,9 +346,7 @@ def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
         # actually deducts from the balance.  For non-BYOK providers (e.g.
         # OpenRouter) usage.cost already equals upstream_inference_cost, so we
         # fall through to the normal ``cost`` lookup below.
-        upstream_cost = _coerce_usd(
-            cost_details.get("upstream_inference_cost")
-        )
+        upstream_cost = _coerce_usd(cost_details.get("upstream_inference_cost"))
         if upstream_cost > 0 and usage_data.get("is_byok"):
             byok_fee = _coerce_usd(usage_data.get("cost"))
             return upstream_cost + byok_fee
@@ -359,8 +377,7 @@ def _get_pricing_rates(
     ``None`` means configured fixed pricing should be used by the caller.
     """
     if settings.fixed_pricing and (
-        settings.fixed_per_1k_input_tokens
-        or settings.fixed_per_1k_output_tokens
+        settings.fixed_per_1k_input_tokens or settings.fixed_per_1k_output_tokens
     ):
         return None
 
@@ -416,12 +433,8 @@ def _get_pricing_rates(
         usd_per_sat = sats_usd_price()
         mspp_1k = input_usd * provider_fee * 1_000_000.0 / usd_per_sat
         mspc_1k = output_usd * provider_fee * 1_000_000.0 / usd_per_sat
-        cache_read_usd = _coerce_usd(
-            pricing.get("cache_read_input_token_cost")
-        )
-        cache_write_usd = _coerce_usd(
-            pricing.get("cache_creation_input_token_cost")
-        )
+        cache_read_usd = _coerce_usd(pricing.get("cache_read_input_token_cost"))
+        cache_write_usd = _coerce_usd(pricing.get("cache_creation_input_token_cost"))
         mscr_1k = (
             cache_read_usd * provider_fee * 1_000_000.0 / usd_per_sat
             if cache_read_usd > 0
@@ -479,6 +492,7 @@ def _calculate_from_usd_cost(
     """Calculate cost from USD figures, deriving input/output split from tokens."""
     if provider_fee is None:
         provider_fee = _resolve_provider_fee(response_data.get("model", ""))
+    reported_usd = usd_cost
     usd_cost = usd_cost * provider_fee
     input_usd = input_usd * provider_fee
     output_usd = output_usd * provider_fee
@@ -525,9 +539,7 @@ def _calculate_from_usd_cost(
         regular_weight = input_tokens * input_rate
         cache_read_weight = cache_read_tokens * cache_read_rate
         cache_creation_weight = cache_creation_tokens * cache_creation_rate
-        total_input_weight = (
-            regular_weight + cache_read_weight + cache_creation_weight
-        )
+        total_input_weight = regular_weight + cache_read_weight + cache_creation_weight
         if total_input_weight > 0:
             cache_read_msats = int(
                 round(
@@ -566,6 +578,7 @@ def _calculate_from_usd_cost(
         cache_creation_input_tokens=cache_creation_tokens,
         cache_read_msats=cache_read_msats,
         cache_creation_msats=cache_creation_msats,
+        upstream_usd=reported_usd,
     )
 
 

@@ -5,13 +5,14 @@ import random
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel as V2BaseModel
-from pydantic.v1 import BaseModel
+from pydantic.v1 import BaseModel, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core.db import ModelRow, UpstreamProviderRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
+from .rates import BILLABLE_PRICING_FIELDS, coerce_rate, is_usable_rate
 
 logger = get_logger(__name__)
 
@@ -58,10 +59,54 @@ class Pricing(BaseModel):
     max_cost: float = 0.0  # in sats not msats
 
 
+# The rates ``Pricing`` declares without a default, derived from the model so the
+# two cannot drift. A payload that omits one writes a row that will not parse.
+REQUIRED_PRICING_FIELDS = tuple(
+    name for name, field in Pricing.__fields__.items() if field.required
+)
+
+
+def has_usable_pricing(pricing: Pricing) -> bool:
+    """True if every billable rate is a number a request could be billed on.
+
+    Free is usable — a rate of zero is a real price. This asks only whether the
+    price is well-formed. One unusable rate disqualifies the whole price even
+    alongside a valid one, since a request can bill on the bad field: a positive
+    ``completion`` must not hide a negative ``prompt``.
+    """
+    return all(
+        is_usable_rate(getattr(pricing, field)) for field in BILLABLE_PRICING_FIELDS
+    )
+
+
 class TopProvider(BaseModel):
     context_length: int | None = None
     max_completion_tokens: int | None = None
     is_moderated: bool | None = None
+
+
+class Reasoning(BaseModel):
+    """Per-model reasoning-effort metadata, matching OpenRouter's shape."""
+
+    mandatory: bool | None = None
+    default_enabled: bool | None = None
+    supported_efforts: list[str] | None = None
+    default_effort: str | None = None
+    supports_max_tokens: bool | None = None
+
+    class Config:
+        extra = "ignore"
+
+    def is_empty(self) -> bool:
+        return not any(
+            (
+                self.mandatory is not None,
+                self.default_enabled is not None,
+                self.supported_efforts,
+                self.default_effort,
+                self.supports_max_tokens is not None,
+            )
+        )
 
 
 class Model(BaseModel):
@@ -80,9 +125,42 @@ class Model(BaseModel):
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
     forwarded_model_id: str | None = None
+    reasoning: Reasoning | None = None
+
+    class Config:
+        extra = "ignore"
 
     def __hash__(self) -> int:
         return hash(self.id)
+
+    @validator("reasoning", pre=True)
+    def _coerce_reasoning(cls, value: object) -> object:
+        if value is None or value is False:
+            return None
+        if isinstance(value, Reasoning):
+            return None if value.is_empty() else value
+        if not isinstance(value, dict) or not value:
+            return None
+        try:
+            parsed = Reasoning.parse_obj(value)
+        except Exception:
+            return None
+        return None if parsed.is_empty() else parsed
+
+    def dict(self, **kwargs: object) -> dict:
+        # Non-reasoning models omit the field entirely so the catalog stays
+        # additive: existing clients never see a new null key.
+        data = super().dict(**kwargs)  # type: ignore[arg-type]
+        reasoning = data.get("reasoning")
+        if not reasoning:
+            data.pop("reasoning", None)
+        elif isinstance(reasoning, dict):
+            cleaned = {k: v for k, v in reasoning.items() if v is not None}
+            if cleaned:
+                data["reasoning"] = cleaned
+            else:
+                data.pop("reasoning", None)
+        return data
 
 
 def litellm_cost_entry(model_id: str) -> dict | None:
@@ -144,18 +222,17 @@ def backfill_cache_pricing(model_id: str, pricing: Pricing) -> Pricing:
 
 
 def _has_valid_pricing(model: dict) -> bool:
-    """Check if model has valid pricing (not free, no negative values)."""
+    """Check if model has valid pricing (usable rates, and not free)."""
     pricing = model.get("pricing", {})
     if not pricing:
         return False
 
-    try:
-        prompt = float(pricing.get("prompt", 0))
-        completion = float(pricing.get("completion", 0))
-    except (ValueError, TypeError):
-        return False
-
-    if prompt < 0 or completion < 0:
+    # Coercion runs before the both-zero test below, which `NaN` would defeat
+    # on its own — and one entry the coercion chokes on must not unwind the
+    # whole fetch, which once cost the node an entire upstream catalog.
+    prompt = coerce_rate(pricing.get("prompt", 0))
+    completion = coerce_rate(pricing.get("completion", 0))
+    if prompt is None or completion is None:
         return False
 
     if prompt == 0 and completion == 0:
@@ -221,9 +298,10 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
         return []
 
 
-def _row_to_model(
+def _build_model_from_row(
     row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
 ) -> Model:
+    """The deterministic USD view of a stored model row, before the sats conversion."""
     architecture = json.loads(row.architecture)
     pricing = json.loads(row.pricing)
     per_request_limits = (
@@ -281,6 +359,14 @@ def _row_to_model(
             parsed_pricing.max_cost,
         ) = _calculate_usd_max_costs(model)
 
+    return model
+
+
+def _row_to_model(
+    row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
+) -> Model:
+    model = _build_model_from_row(row, apply_provider_fee, provider_fee)
+
     try:
         sats_to_usd = sats_usd_price()
         model = _update_model_sats_pricing(model, sats_to_usd)
@@ -309,21 +395,57 @@ async def list_models(
     rows = (await session.exec(query)).all()  # type: ignore
     provider_result = await session.exec(select(UpstreamProviderRow))
     providers_by_id = {p.id: p for p in provider_result.all()}
-    return [
-        _row_to_model(
-            r,
-            apply_provider_fee=apply_fees,
-            provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
-            if r.upstream_provider_id in providers_by_id
-            else 1.01,
-        )
-        for r in rows
-        if include_disabled
-        or (
+
+    models: list[Model] = []
+    for r in rows:
+        if not include_disabled and not (
             r.upstream_provider_id in providers_by_id
             and providers_by_id[r.upstream_provider_id].enabled
-        )
-    ]
+        ):
+            continue
+        try:
+            model = _row_to_model(
+                r,
+                apply_provider_fee=apply_fees,
+                provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
+                if r.upstream_provider_id in providers_by_id
+                else 1.01,
+            )
+        except Exception as e:
+            # Stored pricing/architecture is JSON from whatever wrote the row, so
+            # a legacy import or foreign writer can leave a field that will not
+            # parse. Converting inside this loop meant one such row raised out of
+            # the whole listing and the node advertised nothing at all. Drop the
+            # row we cannot read — it is unservable either way — and keep serving
+            # the rest.
+            logger.warning(
+                "Skipping model row that could not be read",
+                extra={
+                    "model_id": r.id,
+                    "upstream_provider_id": r.upstream_provider_id,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                },
+            )
+            continue
+        # Served-map backstop for legacy rows and writers that bypass the admin
+        # edge: a negative or non-finite rate is not a price. Serving one
+        # advertises a rate the cost calculation cannot bill on, so the request
+        # falls through to the flat maximum reservation — or, if the rate is
+        # negative, bills an amount settlement credits back to the caller.
+        # ``include_disabled`` is the operator's listing, which must keep showing
+        # the row so it can be repaired.
+        if not include_disabled and not has_usable_pricing(model.pricing):
+            logger.warning(
+                "Withholding model with an unusable stored rate from the catalog",
+                extra={
+                    "model_id": r.id,
+                    "upstream_provider_id": r.upstream_provider_id,
+                },
+            )
+            continue
+        models.append(model)
+    return models
 
 
 def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
@@ -409,23 +531,7 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
         if (sats.max_cost or 0.0) < min_req_sats:
             sats.max_cost = min_req_sats
 
-        return Model(
-            id=model.id,
-            name=model.name,
-            created=model.created,
-            description=model.description,
-            context_length=model.context_length,
-            architecture=model.architecture,
-            pricing=model.pricing,
-            sats_pricing=sats,
-            per_request_limits=model.per_request_limits,
-            top_provider=model.top_provider,
-            enabled=model.enabled,
-            upstream_provider_id=model.upstream_provider_id,
-            canonical_slug=model.canonical_slug,
-            alias_ids=model.alias_ids,
-            forwarded_model_id=model.forwarded_model_id,
-        )
+        return model.copy(update={"sats_pricing": sats})
     except Exception as e:
         logger.error(
             "Failed to update sats pricing for model",

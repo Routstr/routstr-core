@@ -686,7 +686,7 @@ async def test_no_database_changes_during_provider_operations(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_admin_routstr_topup_retries_transient_upstream_failure(
+async def test_admin_routstr_topup_does_not_duplicate_invoice_on_upstream_failure(
     integration_client: AsyncClient,
     integration_session: Any,
 ) -> None:
@@ -739,16 +739,7 @@ async def test_admin_routstr_topup_retries_transient_upstream_failure(
             assert json["api_key"] == "sk-upstream-test"
             assert headers["Authorization"] == "Bearer sk-upstream-test"
 
-            if self.calls == 1:
-                return MockResponse(500, {"detail": "warmup failure"})
-
-            return MockResponse(
-                200,
-                {
-                    "bolt11": "lnbc1testinvoice",
-                    "invoice_id": "invoice-123",
-                },
-            )
+            return MockResponse(500, {"detail": "ambiguous upstream failure"})
 
     mock_client = MockAsyncClient()
 
@@ -759,11 +750,7 @@ async def test_admin_routstr_topup_retries_transient_upstream_failure(
                 json={"amount": 10},
             )
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is True
-        assert data["topup_data"]["payment_request"] == "lnbc1testinvoice"
-        assert data["topup_data"]["invoice_id"] == "invoice-123"
-        assert mock_client.calls == 2
+        assert response.status_code == 500
+        assert mock_client.calls == 1
     finally:
         admin_sessions.pop(admin_token, None)

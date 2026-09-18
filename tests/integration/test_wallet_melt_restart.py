@@ -10,9 +10,12 @@ invalidate them on "paid" or release them on "unpaid".
 """
 
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
-from cashu.core.base import Proof
+from cashu.core.base import MeltQuote, MeltQuoteState, Proof
+from cashu.core.models import PostMeltQuoteResponse
 from cashu.wallet import crud
 from cashu.wallet.wallet import Wallet
 
@@ -47,6 +50,20 @@ async def _seed_ambiguous_melt(wallet: Wallet) -> list[Proof]:
     proofs = [_proof("secret-a"), _proof("secret-b", amount=32)]
     for proof in proofs:
         await crud.store_proof(proof, db=wallet.db)
+    await crud.store_bolt11_melt_quote(
+        db=wallet.db,
+        quote=MeltQuote(
+            quote=QUOTE_ID,
+            method="bolt11",
+            request="lnbc1-test",
+            checking_id="",
+            unit="sat",
+            amount=95,
+            fee_reserve=1,
+            state=MeltQuoteState.pending,
+            mint=str(wallet.url),
+        ),
+    )
 
     await wallet.set_reserved_for_melt(proofs, reserved=True, quote_id=QUOTE_ID)
     # cashu's `except` block in melt():
@@ -75,6 +92,34 @@ async def test_melt_recovery_is_findable_by_quote_after_restart(
     assert all(p.melt_id == QUOTE_ID for p in found)
 
 
+async def test_paid_reconciliation_invalidates_recovered_proofs_after_restart(
+    tmp_path: Path,
+) -> None:
+    wallet = await _wallet(tmp_path)
+    await _seed_ambiguous_melt(wallet)
+
+    restarted = await _wallet(tmp_path)
+    remote = PostMeltQuoteResponse(
+        quote=QUOTE_ID,
+        amount=95,
+        unit="sat",
+        request="lnbc1-test",
+        fee_reserve=1,
+        state=MeltQuoteState.paid.value,
+        expiry=None,
+        payment_preimage="preimage",
+    )
+    with patch(
+        "cashu.wallet.v1_api.LedgerAPI.get_melt_quote",
+        new=AsyncMock(return_value=remote),
+    ):
+        reconciled = await restarted.get_melt_quote(QUOTE_ID)
+
+    assert reconciled is not None and reconciled.state == MeltQuoteState.paid
+    assert await crud.get_proofs(db=restarted.db, melt_id=QUOTE_ID) == []
+    assert await crud.get_proofs(db=restarted.db) == []
+
+
 async def test_send_style_reservation_would_not_be_reconcilable(
     tmp_path: Path,
 ) -> None:
@@ -97,19 +142,64 @@ async def test_send_style_reservation_would_not_be_reconcilable(
 async def test_unpaid_reconciliation_releases_recovered_proofs_after_restart(
     tmp_path: Path,
 ) -> None:
-    """The full recovery arc: crash, restart, mint says unpaid, funds usable."""
     wallet = await _wallet(tmp_path)
     await _seed_ambiguous_melt(wallet)
 
     restarted = await _wallet(tmp_path)
-    found = await crud.get_proofs(db=restarted.db, melt_id=QUOTE_ID)
-    assert len(found) == 2
+    remote = PostMeltQuoteResponse(
+        quote=QUOTE_ID,
+        amount=95,
+        unit="sat",
+        request="lnbc1-test",
+        fee_reserve=1,
+        state=MeltQuoteState.unpaid.value,
+        expiry=None,
+    )
+    with patch(
+        "cashu.wallet.v1_api.LedgerAPI.get_melt_quote",
+        new=AsyncMock(return_value=remote),
+    ):
+        reconciled = await restarted.get_melt_quote(QUOTE_ID)
 
-    # What get_melt_quote() does on an "unpaid" answer.
-    await restarted.set_reserved_for_melt(found, reserved=False, quote_id=None)
-
-    released = await crud.get_proofs(db=restarted.db, melt_id=QUOTE_ID)
-    assert released == []
+    assert reconciled is not None and reconciled.state == MeltQuoteState.unpaid
+    assert await crud.get_proofs(db=restarted.db, melt_id=QUOTE_ID) == []
     all_proofs = await crud.get_proofs(db=restarted.db)
     assert len(all_proofs) == 2
-    assert all(not p.reserved for p in all_proofs)  # spendable again
+    assert all(not p.reserved for p in all_proofs)
+
+
+async def test_pending_and_transport_reconciliation_keep_recovered_reservation(
+    tmp_path: Path,
+) -> None:
+    wallet = await _wallet(tmp_path)
+    await _seed_ambiguous_melt(wallet)
+    restarted = await _wallet(tmp_path)
+    pending = PostMeltQuoteResponse(
+        quote=QUOTE_ID,
+        amount=95,
+        unit="sat",
+        request="lnbc1-test",
+        fee_reserve=1,
+        state=MeltQuoteState.pending.value,
+        expiry=None,
+    )
+
+    with patch(
+        "cashu.wallet.v1_api.LedgerAPI.get_melt_quote",
+        new=AsyncMock(return_value=pending),
+    ):
+        reconciled = await restarted.get_melt_quote(QUOTE_ID)
+    assert reconciled is not None and reconciled.state == MeltQuoteState.pending
+    found = await crud.get_proofs(db=restarted.db, melt_id=QUOTE_ID)
+    assert len(found) == 2 and all(proof.reserved for proof in found)
+
+    with (
+        patch(
+            "cashu.wallet.v1_api.LedgerAPI.get_melt_quote",
+            new=AsyncMock(side_effect=httpx.ReadTimeout("mint unavailable")),
+        ),
+        pytest.raises(httpx.ReadTimeout),
+    ):
+        await restarted.get_melt_quote(QUOTE_ID)
+    found = await crud.get_proofs(db=restarted.db, melt_id=QUOTE_ID)
+    assert len(found) == 2 and all(proof.reserved for proof in found)

@@ -133,14 +133,11 @@ async def test_reserved_balance_with_successful_requests(
 
 
 @pytest.mark.asyncio
-async def test_revert_with_zero_reserved_balance_is_noop(
+async def test_revert_with_zero_reserved_balance_repairs_terminally(
     integration_session: AsyncSession,
 ) -> None:
-    """Test that revert_pay_for_request is a no-op when reserved_balance is 0.
-
-    Previously this would drive reserved_balance negative. With the floor guard,
-    it should return False and leave reserved_balance at 0.
-    """
+    """Reverting after the aggregate was already zeroed must not drive it
+    negative: the corrupt durable reservation is released without subtraction."""
     from routstr.auth import pay_for_request, revert_pay_for_request
 
     unique_key = f"test_revert_key_{uuid.uuid4().hex[:8]}"
@@ -153,21 +150,24 @@ async def test_revert_with_zero_reserved_balance_is_noop(
     await integration_session.commit()
     await pay_for_request(test_key, 100, integration_session)
     test_key.reserved_balance = 0
+    test_key.total_requests = 0
     integration_session.add(test_key)
     await integration_session.commit()
 
-    # A stale cleanup already released the aggregate reservation.
+    # A stale cleanup already released the aggregate reservation. The revert
+    # terminalizes the durable row (repair) without driving the aggregate
+    # negative.
     result = await revert_pay_for_request(test_key, integration_session, 100)
 
-    await integration_session.refresh(test_key)
+    integration_session.expunge_all()
+    updated = await integration_session.get(ApiKey, unique_key)
+    assert updated is not None
 
-    assert result is False, "Revert should return False when reservation already released"
-    assert test_key.reserved_balance == 0, (
-        f"Reserved balance should remain 0, got: {test_key.reserved_balance}"
+    assert result is True, "Revert must terminalize the corrupt reservation"
+    assert updated.reserved_balance == 0, (
+        f"Reserved balance should remain 0, got: {updated.reserved_balance}"
     )
-    assert test_key.total_requests == 1, (
-        f"Total requests should remain 1, got: {test_key.total_requests}"
-    )
+    assert updated.total_requests == 0
 
 
 @pytest.mark.asyncio
@@ -203,10 +203,11 @@ async def test_revert_with_sufficient_reserved_balance_succeeds(
 
 
 @pytest.mark.asyncio
-async def test_revert_partial_reserved_balance_is_noop(
+async def test_revert_partial_reserved_balance_repairs_terminally(
     integration_session: AsyncSession,
 ) -> None:
-    """Test that reverting more than the current reserved_balance is a no-op."""
+    """Reverting more than the aggregate holds must not clamp or go negative:
+    the corrupt durable reservation is released without subtraction."""
     from routstr.auth import pay_for_request, revert_pay_for_request
 
     unique_key = f"test_revert_partial_{uuid.uuid4().hex[:8]}"
@@ -223,18 +224,19 @@ async def test_revert_partial_reserved_balance_is_noop(
     integration_session.add(test_key)
     await integration_session.commit()
 
-    # Try to revert 500 when only 50 is reserved — should be no-op
+    # Reverting 500 when only 50 is reserved cannot subtract; the corrupt
+    # reservation is terminalized and the aggregate left untouched.
     result = await revert_pay_for_request(test_key, integration_session, 500)
 
-    await integration_session.refresh(test_key)
+    integration_session.expunge_all()
+    updated = await integration_session.get(ApiKey, unique_key)
+    assert updated is not None
 
-    assert result is False, "Revert should fail when cost > reserved_balance"
-    assert test_key.reserved_balance == 50, (
-        f"Reserved balance should stay at 50, got: {test_key.reserved_balance}"
+    assert result is True, "Revert must terminalize the corrupt reservation"
+    assert updated.reserved_balance == 50, (
+        f"Reserved balance should stay at 50, got: {updated.reserved_balance}"
     )
-    assert test_key.total_requests == 1, (
-        f"Total requests should stay at 1, got: {test_key.total_requests}"
-    )
+    assert updated.total_requests == 0
 
 
 @pytest.mark.asyncio
@@ -265,9 +267,7 @@ async def test_double_revert_prevented(
     snapshot = await get_reservation_snapshot(test_key, integration_session)
 
     # First revert — should succeed
-    result1 = await revert_pay_for_request(
-        test_key, integration_session, 500, snapshot
-    )
+    result1 = await revert_pay_for_request(test_key, integration_session, 500, snapshot)
     await integration_session.refresh(test_key)
 
     assert result1 is True
@@ -275,9 +275,7 @@ async def test_double_revert_prevented(
     assert test_key.total_requests == 4
 
     # Second revert of the same amount — should be no-op
-    result2 = await revert_pay_for_request(
-        test_key, integration_session, 500, snapshot
-    )
+    result2 = await revert_pay_for_request(test_key, integration_session, 500, snapshot)
     await integration_session.refresh(test_key)
 
     assert result2 is False, "Second revert should be a no-op"
@@ -319,9 +317,7 @@ async def test_sequential_reverts_never_go_negative(
     # Run 5 sequential reverts for the same 500 reservation
     results = []
     for _ in range(5):
-        r = await revert_pay_for_request(
-            test_key, integration_session, 500, snapshot
-        )
+        r = await revert_pay_for_request(test_key, integration_session, 500, snapshot)
         results.append(r)
 
     await integration_session.refresh(test_key)
@@ -336,64 +332,4 @@ async def test_sequential_reverts_never_go_negative(
     )
     assert test_key.reserved_balance >= 0, (
         f"Reserved balance went negative: {test_key.reserved_balance}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_child_key_revert_floor_guard(
-    integration_session: AsyncSession,
-) -> None:
-    """Test that child key reserved_balance also has floor guard on revert."""
-    from routstr.auth import (
-        get_reservation_snapshot,
-        pay_for_request,
-        revert_pay_for_request,
-    )
-
-    parent_key_hash = f"test_parent_{uuid.uuid4().hex[:8]}"
-    child_key_hash = f"test_child_{uuid.uuid4().hex[:8]}"
-
-    parent_key = ApiKey(
-        hashed_key=parent_key_hash,
-        balance=10000,
-        reserved_balance=0,
-        total_requests=2,
-    )
-    child_key = ApiKey(
-        hashed_key=child_key_hash,
-        balance=0,
-        reserved_balance=0,
-        total_requests=2,
-        parent_key_hash=parent_key_hash,
-    )
-    integration_session.add(parent_key)
-    integration_session.add(child_key)
-    await integration_session.commit()
-    await pay_for_request(child_key, 500, integration_session)
-    snapshot = await get_reservation_snapshot(child_key, integration_session)
-
-    # First revert succeeds
-    result1 = await revert_pay_for_request(
-        child_key, integration_session, 500, snapshot
-    )
-    await integration_session.refresh(parent_key)
-    await integration_session.refresh(child_key)
-
-    assert result1 is True
-    assert parent_key.reserved_balance == 0
-    assert child_key.reserved_balance == 0
-
-    # Second revert is a no-op for both parent and child
-    result2 = await revert_pay_for_request(
-        child_key, integration_session, 500, snapshot
-    )
-    await integration_session.refresh(parent_key)
-    await integration_session.refresh(child_key)
-
-    assert result2 is False
-    assert parent_key.reserved_balance == 0, (
-        f"Parent reserved_balance should stay 0, got: {parent_key.reserved_balance}"
-    )
-    assert child_key.reserved_balance == 0, (
-        f"Child reserved_balance should stay 0, got: {child_key.reserved_balance}"
     )

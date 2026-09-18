@@ -23,7 +23,11 @@ import litellm
 from fastapi.responses import Response
 
 from ..core import get_logger
-from ..payment.helpers import estimate_tokens
+from ..payment.helpers import (
+    _count_prompt_token_ids,
+    estimate_prompt_tokens,
+    estimate_tokens,
+)
 from ..payment.models import Model
 
 logger = get_logger(__name__)
@@ -39,10 +43,65 @@ def _parse_request_body(request_body: bytes | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _count_with_litellm(model: str, body: dict[str, Any]) -> int:
+def _model_name(model_obj: Model | None, body: dict[str, Any]) -> str:
+    if model_obj is not None:
+        return model_obj.forwarded_model_id or model_obj.id or ""
+    body_model = body.get("model")
+    return body_model if isinstance(body_model, str) else ""
+
+
+def _count_with_litellm(
+    model: str, body: dict[str, Any], include_legacy_prompt: bool = False
+) -> int:
     messages = body.get("messages")
     if not isinstance(messages, list):
         messages = []
+
+    if "input" in body:
+        response_input = body["input"]
+        if isinstance(response_input, str):
+            messages = [{"role": "user", "content": response_input}]
+        elif isinstance(response_input, list):
+            messages = []
+            for item in response_input:
+                if not isinstance(item, dict) or "role" not in item:
+                    raise ValueError(
+                        "Responses input requires fallback token estimation"
+                    )
+                content = item.get("content", "")
+                if isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if not isinstance(part, dict) or part.get("type") not in (
+                            "input_text",
+                            "output_text",
+                            "text",
+                        ):
+                            raise ValueError(
+                                "Non-text Responses input requires fallback token estimation"
+                            )
+                        parts.append({"type": "text", "text": part.get("text", "")})
+                    content = parts
+                messages.append({"role": item["role"], "content": content})
+        else:
+            raise ValueError("Unsupported Responses input")
+        if body.get("instructions"):
+            messages.insert(0, {"role": "system", "content": body["instructions"]})
+
+    prompt_token_ids = 0
+    if include_legacy_prompt:
+        prompt = body.get("prompt")
+        if isinstance(prompt, str):
+            prompt_texts = [prompt]
+        elif isinstance(prompt, list):
+            prompt_texts = [item for item in prompt if isinstance(item, str)]
+        else:
+            prompt_texts = []
+        prompt_token_ids = _count_prompt_token_ids(prompt)
+        messages = [
+            *({"role": "user", "content": text} for text in prompt_texts if text),
+            *messages,
+        ]
 
     system = body.get("system")
     if isinstance(system, str) and system:
@@ -58,13 +117,180 @@ def _count_with_litellm(model: str, body: dict[str, Any]) -> int:
 
     tools = body.get("tools") if isinstance(body.get("tools"), list) else None
 
-    return int(
+    return prompt_token_ids + int(
         litellm.token_counter(
             model=model,
             messages=messages,
             tools=tools,
         )
     )
+
+
+def _count_text_with_litellm(model: str, text: str) -> int:
+    return int(
+        litellm.token_counter(
+            model=model,
+            text=text,
+            count_response_tokens=True,
+        )
+    )
+
+
+def _generated_text(value: object) -> list[str]:
+    """Extract generated text/tool arguments without counting response metadata."""
+    generated_keys = {
+        "arguments",
+        "content",
+        "delta",
+        "output_text",
+        "partial_json",
+        "reasoning",
+        "reasoning_content",
+        "text",
+        "thinking",
+    }
+    parts: list[str] = []
+
+    def walk(item: object, key: str | None = None) -> None:
+        if isinstance(item, str):
+            if key in generated_keys:
+                parts.append(item)
+            return
+        if isinstance(item, list):
+            for child in item:
+                walk(child, key)
+            return
+        if isinstance(item, dict):
+            for child_key, child in item.items():
+                walk(child, child_key)
+
+    walk(value)
+    return parts
+
+
+class MissingUsageEstimator:
+    """Estimate billable usage when an upstream omits its usage trailer.
+
+    The reservation is deliberately absent from this class: it is an
+    authorization ceiling, not an input to usage measurement.
+    """
+
+    def __init__(self, request_body: bytes | None, model_obj: Model | None) -> None:
+        self.body = _parse_request_body(request_body)
+        self.model_name = _model_name(model_obj, self.body)
+        self._output_parts: list[str] = []
+        self._input_tokens: int | None = None
+
+    def _estimate_input_tokens(self) -> int:
+        if self._input_tokens is not None:
+            return self._input_tokens
+        try:
+            self._input_tokens = _count_with_litellm(
+                self.model_name, self.body, include_legacy_prompt=True
+            )
+        except Exception as exc:
+            self._input_tokens = estimate_prompt_tokens(self.body)
+            logger.debug(
+                "litellm request token count failed; using local estimator",
+                extra={
+                    "model": self.model_name,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "estimated_tokens": self._input_tokens,
+                },
+            )
+        return self._input_tokens
+
+    @property
+    def output_text(self) -> str:
+        return "".join(self._output_parts)
+
+    def observe(self, response_data: object) -> None:
+        if isinstance(response_data, dict):
+            event_type = response_data.get("type")
+            if event_type in ("response.completed", "response.incomplete"):
+                response = response_data.get("response")
+                if isinstance(response, dict) and isinstance(
+                    response.get("output"), list
+                ):
+                    # Terminal output is a snapshot, not another text delta.
+                    self._output_parts = _generated_text(response["output"])
+                    return
+            if isinstance(event_type, str) and event_type.endswith(".done"):
+                # Responses API ``*.done`` events repeat text already streamed
+                # via ``*.delta`` events; counting both would double-bill.
+                return
+        self._output_parts.extend(_generated_text(response_data))
+
+    def estimated_usage(self, model: str | None = None) -> dict[str, Any] | None:
+        """Local usage estimate, or None when the upstream generated no text."""
+        if not self.output_text:
+            return None
+        return self.response_data(model)["usage"]
+
+    def billing_data(
+        self,
+        response_data: dict[str, Any] | None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Use measured usage when present, otherwise return a local estimate."""
+        if isinstance(response_data, dict):
+            usage = response_data.get("usage")
+            if not isinstance(usage, dict):
+                nested = response_data.get("response")
+                usage = nested.get("usage") if isinstance(nested, dict) else None
+            if isinstance(usage, dict) and usage:
+                return {
+                    "model": model or response_data.get("model") or self.model_name,
+                    "usage": usage,
+                }
+            if not self._output_parts:
+                self.observe(response_data)
+        return self.response_data(model)
+
+    def response_data(self, model: str | None = None) -> dict[str, Any]:
+        text = self.output_text
+        try:
+            output_tokens = (
+                _count_text_with_litellm(self.model_name, text) if text else 0
+            )
+        except Exception as exc:
+            output_tokens = len(text) // 3
+            logger.debug(
+                "litellm response token count failed; using local estimator",
+                extra={
+                    "model": self.model_name,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "estimated_tokens": output_tokens,
+                },
+            )
+
+        input_tokens = max(0, int(self._estimate_input_tokens()))
+        output_tokens = max(0, int(output_tokens))
+        return {
+            "model": model or self.model_name or "unknown",
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "estimated": True,
+            },
+        }
+
+    def openai_response_data(self, model: str | None = None) -> dict[str, Any]:
+        """Same estimate in the OpenAI chat-completions usage dialect."""
+        data = self.response_data(model)
+        usage = data["usage"]
+        return {
+            "model": data["model"],
+            "usage": {
+                "prompt_tokens": usage["input_tokens"],
+                "completion_tokens": usage["output_tokens"],
+                "total_tokens": usage["total_tokens"],
+                "estimated": True,
+            },
+        }
 
 
 def count_tokens_locally(
@@ -75,13 +301,7 @@ def count_tokens_locally(
     touching the upstream. Always returns 200; never raises."""
     body = _parse_request_body(request_body)
 
-    model_name = ""
-    if model_obj is not None:
-        model_name = model_obj.forwarded_model_id or model_obj.id or ""
-    if not model_name:
-        body_model = body.get("model")
-        if isinstance(body_model, str):
-            model_name = body_model
+    model_name = _model_name(model_obj, body)
 
     input_tokens: int
     try:

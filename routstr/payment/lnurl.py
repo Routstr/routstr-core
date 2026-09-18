@@ -1,18 +1,27 @@
 from __future__ import annotations
 
-import math
+import asyncio
+import ipaddress
+import json
+import socket
 from collections.abc import Awaitable, Callable
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import httpx
 from cashu.core.base import MeltQuoteState
+from cashu.core.settings import settings as cashu_settings
 from cashu.wallet.wallet import Proof, Wallet
 
+from ..cashu_compat import install_cashu_httpx_shim
 from ..mint import (
-    MINT_TRANSPORT_EXCEPTIONS,
     is_mint_rate_limited,
+    is_mint_transport_error,
     run_mint_operation,
 )
+
+# cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28; see the module
+# docstring. Installed at import so no mint call can run before the patch.
+install_cashu_httpx_shim()
 
 try:
     from bech32 import bech32_decode, convertbits  # type: ignore
@@ -40,6 +49,114 @@ class MeltOutcomeAmbiguousError(LNURLError):
     settle, so debits backing it must be kept until reconciliation confirms
     the true outcome.
     """
+
+
+class MeltUnpaidError(LNURLError):
+    """The mint answered the melt request itself with ``unpaid``.
+
+    Unlike :class:`MeltOutcomeAmbiguousError` this is proof that no Lightning
+    payment was made, so callers may restore what they debited.
+    """
+
+
+_MAX_LNURL_REDIRECTS = 3
+_MAX_LNURL_RESPONSE_BYTES = 64 * 1024
+_NON_PUBLIC_HOST_SUFFIXES = (".localhost", ".local", ".internal")
+
+
+async def _require_public_https_destination(url: httpx.URL) -> None:
+    """Reject anything that is not a public HTTPS endpoint.
+
+    LNURL destinations and their redirect targets are attacker-influenced, so
+    every hop has to be re-checked: a single ``https://`` origin says nothing
+    about where a 302 points. A bare hostname check is not enough either: a
+    public-looking name can resolve to a loopback/link-local/private address
+    (SSRF), so DNS is resolved here and every resulting address must be global.
+    """
+    if url.scheme != "https":
+        raise LNURLError("LNURL destination must be an HTTPS URL")
+
+    host = (url.host or "").rstrip(".").lower()
+    if not host:
+        raise LNURLError("LNURL destination has no host")
+
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+
+    if literal is not None:
+        if not literal.is_global:
+            raise LNURLError("LNURL destination is not a public host")
+        return
+
+    if host == "localhost" or host.endswith(_NON_PUBLIC_HOST_SUFFIXES):
+        raise LNURLError("LNURL destination is not a public host")
+
+    port = url.port or 443
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            host, port, proto=socket.IPPROTO_TCP
+        )
+    except socket.gaierror as e:
+        raise LNURLError("LNURL destination could not be resolved") from e
+    if not infos:
+        raise LNURLError("LNURL destination could not be resolved")
+    for info in infos:
+        try:
+            resolved = ipaddress.ip_address(info[4][0])
+        except ValueError as e:
+            raise LNURLError("LNURL destination resolved to an invalid address") from e
+        if not resolved.is_global:
+            raise LNURLError("LNURL destination is not a public host")
+
+
+async def _fetch_lnurl_json(
+    url: str, params: dict[str, int] | None = None
+) -> dict[str, Any]:
+    """GET an LNURL endpoint, validating the destination at every redirect.
+
+    Response bodies are never echoed: an LNURL service is untrusted, and its
+    payload would otherwise reach operator logs through raised errors.
+    """
+    try:
+        target = httpx.URL(url, params=params) if params else httpx.URL(url)
+    except httpx.InvalidURL as e:
+        raise LNURLError("LNURL destination is not a usable URL") from e
+    await _require_public_https_destination(target)
+
+    raw: bytes | None = None
+    async with httpx.AsyncClient() as client:
+        for _ in range(_MAX_LNURL_REDIRECTS + 1):
+            async with client.stream(
+                "GET", target, follow_redirects=False, timeout=10
+            ) as response:
+                if response.is_redirect:
+                    target = target.join(response.headers.get("location", ""))
+                    await _require_public_https_destination(target)
+                    continue
+                response.raise_for_status()
+                chunks = bytearray()
+                async for chunk in response.aiter_bytes():
+                    chunks.extend(chunk)
+                    if len(chunks) > _MAX_LNURL_RESPONSE_BYTES:
+                        raise LNURLError("LNURL response exceeded the size limit")
+                raw = bytes(chunks)
+            break
+        else:
+            raise LNURLError("LNURL destination exceeded the redirect limit")
+
+    if raw is None:
+        raise LNURLError("LNURL destination exceeded the redirect limit")
+
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        raise LNURLError("LNURL response was not valid JSON") from e
+
+    if not isinstance(data, dict):
+        raise LNURLError("LNURL response was not a JSON object")
+    return data
 
 
 async def decode_lnurl(lnurl: str) -> str:
@@ -111,26 +228,30 @@ async def get_lnurl_data(lnurl: str) -> LNURLData:
         httpx.HTTPError: If the HTTP request fails
     """
     url = await decode_lnurl(lnurl)
-
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url, follow_redirects=True, timeout=10)
-        response.raise_for_status()
-
-    lnurl_data = response.json()
+    lnurl_data = await _fetch_lnurl_json(url)
 
     # Validate payRequest data
     if lnurl_data.get("tag") != "payRequest":
-        raise LNURLError(
-            f"Invalid LNURL tag: expected 'payRequest', got '{lnurl_data.get('tag')}'"
-        )
+        raise LNURLError("Invalid LNURL tag: expected 'payRequest'")
 
-    if not isinstance(lnurl_data.get("callback"), str):
+    callback_url = lnurl_data.get("callback")
+    if not isinstance(callback_url, str):
         raise LNURLError("Invalid LNURL payRequest: missing callback URL")
+    try:
+        callback_target = httpx.URL(callback_url)
+    except httpx.InvalidURL as e:
+        raise LNURLError("Invalid LNURL callback URL") from e
+    await _require_public_https_destination(callback_target)
+
+    min_sendable = lnurl_data.get("minSendable", 1000)  # Default 1 sat
+    max_sendable = lnurl_data.get("maxSendable", 1000000000)  # Default 1000 BTC
+    if not isinstance(min_sendable, int) or not isinstance(max_sendable, int):
+        raise LNURLError("Invalid LNURL payRequest: non-integer sendable limits")
 
     return LNURLData(
-        callback_url=lnurl_data["callback"],
-        min_sendable=lnurl_data.get("minSendable", 1000),  # Default 1 sat
-        max_sendable=lnurl_data.get("maxSendable", 1000000000),  # Default 1000 BTC
+        callback_url=callback_url,
+        min_sendable=min_sendable,
+        max_sendable=max_sendable,
     )
 
 
@@ -150,24 +271,51 @@ async def get_lnurl_invoice(
         LNURLError: If the response is invalid
         httpx.HTTPError: If the HTTP request fails
     """
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            callback_url,
-            params={"amount": amount_msat},
-            follow_redirects=True,
-            timeout=10,
-        )
-        response.raise_for_status()
+    invoice_data = await _fetch_lnurl_json(callback_url, params={"amount": amount_msat})
 
-    invoice_data = response.json()
-
-    if "pr" not in invoice_data:
-        # Check if there's an error in the response
-        if "reason" in invoice_data:
-            raise LNURLError(f"LNURL error: {invoice_data['reason']}")
-        raise LNURLError(f"Invalid LNURL invoice response: {invoice_data}")
+    if not isinstance(invoice_data.get("pr"), str):
+        raise LNURLError("LNURL callback returned no invoice")
 
     return invoice_data["pr"], invoice_data
+
+
+def _select_melt_proofs(
+    wallet: Wallet,
+    proofs: list[Proof],
+    *,
+    quote_amount: int,
+    fee_reserve: int,
+    gross_budget: int,
+) -> tuple[list[Proof] | None, int]:
+    """Select proofs that cover the quote and exact NUT-02 input fees.
+
+    Cashu 0.20's ``select_to_send`` may recursively swap when asked to spend a
+    wallet's full balance. Melts accept overpayment and return change, so a
+    bounded, largest-first selection is both safer and minimizes input fees.
+
+    Mints reject a melt carrying more than ``mint_max_request_length`` inputs,
+    so a dust-heavy wallet can only pay what its largest inputs cover; the
+    caller lowers the amount and the rest goes out on later payouts.
+    """
+    selected: list[Proof] = []
+    selected_amount = 0
+    required = quote_amount + fee_reserve
+    spendable = [
+        proof
+        for proof in sorted(proofs, key=lambda item: item.amount, reverse=True)
+        if getattr(proof, "reserved", False) is not True
+    ]
+    for proof in spendable[: cashu_settings.mint_max_request_length]:
+        selected.append(proof)
+        selected_amount += proof.amount
+        input_fees = int(wallet.get_fees_for_proofs(selected))
+        required = quote_amount + fee_reserve + input_fees
+        if selected_amount >= required:
+            if required <= gross_budget:
+                return selected, 0
+            # Covered but over budget; more proofs only raise input fees.
+            break
+    return None, max(1, required - min(selected_amount, gross_budget))
 
 
 async def raw_send_to_lnurl(
@@ -201,12 +349,11 @@ async def raw_send_to_lnurl(
         # Send USD to Lightning Address
         paid = await wallet.send_to_lnurl("user@getalby.com", 50, unit="usd")
     """
-    total_balance = sum(proof.amount for proof in proofs)
-    if amount and total_balance < amount:
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+        raise ValueError("A positive integer amount is required to send to an LNURL.")
+    if sum(proof.amount for proof in proofs) < amount:
         raise ValueError("Amount to send is higher than available proofs.")
-    else:
-        assert isinstance(amount, int)
-        total_balance = amount
+    total_balance = amount
     lnurl_data = await get_lnurl_data(lnurl)
 
     if unit == "sat":
@@ -226,25 +373,51 @@ async def raw_send_to_lnurl(
             f"({min_sendable_sat} - {max_sendable_sat} {unit})"
         )
 
-    estimated_fees_sat = int(max(math.ceil((amount_msat / 1000) * 0.01), 2)) + 1
-    estimated_fees_msat = estimated_fees_sat * 1000
-    final_amount = amount_msat - estimated_fees_msat
+    final_amount = amount_msat
 
-    bolt11_invoice, _ = await get_lnurl_invoice(
-        lnurl_data["callback_url"], final_amount
-    )
+    selected_proofs: list[Proof] | None = None
+    # Find the largest amount covered by the budget after reserve and input fees.
+    for _ in range(8):
+        if final_amount < lnurl_data["min_sendable"]:
+            raise LNURLError("Cashu melt fees leave no payable LNURL amount")
+        bolt11_invoice, _ = await get_lnurl_invoice(
+            lnurl_data["callback_url"], final_amount
+        )
+        melt_quote_resp = await run_mint_operation(
+            lambda: wallet.melt_quote(invoice=bolt11_invoice),
+            op_name="lnurl_melt_quote",
+            mint_url=str(wallet.url),
+            # Quote creation is unsafe to retry without idempotency.
+            retry_timeouts=False,
+        )
 
-    melt_quote_resp = await run_mint_operation(
-        lambda: wallet.melt_quote(invoice=bolt11_invoice),
-        op_name="lnurl_melt_quote",
-        mint_url=str(wallet.url),
-    )
+        quoted_amount = int(melt_quote_resp.amount)
+        expected_amount = final_amount // 1000 if unit == "sat" else final_amount
+        if quoted_amount != expected_amount:
+            raise LNURLError(
+                f"LNURL invoice amount does not match the requested amount "
+                f"(quoted {quoted_amount} {unit}, expected {expected_amount} {unit})"
+            )
+
+        selected_proofs, shortfall = _select_melt_proofs(
+            wallet,
+            proofs,
+            quote_amount=quoted_amount,
+            fee_reserve=int(melt_quote_resp.fee_reserve),
+            gross_budget=amount,
+        )
+        if selected_proofs is not None:
+            break
+        final_amount -= shortfall * (1000 if unit == "sat" else 1)
+    else:
+        raise LNURLError("Cashu melt fees exceed the requested gross amount")
 
     if on_melt_quote is not None:
         await on_melt_quote(melt_quote_resp.quote)
 
-    if amount:
-        proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
+    assert selected_proofs is not None
+    proofs = selected_proofs
+    await wallet.set_reserved_for_send(proofs, reserved=True)
 
     try:
         melt_response = await run_mint_operation(
@@ -265,15 +438,29 @@ async def raw_send_to_lnurl(
             # reserved as though a Lightning payment could still settle.
             await wallet.set_reserved_for_send(proofs, reserved=False)
             raise
-        if not isinstance(error, MINT_TRANSPORT_EXCEPTIONS):
+        if not is_mint_transport_error(error):
             raise
+        # Cashu clears reservations on transport errors despite an unknown outcome.
+        try:
+            await wallet.set_reserved_for_melt(
+                proofs, reserved=True, quote_id=melt_quote_resp.quote
+            )
+        except Exception as reservation_error:
+            raise MeltOutcomeAmbiguousError(
+                "Melt outcome is ambiguous and its proof reservation could not "
+                "be restored; proofs must not be retried"
+            ) from reservation_error
         melt_response = None
         melt_error: BaseException | None = error
     else:
         melt_error = None
 
-    if getattr(melt_response, "state", None) == MeltQuoteState.paid:
+    melt_state = getattr(melt_response, "state", None)
+    if melt_state == MeltQuoteState.paid:
         return final_amount
+    if melt_state == MeltQuoteState.unpaid:
+        await wallet.set_reserved_for_send(proofs, reserved=False)
+        raise MeltUnpaidError("Cashu mint confirmed that the melt was unpaid")
 
     try:
         quote = await run_mint_operation(
@@ -281,6 +468,8 @@ async def raw_send_to_lnurl(
             op_name="reconcile_lnurl_melt_quote",
             mint_url=str(wallet.url),
             retry_timeouts=False,
+            # Reconciliation must bypass the cooldown opened by this failure.
+            allow_during_cooldown=True,
         )
     except Exception as reconciliation_error:
         raise MeltOutcomeAmbiguousError(
@@ -290,6 +479,20 @@ async def raw_send_to_lnurl(
 
     if quote is not None and quote.state == MeltQuoteState.paid:
         return final_amount
+    if quote is not None and quote.state == MeltQuoteState.unpaid:
+        # A just-dispatched quote can briefly report unpaid before transitioning.
+        try:
+            await wallet.set_reserved_for_melt(
+                proofs, reserved=True, quote_id=melt_quote_resp.quote
+            )
+        except Exception as reservation_error:
+            raise MeltOutcomeAmbiguousError(
+                "Melt outcome is ambiguous and its proof reservation could not "
+                "be restored; proofs must not be retried"
+            ) from reservation_error
+        raise MeltOutcomeAmbiguousError(
+            "Melt outcome is ambiguous; an immediate unpaid state is not final"
+        ) from melt_error
 
     state = getattr(getattr(quote, "state", None), "value", "unknown")
     raise MeltOutcomeAmbiguousError(

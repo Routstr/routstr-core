@@ -10,17 +10,17 @@ from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import case
-from sqlmodel import col, update
 
 from ..auth import (
     ROUTSTR_FEE_PERCENT,
     ReservationSnapshot,
+    _charge_reservation_rows,
     _claim_reservation_for_charge,
+    _stop_reservation_heartbeat,
     _validate_reservation_snapshot,
-    get_billing_key,
     get_reservation_snapshot,
     payments_logger,
+    release_reservation,
 )
 from ..core import get_logger
 from ..core.db import (
@@ -31,7 +31,7 @@ from ..core.db import (
 from ..core.db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
-from ..core.exceptions import UpstreamError
+from ..core.exceptions import EhbpTimeoutError, UpstreamError
 from ..core.settings import settings
 from ..payment.cost_calculation import (
     CostData,
@@ -40,8 +40,13 @@ from ..payment.cost_calculation import (
 )
 from ..payment.helpers import create_error_response
 from ..payment.models import Model
-from ..wallet import recieve_token, send_token
-from .tinfoil_trailer import forward_with_trailer
+from ..wallet import (
+    SPENT_TOKEN_CODES,
+    classify_redemption_error,
+    recieve_token,
+    send_token,
+)
+from .tinfoil_trailer import TrailerResponse, forward_with_trailer
 
 logger = get_logger(__name__)
 
@@ -55,6 +60,55 @@ _RESPONSE_USAGE_HEADER = "X-Tinfoil-Usage-Metrics"
 _TINFOIL_PROVIDER_TYPE = "tinfoil"
 _TINFOIL_ALLOWED_ENCLAVE_HOST_SUFFIX = ".tinfoil.sh"
 _TINFOIL_ALLOWED_ENCLAVE_HOSTS = frozenset({"tinfoil.sh"})
+
+
+_KEY_CONFIG_PROBLEM_TYPE = "urn:ietf:params:ehbp:error:key-config"
+
+
+def _is_ehbp_key_config_response(resp: TrailerResponse) -> bool:
+    """Check whether an upstream EHBP response is a key-config mismatch.
+
+    The enclave returns ``422 application/problem+json`` with
+    ``type=urn:ietf:params:ehbp:error:key-config`` when it cannot decrypt the
+    request body — meaning the client's HPKE key is stale (the enclave rotated
+    keys).  The proxy must pass this response through with its original
+    content type so EHBP clients can detect it and trigger re-attestation.
+    """
+    if resp.status_code != 422:
+        return False
+    ct = ""
+    for k, v in resp.headers:
+        if k.lower() == "content-type":
+            ct = v.lower()
+            break
+    media_type = ct.split(";", 1)[0].strip()
+    if media_type != "application/problem+json":
+        return False
+    try:
+        body = json.loads(resp.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return isinstance(body, dict) and body.get("type") == _KEY_CONFIG_PROBLEM_TYPE
+
+
+def _passthrough_key_config_response(resp: TrailerResponse) -> Response:
+    """Return the enclave's key-config 422 with its original body and content
+    type so the EHBP client's ``KeyConfigMismatchError`` detection fires.
+
+    Only the content type is forwarded. ``Ehbp-Response-Nonce`` must be
+    dropped: a nonce only carries meaning for an *encrypted* response body,
+    and the stock ``ehbp`` client (``shouldDecryptResponse``) checks for the
+    nonce *before* checking for a key-config mismatch — forwarding it would
+    send that client down the decrypt path on this plaintext error body, so
+    the re-attestation loop would never fire. Content-length is recomputed
+    from the body, and upstream-internal headers are filtered out.
+    """
+    return Response(
+        content=resp.body,
+        status_code=422,
+        headers={"content-type": "application/problem+json"},
+        media_type="application/problem+json",
+    )
 
 
 def _normalize_upstream_model_id(model_id: str | None) -> str:
@@ -73,28 +127,43 @@ _PROXY_ONLY_HEADERS = frozenset(
     }
 )
 
+# Namespace prefix the routstr catalog applies to Tinfoil models
+# (e.g. ``tinfoil-deepseek-v4-1-flash``). The SDK strips this prefix for the
+# encrypted body (``getTinfoilUpstreamModelId`` in client/TinfoilSecure.ts), so
+# the enclave always reports the *bare* upstream model id in the usage-metrics
+# header even though the routstr model id and ``forwarded_model_id`` carry it.
+TINFOIL_MODEL_PREFIX = "tinfoil-"
+
 
 def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
     """Parse ``X-Tinfoil-Usage-Metrics`` into an OpenAI-style usage dict.
 
     The header format is::
 
-        prompt=<n>,completion=<n>,total=<n>[,model=<name>]
+        prompt=<n>,completion=<n>,total=<n>[,cached_prompt_tokens=<n>,
+        uncached_prompt_tokens=<n>][,model=<name>][,cost_usd=<usd>]
+
+    ``prompt`` is the inclusive prompt total and ``cached_prompt_tokens`` is
+    the cache-read portion included within it. Routstr maps these to
+    ``prompt_tokens`` and ``cache_read_input_tokens`` so ``normalize_usage``
+    can subtract the cached read from the prompt total (OpenAI-family
+    semantics). ``cost_usd`` is parsed as a float and kept for logging/
+    cross-checking only — billing uses the token path.
 
     The ``model`` field (added in tinfoilsh/confidential-model-router PR #385)
-    is extracted as a string and included in the returned dict under the
-    ``"model"`` key so callers can compare the served model against the
-    requested one and adjust pricing.
+    is extracted as a string so callers can compare the served model against
+    the requested one and adjust pricing.
 
-    Returns a dict like ``{"prompt_tokens": n, "completion_tokens": n,
-    "model": "<name>"}`` suitable for :func:`calculate_cost` (which ignores
-    the extra ``model`` key in the usage sub-dict), or ``None`` when the
+    Returns a dict suitable for :func:`calculate_cost`, or ``None`` when the
     header is absent or malformed.
     """
     if not header_value:
         return None
-    parts: dict[str, int] = {}
+
+    int_parts: dict[str, int] = {}
     model: str | None = None
+    cost_usd: float | None = None
+
     for item in header_value.split(","):
         key, sep, value = item.partition("=")
         if not sep:
@@ -104,30 +173,44 @@ def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
         if key == "model":
             model = value
             continue
+        if key == "cost_usd":
+            try:
+                cost_usd = float(value)
+            except (ValueError, TypeError):
+                cost_usd = None
+            continue
         try:
-            parts[key] = int(value)
+            int_parts[key] = int(value)
         except (ValueError, TypeError):
             continue
-    prompt = parts.get("prompt")
-    completion = parts.get("completion")
-    if prompt is not None and completion is not None:
-        result: dict[str, int | str] = {
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-        }
-        if "total" in parts:
-            result["total_tokens"] = parts["total"]
-        if model:
-            result["model"] = model
-        return result
-    logger.warning(
-        "Failed to parse X-Tinfoil-Usage-Metrics header",
-        extra={
-            "header_value": header_value,
-            "parsed_parts": parts,
-        },
-    )
-    return None
+
+    prompt = int_parts.get("prompt")
+    completion = int_parts.get("completion")
+    if prompt is None or completion is None:
+        logger.warning(
+            "Failed to parse X-Tinfoil-Usage-Metrics header",
+            extra={
+                "header_value": header_value,
+                "parsed_parts": int_parts,
+            },
+        )
+        return None
+
+    result: dict[str, int | float | str] = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+    }
+    if "total" in int_parts:
+        result["total_tokens"] = int_parts["total"]
+    if "cached_prompt_tokens" in int_parts:
+        result["cache_read_input_tokens"] = int_parts["cached_prompt_tokens"]
+    if "uncached_prompt_tokens" in int_parts:
+        result["uncached_prompt_tokens"] = int_parts["uncached_prompt_tokens"]
+    if cost_usd is not None:
+        result["cost_usd"] = cost_usd
+    if model:
+        result["model"] = model
+    return result
 
 
 def _get_header_case_insensitive(
@@ -191,7 +274,9 @@ def _resolve_ehbp_target_url(
     otherwise the header is ignored so callers cannot redirect other providers
     or leak upstream API keys.
     """
-    override_header = profile.client_target_url_header if profile else _ENCLAVE_URL_HEADER
+    override_header = (
+        profile.client_target_url_header if profile else _ENCLAVE_URL_HEADER
+    )
     if not override_header:
         return target_url
     enclave_url = _get_header_case_insensitive(headers, override_header)
@@ -274,6 +359,11 @@ def _build_cost_info(
     output_tokens: int = 0,
     input_msats: int = 0,
     output_msats: int = 0,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_msats: int = 0,
+    cache_creation_msats: int = 0,
+    total_usd: float = 0.0,
     actual_model: str | None = None,
 ) -> dict:
     """Build a cost-info dict with token counts and per-token-type costs.
@@ -282,22 +372,25 @@ def _build_cost_info(
     one), it is included in the returned dict so callers can use it for billing
     finalization and logging.
     """
-    result: dict[str, int | str | None] = {
+    result: dict[str, int | float | str | None] = {
         "total_msats": total_msats,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
         "input_msats": input_msats,
         "output_msats": output_msats,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_msats": cache_read_msats,
+        "cache_creation_msats": cache_creation_msats,
+        "total_usd": total_usd,
     }
     if actual_model:
         result["actual_model"] = actual_model
     return result
 
 
-def _inject_cost_response_headers(
-    headers: dict[str, str], cost_info: dict
-) -> None:
+def _inject_cost_response_headers(headers: dict[str, str], cost_info: dict) -> None:
     """Add per-request cost headers to an EHBP response.
 
     Since EHBP response bodies are opaque encrypted blobs, cost cannot be
@@ -305,8 +398,14 @@ def _inject_cost_response_headers(
     the client/Tinfoil SDK can read without decrypting.
     """
     headers["X-Routstr-Cost-Msats"] = str(cost_info["total_msats"])
+    if "computed_msats" in cost_info:
+        headers["X-Routstr-Computed-Cost-Msats"] = str(cost_info["computed_msats"])
     headers["X-Routstr-Input-Cost-Msats"] = str(cost_info["input_msats"])
     headers["X-Routstr-Output-Cost-Msats"] = str(cost_info["output_msats"])
+    headers["X-Routstr-Cache-Read-Msats"] = str(cost_info.get("cache_read_msats", 0))
+    headers["X-Routstr-Cache-Creation-Msats"] = str(
+        cost_info.get("cache_creation_msats", 0)
+    )
 
 
 async def _compute_ehbp_actual_cost(
@@ -316,10 +415,10 @@ async def _compute_ehbp_actual_cost(
 ) -> dict:
     """Compute the actual cost in msats from Tinfoil usage metrics.
 
-    Falls back to ``max_cost_for_model`` when usage is absent (streaming) or
-    cannot be priced. The result is clamped to ``[min_request_msat,
-    max_cost_for_model]`` so the refund never exceeds the reservation and is
-    never zero.
+    When usage is present, the result is clamped to ``[min_request_msat,
+    max_cost_for_model]``. Missing or unpriceable usage returns zero: encrypted
+    EHBP bodies cannot be estimated locally, and the authorization ceiling is
+    not evidence of consumption.
 
     When the usage-metrics header includes ``model=<name>`` and it differs
     from ``model_obj.id``, the actual served model's pricing is used for the
@@ -332,7 +431,7 @@ async def _compute_ehbp_actual_cost(
     """
     usage_dict = parse_tinfoil_usage_metrics(usage_header)
     if usage_dict is None:
-        return _build_cost_info(max_cost_for_model)
+        return _build_cost_info(0)
 
     # The enclave may serve a different model than the one requested (e.g.
     # due to failover).  The usage-metrics header's ``model=<name>`` carries
@@ -344,6 +443,14 @@ async def _compute_ehbp_actual_cost(
     # look up the actual model's pricing.
     actual_model: str | None = usage_dict.pop("model", None)  # type: ignore[arg-type]
     pricing_model_id = model_obj.id
+    # Bill the model we actually routed to. Passing only the model *string*
+    # to calculate_cost makes it re-derive pricing from the global alias map,
+    # which resolves the id to the best-ranked candidate — not the serving
+    # one.  Tinfoil's catalog id (e.g. ``deepseek-v4-1-flash``) is also a
+    # cross-provider alias, and that cheaper candidate has no cache rate, so
+    # the cache discount silently disappeared (and the request was
+    # undercharged).  Hand calculate_cost the identity it cannot reconstruct.
+    pricing_model_obj: Model = model_obj
     expected_upstream_model = model_obj.forwarded_model_id or model_obj.id
     expected_identity = _normalize_upstream_model_id(expected_upstream_model)
     served_identity = _normalize_upstream_model_id(actual_model)
@@ -359,7 +466,24 @@ async def _compute_ehbp_actual_cost(
         # the global model map. The resolved object can belong to a different
         # provider and therefore have a different client-facing ``id`` while
         # still representing the same upstream model.
-        actual_model_obj = get_model_instance(actual_model)
+        #
+        # The enclave reports the *bare* upstream id, but the routstr model is
+        # namespaced ``tinfoil-`` (and the SDK strips that prefix for the
+        # encrypted body). Resolve the served id within the same namespace
+        # first: a same-model report then maps back onto the requested Tinfoil
+        # model, and a genuine failover lands on the actually-served Tinfoil
+        # model — instead of the cheaper cross-provider model the bare id
+        # would resolve to in the global map.
+        namespaced_served = actual_model
+        if (
+            expected_upstream_model.startswith(TINFOIL_MODEL_PREFIX)
+            and not actual_model.startswith(TINFOIL_MODEL_PREFIX)
+        ):
+            namespaced_served = TINFOIL_MODEL_PREFIX + actual_model
+
+        actual_model_obj = get_model_instance(namespaced_served)
+        if actual_model_obj is None and namespaced_served != actual_model:
+            actual_model_obj = get_model_instance(actual_model)
         if actual_model_obj is None:
             logger.warning(
                 "EHBP served model not found in registry, falling back "
@@ -375,9 +499,7 @@ async def _compute_ehbp_actual_cost(
             resolved_upstream_model = (
                 actual_model_obj.forwarded_model_id or actual_model_obj.id
             )
-            resolved_identity = _normalize_upstream_model_id(
-                resolved_upstream_model
-            )
+            resolved_identity = _normalize_upstream_model_id(resolved_upstream_model)
             if resolved_identity != expected_identity:
                 logger.info(
                     "EHBP served model differs from requested, using actual "
@@ -390,6 +512,7 @@ async def _compute_ehbp_actual_cost(
                     },
                 )
                 pricing_model_id = actual_model_obj.id
+                pricing_model_obj = actual_model_obj
             else:
                 # A different registry/client alias resolved to the same
                 # upstream model; retain the requested model's pricing.
@@ -402,22 +525,23 @@ async def _compute_ehbp_actual_cost(
         cost = await calculate_cost(
             {"model": pricing_model_id, "usage": usage_dict},
             max_cost_for_model,
+            pricing_model_obj,
         )
     except Exception as e:
         logger.warning(
-            "EHBP usage cost calculation failed, falling back to max cost",
+            "EHBP usage cost calculation failed; releasing instead of charging max cost",
             extra={
                 "model": pricing_model_id,
                 "error": str(e),
                 "usage": usage_dict,
             },
         )
-        return _build_cost_info(max_cost_for_model, actual_model=actual_model)
+        return _build_cost_info(0, actual_model=actual_model)
 
     if isinstance(cost, MaxCostData):
         logger.warning(
-            "EHBP calculate_cost returned MaxCostData (no model pricing), "
-            "falling back to max cost",
+            "EHBP calculate_cost returned MaxCostData (no usable pricing); "
+            "releasing instead of charging max cost",
             extra={
                 "model": pricing_model_id,
                 "max_cost_for_model": max_cost_for_model,
@@ -425,7 +549,7 @@ async def _compute_ehbp_actual_cost(
                 "cost_total_msats": cost.total_msats,
             },
         )
-        return _build_cost_info(max_cost_for_model, actual_model=actual_model)
+        return _build_cost_info(0, actual_model=actual_model)
     if isinstance(cost, CostData):
         actual = max(int(cost.total_msats), int(settings.min_request_msat))
         clamped = min(actual, max_cost_for_model)
@@ -445,17 +569,22 @@ async def _compute_ehbp_actual_cost(
             output_tokens=cost.output_tokens,
             input_msats=cost.input_msats,
             output_msats=cost.output_msats,
+            cache_read_input_tokens=cost.cache_read_input_tokens,
+            cache_creation_input_tokens=cost.cache_creation_input_tokens,
+            cache_read_msats=cost.cache_read_msats,
+            cache_creation_msats=cost.cache_creation_msats,
+            total_usd=cost.total_usd,
             actual_model=actual_model,
         )
     # CostDataError
     logger.warning(
-        "EHBP usage cost calculation error, falling back to max cost",
+        "EHBP usage cost calculation error; releasing instead of charging max cost",
         extra={
             "model": pricing_model_id,
             "error": getattr(cost, "message", str(cost)),
         },
     )
-    return _build_cost_info(max_cost_for_model, actual_model=actual_model)
+    return _build_cost_info(0, actual_model=actual_model)
 
 
 def _extract_usage_from_response(
@@ -500,6 +629,18 @@ class EHBPForwardingTarget:
     profile: ConfidentialInferenceProfile | None = None
 
 
+async def _release_failed_ehbp_charge(
+    reservation: ReservationSnapshot, session: AsyncSession
+) -> None:
+    if await release_reservation(reservation, session, reservation.reserved_msats):
+        return
+    await _stop_reservation_heartbeat(reservation.release_id)
+    logger.critical(
+        "Failed to release EHBP reservation after rejected charge",
+        extra={"reservation_id": reservation.release_id},
+    )
+
+
 async def finalize_ehbp_actual_cost_payment(
     key: ApiKey,
     session: AsyncSession,
@@ -507,61 +648,27 @@ async def finalize_ehbp_actual_cost_payment(
     model_id: str,
     cost_info: dict,
     reservation_snapshot: ReservationSnapshot | None = None,
-) -> None:
+) -> int:
     """Finalize an EHBP bearer request using clamped provider usage metrics."""
     reservation = reservation_snapshot or await get_reservation_snapshot(key, session)
     await _validate_reservation_snapshot(key, reservation, session)
     if not await _claim_reservation_for_charge(reservation, session):
-        return
+        return 0
     reserved_cost_for_model = reservation.reserved_msats
-    billing_key = await get_billing_key(key, session)
     key_hash = key.hashed_key
-    billing_key_hash = billing_key.hashed_key
-    total_cost_msats = max(0, int(cost_info.get("total_msats", reserved_cost_for_model)))
+    billing_key_hash = key_hash
+    total_cost_msats = max(
+        0, int(cost_info.get("total_msats", reserved_cost_for_model))
+    )
     now = int(time.time())
 
-    safe_reserved = case(
-        (
-            col(ApiKey.reserved_balance) >= reserved_cost_for_model,
-            col(ApiKey.reserved_balance) - reserved_cost_for_model,
-        ),
-        else_=0,
+    charged = await _charge_reservation_rows(
+        session,
+        billing_key_hash=billing_key_hash,
+        reserved_msats=reserved_cost_for_model,
+        charge_msats=total_cost_msats,
     )
-    cleared_reserved_at = case(
-        (
-            col(ApiKey.reserved_balance) - reserved_cost_for_model > 0,
-            col(ApiKey.reserved_at),
-        ),
-        else_=None,
-    )
-
-    stmt = (
-        update(ApiKey)
-        .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-        .values(
-            reserved_balance=safe_reserved,
-            reserved_at=cleared_reserved_at,
-            balance=col(ApiKey.balance) - total_cost_msats,
-            total_spent=col(ApiKey.total_spent) + total_cost_msats,
-        )
-    )
-    result = await session.exec(stmt)  # type: ignore[call-overload]
-
-    child_result = None
-    if billing_key.hashed_key != key.hashed_key:
-        child_stmt = (
-            update(ApiKey)
-            .where(col(ApiKey.hashed_key) == key.hashed_key)
-            .values(
-                reserved_balance=safe_reserved,
-                reserved_at=cleared_reserved_at,
-                total_spent=col(ApiKey.total_spent) + total_cost_msats,
-            )
-        )
-        child_result = await session.exec(child_stmt)  # type: ignore[call-overload]
-
-    if result.rowcount == 0 or (child_result is not None and child_result.rowcount == 0):
-        await session.rollback()
+    if not charged:
         logger.error(
             "Failed to finalize EHBP usage-based payment",
             extra={
@@ -570,16 +677,14 @@ async def finalize_ehbp_actual_cost_payment(
                 "model": model_id,
                 "reserved_cost_for_model": reserved_cost_for_model,
                 "total_cost_msats": total_cost_msats,
-                "parent_rowcount": result.rowcount,
-                "child_rowcount": getattr(child_result, "rowcount", None),
             },
         )
-        return
+        await _release_failed_ehbp_charge(reservation, session)
+        return 0
 
     await session.commit()
-    await session.refresh(billing_key)
-    if billing_key.hashed_key != key.hashed_key:
-        await session.refresh(key)
+    await _stop_reservation_heartbeat(reservation.release_id)
+    await session.refresh(key)
 
     if total_cost_msats > 0 and ROUTSTR_FEE_PERCENT > 0:
         fee_msats = math.ceil(total_cost_msats * ROUTSTR_FEE_PERCENT / 100)
@@ -596,19 +701,30 @@ async def finalize_ehbp_actual_cost_payment(
         extra={
             "event": "finalize",
             "key_hash": key.hashed_key[:8] + "...",
-            "billing_key_hash": billing_key.hashed_key[:8] + "...",
+            "billing_key_hash": key.hashed_key[:8] + "...",
             "model": model_id,
             "cost_reserved": reserved_cost_for_model,
             "cost_charged": total_cost_msats,
             "input_tokens": cost_info.get("input_tokens", 0),
             "output_tokens": cost_info.get("output_tokens", 0),
-            "balance": billing_key.balance,
-            "reserved_balance": billing_key.reserved_balance,
-            "total_spent": billing_key.total_spent,
+            # Cache splits are only knowable when the enclave reports
+            # ``cached_prompt_tokens``; absent that they are a measured zero on
+            # the token counts the provider did report (not an unknown), so the
+            # event key set stays stable for usage-analytics consumers.
+            "cache_read_input_tokens": cost_info.get("cache_read_input_tokens", 0),
+            "cache_creation_input_tokens": cost_info.get(
+                "cache_creation_input_tokens", 0
+            ),
+            "cache_read_msats": cost_info.get("cache_read_msats", 0),
+            "cache_creation_msats": cost_info.get("cache_creation_msats", 0),
+            "balance": key.balance,
+            "reserved_balance": key.reserved_balance,
+            "total_spent": key.total_spent,
             "finalize_type": "ehbp_usage",
             "finalized_at": now,
         },
     )
+    return total_cost_msats
 
 
 async def finalize_ehbp_max_cost_payment(
@@ -617,128 +733,26 @@ async def finalize_ehbp_max_cost_payment(
     max_cost_for_model: int,
     model_id: str,
     reservation_snapshot: ReservationSnapshot | None = None,
-) -> None:
-    """Finalize an EHBP bearer request by charging the reserved max cost.
+) -> int:
+    """Release an unmeasured EHBP request without charging its reservation.
 
-    EHBP responses are encrypted, so Routstr cannot inspect token usage. Unlike
-    normal completion handlers, this intentionally charges the pre-reserved max
-    cost and releases the reservation.
+    The legacy name is retained for compatibility with internal callers. EHBP
+    responses are encrypted, so no local estimate is possible when the trusted
+    usage header/trailer is absent.
     """
     reservation = reservation_snapshot or await get_reservation_snapshot(key, session)
     await _validate_reservation_snapshot(key, reservation, session)
-    if not await _claim_reservation_for_charge(reservation, session):
-        return
-    max_cost_for_model = reservation.reserved_msats
-    billing_key = await get_billing_key(key, session)
-    key_hash = key.hashed_key
-    billing_key_hash = billing_key.hashed_key
-    total_cost_msats = max(0, int(max_cost_for_model))
-    now = int(time.time())
-
-    cleared_reserved_at = case(
-        (
-            col(ApiKey.reserved_balance) - max_cost_for_model > 0,
-            col(ApiKey.reserved_at),
-        ),
-        else_=None,
-    )
-    safe_reserved = case(
-        (
-            col(ApiKey.reserved_balance) >= max_cost_for_model,
-            col(ApiKey.reserved_balance) - max_cost_for_model,
-        ),
-        else_=0,
-    )
-
-    stmt = (
-        update(ApiKey)
-        .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-        .values(
-            reserved_balance=safe_reserved,
-            reserved_at=cleared_reserved_at,
-            balance=col(ApiKey.balance) - total_cost_msats,
-            total_spent=col(ApiKey.total_spent) + total_cost_msats,
-        )
-    )
-    result = await session.exec(stmt)  # type: ignore[call-overload]
-
-    if billing_key.hashed_key != key.hashed_key:
-        child_safe_reserved = case(
-            (
-                col(ApiKey.reserved_balance) >= max_cost_for_model,
-                col(ApiKey.reserved_balance) - max_cost_for_model,
-            ),
-            else_=0,
-        )
-        child_cleared_reserved_at = case(
-            (
-                col(ApiKey.reserved_balance) - max_cost_for_model > 0,
-                col(ApiKey.reserved_at),
-            ),
-            else_=None,
-        )
-        child_stmt = (
-            update(ApiKey)
-            .where(col(ApiKey.hashed_key) == key.hashed_key)
-            .values(
-                reserved_balance=child_safe_reserved,
-                reserved_at=child_cleared_reserved_at,
-                total_spent=col(ApiKey.total_spent) + total_cost_msats,
-            )
-        )
-        child_result = await session.exec(child_stmt)  # type: ignore[call-overload]
-    else:
-        child_result = None
-
-    if result.rowcount == 0 or (child_result is not None and child_result.rowcount == 0):
-        await session.rollback()
-        logger.error(
-            "Failed to finalize EHBP max-cost payment",
-            extra={
-                "key_hash": key_hash[:8] + "...",
-                "billing_key_hash": billing_key_hash[:8] + "...",
-                "model": model_id,
-                "max_cost_for_model": max_cost_for_model,
-                "parent_rowcount": result.rowcount,
-                "child_rowcount": getattr(child_result, "rowcount", None),
-            },
-        )
-        return
-
-    await session.commit()
-
-    await session.refresh(billing_key)
-    if billing_key.hashed_key != key.hashed_key:
-        await session.refresh(key)
-
-    if total_cost_msats > 0 and ROUTSTR_FEE_PERCENT > 0:
-        fee_msats = math.ceil(total_cost_msats * ROUTSTR_FEE_PERCENT / 100)
-        try:
-            await accumulate_routstr_fee(session, fee_msats)
-        except Exception as e:
-            logger.warning(
-                "Failed to accumulate Routstr fee for EHBP request",
-                extra={"error": str(e), "fee_msats": fee_msats},
-            )
-
-    payments_logger.info(
-        "FINALIZE",
+    key_log_hash = key.hashed_key[:8] + "..."
+    await release_reservation(reservation, session, reservation.reserved_msats)
+    logger.warning(
+        "Released unmeasured EHBP reservation without charging max cost",
         extra={
-            "event": "finalize",
-            "key_hash": key.hashed_key[:8] + "...",
-            "billing_key_hash": billing_key.hashed_key[:8] + "...",
+            "key_hash": key_log_hash,
             "model": model_id,
-            "cost_reserved": max_cost_for_model,
-            "cost_charged": total_cost_msats,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "balance": billing_key.balance,
-            "reserved_balance": billing_key.reserved_balance,
-            "total_spent": billing_key.total_spent,
-            "finalize_type": "ehbp_max_cost",
-            "finalized_at": now,
+            "max_cost_for_model": max_cost_for_model,
         },
     )
+    return 0
 
 
 async def send_cashu_refund(
@@ -842,6 +856,25 @@ async def forward_ehbp_request(
                     "body_preview": body_preview,
                 },
             )
+            # Key-config mismatch (stale client HPKE key): return the
+            # enclave's 422 problem+json directly so the SDK's
+            # KeyConfigMismatchError detection fires and triggers
+            # re-attestation.  Wrapping it as application/json would
+            # destroy the signal and cause permanent failure.
+            if _is_ehbp_key_config_response(resp):
+                logger.warning(
+                    "EHBP upstream %s returned key-config mismatch for model=%s, "
+                    "passing through for client re-attestation",
+                    provider_type,
+                    model_obj.id,
+                    extra={
+                        "provider": provider_type,
+                        "model": model_obj.id,
+                        "path": path,
+                    },
+                )
+                return _passthrough_key_config_response(resp)
+
             raise UpstreamError(
                 f"EHBP upstream {provider_type} returned {resp.status_code} "
                 f"for model {model_obj.id}: {body_preview[:200] or '<empty>'}",
@@ -893,10 +926,9 @@ async def forward_ehbp_request(
             cost_info = await _compute_ehbp_actual_cost(
                 usage_header, model_obj, max_cost_for_model
             )
-            # Use the actual served model for billing when it differs from
-            # the requested model.
             billing_model = cost_info.pop("actual_model", None) or model_obj.id
-            await finalize_ehbp_actual_cost_payment(
+            computed_msats = int(cost_info["total_msats"])
+            charged_msats = await finalize_ehbp_actual_cost_payment(
                 key,
                 session,
                 max_cost_for_model,
@@ -904,18 +936,25 @@ async def forward_ehbp_request(
                 cost_info,
                 reservation_snapshot,
             )
-            cost_data = {**cost_info, "total_usd": 0.0}
+            cost_data = {
+                **cost_info,
+                "total_msats": charged_msats,
+                "charged_msats": charged_msats,
+                "total_usd": cost_info.get("total_usd", 0.0),
+            }
+            if computed_msats != charged_msats:
+                cost_data["computed_msats"] = computed_msats
         else:
             logger.warning(
-                "EHBP usage metrics not found in headers or trailers, "
-                "falling back to max-cost billing",
+                "EHBP usage metrics not found in headers or trailers; "
+                "releasing instead of charging the authorization ceiling",
                 extra={
                     "model": model_obj.id,
                     "provider": provider_type,
                     "key_hash": key.hashed_key[:8] + "...",
                 },
             )
-            await finalize_ehbp_max_cost_payment(
+            charged_msats = await finalize_ehbp_max_cost_payment(
                 key,
                 session,
                 max_cost_for_model,
@@ -923,14 +962,15 @@ async def forward_ehbp_request(
                 reservation_snapshot,
             )
             cost_data = {
-                "total_msats": max_cost_for_model,
+                "total_msats": charged_msats,
+                "charged_msats": charged_msats,
                 "total_usd": 0.0,
                 "input_tokens": 0,
                 "output_tokens": 0,
             }
 
-        # Build the cost_info dict from what adjust_payment_for_tokens returned
-        # or from the max-cost fallback. Fields match CostData/MaxCostData.dict().
+        # Build the cost_info dict from measured usage or the unmeasured-release
+        # fallback. Fields match CostData/MaxCostData.dict().
         cost_info = {
             "total_msats": cost_data.get("total_msats", max_cost_for_model),
             "input_tokens": cost_data.get("input_tokens", 0),
@@ -939,7 +979,15 @@ async def forward_ehbp_request(
             + cost_data.get("output_tokens", 0),
             "input_msats": cost_data.get("input_msats", 0),
             "output_msats": cost_data.get("output_msats", 0),
+            "cache_read_input_tokens": cost_data.get("cache_read_input_tokens", 0),
+            "cache_creation_input_tokens": cost_data.get(
+                "cache_creation_input_tokens", 0
+            ),
+            "cache_read_msats": cost_data.get("cache_read_msats", 0),
+            "cache_creation_msats": cost_data.get("cache_creation_msats", 0),
         }
+        if "computed_msats" in cost_data:
+            cost_info["computed_msats"] = cost_data["computed_msats"]
         cost_usd = cost_data.get("total_usd", 0.0)
 
         # Build response headers, filtering out hop-by-hop headers
@@ -1028,7 +1076,9 @@ async def forward_ehbp_x_cashu_request(
         target_url = _resolve_ehbp_target_url(
             target.url, path, headers, provider_type, profile
         )
-        upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers, profile)
+        upstream_headers = _prepare_ehbp_upstream_headers(
+            headers, target.headers, profile
+        )
         request_body = await request.body()
 
         # Merge query params into the target URL
@@ -1047,6 +1097,29 @@ async def forward_ehbp_x_cashu_request(
             )
 
             if resp.status_code != 200:
+                # Key-config mismatch (stale client HPKE key): refund the
+                # full token and pass the enclave's 422 problem+json through
+                # so the SDK's KeyConfigMismatchError detection fires.
+                if _is_ehbp_key_config_response(resp):
+                    logger.warning(
+                        "EHBP upstream %s returned key-config mismatch for "
+                        "model=%s, refunding and passing through",
+                        provider_type,
+                        model_obj.id,
+                        extra={
+                            "provider": provider_type,
+                            "model": model_obj.id,
+                            "path": path,
+                            "refunded_amount": amount,
+                        },
+                    )
+                    refund_token = await send_cashu_refund(
+                        amount, unit, mint, request_id
+                    )
+                    passthrough = _passthrough_key_config_response(resp)
+                    passthrough.headers["X-Cashu"] = refund_token
+                    return passthrough
+
                 refund_token = await send_cashu_refund(amount, unit, mint, request_id)
                 error_response = Response(
                     content=json.dumps(
@@ -1076,9 +1149,7 @@ async def forward_ehbp_x_cashu_request(
             usage_source = (
                 "header"
                 if usage_header_name
-                and any(
-                    k.lower() == usage_header_name.lower() for k, _ in resp.headers
-                )
+                and any(k.lower() == usage_header_name.lower() for k, _ in resp.headers)
                 else ("trailer" if usage_header else "none")
             )
 
@@ -1153,6 +1224,46 @@ async def forward_ehbp_x_cashu_request(
         except Exception:
             raise
 
+    except EhbpTimeoutError as e:
+        logger.warning(
+            "EHBP X-Cashu upstream timed out",
+            extra={
+                "error": str(e),
+                "path": path,
+                "method": request.method,
+                "redeemed": redeemed,
+            },
+        )
+
+        if redeemed and amount > 0:
+            try:
+                refund_token = await send_cashu_refund(amount, unit, mint, request_id)
+                error_response = create_error_response(
+                    "upstream_timeout",
+                    str(e),
+                    504,
+                    request=request,
+                    code="UPSTREAM_TIMEOUT",
+                )
+                error_response.headers["X-Cashu"] = refund_token
+                return error_response
+            except Exception as refund_error:
+                logger.error(
+                    "Failed to refund EHBP X-Cashu token after timeout",
+                    extra={
+                        "error": str(refund_error),
+                        "original_error": str(e),
+                    },
+                )
+
+        return create_error_response(
+            "upstream_timeout",
+            str(e),
+            504,
+            request=request,
+            code="UPSTREAM_TIMEOUT",
+        )
+
     except Exception as e:
         error_message = str(e)
         logger.error(
@@ -1185,6 +1296,30 @@ async def forward_ehbp_x_cashu_request(
                         "original_error": error_message,
                     },
                 )
+
+        if not redeemed:
+            classified = classify_redemption_error(e)
+            if classified is not None:
+                error_type, status_code, message, error_code = classified
+                # Never re-offer a spent/consumed token.
+                echo_token = None if error_code in SPENT_TOKEN_CODES else x_cashu_token
+                return create_error_response(
+                    error_type,
+                    message,
+                    status_code,
+                    request=request,
+                    token=echo_token,
+                    code=error_code,
+                )
+            # Raw exception text may contain the attacker-supplied mint URL.
+            return create_error_response(
+                "api_error",
+                "Internal error during token redemption",
+                500,
+                request=request,
+                token=x_cashu_token,
+                code="internal_error",
+            )
 
         if "already spent" in error_message.lower():
             return create_error_response(

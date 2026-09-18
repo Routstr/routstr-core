@@ -1,9 +1,6 @@
 """Model-path discovery service.
 
 Exposes every selectable upstream route a Routstr model is reachable through.
-This PR remains discovery-only: request-side routing will consume the opaque
-selectors in a follow-up.
-
 A path is a standard percent-encoded query string containing the configured
 upstream URL, provider ID, client-visible model ID and, for an exact OpenRouter
 endpoint, its machine-readable tag::
@@ -16,11 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import random
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 from sqlalchemy.dialects.sqlite import insert
@@ -60,10 +58,11 @@ ModelKey = tuple[str, int]
 
 @dataclass(frozen=True)
 class EndpointIdentity:
-    """Exact OpenRouter endpoint identity returned by ``/endpoints``."""
+    """Exact OpenRouter endpoint and its provider-specific model metadata."""
 
     tag: str
     provider_name: str | None
+    model_metadata: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -83,6 +82,7 @@ class DiscoveredPath:
     model_id: str
     path: str
     provider: ConfiguredProviderIdentity
+    model_metadata: dict[str, Any]
     endpoint_tag: str | None = None
     endpoint_name: str | None = None
 
@@ -132,21 +132,68 @@ def encode_model_path(
     return urlencode(components)
 
 
+@dataclass(frozen=True)
+class ModelPathSelector:
+    """Decoded client-supplied route selector."""
+
+    base_url: str
+    provider_id: int
+    model_id: str
+    endpoint_tag: str | None = None
+
+
+def decode_model_path(path: str) -> ModelPathSelector | None:
+    """Inverse of ``encode_model_path``; ``None`` when the selector is malformed."""
+    try:
+        pairs = parse_qsl(
+            path,
+            keep_blank_values=True,
+            strict_parsing=True,
+            max_num_fields=4,
+            errors="strict",
+        )
+    except ValueError:
+        return None
+    params = dict(pairs)
+    if len(params) != len(pairs) or params.keys() - {
+        "url",
+        "provider-id",
+        "model-id",
+        "endpoint",
+    }:
+        return None
+    if any(not value.strip() for value in params.values()):
+        return None
+    base_url = params.get("url", "")
+    model_id = params.get("model-id", "")
+    raw_provider_id = params.get("provider-id", "")
+    if not base_url or not model_id or not raw_provider_id:
+        return None
+    try:
+        provider_id = int(raw_provider_id)
+    except ValueError:
+        return None
+    if provider_id <= 0:
+        return None
+    return ModelPathSelector(
+        base_url=base_url,
+        provider_id=provider_id,
+        model_id=model_id,
+        endpoint_tag=params.get("endpoint") or None,
+    )
+
+
 def _make_http_client() -> httpx.AsyncClient:
     """Client factory, separated so tests can substitute a mock transport."""
     return httpx.AsyncClient()
 
 
 def is_openrouter_base_url(base_url: str | None) -> bool:
-    """True when ``base_url`` points at OpenRouter.
-
-    Deliberately separate from ``BaseUpstreamProvider._upstream_accepts_cache_control``:
-    that predicate also returns True for native Anthropic (correct for
-    cache-control, wrong for OpenRouter endpoint discovery). This one keys only
-    on the URL so a ``GenericUpstreamProvider`` aimed at OpenRouter is matched
-    while native Anthropic is not.
-    """
-    return "openrouter.ai" in (base_url or "")
+    """Match OpenRouter itself, not compatible providers or lookalike hosts."""
+    try:
+        return urlsplit(base_url or "").hostname == "openrouter.ai"
+    except ValueError:
+        return False
 
 
 def exposed_model_id(model: object) -> str:
@@ -263,9 +310,14 @@ async def _fetch_openrouter_endpoint_subproviders(
     try:
         payload = resp.json()
         data = payload.get("data") if isinstance(payload, dict) else None
-        endpoints = data.get("endpoints") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            raise ValueError("data must be an object")
+        endpoints = data.get("endpoints")
         if not isinstance(endpoints, list):
             raise ValueError("endpoints must be a list")
+        common_metadata = {
+            key: value for key, value in data.items() if key != "endpoints"
+        }
         identities: dict[str, EndpointIdentity] = {}
         for endpoint in endpoints:
             if not isinstance(endpoint, dict):
@@ -281,6 +333,7 @@ async def _fetch_openrouter_endpoint_subproviders(
                     provider_name=provider_name
                     if isinstance(provider_name, str) and provider_name
                     else None,
+                    model_metadata={**common_metadata, **endpoint},
                 ),
             )
         if endpoints and not identities:
@@ -341,6 +394,34 @@ async def _load_model_visibility() -> tuple[
     return overrides_by_key, disabled_model_keys, provider_identities
 
 
+def _serialize_model_metadata(model: object, model_id: str) -> dict[str, Any]:
+    """Serialize provider-specific model details into the public API shape."""
+    model_dict = getattr(model, "dict", None)
+    if callable(model_dict):
+        metadata = dict(model_dict())
+    else:
+        metadata = {
+            key: value for key, value in vars(model).items() if not key.startswith("_")
+        }
+
+    for field in (
+        "architecture",
+        "pricing",
+        "sats_pricing",
+        "per_request_limits",
+        "top_provider",
+        "alias_ids",
+    ):
+        value = metadata.get(field)
+        if isinstance(value, str):
+            try:
+                metadata[field] = json.loads(value)
+            except (TypeError, ValueError):
+                pass
+    metadata["id"] = model_id
+    return metadata
+
+
 def _apply_model_visibility(
     upstream: BaseUpstreamProvider,
     overrides_by_key: dict[ModelKey, ModelRow] | None,
@@ -348,11 +429,10 @@ def _apply_model_visibility(
 ) -> list[object]:
     """Return provider models after DB disabled/override state is applied.
 
-    Only the identity fields (``id``, ``forwarded_model_id``,
-    ``canonical_slug``) matter for path discovery, so DB override rows are used
-    directly rather than rebuilt into fully priced ``Model`` objects — the
-    pricing pipeline costs ~0.7ms of event-loop CPU per row for data this
-    module immediately discards.
+    DB override rows are used directly rather than rebuilt into priced
+    ``Model`` objects. Their JSON metadata fields are decoded when each path is
+    collected, preserving the provider-specific stored values without running
+    the routing price-selection pipeline.
     """
     overrides_by_key = overrides_by_key or {}
     disabled_model_keys = disabled_model_keys or set()
@@ -414,6 +494,7 @@ async def _collect_provider_paths(
                 provider_identity.base_url, provider_identity.id, model_id
             ),
             provider=provider_identity,
+            model_metadata=_serialize_model_metadata(model, model_id),
         )
 
     if not is_openrouter_base_url(upstream.base_url):
@@ -453,6 +534,7 @@ async def _collect_provider_paths(
                         endpoint.tag,
                     ),
                     provider=provider_identity,
+                    model_metadata={**endpoint.model_metadata, "id": model_id},
                     endpoint_tag=endpoint.tag,
                     endpoint_name=endpoint.provider_name,
                 )
@@ -512,6 +594,7 @@ async def _persist_provider_paths(
                     "provider_type": discovered.provider.provider_type,
                     "endpoint_tag": discovered.endpoint_tag,
                     "endpoint_name": discovered.endpoint_name,
+                    "model_metadata": json.dumps(discovered.model_metadata),
                     "upstream_provider_id": upstream_provider_id,
                     "updated_at": now,
                 }
@@ -526,6 +609,7 @@ async def _persist_provider_paths(
                         "provider_type": insert_stmt.excluded.provider_type,
                         "endpoint_tag": insert_stmt.excluded.endpoint_tag,
                         "endpoint_name": insert_stmt.excluded.endpoint_name,
+                        "model_metadata": insert_stmt.excluded.model_metadata,
                         "updated_at": insert_stmt.excluded.updated_at,
                     },
                 )
@@ -736,10 +820,83 @@ async def refresh_model_paths_periodically(
             break
 
 
-def _serialize_path(row: ModelPathRow) -> dict[str, Any]:
+def _price_in_sats(model: dict[str, Any], provider_fee: float) -> None:
+    """Run a path's USD rates through the ``/v1/models`` pricing pipeline.
+
+    Metadata copied from the provider model cache is already priced. OpenRouter
+    endpoint metadata is not: it carries that endpoint's own USD rates, which
+    still need the cache backfill, the provider fee and the sats conversion.
+    """
+    pricing = model.get("pricing")
+    if model.get("sats_pricing") or not isinstance(pricing, dict):
+        return
+
+    from ..payment.models import (
+        Architecture,
+        Model,
+        Pricing,
+        TopProvider,
+        _calculate_usd_max_costs,
+        _update_model_sats_pricing,
+        backfill_cache_pricing,
+    )
+    from ..payment.price import sats_usd_price
+
+    try:
+        model_id = model.get("forwarded_model_id") or model["id"]
+        usd = backfill_cache_pricing(model_id, Pricing.parse_obj(pricing))
+        usd = Pricing.parse_obj({k: v * provider_fee for k, v in usd.dict().items()})
+        priced = Model(
+            id=model_id,
+            name=model.get("name") or model_id,
+            created=0,
+            description="",
+            context_length=model.get("context_length") or 0,
+            architecture=Architecture(
+                modality="text",
+                input_modalities=[],
+                output_modalities=[],
+                tokenizer="",
+                instruct_type=None,
+            ),
+            pricing=usd,
+            top_provider=TopProvider(
+                context_length=model.get("context_length"),
+                max_completion_tokens=model.get("max_completion_tokens"),
+            ),
+        )
+        (
+            usd.max_prompt_cost,
+            usd.max_completion_cost,
+            usd.max_cost,
+        ) = _calculate_usd_max_costs(priced)
+        priced = _update_model_sats_pricing(priced, sats_usd_price())
+    except Exception as exc:
+        # An endpoint with rates we cannot price is still a usable route, so it
+        # is served with its raw upstream pricing rather than dropped.
+        logger.warning(
+            "Could not calculate sats pricing for model path",
+            extra={"model_id": model.get("id"), "error": str(exc)},
+        )
+        return
+
+    if priced.sats_pricing:
+        model["pricing"] = usd.dict()
+        model["sats_pricing"] = priced.sats_pricing.dict()
+
+
+def _serialize_path(row: ModelPathRow, provider_fee: float) -> dict[str, Any]:
     endpoint = None
     if row.endpoint_tag or row.endpoint_name:
         endpoint = {"tag": row.endpoint_tag, "name": row.endpoint_name}
+    try:
+        model = json.loads(row.model_metadata)
+    except (TypeError, ValueError):
+        model = {}
+    if not isinstance(model, dict):
+        model = {}
+    model.setdefault("id", row.model_id)
+    _price_in_sats(model, provider_fee)
     return {
         "path": row.path,
         "provider": {
@@ -748,11 +905,17 @@ def _serialize_path(row: ModelPathRow) -> dict[str, Any]:
             "type": row.provider_type,
         },
         "endpoint": endpoint,
+        "model": model,
     }
 
 
+async def _provider_fees(session: "AsyncSession") -> dict[int, float]:
+    rows = (await session.exec(select(UpstreamProviderRow))).all()
+    return {row.id: row.provider_fee for row in rows if row.id is not None}
+
+
 async def get_all_model_paths() -> dict:
-    """All models with their exact selectable routes."""
+    """All models with exact routes and provider-specific model metadata."""
     async with create_session() as session:
         rows = (
             await session.exec(
@@ -763,6 +926,7 @@ async def get_all_model_paths() -> dict:
                 )
             )
         ).all()
+        fees = await _provider_fees(session)
 
     grouped: dict[str, list[dict[str, Any]]] = {}
     seen_paths: dict[str, set[str]] = {}
@@ -772,7 +936,9 @@ async def get_all_model_paths() -> dict:
         if row.path in seen_paths.setdefault(row.model_id, set()):
             continue
         seen_paths[row.model_id].add(row.path)
-        grouped.setdefault(row.model_id, []).append(_serialize_path(row))
+        grouped.setdefault(row.model_id, []).append(
+            _serialize_path(row, fees.get(row.upstream_provider_id, 1.01))
+        )
     data = [
         {
             "id": grouped_model_id,
@@ -806,6 +972,7 @@ async def get_paths_for_model(model_id: str) -> dict:
             unprefixed_id = public_model_id(model_id)
             if unprefixed_id != model_id:
                 rows = await load_rows(session, unprefixed_id)
+        fees = await _provider_fees(session)
 
     seen: set[str] = set()
     paths: list[dict] = []
@@ -815,5 +982,5 @@ async def get_paths_for_model(model_id: str) -> dict:
         if row.path in seen:
             continue
         seen.add(row.path)
-        paths.append(_serialize_path(row))
+        paths.append(_serialize_path(row, fees.get(row.upstream_provider_id, 1.01)))
     return {"data": paths, "updated_at": updated_at or None}

@@ -136,19 +136,20 @@ async def test_supported_mint_units_come_from_active_keysets() -> None:
     msat = MagicMock(active=False, unit="msat")
     usd = MagicMock(active=True)
     usd.unit.name = "usd"
-    wallet = MagicMock()
-    wallet._get_keysets = AsyncMock(return_value=[usd, msat, sat])
+    wallet = MagicMock(url="http://mint:3338", db=MagicMock())
+    get_keysets = AsyncMock(return_value=[usd, msat, sat])
 
     with (
         patch.object(settings, "primary_mint_unit", "sat"),
         patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.wallet.get_cashu_keysets", get_keysets),
     ):
         units = await _get_supported_mint_units("http://mint:3338")
         cached_units = await _get_supported_mint_units("http://mint:3338")
 
     assert units == ["sat", "usd"]
     assert cached_units == units
-    wallet._get_keysets.assert_awaited_once()
+    get_keysets.assert_awaited_once_with(mint_url=wallet.url, db=wallet.db)
 
 
 @pytest.mark.asyncio
@@ -339,7 +340,7 @@ async def test_slow_mints_do_not_exhaust_a_single_connection_pool(
         f"sqlite+aiosqlite:///{tmp_path / 'pool-pressure.db'}",
         pool_size=1,
         max_overflow=0,
-        pool_timeout=0.2,
+        pool_timeout=0.5,
     )
     async with engine.begin() as connection:
         await connection.run_sync(SQLModel.metadata.create_all)
@@ -350,7 +351,7 @@ async def test_slow_mints_do_not_exhaust_a_single_connection_pool(
             yield session
 
     async def slow_filter(proofs, wallet):  # type: ignore[no-untyped-def]
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(1.0)
         return proofs
 
     try:

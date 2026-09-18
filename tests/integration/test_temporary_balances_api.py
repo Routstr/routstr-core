@@ -22,18 +22,18 @@ async def _add_key(
     hashed_key: str,
     *,
     balance: int = 0,
+    reserved_balance: int = 0,
     total_spent: int = 0,
     total_requests: int = 0,
     created_at: int | None = None,
-    parent_key_hash: str | None = None,
     refund_address: str | None = None,
 ) -> ApiKey:
     key = ApiKey(
         hashed_key=hashed_key,
         balance=balance,
+        reserved_balance=reserved_balance,
         total_spent=total_spent,
         total_requests=total_requests,
-        parent_key_hash=parent_key_hash,
         refund_address=refund_address,
     )
     key.created_at = created_at
@@ -123,28 +123,17 @@ async def test_temporary_balances_pagination(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_temporary_balances_totals_exclude_child_balance(
+async def test_temporary_balances_totals(
     integration_client: httpx.AsyncClient,
     integration_session: AsyncSession,
 ) -> None:
     await _add_key(
         integration_session,
-        "parent",
+        "standalone_key",
         balance=5000,
         total_spent=100,
         total_requests=3,
         created_at=1000,
-    )
-    # Child draws from parent's balance, so its balance must NOT be summed,
-    # but its spent/requests still count.
-    await _add_key(
-        integration_session,
-        "child",
-        balance=0,
-        total_spent=200,
-        total_requests=7,
-        created_at=1001,
-        parent_key_hash="parent",
     )
 
     response = await integration_client.get(
@@ -153,8 +142,8 @@ async def test_temporary_balances_totals_exclude_child_balance(
 
     totals = response.json()["totals"]
     assert totals["total_balance"] == 5000
-    assert totals["total_spent"] == 300
-    assert totals["total_requests"] == 10
+    assert totals["total_spent"] == 100
+    assert totals["total_requests"] == 3
 
 
 @pytest.mark.integration

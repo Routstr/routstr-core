@@ -1,6 +1,6 @@
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -20,7 +20,15 @@ from routstr.lightning import (
     get_invoice_status,
     recover_invoice,
 )
+from routstr.mint import MintRateGuard
 from routstr.wallet import Wallet
+
+
+@pytest.fixture(autouse=True)
+def _clear_mint_rate_guards() -> Iterator[None]:
+    MintRateGuard._guards.clear()
+    yield
+    MintRateGuard._guards.clear()
 
 
 def _invoice(**overrides: object) -> SimpleNamespace:
@@ -33,8 +41,6 @@ def _invoice(**overrides: object) -> SimpleNamespace:
         "paid_at": None,
         "api_key_hash": None,
         "mint_url": "http://mint:3338",
-        "balance_limit": None,
-        "balance_limit_reset": None,
         "validity_date": None,
         "created_at": 1,
         "expires_at": 2,

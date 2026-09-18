@@ -418,7 +418,7 @@ POST /v1/wallet/create
 
 ### Get Key Information
 
-Get current balance, consumption data, and child keys for an API key.
+Get current balance and consumption data for an API key.
 
 ```http
 GET /v1/balance/info
@@ -432,23 +432,9 @@ Authorization: Bearer sk-...
   "api_key": "sk-abc...",
   "balance": 8500000,
   "reserved": 0,
-  "is_child": false,
-  "parent_key": null,
   "total_requests": 42,
   "total_spent": 1500000,
-  "balance_limit": null,
-  "balance_limit_reset": null,
-  "validity_date": null,
-  "child_keys": [
-    {
-      "api_key": "sk-child1...",
-      "total_requests": 10,
-      "total_spent": 500000,
-      "balance_limit": 1000000,
-      "balance_limit_reset": "daily",
-      "validity_date": 1738000000
-    }
-  ]
+  "validity_date": null
 }
 ```
 
@@ -500,48 +486,23 @@ Authorization: Bearer sk-...
 }
 ```
 
-### Withdraw Funds
+### Refund Balance
 
-Withdraw balance as eCash.
-
-```http
-POST /v1/wallet/withdraw
-Authorization: Bearer sk-...
-```
-
-**Request Body:**
-
-```json
-{
-  "amount": 5000,
-  "mint": "https://mint.example.com"
-}
-```
-
-**Response:**
-
-```json
-{
-  "cashu_token": "cashuAeyJ0...",
-  "amount": 5000,
-  "mint": "https://mint.example.com"
-}
-```
-
-### Create Child Key
-
-Creates one or more child API keys that share the parent's balance. Each child key creation costs a fixed amount (configurable).
+Pay out the current balance. The key remains valid at zero balance and can be topped up again. The payout goes to a Lightning address when one is given (in the request or stored on the key), otherwise a Cashu token is returned.
 
 ```http
-POST /v1/balance/child-key
+POST /v1/balance/refund
 Authorization: Bearer sk-...
+Content-Type: application/json
 ```
 
-**Request Body:**
+`/v1/wallet/refund` is a deprecated alias.
+
+**Request Body** (optional):
 
 ```json
 {
-  "count": 1
+  "lightning_address": "user@getalby.com"
 }
 ```
 
@@ -549,20 +510,66 @@ Authorization: Bearer sk-...
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `count` | integer | Yes | - | Number of child keys to create (1-50) |
+| `lightning_address` | string | No | Key's stored refund address | Lightning address or LNURL to pay. Overrides the stored address for this request. The effective address (request or stored) is resolved only for a request that can open a new claim, before any balance is debited. |
 
-**Response:**
+**Response (Lightning):**
 
 ```json
 {
-  "api_keys": ["sk-abc...", "sk-def..."],
-  "count": 2,
-  "cost_msats": 2000,
-  "cost_sats": 2,
-  "parent_balance": 98000,
-  "parent_balance_sats": 98
+  "refund_id": "3f9c1e2d8b7a4c6e9f0a1b2c3d4e5f60",
+  "status": "paid",
+  "recipient": "user@getalby.com",
+  "sats": "4500"
 }
 ```
+
+**Response (Cashu):**
+
+```json
+{
+  "refund_id": "3f9c1e2d8b7a4c6e9f0a1b2c3d4e5f60",
+  "status": "paid",
+  "token": "cashuAeyJ0...",
+  "sats": "4500"
+}
+```
+
+The amount field is `sats` or `msats` depending on the key's refund currency. It reports the gross balance debited by the claim. For Lightning refunds, mint and input fees can reduce the amount actually delivered to the recipient.
+
+**Behaviour:**
+
+- The balance is debited and a refund claim is recorded before the payout is attempted. A key has at most one open claim at a time.
+- If the payout fails cleanly, the claim is closed and the balance is restored. Retry the request.
+- Once a melt quote has been recorded or a Cashu token has been issued, the payout may already have happened, so any later failure returns `502` and withholds the balance rather than restoring it. The exception is the mint answering the melt itself with `unpaid`: that is proof nothing was sent, so the balance is restored at once and the request returns `503`.
+- If the Lightning payment is dispatched but the mint cannot confirm the outcome, the request returns `502`, the balance stays withheld, and a background reconciler asks the mint until it answers. The balance is restored if the mint reports the payment unpaid.
+- An unresolved claim is reported before any replay: a request on a key with an open claim returns `409` with that claim's `refund_id` and `status`.
+- Calling again on a zero-balance key with no open claim returns the last paid Lightning refund, or the Cashu token issued by the last paid claim while it remains uncollected.
+
+**Errors:**
+
+| Status | Meaning |
+|--------|---------|
+| `400` | Invalid Lightning destination, no balance, or balance too small for the refund unit |
+| `400` | Ongoing requests are still reserving balance on this key |
+| `401` | Unknown key |
+| `409` | Balance changed concurrently. Retry. |
+| `409` | `refund_in_progress`: another refund claim for this key is still open. The body carries its `refund_id` and `status` |
+| `409` | `refund_unresolved`: a claim for this key is `stuck` and needs operator reconciliation |
+| `410` | Previously issued Cashu refund token has been swept |
+| `500` | Payout failed before anything was dispatched. Balance restored. Retry. |
+| `502` | Payment dispatched, outcome unconfirmed. Balance withheld pending reconciliation. Do not retry. |
+| `503` | Mint unavailable, or the mint reported the Lightning payment unpaid. Balance restored. Retry later. |
+
+**X-Cashu refunds:**
+
+Requests paid per-call with an `X-Cashu` header get their change from this endpoint by sending the same header instead of `Authorization`:
+
+```http
+POST /v1/balance/refund
+X-Cashu: cashuAeyJ0...
+```
+
+Returns the change token in the body and in an `X-Cashu` response header. `404` if no matching request exists, `425` while the change is still being minted, `410` if it was swept.
 
 ## Provider Discovery
 

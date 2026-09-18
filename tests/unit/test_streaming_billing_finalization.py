@@ -1,8 +1,12 @@
 import asyncio
+import json
 from collections.abc import AsyncGenerator
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from fastapi import BackgroundTasks
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlmodel import SQLModel
@@ -18,6 +22,7 @@ from routstr.auth import (
 )
 from routstr.core.db import ApiKey, ReservationRelease
 from routstr.payment.cost_calculation import MaxCostData
+from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream.base import BaseUpstreamProvider
 
 
@@ -77,44 +82,43 @@ async def test_release_only_owns_its_concurrent_reservation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_release_updates_parent_and_child_atomically() -> None:
+async def test_release_clears_reservation_aggregates_atomically() -> None:
     engine = await _engine()
-    parent = ApiKey(hashed_key="parent", balance=1_000)
-    child = ApiKey(hashed_key="child", parent_key_hash="parent", balance=0)
+    key = ApiKey(hashed_key="key", balance=1_000)
     async with AsyncSession(engine, expire_on_commit=False) as session:
-        session.add_all([parent, child])
+        session.add(key)
         await session.commit()
-        await pay_for_request(child, 500, session)
-        snapshot = await get_reservation_snapshot(child, session)
+        await pay_for_request(key, 500, session)
+        snapshot = await get_reservation_snapshot(key, session)
 
         assert await release_reservation(snapshot, session, 500) is True
-        await session.refresh(parent)
-        await session.refresh(child)
-        assert (parent.reserved_balance, child.reserved_balance) == (0, 0)
-        assert (parent.reserved_at, child.reserved_at) == (None, None)
+        await session.refresh(key)
+        assert (key.reserved_balance, key.reserved_at) == (0, None)
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_release_rolls_back_partial_parent_child_update() -> None:
+async def test_release_repairs_partial_aggregate_corruption() -> None:
+    """An aggregate that no longer holds the reservation must not leave
+    the durable row active forever: the release rolls the subtraction back and
+    terminalizes the reservation without touching aggregates."""
     engine = await _engine()
-    parent = ApiKey(hashed_key="parent", balance=1_000)
-    child = ApiKey(hashed_key="child", parent_key_hash="parent", balance=0)
+    key = ApiKey(hashed_key="key", balance=1_000)
     async with AsyncSession(engine, expire_on_commit=False) as session:
-        session.add_all([parent, child])
+        session.add(key)
         await session.commit()
-        await pay_for_request(child, 500, session)
-        snapshot = await get_reservation_snapshot(child, session)
-        child.reserved_balance = 100
-        session.add(child)
+        await pay_for_request(key, 500, session)
+        snapshot = await get_reservation_snapshot(key, session)
+        key.reserved_balance = 100
+        session.add(key)
         await session.commit()
 
-        assert await release_reservation(snapshot, session, 500) is False
-        await session.refresh(parent)
-        await session.refresh(child)
+        assert await release_reservation(snapshot, session, 500) is True
+        await session.refresh(key)
         record = await session.get(ReservationRelease, snapshot.release_id)
-        assert (parent.reserved_balance, child.reserved_balance) == (500, 100)
-        assert record is not None and record.status == "active"
+        # Aggregates untouched — legacy cleanup reconciles them when stale.
+        assert key.reserved_balance == 100
+        assert record is not None and record.status == "released"
     await engine.dispose()
 
 
@@ -334,6 +338,220 @@ async def test_responses_streaming_releases_and_raises_on_billing_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("finalization_fails", [False, True])
+async def test_partial_remote_protocol_error_finalizes_and_closes_once(
+    api: str,
+    finalization_fails: bool,
+) -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield b'data: {"model":"test","choices":[{"delta":{"content":"hi"}}]}\n\n'
+        raise httpx.RemoteProtocolError("incomplete chunked read")
+
+    upstream_response = MagicMock(
+        status_code=200, headers={"content-type": "text/event-stream"}
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    upstream_response.aclose = AsyncMock()
+    client = MagicMock()
+    client.aclose = AsyncMock()
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = f"{api}-partial"
+    key.balance = 10_000
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session.rollback = AsyncMock()
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    adjust = (
+        AsyncMock(side_effect=SQLAlchemyError("database unavailable"))
+        if finalization_fails
+        else AsyncMock(return_value={"input_tokens": 0, "output_tokens": 0})
+    )
+    snapshot = ReservationSnapshot(
+        release_id=f"{api}-partial-release",
+        key_hash=key.hashed_key,
+        billing_key_hash=key.hashed_key,
+        reserved_msats=500,
+    )
+    release = AsyncMock(return_value=True)
+
+    with (
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.release_reservation", release),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+    ):
+        if api == "chat":
+            response = await provider.handle_streaming_chat_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                background_tasks=BackgroundTasks(),
+                reservation_snapshot=snapshot,
+                client=client,
+            )
+        else:
+            response = await provider.handle_streaming_responses_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                reservation_snapshot=snapshot,
+                client=client,
+            )
+        emitted = bytearray()
+        with pytest.raises(httpx.RemoteProtocolError):
+            async for chunk in response.body_iterator:
+                emitted.extend(
+                    chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+                )
+
+    adjust.assert_awaited_once()
+    if finalization_fails:
+        session.rollback.assert_awaited_once()
+        release.assert_awaited_once_with(snapshot, session, 500)
+    else:
+        release.assert_not_awaited()
+    upstream_response.aclose.assert_awaited_once()
+    client.aclose.assert_awaited_once()
+    assert b"[DONE]" not in emitted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["chat", "responses"])
+async def test_partial_stream_preserves_transport_error_when_billing_db_is_down(
+    api: str,
+) -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield b'data: {"model":"test","choices":[]}\n\n'
+        raise httpx.RemoteProtocolError("incomplete chunked read")
+
+    upstream_response = MagicMock(
+        status_code=200, headers={"content-type": "text/event-stream"}
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    upstream_response.aclose = AsyncMock()
+    client = MagicMock()
+    client.aclose = AsyncMock()
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = f"{api}-database-down"
+    key.balance = 10_000
+    snapshot = ReservationSnapshot(
+        release_id=f"{api}-database-down-release",
+        key_hash=key.hashed_key,
+        billing_key_hash=key.hashed_key,
+        reserved_msats=500,
+    )
+    unavailable_session = MagicMock()
+    unavailable_session.__aenter__ = AsyncMock(
+        side_effect=SQLAlchemyError("database unavailable")
+    )
+    unavailable_session.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "routstr.upstream.base.create_session", return_value=unavailable_session
+    ):
+        if api == "chat":
+            response = await provider.handle_streaming_chat_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                background_tasks=BackgroundTasks(),
+                reservation_snapshot=snapshot,
+                client=client,
+            )
+        else:
+            response = await provider.handle_streaming_responses_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                reservation_snapshot=snapshot,
+                client=client,
+            )
+        with pytest.raises(httpx.RemoteProtocolError, match="incomplete chunked read"):
+            async for _ in response.body_iterator:
+                pass
+
+    upstream_response.aclose.assert_awaited_once()
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_responses_streaming_duplicate_publishes_zero_settled_cost() -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield (
+            b'data: {"type":"response.completed","response":{"model":"test",'
+            b'"usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+        yield b"data: [DONE]\n\n"
+
+    upstream_response = MagicMock(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = "responses-duplicate"
+    key.balance = 10_000
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    cost_data = {
+        "input_tokens": 2,
+        "output_tokens": 1,
+        "input_msats": 1_000,
+        "output_msats": 500,
+        "total_msats": 1_500,
+        "charged_msats": 0,
+        "total_usd": 0.0001,
+    }
+
+    with (
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            AsyncMock(return_value=cost_data),
+        ),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+    ):
+        response = await provider.handle_streaming_responses_completion(
+            response=upstream_response,
+            key=key,
+            max_cost_for_model=500,
+        )
+        chunks = [
+            chunk if isinstance(chunk, str) else bytes(chunk).decode()
+            async for chunk in response.body_iterator
+        ]
+
+    completed = next(
+        json.loads(line[6:])
+        for line in "".join(chunks).splitlines()
+        if line.startswith("data: {")
+    )
+    nested_usage = completed["response"]["usage"]
+    assert nested_usage["cost_sats"] == 0
+    assert nested_usage["cost"]["total_msats"] == 0
+    assert nested_usage["cost"]["charged_msats"] == 0
+    assert nested_usage["cost"]["computed_msats"] == 1_500
+    assert completed["cost"]["total_msats"] == 0
+    assert completed["cost"]["computed_msats"] == 1_500
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("via_litellm", [False, True])
 @pytest.mark.parametrize(
     "release_outcome",
@@ -445,4 +663,115 @@ async def test_cross_key_reservation_snapshot_is_rejected_without_mutation() -> 
         assert first.reserved_balance == 500
         assert second.reserved_balance == 0
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_midstream_estimates_usage_and_stops_heartbeat() -> (
+    None
+):
+    """A client abort releases the hold after charging only estimated usage.
+
+    Starlette closes the response generator (``aclose``) on disconnect. The
+    finalizer still has the request and streamed deltas, so it can estimate
+    usage without converting the reservation ceiling into the charge.
+    """
+    engine = await _engine()
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key", provider_fee=1.0
+    )
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        key = ApiKey(hashed_key="disconnect-key", balance=1_000)
+        session.add(key)
+        await session.commit()
+        await pay_for_request(key, 500, session)
+        snapshot = await get_reservation_snapshot(key, session)
+
+    assert snapshot.release_id in auth_module._reservation_heartbeats
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        # A live stream that never sends a usage chunk or [DONE]; the client
+        # disconnects after the first delta.
+        yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        yield b'data: {"choices":[{"delta":{"content":" there"}}]}\n\n'
+
+    upstream_response = MagicMock(
+        status_code=200, headers={"content-type": "text/event-stream"}
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+
+    model = Model(
+        id="test-model",
+        name="test-model",
+        created=0,
+        description="",
+        context_length=8_192,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="unknown",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.01, completion=0.02),
+        sats_pricing=Pricing(prompt=0.01, completion=0.02),
+    )
+    request_body = json.dumps(
+        {"model": model.id, "messages": [{"role": "user", "content": "hi"}]}
+    ).encode()
+
+    background_tasks = BackgroundTasks()
+    try:
+        with (
+            patch(
+                "routstr.upstream.base.create_session",
+                side_effect=lambda: AsyncSession(engine, expire_on_commit=False),
+            ),
+            patch(
+                "routstr.upstream.base.adjust_payment_for_tokens",
+                auth_module.adjust_payment_for_tokens,
+            ),
+            patch("routstr.upstream.count_tokens._count_with_litellm", return_value=3),
+            patch(
+                "routstr.upstream.count_tokens._count_text_with_litellm",
+                return_value=2,
+            ),
+            patch(
+                "routstr.payment.cost_calculation.sats_usd_price",
+                return_value=5.0e-5,
+            ),
+        ):
+            response = await provider.handle_streaming_chat_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                background_tasks=background_tasks,
+                model_obj=model,
+                reservation_snapshot=snapshot,
+                request_body=request_body,
+            )
+            iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
+            await iterator.__anext__()  # first chunk reaches the client
+            await iterator.aclose()  # client aborts the socket here
+
+            # Starlette runs the response's background tasks after the abort.
+            for task in background_tasks.tasks:
+                await task()
+    finally:
+        await auth_module._stop_reservation_heartbeat(snapshot.release_id)
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        final_key = await session.get(ApiKey, "disconnect-key")
+        record = await session.get(ReservationRelease, snapshot.release_id)
+
+    assert final_key is not None
+    # The reservation reached a single terminal outcome; funds are not locked.
+    assert record is not None and record.status in {"charged", "released"}
+    assert final_key.reserved_balance == 0
+    # 3 input tokens × 10 msats + 2 output tokens × 20 msats = 70 msats.
+    assert final_key.total_spent == 70
+    assert final_key.balance == 930
+    # The heartbeat is gone — no forever-renewing task on an abandoned request.
+    assert snapshot.release_id not in auth_module._reservation_heartbeats
     await engine.dispose()

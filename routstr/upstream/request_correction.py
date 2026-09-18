@@ -84,19 +84,46 @@ def extract_error_message(response: Response) -> str:
     return ""
 
 
-def strip_unsupported_param(
-    body: dict, error_message: str
-) -> tuple[dict, str] | None:
+# Spend-shaping fields bound how much work — and therefore cost — the upstream
+# may perform. The reservation was priced with these caps in place; dropping one
+# and retrying would let the request run uncapped (or fan out) and bill above the
+# caller's authorization. When the upstream names one of these, decline the strip
+# and let the error propagate. Matched case-insensitively.
+_SPEND_SHAPING_PARAMS = frozenset(
+    {
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "max_tokens_to_sample",
+        "n",
+        "best_of",
+    }
+)
+
+
+def strip_unsupported_param(body: dict, error_message: str) -> tuple[dict, str] | None:
     """Drop a top-level param the upstream named as unsupported/deprecated.
 
     Returns ``(new_body, param)`` (a new dict, original untouched) when the
     error names a top-level param present in the body, otherwise ``None``.
+
+    Spend-shaping fields (output caps, fan-out counts) are never stripped:
+    removing one after the reservation was priced would uncap the retry and
+    overcharge. When the upstream names such a field, decline so the original
+    error propagates rather than silently resizing the request's cost.
     """
     match = _UNSUPPORTED_PARAM_RE.search(error_message)
     if not match:
         return None
     param = match.group("param")
     if param not in body:
+        return None
+    if param.lower() in _SPEND_SHAPING_PARAMS:
+        logger.warning(
+            "Upstream rejected spend-shaping param '%s'; refusing to strip it "
+            "(retrying uncapped would overcharge) — surfacing the error",
+            param,
+        )
         return None
     new_body = {k: v for k, v in body.items() if k != param}
     return new_body, param
