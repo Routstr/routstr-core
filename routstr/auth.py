@@ -34,7 +34,7 @@ from .payment.cost_calculation import (
     calculate_cost,
     unpriced_cost,
 )
-from .payment.usage import UsageFieldPresence
+from .payment.usage import UsageFieldPresence, usage_field_presence
 from .redemption_cache import (
     TERMINAL_REDEMPTION_CODES,
     CachedRedemptionFailure,
@@ -1123,6 +1123,7 @@ async def adjust_payment_for_tokens(
     reservation_snapshot: ReservationSnapshot | None = None,
     terminal_outcome: TerminalOutcomeContext | None = None,
     usage_presence: UsageFieldPresence | None = None,
+    terminal_usage: dict | None = None,
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
@@ -1135,6 +1136,7 @@ async def adjust_payment_for_tokens(
 
     The response's usage object is normalized with the default union parser in
     ``calculate_cost``.
+    ``terminal_usage`` supplies reported stats without changing that billing input.
     """
     billing_key = key
     reservation = reservation_snapshot or await get_reservation_snapshot(key, session)
@@ -1207,25 +1209,42 @@ async def adjust_payment_for_tokens(
                 mark_terminal_outcome_loss("prepaid_commit_ambiguous")
             raise
         if terminal_outcome is not None:
-            record_terminal_outcome(
-                replace(
-                    terminal_outcome,
-                    pricing_source=cost.pricing_source,
-                    input_source=cost.input_source,
-                    output_source=cost.output_source,
-                    cache_read_source=cost.cache_read_source,
-                    cache_creation_source=cost.cache_creation_source,
+            recorded_usage = response_data.get("usage")
+            context = replace(
+                terminal_outcome,
+                pricing_source=cost.pricing_source,
+                input_source=cost.input_source,
+                output_source=cost.output_source,
+                cache_read_source=cost.cache_read_source,
+                cache_creation_source=cost.cache_creation_source,
+                input_observed=cost.input_observed,
+                output_observed=cost.output_observed,
+                cache_read_observed=cost.cache_read_observed,
+                cache_creation_observed=cost.cache_creation_observed,
+            )
+            if terminal_usage is not None:
+                recorded_usage = {**(recorded_usage or {}), **terminal_usage}
+                presence = UsageFieldPresence(
                     input_observed=cost.input_observed,
                     output_observed=cost.output_observed,
                     cache_read_observed=cost.cache_read_observed,
                     cache_creation_observed=cost.cache_creation_observed,
-                ),
+                    input_estimated=cost.input_source == "estimated",
+                    output_estimated=cost.output_source == "estimated",
+                    cache_read_estimated=cost.cache_read_source == "estimated",
+                    cache_creation_estimated=cost.cache_creation_source == "estimated",
+                ).merged(usage_field_presence(terminal_usage))
+                context = replace(
+                    context, **presence.as_dict(), **presence.sources_dict()
+                )
+            record_terminal_outcome(
+                context,
                 input_tokens=cost.input_tokens,
                 output_tokens=cost.output_tokens,
                 cache_read_input_tokens=cost.cache_read_input_tokens,
                 cache_creation_input_tokens=cost.cache_creation_input_tokens,
                 revenue_msats=revenue_msats,
-                usage=response_data.get("usage"),
+                usage=recorded_usage,
             )
 
     calculated_cost = await calculate_cost(

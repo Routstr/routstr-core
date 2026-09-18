@@ -656,7 +656,7 @@ async def test_writer_failure_does_not_fail_settlement_and_marks_gap(
         )
         assert charged == 1200
         assert key.balance == 8800 and key.reserved_balance == 0
-    assert await writer.flush(timeout=1)
+    assert await writer.flush()
     async with sessions() as session:
         assert not (await session.exec(select(TerminalOutcome))).all()
         epochs = (
