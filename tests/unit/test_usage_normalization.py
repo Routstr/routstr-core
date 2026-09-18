@@ -15,7 +15,13 @@ os.environ.setdefault("LIGHTNING_ADDRESS", "test@stm.to")
 
 import pytest
 
-from routstr.payment.usage import NormalizedUsage, normalize_usage
+from routstr.payment.usage import (
+    NormalizedUsage,
+    UsageFieldPresence,
+    ledger_usage,
+    normalize_usage,
+    usage_field_presence,
+)
 
 # ============================================================================
 # The union parser: one canonical shape for all known dialects
@@ -120,6 +126,19 @@ def test_normalize_usage_dialects(usage: dict, expected: NormalizedUsage) -> Non
     assert normalize_usage(usage) == expected
 
 
+def test_responses_cache_split_is_ledger_only() -> None:
+    usage = {
+        "input_tokens": 100,
+        "output_tokens": 5,
+        "input_tokens_details": {"cached_tokens": 20},
+    }
+
+    assert normalize_usage(usage) == NormalizedUsage(input_tokens=100, output_tokens=5)
+    assert ledger_usage(usage) == NormalizedUsage(
+        input_tokens=80, output_tokens=5, cache_read_tokens=20
+    )
+
+
 def test_normalize_usage_absent_usage() -> None:
     """Missing/invalid usage yields None so callers can bill at max cost."""
     assert normalize_usage(None) is None
@@ -138,3 +157,70 @@ def test_normalize_usage_never_negative() -> None:
     assert result is not None
     assert result.input_tokens == 0
     assert result.cache_read_tokens == 150
+
+
+def test_usage_presence_counts_explicit_zero_across_dialects() -> None:
+    presence = usage_field_presence(
+        {
+            "prompt_tokens": 0,
+            "completion_tokens": "0",
+            "prompt_tokens_details": {
+                "cached_tokens": 0.0,
+                "cache_write_tokens": "0",
+            },
+        }
+    )
+
+    assert presence == UsageFieldPresence(
+        input_observed=True,
+        output_observed=True,
+        cache_read_observed=True,
+        cache_creation_observed=True,
+    )
+
+
+def test_usage_presence_rejects_missing_and_unparseable_fields() -> None:
+    presence = usage_field_presence(
+        {
+            "input_tokens": None,
+            "output_tokens": "not-a-number",
+            "cache_read_input_tokens": -1,
+            "cache_creation_input_tokens": False,
+        }
+    )
+
+    assert presence == UsageFieldPresence()
+
+
+def test_usage_presence_recognizes_responses_cache_details() -> None:
+    presence = usage_field_presence(
+        {
+            "input_tokens": 12,
+            "output_tokens": 3,
+            "input_tokens_details": {"cached_tokens": 0},
+        }
+    )
+
+    assert presence.input_observed is True
+    assert presence.output_observed is True
+    assert presence.cache_read_observed is True
+    assert presence.cache_creation_observed is False
+
+
+def test_locally_estimated_usage_is_not_observed() -> None:
+    presence = usage_field_presence(
+        {
+            "input_tokens": 12,
+            "output_tokens": 3,
+            "estimated": True,
+        }
+    )
+
+    assert presence.input_observed is False
+    assert presence.output_observed is False
+    assert presence.sources_dict() == {
+        "input_source": "estimated",
+        "output_source": "estimated",
+        "cache_read_source": "missing",
+        "cache_creation_source": "missing",
+    }

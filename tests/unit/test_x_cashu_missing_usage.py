@@ -302,3 +302,26 @@ async def test_full_refund_is_logged_with_model_provider_and_body(
     assert logged["refund_amount"] == 10_000
     assert logged["unit"] == "msat"
     assert "unpriced-model" in logged["response_body_preview"]
+
+
+@pytest.mark.asyncio
+async def test_pricing_failure_keeps_reported_usage_for_zero_charge_stats() -> None:
+    from routstr.upstream.base import BaseUpstreamProvider
+
+    provider = BaseUpstreamProvider("https://unused.example/v1", "unused", 1.0)
+    with patch(
+        "routstr.payment.cost_calculation._get_pricing_rates",
+        side_effect=ValueError("No pricing for model"),
+    ):
+        cost = await provider.get_x_cashu_cost(
+            {
+                "model": "unpriced",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+            10_000,
+            None,
+        )
+    assert cost is not None and cost.total_msats == 0
+    assert (cost.input_tokens, cost.output_tokens) == (10, 5)
+    assert cost.input_source == cost.output_source == "reported"
+    assert cost.pricing_source == "missing"

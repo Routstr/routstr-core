@@ -7,7 +7,12 @@ from ..core import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
 from .rates import coerce_rate, is_usable_rate
-from .usage import normalize_usage, parse_token_count
+from .usage import (
+    UsageFieldPresence,
+    normalize_usage,
+    parse_token_count,
+    usage_field_presence,
+)
 
 if TYPE_CHECKING:
     from .models import Model
@@ -35,6 +40,16 @@ class CostData(BaseModel):
     cache_creation_input_tokens: int = 0
     cache_read_msats: int = 0
     cache_creation_msats: int = 0
+    # Settlement-only metadata must not expand the client cost contract.
+    pricing_source: str = Field(default="missing", exclude=True)
+    input_source: str = Field(default="missing", exclude=True)
+    output_source: str = Field(default="missing", exclude=True)
+    cache_read_source: str = Field(default="missing", exclude=True)
+    cache_creation_source: str = Field(default="missing", exclude=True)
+    input_observed: bool = Field(default=False, exclude=True)
+    output_observed: bool = Field(default=False, exclude=True)
+    cache_read_observed: bool = Field(default=False, exclude=True)
+    cache_creation_observed: bool = Field(default=False, exclude=True)
     # Actual debit after finalization; None means settlement has not run yet.
     charged_msats: int | None = None
     upstream_usd: float = Field(default=0.0, exclude=True)
@@ -49,13 +64,17 @@ class CostDataError(BaseModel):
     code: str
 
 
-def _empty_cost(cls: type[CostData] = CostData) -> CostData:
+def _empty_cost(
+    cls: type[CostData] = CostData,
+    usage_presence: UsageFieldPresence | None = None,
+) -> CostData:
     """Build an all-zero cost object — a full refund for an empty response.
 
     Shared by the two paths that must not bill: an upstream response with no
     usage data at all, and one that reports a USD cost but carries zero tokens
     in every bucket.
     """
+    presence = usage_presence if usage_presence is not None else UsageFieldPresence()
     return cls(
         base_msats=0,
         input_msats=0,
@@ -68,7 +87,28 @@ def _empty_cost(cls: type[CostData] = CostData) -> CostData:
         cache_creation_input_tokens=0,
         cache_read_msats=0,
         cache_creation_msats=0,
+        **presence.as_dict(),
+        **presence.sources_dict(),
     )
+
+
+def unpriced_cost(
+    response_data: dict, usage_presence: UsageFieldPresence | None = None
+) -> CostData:
+    raw_usage = response_data.get("usage")
+    presence = usage_presence
+    if presence is None or (
+        isinstance(raw_usage, dict) and raw_usage.get("estimated") is True
+    ):
+        presence = usage_field_presence(raw_usage)
+    cost = _empty_cost(MaxCostData, presence)
+    usage = normalize_usage(raw_usage)
+    if usage is not None:
+        cost.input_tokens = usage.input_tokens
+        cost.output_tokens = usage.output_tokens
+        cost.cache_read_input_tokens = usage.cache_read_tokens
+        cost.cache_creation_input_tokens = usage.cache_write_tokens
+    return cost
 
 
 async def calculate_cost(
@@ -76,6 +116,7 @@ async def calculate_cost(
     max_cost: int,
     model_obj: "Model | None" = None,
     provider_fee: float | None = None,
+    usage_presence: UsageFieldPresence | None = None,
 ) -> CostData | MaxCostData | CostDataError:
     """Calculate the cost of an API request based on token usage.
 
@@ -91,6 +132,7 @@ async def calculate_cost(
             pricing already carries the fee baked in). Without it, the fee is
             re-derived from the response's model string, which yields the
             best-ranked provider's fee.
+        usage_presence: Raw presence retained when a stream rebuilt its usage.
 
     Returns:
         Cost data or error information
@@ -107,7 +149,16 @@ async def calculate_cost(
         },
     )
 
-    usage = normalize_usage(response_data.get("usage"))
+    raw_usage = response_data.get("usage")
+    presence = (
+        usage_presence
+        if usage_presence is not None
+        else usage_field_presence(raw_usage)
+    )
+    usage = normalize_usage(raw_usage)
+
+    if isinstance(raw_usage, dict) and raw_usage.get("estimated") is True:
+        presence = usage_field_presence(raw_usage)
 
     if usage is None:
         logger.warning(
@@ -124,7 +175,7 @@ async def calculate_cost(
                 else None,
             },
         )
-        return _empty_cost(MaxCostData)
+        return _empty_cost(MaxCostData, presence)
 
     usage_data = response_data.get("usage") or {}
     if not isinstance(usage_data, dict):
@@ -158,7 +209,7 @@ async def calculate_cost(
                     else None,
                 },
             )
-            return _empty_cost()
+            return _empty_cost(usage_presence=presence)
         if input_tokens == 0 and output_tokens == 0:
             logger.warning(
                 "Upstream reported a USD cost but no token counts — "
@@ -191,9 +242,11 @@ async def calculate_cost(
             cache_pricing_rates: tuple[float, float, float, float] | None = None
             if cache_read_tokens > 0 or cache_creation_tokens > 0:
                 try:
-                    cache_pricing_rates = _get_pricing_rates(
+                    reported_rates = _get_pricing_rates(
                         response_data, model_obj, provider_fee
                     )
+                    if reported_rates is not None:
+                        cache_pricing_rates = reported_rates[:4]
                 except ValueError:
                     logger.warning(
                         "Cache pricing unavailable for USD cost breakdown; "
@@ -221,6 +274,7 @@ async def calculate_cost(
                 response_data,
                 provider_fee,
                 cache_pricing_rates,
+                presence,
             )
         except Exception as e:
             logger.warning(
@@ -243,8 +297,15 @@ async def calculate_cost(
         output_rate = float(settings.fixed_per_1k_output_tokens) * 1000.0
         cache_read_rate = input_rate
         cache_creation_rate = input_rate
+        pricing_source = "fixed"
     else:
-        input_rate, output_rate, cache_read_rate, cache_creation_rate = pricing_rates
+        (
+            input_rate,
+            output_rate,
+            cache_read_rate,
+            cache_creation_rate,
+            pricing_source,
+        ) = pricing_rates
 
     # Truthiness is not the question: `NaN` and a negative rate are both truthy
     # and sailed past this gate into the token math, while a rate of zero is a
@@ -278,6 +339,8 @@ async def calculate_cost(
             cache_creation_input_tokens=cache_creation_tokens,
             cache_read_msats=0,
             cache_creation_msats=0,
+            **presence.as_dict(),
+            **presence.sources_dict(),
         )
 
     return _calculate_from_tokens(
@@ -290,6 +353,8 @@ async def calculate_cost(
         cache_read_rate,
         cache_creation_rate,
         response_data,
+        presence,
+        pricing_source,
     )
 
 
@@ -366,14 +431,14 @@ def _get_pricing_rates(
     response_data: dict,
     model_obj: "Model | None",
     provider_fee: float | None,
-) -> tuple[float, float, float, float] | None:
+) -> tuple[float, float, float, float, str] | None:
     """Get configured rates, falling back to LiteLLM's model cost map.
 
     The served ``model_obj`` (when the caller has it) is billed directly;
     otherwise the response's model string is resolved through the alias map,
     which yields the best-ranked candidate rather than the serving one.
 
-    Returns: (input_rate, output_rate, cache_read_rate, cache_write_rate).
+    Returns rates and their source (configured or LiteLLM).
     ``None`` means configured fixed pricing should be used by the caller.
     """
     if settings.fixed_pricing and (
@@ -458,7 +523,7 @@ def _get_pricing_rates(
             "cache_write_price_msats_per_1k": mscw_1k,
         },
     )
-    return mspp_1k, mspc_1k, mscr_1k, mscw_1k
+    return mspp_1k, mspc_1k, mscr_1k, mscw_1k, source
 
 
 def _resolve_provider_fee(model_id: str) -> float:
@@ -488,6 +553,7 @@ def _calculate_from_usd_cost(
     response_data: dict,
     provider_fee: float | None,
     pricing_rates: tuple[float, float, float, float] | None = None,
+    usage_presence: UsageFieldPresence | None = None,
 ) -> CostData:
     """Calculate cost from USD figures, deriving input/output split from tokens."""
     if provider_fee is None:
@@ -566,6 +632,7 @@ def _calculate_from_usd_cost(
         },
     )
 
+    presence = usage_presence if usage_presence is not None else UsageFieldPresence()
     return CostData(
         base_msats=0,
         input_msats=input_msats,
@@ -579,6 +646,9 @@ def _calculate_from_usd_cost(
         cache_read_msats=cache_read_msats,
         cache_creation_msats=cache_creation_msats,
         upstream_usd=reported_usd,
+        pricing_source="reported_usd",
+        **presence.as_dict(),
+        **presence.sources_dict(),
     )
 
 
@@ -592,6 +662,8 @@ def _calculate_from_tokens(
     cache_read_rate: float,
     cache_creation_rate: float,
     response_data: dict,
+    usage_presence: UsageFieldPresence | None = None,
+    pricing_source: str = "missing",
 ) -> CostData:
     """Calculate cost from token counts using pricing rates."""
     calc_input_msats = round(input_tokens / 1000 * input_rate, 3)
@@ -636,6 +708,7 @@ def _calculate_from_tokens(
     visible_output_msats = int(calc_output_msats)
     visible_input_msats = token_based_cost - visible_output_msats
 
+    presence = usage_presence if usage_presence is not None else UsageFieldPresence()
     return CostData(
         base_msats=0,
         input_msats=visible_input_msats,
@@ -648,4 +721,7 @@ def _calculate_from_tokens(
         cache_creation_input_tokens=cache_creation_tokens,
         cache_read_msats=int(calc_cache_read_msats),
         cache_creation_msats=int(calc_cache_write_msats),
+        pricing_source=pricing_source,
+        **presence.as_dict(),
+        **presence.sources_dict(),
     )
