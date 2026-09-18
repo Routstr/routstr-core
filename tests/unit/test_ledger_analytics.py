@@ -5,10 +5,11 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import (
@@ -225,6 +226,58 @@ async def test_dashboard_replaces_log_totals_and_matches_every_chart(
         "estimated": 0,
         "missing": 2,
     }
+
+
+@pytest.mark.parametrize("new_bucket", [False, True])
+async def test_dashboard_keeps_one_snapshot_while_queued_outcomes_flush(
+    sessions: SessionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    new_bucket: bool,
+) -> None:
+    async with sessions() as session:
+        await session.execute(text("PRAGMA journal_mode=WAL"))
+    await _seed(sessions)
+    original_exec = AsyncSession.exec
+    flushed = False
+
+    async def exec_then_flush(
+        session: AsyncSession, statement: Any, **kwargs: Any
+    ) -> Any:
+        nonlocal flushed
+        result = await original_exec(session, statement, **kwargs)
+        if not flushed:
+            flushed = True
+            async with sessions() as writer:
+                writer.add(
+                    _row(
+                        "queued",
+                        NOW - timedelta(minutes=1 if new_bucket else 240),
+                    )
+                )
+                await writer.commit()
+        return result
+
+    monkeypatch.setattr(AsyncSession, "exec", exec_then_flush)
+    result = await get_ledger_usage_dashboard(
+        _legacy(), interval=60, hours=24, session_factory=sessions, now=NOW
+    )
+    assert flushed
+    assert result["summary"]["successful_chat_completions"] == 3
+    assert result["summary"]["revenue_msats"] == 1250
+    assert (
+        sum(model["successful"] for model in result["revenue_by_model"]["models"]) == 3
+    )
+    for point in result["model_usage_mix"]["metrics"]:
+        assert point["others"] >= 0
+        assert point["others_revenue_msats"] >= 0
+        assert (
+            sum(point["model_counts"].values()) + point["others"]
+            == point["total_successful"]
+        )
+        assert (
+            sum(point["model_revenue_msats"].values()) + point["others_revenue_msats"]
+            == point["total_revenue_msats"]
+        )
 
 
 async def test_historical_dates_do_not_return_recent_ledger_or_log_data(

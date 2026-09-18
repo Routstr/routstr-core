@@ -4,14 +4,15 @@ import asyncio
 import time
 from datetime import UTC, datetime
 
-from ..core.db import create_session
+from ..core.db import NsecState, Secret, create_session
 from ..core.logging import get_logger
-from ..core.settings import SettingsService, settings
+from ..core.settings import SettingsService, derive_npub_from_nsec, settings
 from ..core.terminal_outcomes import (
     start_terminal_outcome_writer,
     stop_terminal_outcome_writer,
     terminal_outcome_writer,
 )
+from ..core.vault import decrypt
 from .analytics_v2_delivery import (
     AnalyticsV2Delivery,
     AnalyticsV2Producer,
@@ -34,6 +35,15 @@ async def _read_state() -> DeliveryStateSnapshot:
     state = await get_analytics_v2_delivery_state(create_session)
     async with create_session() as session:
         await SettingsService.refresh(session, ("enable_analytics_sharing",))
+        secret = await session.get(Secret, 1)
+        if secret is not None and secret.nsec_state != NsecState.legacy:
+            if secret.nsec_state == NsecState.encrypted:
+                if secret.encrypted_nsec is None:
+                    raise RuntimeError("Encrypted Nostr identity has no ciphertext")
+                settings.nsec = decrypt(secret.encrypted_nsec)
+            else:
+                settings.nsec = ""
+            settings.npub = derive_npub_from_nsec(settings.nsec) or ""
     return state
 
 

@@ -4,7 +4,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case
+from sqlalchemy import case, text
 from sqlmodel import col, func, select
 
 from . import terminal_outcomes
@@ -168,6 +168,13 @@ async def get_ledger_usage_dashboard(
         + col(TerminalOutcome.cache_creation_input_tokens)
     )
     async with session_factory() as session:
+        # Keep all aggregates on one snapshot while queued outcomes are flushed.
+        if session.get_bind().dialect.name == "sqlite":
+            await session.execute(text("BEGIN"))
+        else:
+            await session.connection(
+                execution_options={"isolation_level": "REPEATABLE READ"}
+            )
         bucket_rows = (
             await session.exec(
                 select(bucket, *measures)
