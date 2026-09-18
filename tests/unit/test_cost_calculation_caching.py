@@ -46,8 +46,8 @@ async def test_openai_cache_subtraction() -> None:
             "completion_tokens": 100,
             "prompt_tokens_details": {
                 "cached_tokens": 1000  # ← Extracted separately
-            }
-        }
+            },
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -55,6 +55,29 @@ async def test_openai_cache_subtraction() -> None:
     assert result.input_tokens == 1000  # 2000 - 1000
     assert result.cache_read_input_tokens == 1000
     assert result.output_tokens == 100
+    assert result.input_observed is True
+    assert result.output_observed is True
+    assert result.cache_read_observed is True
+    assert result.cache_creation_observed is False
+
+
+@pytest.mark.asyncio
+async def test_responses_cached_tokens_keep_input_rate_billing() -> None:
+    response = {
+        "model": "gpt-4",
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 5,
+            "input_tokens_details": {"cached_tokens": 20},
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 100
+    assert result.cache_read_input_tokens == 0
+    assert result.output_tokens == 5
 
 
 # ============================================================================
@@ -776,6 +799,10 @@ async def test_missing_usage_block(mock_fixed_pricing: None) -> None:
     assert result.input_tokens == 0
     assert result.cache_read_input_tokens == 0
     assert result.output_tokens == 0
+    assert result.input_observed is False
+    assert result.output_observed is False
+    assert result.cache_read_observed is False
+    assert result.cache_creation_observed is False
 
 
 # ============================================================================
@@ -790,3 +817,67 @@ async def test_null_usage_block(mock_fixed_pricing: None) -> None:
     assert isinstance(result, MaxCostData)
     assert result.input_tokens == 0
     assert result.cache_read_input_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_explicit_zero_presence_survives_cost_calculation(
+    mock_fixed_pricing: None,
+) -> None:
+    response = {
+        "model": "gpt-4",
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.input_observed is True
+    assert result.output_observed is True
+    assert result.cache_read_observed is True
+    assert result.cache_creation_observed is True
+    assert "input_observed" not in result.dict()
+    assert result.input_source == result.output_source == "reported"
+    assert "input_source" not in result.dict()
+    assert "pricing_source" not in result.dict()
+
+
+@pytest.mark.asyncio
+async def test_estimated_usage_cost_is_unobserved(mock_fixed_pricing: None) -> None:
+    response = {
+        "model": "gpt-4",
+        "usage": {
+            "input_tokens": 12,
+            "output_tokens": 3,
+            "estimated": True,
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 12
+    assert result.output_tokens == 3
+    assert result.input_observed is False
+    assert result.output_observed is False
+    assert result.input_source == result.output_source == "estimated"
+    assert result.cache_read_source == result.cache_creation_source == "missing"
+    assert result.pricing_source == "fixed"
+
+
+def test_unpriced_estimate_keeps_estimated_provenance() -> None:
+    from routstr.payment.cost_calculation import unpriced_cost
+    from routstr.payment.usage import UsageFieldPresence
+
+    result = unpriced_cost(
+        {"usage": {"input_tokens": 12, "output_tokens": 3, "estimated": True}},
+        UsageFieldPresence(),
+    )
+    assert result.total_msats == 0
+    assert result.input_tokens == 12 and result.output_tokens == 3
+    assert result.input_source == result.output_source == "estimated"
+    assert result.pricing_source == "missing"

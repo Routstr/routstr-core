@@ -1,6 +1,6 @@
 import json
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -8,8 +8,12 @@ import pytest
 os.environ.setdefault("UPSTREAM_BASE_URL", "http://test")
 os.environ.setdefault("UPSTREAM_API_KEY", "test")
 
+from routstr.core.terminal_outcomes import TerminalOutcomeContext  # noqa: E402
 from routstr.payment.cost_calculation import CostData  # noqa: E402
-from routstr.upstream.base import BaseUpstreamProvider  # noqa: E402
+from routstr.upstream.base import (  # noqa: E402
+    BaseUpstreamProvider,
+    _record_x_cashu_terminal_outcome,
+)
 
 
 def _make_provider() -> BaseUpstreamProvider:
@@ -29,7 +33,34 @@ def _make_cost_data(total_msats: int = 5000) -> CostData:
         total_usd=0.00025,
         input_tokens=100,
         output_tokens=50,
+        input_observed=True,
+        output_observed=True,
     )
+
+
+def test_zero_usage_x_cashu_preserves_captured_presence() -> None:
+    record = MagicMock()
+    context = TerminalOutcomeContext(
+        outcome_id="zero-usage",
+        model_identifier="author/model",
+        input_observed=True,
+        output_observed=True,
+        cache_read_observed=False,
+        cache_creation_observed=False,
+    )
+
+    with patch("routstr.upstream.base.record_terminal_outcome", record):
+        _record_x_cashu_terminal_outcome(
+            context,
+            None,
+            amount=10,
+            unit="sat",
+        )
+
+    recorded_context = record.call_args.args[0]
+    assert recorded_context.input_observed is True
+    assert recorded_context.output_observed is True
+    assert record.call_args.kwargs["revenue_msats"] == 10_000
 
 
 # ---------------------------------------------------------------------------
@@ -80,24 +111,48 @@ async def test_non_streaming_includes_cost_sats() -> None:
 async def test_non_streaming_cost_sats_value_rounds_down() -> None:
     provider = _make_provider()
     cost_data = _make_cost_data(total_msats=1999)
+    settlement_order: list[str] = []
+
+    async def persist_refund(*args: object, **kwargs: object) -> str:
+        settlement_order.append("refund")
+        return "cashuA_refund_token"
+
+    def record_outcome(*args: object, **kwargs: object) -> None:
+        settlement_order.append("record")
+
+    send_refund = AsyncMock(side_effect=persist_refund)
+    record = MagicMock(side_effect=record_outcome)
 
     response_body = {"model": "gpt-4o", "usage": {"prompt_tokens": 10}}
     content_str = json.dumps(response_body)
 
     with (
         patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)),
-        patch.object(provider, "send_refund", new=AsyncMock(return_value="cashuA_refund_token")),
+        patch.object(provider, "send_refund", new=send_refund),
+        patch("routstr.upstream.base.record_terminal_outcome", record),
     ):
         response = await provider.handle_x_cashu_non_streaming_response(
             content_str=content_str,
             response=_make_httpx_response(),
-            amount=10000,
-            unit="msat",
+            amount=10,
+            unit="sat",
             max_cost_for_model=10000,
+            request_id="sat-rounding-request",
         )
 
     body = json.loads(response.body)
     assert body["usage"]["cost_sats"] == 1  # 1999 // 1000
+    send_refund.assert_awaited_once_with(
+        8, "sat", None, request_id="sat-rounding-request"
+    )
+    record.assert_called_once()
+    recorded_context = record.call_args.args[0]
+    assert recorded_context.input_observed is True
+    assert recorded_context.output_observed is True
+    assert recorded_context.cache_read_observed is False
+    assert recorded_context.cache_creation_observed is False
+    assert record.call_args.kwargs["revenue_msats"] == 2000
+    assert settlement_order == ["refund", "record"]
 
 
 @pytest.mark.asyncio
@@ -218,3 +273,69 @@ async def test_streaming_non_usage_chunks_unmodified() -> None:
     regular_line_data = json.loads(lines[0][6:])
     # regular chunk should not have cost_sats injected
     assert "cost_sats" not in regular_line_data.get("usage", {})
+
+
+@pytest.mark.asyncio
+async def test_streaming_no_space_error_event_is_not_recorded() -> None:
+    provider = _make_provider()
+    record = MagicMock()
+
+    with patch("routstr.upstream.base.record_terminal_outcome", record):
+        await provider.handle_x_cashu_streaming_response(
+            content_str='data:{"type":"error","error":{"message":"failed"}}\n\n',
+            response=_make_httpx_response(),
+            amount=10,
+            unit="sat",
+            max_cost_for_model=10_000,
+            request_id="no-space-error",
+        )
+
+    record.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_streaming_no_space_lines_keep_existing_billing_parse() -> None:
+    provider = _make_provider()
+    cost = AsyncMock(return_value=None)
+    body = 'data:{"usage":{"prompt_tokens":100,"completion_tokens":50}}\n\n'
+
+    with patch.object(provider, "get_x_cashu_cost", new=cost):
+        response = await provider.handle_x_cashu_streaming_response(
+            content_str=body,
+            response=_make_httpx_response(),
+            amount=10,
+            unit="sat",
+            max_cost_for_model=10_000,
+            request_id="no-space-usage",
+        )
+
+    assert cost.await_args is not None
+    assert cost.await_args.args[0]["usage"] is None
+    assert "".join(await _collect_streaming(response)).strip() == body.strip()
+
+
+@pytest.mark.asyncio
+async def test_streaming_no_space_usage_is_still_recorded_as_reported() -> None:
+    provider = _make_provider()
+    record = MagicMock()
+    body = 'data:{"usage":{"prompt_tokens":100,"completion_tokens":5}}\n\ndata:[DONE]\n\n'
+
+    with (
+        patch("routstr.upstream.base.record_terminal_outcome", record),
+        patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=None)),
+    ):
+        await provider.handle_x_cashu_streaming_response(
+            content_str=body,
+            response=_make_httpx_response(),
+            amount=10,
+            unit="sat",
+            max_cost_for_model=10_000,
+            request_id="no-space-recorded",
+        )
+
+    context = record.call_args.args[0]
+    assert (context.input_source, context.output_source) == ("reported", "reported")
+    assert record.call_args.kwargs["usage"] == {
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+    }

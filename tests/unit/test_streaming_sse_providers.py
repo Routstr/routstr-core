@@ -20,12 +20,13 @@ comment ever reaches the client. That invariant is exactly what the buggy
 
 import json
 from collections.abc import AsyncGenerator
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from routstr.auth import ReservationSnapshot
 from routstr.core.db import ApiKey
+from routstr.core.terminal_outcomes import TerminalOutcomeContext
 from routstr.upstream import base
 from routstr.upstream.base import BaseUpstreamProvider
 
@@ -42,7 +43,12 @@ def _make_response(chunks: list[bytes]) -> MagicMock:
     return mock_response
 
 
-async def _drive(chunks: list[bytes], requested_model: str | None = None) -> list[bytes]:
+async def _drive(
+    chunks: list[bytes],
+    requested_model: str | None = None,
+    terminal_outcome: TerminalOutcomeContext | None = None,
+    adjustment: AsyncMock | None = None,
+) -> list[bytes]:
     """Run the real streaming generator over ``chunks`` and collect output bytes."""
     provider = BaseUpstreamProvider(
         base_url="https://api.example.com", api_key="test_key"
@@ -52,7 +58,7 @@ async def _drive(chunks: list[bytes], requested_model: str | None = None) -> lis
     key.hashed_key = "test_hash"
     key.balance = 1000
 
-    base.adjust_payment_for_tokens = AsyncMock(
+    adjustment = adjustment or AsyncMock(
         return_value={"total_usd": 0.1, "total_msats": 100}
     )
     mock_session = MagicMock()
@@ -60,28 +66,31 @@ async def _drive(chunks: list[bytes], requested_model: str | None = None) -> lis
     mock_ctx = MagicMock()
     mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
     mock_ctx.__aexit__ = AsyncMock(return_value=None)
-    base.create_session = MagicMock(return_value=mock_ctx)
-
-    streaming_response = await provider.handle_streaming_chat_completion(
-        response=_make_response(chunks),
-        key=key,
-        max_cost_for_model=100,
-        background_tasks=MagicMock(),
-        requested_model=requested_model,
-        reservation_snapshot=ReservationSnapshot(
-            release_id="test-release",
-            key_hash="test_hash",
-            billing_key_hash="test_hash",
-            reserved_msats=100,
-        ),
-    )
-
     out: list[bytes] = []
-    async for chunk in streaming_response.body_iterator:
-        if isinstance(chunk, str):
-            out.append(chunk.encode())
-        else:
-            out.append(bytes(chunk))
+    with (
+        patch.object(base, "adjust_payment_for_tokens", adjustment),
+        patch.object(base, "create_session", MagicMock(return_value=mock_ctx)),
+    ):
+        streaming_response = await provider.handle_streaming_chat_completion(
+            response=_make_response(chunks),
+            key=key,
+            max_cost_for_model=100,
+            background_tasks=MagicMock(),
+            requested_model=requested_model,
+            terminal_outcome=terminal_outcome,
+            reservation_snapshot=ReservationSnapshot(
+                release_id="test-release",
+                key_hash="test_hash",
+                billing_key_hash="test_hash",
+                reserved_msats=100,
+            ),
+        )
+
+        async for chunk in streaming_response.body_iterator:
+            if isinstance(chunk, str):
+                out.append(chunk.encode())
+            else:
+                out.append(bytes(chunk))
     return out
 
 
@@ -404,7 +413,16 @@ async def test_truncated_json_tail_on_connection_close() -> None:
         b'data: {"id":"x","choices":[{"delta":{"content":"ok"}}]}\n\n',
         b'data: {"id":"x","choices":[{"delta":{"con',  # connection dies here
     ]
-    out = await _drive(chunks)
+    terminal_outcome = TerminalOutcomeContext(
+        outcome_id="truncated-stream",
+        model_identifier="test-model",
+    )
+    adjustment = AsyncMock(return_value={"total_usd": 0.1, "total_msats": 100})
+    out = await _drive(
+        chunks,
+        terminal_outcome=terminal_outcome,
+        adjustment=adjustment,
+    )
     objs = _assert_clean(out)  # raises if the partial tail leaked as a data frame
     contents = [
         c["delta"]["content"]
@@ -416,3 +434,5 @@ async def test_truncated_json_tail_on_connection_close() -> None:
     # entirely (no second delta), and _assert_clean above guarantees nothing
     # non-JSON ever reached the client.
     assert contents == ["ok"]
+    assert adjustment.await_args is not None
+    assert adjustment.await_args.kwargs["terminal_outcome"] is None
