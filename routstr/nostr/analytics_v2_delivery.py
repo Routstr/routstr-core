@@ -266,7 +266,12 @@ async def fetch_relay_max_message_length(
                     and response.content_length > NIP11_MAX_DOCUMENT_BYTES
                 ):
                     return None
-                body = await response.content.read(NIP11_MAX_DOCUMENT_BYTES + 1)
+                try:
+                    body = await response.content.readexactly(
+                        NIP11_MAX_DOCUMENT_BYTES + 1
+                    )
+                except asyncio.IncompleteReadError as error:
+                    body = error.partial
                 if len(body) > NIP11_MAX_DOCUMENT_BYTES:
                     return None
                 payload = json.loads(body)
