@@ -4,9 +4,10 @@ import os
 import pytest
 from pydantic.v1 import ValidationError
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlmodel import text
+from sqlmodel import SQLModel, text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from routstr.core import db  # noqa: F401  registers the app tables
 from routstr.core.settings import Settings, SettingsService, settings
 
 NSEC_HEX = "1" * 64
@@ -40,6 +41,9 @@ async def test_settings_db_precedence_over_env() -> None:
     os.environ["ENABLE_ANALYTICS_SHARING"] = "true"
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    # Saving a sharing opt-out also fences delivery, which lives in the app schema.
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
     async with AsyncSession(engine, expire_on_commit=False) as session:
         _ = await SettingsService.initialize(session)
         updated = await SettingsService.update(
@@ -210,7 +214,7 @@ async def test_settings_initialize_discards_unknown_keys() -> None:
             text(
                 "UPDATE settings SET data = :data WHERE id = 1"
             ).bindparams(
-                data='{"name":"LegacyNode","nostr_analytics_enabled":false,"unknown_key":123}'
+                data='{"name":"LegacyNode","nostr_analytics_enabled":false,"unknown_key":123,"enable_analytics_v2":true,"enable_analytics_collection":true}'
             )
         )
         await session.commit()
@@ -224,6 +228,8 @@ async def test_settings_initialize_discards_unknown_keys() -> None:
         assert '"enable_analytics_sharing": true' in stored_data
         assert "nostr_analytics_enabled" not in stored_data
         assert "unknown_key" not in stored_data
+        assert "enable_analytics_v2" not in stored_data
+        assert "enable_analytics_collection" not in stored_data
 
 
 # ── Secret fields are never written to the settings blob (issue #553) ────────

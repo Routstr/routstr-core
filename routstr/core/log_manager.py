@@ -103,7 +103,10 @@ class LogManager:
 
             # If we only care about hours back, we can optimize file selection
             if hours_back is not None:
-                cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+                # Log stamps and file dates are server-local.
+                cutoff_date = (
+                    datetime.now(timezone.utc) - timedelta(hours=hours_back)
+                ).astimezone()
                 cutoff_timestamp_str = cutoff_date.strftime("%Y-%m-%d %H:%M:%S")
                 filtered_files = []
                 for log_path in log_files:
@@ -111,7 +114,7 @@ class LogManager:
                         file_date_str = log_path.stem.split("_")[1]
                         file_date = datetime.strptime(
                             file_date_str, "%Y-%m-%d"
-                        ).replace(tzinfo=timezone.utc)
+                        ).replace(tzinfo=cutoff_date.tzinfo)
                         # Include file if it's from the same day or after the cutoff day
                         if file_date >= cutoff_date.replace(
                             hour=0, minute=0, second=0, microsecond=0
@@ -270,22 +273,20 @@ class LogManager:
     def _bucket_key_for_timestamp(
         self, timestamp_str: str, interval_minutes: int
     ) -> str | None:
-        if len(timestamp_str) != 19:
-            return None
-        if timestamp_str[10] != " ":
-            return None
-
         try:
-            hour = int(timestamp_str[11:13])
-            minute = int(timestamp_str[14:16])
-        except (TypeError, ValueError):
+            # Server-local stamps are bucketed in UTC, like the indexed store.
+            at = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").astimezone(
+                timezone.utc
+            )
+        except ValueError:
             return None
 
-        total_minutes = hour * 60 + minute
-        rounded_minutes = (total_minutes // interval_minutes) * interval_minutes
-        rounded_hour = rounded_minutes // 60
-        rounded_minute = rounded_minutes % 60
-        return f"{timestamp_str[:10]} {rounded_hour:02d}:{rounded_minute:02d}:00"
+        rounded_minutes = (
+            (at.hour * 60 + at.minute) // interval_minutes * interval_minutes
+        )
+        return (
+            f"{at:%Y-%m-%d} {rounded_minutes // 60:02d}:{rounded_minutes % 60:02d}:00"
+        )
 
     def _extract_success_metrics(
         self, entry: dict[str, Any], message: str

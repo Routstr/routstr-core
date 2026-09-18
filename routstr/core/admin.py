@@ -1,7 +1,7 @@
 import json
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -35,6 +35,7 @@ from .db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
 from .exceptions import json_compliant
+from .ledger_analytics import get_ledger_usage_dashboard
 from .log_manager import log_manager
 from .logging import get_logger
 from .provider_slugs import allocate_unique_provider_slug
@@ -1597,6 +1598,42 @@ async def get_openrouter_presets() -> list[dict[str, object]]:
     return models_data
 
 
+async def _usage_dashboard(
+    interval: int,
+    hours: int,
+    error_limit: int = 100,
+    model_limit: int = 20,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+) -> dict:
+    if (start_at is None) != (end_at is None):
+        raise HTTPException(400, "Provide both start_at and end_at")
+    if start_at is not None and end_at is not None:
+        if start_at.tzinfo is None or end_at.tzinfo is None:
+            raise HTTPException(400, "Stats dates must include a timezone")
+        now = datetime.now(timezone.utc)
+        tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(
+            days=1
+        )
+        if end_at > tomorrow or start_at >= min(end_at, now):
+            raise HTTPException(400, "Choose a non-empty stats period through today")
+        if end_at - start_at > timedelta(hours=MAX_USAGE_ANALYTICS_HOURS):
+            raise HTTPException(400, "Stats periods cannot exceed 365 days")
+        end_at = min(end_at, now)
+    dashboard = log_manager.get_usage_dashboard(
+        interval=interval, hours=hours, error_limit=error_limit, model_limit=model_limit
+    )
+    return await get_ledger_usage_dashboard(
+        dashboard,
+        interval=interval,
+        hours=hours,
+        model_limit=model_limit,
+        session_factory=create_session,
+        start_at=start_at,
+        end_at=end_at,
+    )
+
+
 @admin_router.get("/api/usage/metrics", dependencies=[Depends(require_admin_api)])
 async def get_usage_metrics(
     request: Request,
@@ -1611,7 +1648,7 @@ async def get_usage_metrics(
     ),
 ) -> dict:
     """Get usage metrics aggregated by time interval."""
-    return log_manager.get_usage_metrics(interval=interval, hours=hours)
+    return (await _usage_dashboard(interval, hours))["metrics"]
 
 
 @admin_router.get("/api/usage/dashboard", dependencies=[Depends(require_admin_api)])
@@ -1632,16 +1669,20 @@ async def get_usage_dashboard(
     model_limit: int = Query(
         default=20, ge=1, le=100, description="Maximum number of models to return"
     ),
+    start_at: datetime | None = Query(default=None),
+    end_at: datetime | None = Query(default=None),
 ) -> dict:
     """
     Get all dashboard analytics in one request.
     This runs one combined aggregation pass and avoids repeated scans.
     """
-    return log_manager.get_usage_dashboard(
+    return await _usage_dashboard(
         interval=interval,
         hours=hours,
         error_limit=error_limit,
         model_limit=model_limit,
+        start_at=start_at,
+        end_at=end_at,
     )
 
 
@@ -1656,7 +1697,7 @@ async def get_usage_summary(
     ),
 ) -> dict:
     """Get summary statistics for the specified time period."""
-    return log_manager.get_usage_summary(hours=hours)
+    return (await _usage_dashboard(15, hours))["summary"]
 
 
 @admin_router.get("/api/usage/error-details", dependencies=[Depends(require_admin_api)])
@@ -1694,7 +1735,7 @@ async def get_revenue_by_model(
     """
     Get revenue breakdown by model.
     """
-    return log_manager.get_revenue_by_model(hours=hours, limit=limit)
+    return (await _usage_dashboard(15, hours, model_limit=limit))["revenue_by_model"]
 
 
 @admin_router.get("/api/logs", dependencies=[Depends(require_admin_api)])
