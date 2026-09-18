@@ -42,7 +42,6 @@ def log_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def handler(log_dir: Path) -> Iterator[DailyRotatingFileHandler]:
-    """A file handler configured exactly like the production ``file`` handler."""
     handler = DailyRotatingFileHandler(
         str(log_dir / "app.log"),
         when="midnight",

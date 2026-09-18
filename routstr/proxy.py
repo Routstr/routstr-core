@@ -10,7 +10,6 @@ from sqlmodel import select
 from .algorithm import create_model_mappings
 from .auth import (
     ReservationSnapshot,
-    get_reservation_snapshot,
     pay_for_request,
     revert_pay_for_request,
     validate_bearer_key,
@@ -466,7 +465,7 @@ async def _proxy(
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
                 if (
-                    response.status_code in [502, 429]
+                    response.status_code in [502, 503, 429]
                     and i < len(selected_upstreams) - 1
                 ):
                     logger.warning(
@@ -688,7 +687,7 @@ async def _proxy(
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
 
-                if response.status_code in [502, 429] and i < len(candidates) - 1:
+                if response.status_code in [502, 503, 429] and i < len(candidates) - 1:
                     error_message = ""
                     try:
                         if hasattr(response, "body"):
@@ -727,9 +726,8 @@ async def _proxy(
 
     reservation_snapshot: ReservationSnapshot | None = None
     if is_ehbp or request_body_dict:
-        await pay_for_request(key, max_cost_for_model, session)
-        reservation_snapshot = await get_reservation_snapshot(key, session)
-        # Snapshot validation performs SELECTs after pay_for_request commits.
+        reservation_snapshot = await pay_for_request(key, max_cost_for_model, session)
+        # pay_for_request refreshes the key after committing the reservation.
         # End that read transaction before waiting on upstream response headers.
         await _finish_read_transaction(session)
 
@@ -756,15 +754,17 @@ async def _proxy(
                     key, session, max_cost_for_model, reservation_snapshot
                 )
                 try:
-                    await pay_for_request(key, candidate_max, session)
+                    reservation_snapshot = await pay_for_request(
+                        key, candidate_max, session
+                    )
                 except HTTPException:
                     if i == len(candidates) - 1:
                         raise
-                    await pay_for_request(key, max_cost_for_model, session)
-                    reservation_snapshot = await get_reservation_snapshot(key, session)
+                    reservation_snapshot = await pay_for_request(
+                        key, max_cost_for_model, session
+                    )
                     await _finish_read_transaction(session)
                     continue
-                reservation_snapshot = await get_reservation_snapshot(key, session)
                 await _finish_read_transaction(session)
                 max_cost_for_model = candidate_max
 
@@ -874,8 +874,17 @@ async def _proxy(
                 break
 
             if response.status_code != 200:
-                # Check if we should retry (502 Upstream Error or 429 Rate Limit)
-                should_retry = response.status_code in [502, 429, 400, 401, 403, 404]
+                # Retry on 502/503 upstream errors, 429 rate limits, and client
+                # errors that may be provider-specific.
+                should_retry = response.status_code in [
+                    502,
+                    503,
+                    429,
+                    400,
+                    401,
+                    403,
+                    404,
+                ]
                 if should_retry and i < len(candidates) - 1:
                     error_message = ""
                     try:
