@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -764,6 +765,124 @@ async def test_native_messages_split_error_event_is_not_counted() -> None:
     adjust.assert_awaited_once()
     assert adjust.await_args is not None
     assert adjust.await_args.kwargs["terminal_outcome"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "split_frames,start_usage,delta_usage,charged,tokens,sources",
+    [
+        (
+            False,
+            {"input_tokens": 10, "output_tokens": 0},
+            {"output_tokens": 5},
+            15,
+            (10, 5),
+            ("reported", "reported"),
+        ),
+        (
+            True,
+            {"input_tokens": 10, "output_tokens": 0},
+            {"output_tokens": 5},
+            3,
+            (10, 5),
+            ("reported", "reported"),
+        ),
+        (False, {}, {}, 3, (3, 0), ("estimated", "estimated")),
+        (True, {}, {"output_tokens": 5}, 3, (3, 5), ("estimated", "reported")),
+    ],
+)
+async def test_native_messages_stats_ignore_network_chunk_boundaries(
+    split_frames: bool,
+    start_usage: dict[str, int],
+    delta_usage: dict[str, int],
+    charged: int,
+    tokens: tuple[int, int],
+    sources: tuple[str, str],
+) -> None:
+    engine = await _engine()
+
+    @asynccontextmanager
+    async def sessions() -> AsyncGenerator[AsyncSession, None]:
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            yield session
+
+    frames = [
+        f'event: message_start\ndata: {{"type":"message_start","message":{{"model":"test-model","usage":{json.dumps(start_usage)}}}}}\n\n'.encode(),
+        f'event: message_delta\ndata: {{"type":"message_delta","delta":{{"stop_reason":"end_turn"}},"usage":{json.dumps(delta_usage)}}}\n\n'.encode(),
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]
+
+    async def chunks() -> AsyncGenerator[bytes, None]:
+        for frame in frames:
+            if split_frames:
+                boundary = frame.index(b"data: ") + 17
+                yield frame[:boundary]
+                yield frame[boundary:]
+            else:
+                yield frame
+
+    upstream_response = MagicMock(
+        status_code=200, headers={"content-type": "text/event-stream"}
+    )
+    upstream_response.aiter_bytes = chunks
+    writer = MagicMock()
+    provider = BaseUpstreamProvider("https://unused.example", "test-key")
+    try:
+        async with sessions() as session:
+            key = ApiKey(hashed_key="messages-stats", balance=1_000)
+            session.add(key)
+            await session.commit()
+            await pay_for_request(key, 100, session)
+            reservation = await get_reservation_snapshot(key, session)
+
+        with (
+            patch("routstr.upstream.base.create_session", sessions),
+            patch(
+                "routstr.upstream.base.adjust_payment_for_tokens",
+                auth_module.adjust_payment_for_tokens,
+            ),
+            patch("routstr.core.terminal_outcomes.terminal_outcome_writer", writer),
+            patch(
+                "routstr.payment.cost_calculation._get_pricing_rates",
+                return_value=(1_000.0, 1_000.0, 1_000.0, 1_000.0, "configured"),
+            ),
+            patch(
+                "routstr.payment.cost_calculation.sats_usd_price", return_value=0.0005
+            ),
+            patch("routstr.auth.ROUTSTR_FEE_PERCENT", 0),
+            patch("routstr.upstream.count_tokens._count_with_litellm", return_value=3),
+            patch(
+                "routstr.upstream.count_tokens._count_text_with_litellm", return_value=0
+            ),
+        ):
+            response = await provider.handle_streaming_messages_completion(
+                upstream_response,
+                key,
+                100,
+                reservation_snapshot=reservation,
+                terminal_outcome=TerminalOutcomeContext(
+                    "messages-request", "test-model"
+                ),
+            )
+            async for _ in response.body_iterator:
+                pass
+
+        # Billing keeps its existing parser and charge; stats retain reported usage.
+        async with sessions() as session:
+            stored_key = await session.get(ApiKey, key.hashed_key)
+            assert stored_key is not None
+            assert stored_key.balance == 1_000 - charged
+            assert stored_key.reserved_balance == 0
+        writer.submit.assert_called_once()
+        outcome = writer.submit.call_args.args[0]
+        assert outcome.revenue_msats == charged
+        assert (outcome.input_tokens, outcome.output_tokens) == tokens
+        assert (outcome.input_source, outcome.output_source) == sources
+        assert outcome.input_observed is (sources[0] == "reported")
+        assert outcome.output_observed is (sources[1] == "reported")
+        writer.declare_loss.assert_not_called()
+    finally:
+        await engine.dispose()
 
 
 def test_anthropic_stop_reason_is_terminal_before_transport_failure() -> None:

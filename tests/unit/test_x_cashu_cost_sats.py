@@ -339,3 +339,45 @@ async def test_streaming_no_space_usage_is_still_recorded_as_reported() -> None:
         "prompt_tokens": 100,
         "completion_tokens": 5,
     }
+
+
+@pytest.mark.asyncio
+async def test_native_messages_stream_keeps_input_usage_in_stats() -> None:
+    provider = _make_provider()
+    body = (
+        'event: message_start\ndata: {"type":"message_start","message":{"model":"test-model","usage":{"input_tokens":10,"output_tokens":0}}}\n\n'
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}\n\n'
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+    writer = MagicMock()
+    send_refund = AsyncMock(return_value="cashu-refund")
+    with (
+        patch("routstr.core.terminal_outcomes.terminal_outcome_writer", writer),
+        patch.object(provider, "send_refund", send_refund),
+        patch(
+            "routstr.payment.cost_calculation._get_pricing_rates",
+            return_value=(1_000.0, 1_000.0, 1_000.0, 1_000.0, "configured"),
+        ),
+        patch("routstr.payment.cost_calculation.sats_usd_price", return_value=0.0005),
+    ):
+        response = await provider.handle_x_cashu_streaming_response(
+            content_str=body,
+            response=_make_httpx_response(),
+            amount=100,
+            unit="msat",
+            max_cost_for_model=100,
+            request_id="messages-request",
+        )
+        await _collect_streaming(response)
+
+    send_refund.assert_awaited_once_with(
+        95, "msat", None, request_id="messages-request"
+    )
+    assert response.headers["x-cashu"] == "cashu-refund"
+    writer.submit.assert_called_once()
+    outcome = writer.submit.call_args.args[0]
+    assert outcome.revenue_msats == 5
+    assert (outcome.input_tokens, outcome.output_tokens) == (10, 5)
+    assert outcome.input_observed is outcome.output_observed is True
+    assert outcome.input_source == outcome.output_source == "reported"
+    writer.declare_loss.assert_not_called()

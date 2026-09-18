@@ -125,8 +125,10 @@ class _TerminalOutcomeState:
         nested_response = event.get("response")
         if isinstance(nested_response, dict):
             status = str(nested_response.get("status") or status).lower()
-        if isinstance(event.get("usage"), dict):
-            self.usage = event["usage"]
+        # Messages report input and output usage in separate events.
+        for payload in (event.get("message"), event):
+            if isinstance(payload, dict) and isinstance(payload.get("usage"), dict):
+                self.usage = {**(self.usage or {}), **payload["usage"]}
         if (
             event.get("error") is not None
             or event_type in {"error", "response.failed"}
@@ -2447,6 +2449,7 @@ class BaseUpstreamProvider:
                             reservation_snapshot,
                             terminal_outcome=outcome_state.settlement_context(),
                             usage_presence=usage_presence,
+                            terminal_usage=outcome_state.usage,
                         )
                         usage_finalized = True
                         return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
@@ -2625,6 +2628,7 @@ class BaseUpstreamProvider:
                                     reservation_snapshot,
                                     terminal_outcome=outcome_state.settlement_context(),
                                     usage_presence=usage_presence,
+                                    terminal_usage=outcome_state.usage,
                                 )
 
                                 self.inject_cost_metadata(
@@ -4477,7 +4481,7 @@ class BaseUpstreamProvider:
                     amount=amount,
                     unit=unit,
                     refund_amount=refund_amount_sent,
-                    usage=usage_data or outcome_state.usage,
+                    usage=outcome_state.usage or usage_data,
                 )
 
         for i, line in enumerate(lines):
