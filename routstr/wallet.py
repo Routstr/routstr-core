@@ -1165,7 +1165,15 @@ async def get_wallet(
     retry_on_rate_limit: bool = True,
     force_reload: bool = False,
     load_proofs: bool = True,
+    force_reload_proofs: bool = False,
 ) -> Wallet:
+    """Return the cached wallet for a mint/unit, refreshing state as needed.
+
+    ``force_reload`` refreshes both mint keysets and proofs from scratch.
+    ``force_reload_proofs`` only bypasses the proof reload interval, keeping
+    the cached keysets: proofs live in the local DB, so this costs no mint
+    requests beyond the normal keyset refresh interval.
+    """
     global _wallets, _wallet_last_load, _wallet_last_mint_load, _wallet_load_locks
     id = f"{mint_url}_{unit}"
     lock = _wallet_load_locks.setdefault(id, asyncio.Lock())
@@ -1197,6 +1205,7 @@ async def get_wallet(
                 last_proof_load = _wallet_last_load.get(id)
                 if (
                     force_reload
+                    or force_reload_proofs
                     or last_proof_load is None
                     or now - last_proof_load
                     >= _WALLET_PROOF_RELOAD_MIN_INTERVAL_SECONDS
@@ -1545,12 +1554,20 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
     try:
         # Runs under wallet_operation_guard; a cached wallet may carry a proof
         # snapshot up to 30s stale from another process's reservation, so the
-        # cross-process lock is only safe with a fresh reload.
-        wallet = await get_wallet(mint_url, unit, force_reload=True)
+        # cross-process lock is only safe with a fresh proof reload. Proofs
+        # come from the local DB; keysets stay on their normal refresh interval
+        # so each cycle does not re-fetch every keyset from the mint.
+        wallet = await get_wallet(mint_url, unit, force_reload_proofs=True)
         proofs = get_proofs_per_mint_and_unit(wallet, mint_url, unit, not_reserved=True)
-        if not proofs:
-            # Nothing to pay out, so skip the settle delay rather than hold the
-            # cross-process guard (and block credits) for a wallet with no funds.
+        min_amount = (
+            settings.min_payout_sat
+            if unit == "sat"
+            else _sats_to_msats(settings.min_payout_sat)
+        )
+        if sum(proof.amount for proof in proofs) <= min_amount:
+            # Nothing payable even before subtracting liabilities, so skip the
+            # proof-state check and settle delay rather than spend mint quota
+            # and hold the cross-process guard (blocking credits) for nothing.
             return
         proofs = await slow_filter_spend_proofs(proofs, wallet)
         await asyncio.sleep(5)
@@ -1582,11 +1599,6 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
             user_balance = _msats_to_sats_ceil(user_balance)
         proofs_balance = sum(proof.amount for proof in proofs)
         available_balance = proofs_balance - user_balance
-        min_amount = (
-            settings.min_payout_sat
-            if unit == "sat"
-            else _sats_to_msats(settings.min_payout_sat)
-        )
         if available_balance > min_amount:
             amount_received = await raw_send_to_lnurl(
                 wallet,
