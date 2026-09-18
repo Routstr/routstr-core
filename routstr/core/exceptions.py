@@ -92,7 +92,8 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
         content = {"detail": detail}
     content["request_id"] = request_id
 
-    return JSONResponse(status_code=status_code, content=content)
+    headers = getattr(exc, "headers", None)
+    return JSONResponse(status_code=status_code, content=content, headers=headers)
 
 
 def json_compliant(value: object) -> object:
