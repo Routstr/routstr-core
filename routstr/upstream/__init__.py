@@ -12,6 +12,7 @@ from .perplexity import PerplexityUpstreamProvider
 from .ppqai import PPQAIUpstreamProvider
 from .routstr import RoutstrUpstreamProvider
 from .tinfoil import TinfoilUpstreamProvider
+from .typesafe import TypeSafeUpstreamProvider
 from .xai import XAIUpstreamProvider
 
 upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
@@ -28,6 +29,7 @@ upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
     PPQAIUpstreamProvider,
     RoutstrUpstreamProvider,
     TinfoilUpstreamProvider,
+    TypeSafeUpstreamProvider,
     XAIUpstreamProvider,
 ]
 """List of all upstream classes"""

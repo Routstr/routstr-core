@@ -200,6 +200,62 @@ POST /v1/embeddings
 }
 ```
 
+## System One (TypeSafe Decisions)
+
+### Evaluate State
+
+Evaluate a state against typed questions (noul / choice / score) on a TypeSafe
+System One decision model (e.g. `jev-latest`). Requires a `typesafe` upstream
+provider on the node.
+
+```http
+POST /v1/systemone
+```
+
+**Request Body:**
+
+```json
+{
+  "model": "jev-latest",
+  "state": "Help! My payouts have been failing for 3 days.",
+  "questions": {
+    "is_urgent": {
+      "type": "noul",
+      "instructions": "Does this convey urgency?"
+    }
+  }
+}
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `model` | string | Yes | - | TypeSafe model or alias (e.g. `jev-latest`) |
+| `state` | string/object/array | Yes | - | Content to evaluate |
+| `questions` | map<string, Question> | Yes | - | Typed questions; answers keyed identically |
+
+**Response:**
+
+```json
+{
+  "model": "jev-latest",
+  "answers": {
+    "is_urgent": {
+      "type": "noul",
+      "noul": 0.95
+    }
+  },
+  "usage": {
+    "input_tokens": 312,
+    "output_tokens": 48
+  }
+}
+```
+
+Billing is input-token based (output tokens are free on Jev); the response's
+`usage` is the settlement seam, exactly like embeddings.
+
 ## Images (Coming Soon)
 
 ### Create Image
