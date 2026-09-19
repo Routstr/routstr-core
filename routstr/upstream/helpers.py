@@ -194,11 +194,16 @@ async def refresh_upstreams_models_periodically(
             break
 
 
-async def init_upstreams() -> list[BaseUpstreamProvider]:
+async def init_upstreams(fetch_models: bool = True) -> list[BaseUpstreamProvider]:
     """Initialize upstream providers from database.
 
     Seeds database with providers from settings if empty, then loads and instantiates
     provider instances from database records, and refreshes their models cache.
+
+    Args:
+        fetch_models: Call every upstream's /models to build the cache. Pass False
+            to warm the cache from stored rows only, leaving the network pass to
+            the models refresh loop.
     """
     from ..core.settings import settings
 
@@ -225,7 +230,10 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
 
             provider = _instantiate_provider(provider_row)
             if provider:
-                await provider.refresh_models_cache()
+                if fetch_models:
+                    await provider.refresh_models_cache()
+                else:
+                    await provider.load_models_cache_from_db()
                 logger.debug(
                     f"Initialized {provider_row.provider_type} provider",
                     extra={

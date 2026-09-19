@@ -7,13 +7,21 @@ as-is, so ``input_image`` parts are flattened to ``{image_url: str, detail}`` fi
 
 from typing import Any
 
-from litellm.responses.litellm_completion_transformation.transformation import (
-    LiteLLMCompletionResponsesConfig,
-)
-
 from ..core import get_logger
 
 logger = get_logger(__name__)
+
+
+def __getattr__(name: str) -> Any:
+    """Preserve the patchable config class without eagerly importing it."""
+    if name == "LiteLLMCompletionResponsesConfig":
+        from litellm.responses.litellm_completion_transformation.transformation import (
+            LiteLLMCompletionResponsesConfig,
+        )
+
+        return LiteLLMCompletionResponsesConfig
+    raise AttributeError(name)
+
 
 FILE_ID_URL_PREFIX = "file-id:"
 
@@ -63,9 +71,13 @@ def responses_input_to_messages(input_data: Any) -> list[dict[str, Any]] | None:
     if not isinstance(input_data, list):
         return []
     try:
+        config = globals().get("LiteLLMCompletionResponsesConfig")
+        if config is None:
+            config = __getattr__("LiteLLMCompletionResponsesConfig")
+
         normalized = [_normalize_item(item) for item in input_data]
         converted = (
-            LiteLLMCompletionResponsesConfig.transform_responses_api_input_to_messages(
+            config.transform_responses_api_input_to_messages(
                 input=normalized,  # type: ignore[arg-type]
                 responses_api_request={},
             )
