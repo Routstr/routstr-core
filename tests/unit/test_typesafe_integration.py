@@ -12,6 +12,7 @@ Covers the three integration seams the systemone endpoint touches:
 from __future__ import annotations
 
 import os
+from typing import Any
 
 os.environ.setdefault("UPSTREAM_BASE_URL", "http://test")
 os.environ.setdefault("UPSTREAM_API_KEY", "test")
@@ -77,7 +78,7 @@ def _mock_models_response(payload: dict) -> MagicMock:
     return mock_response
 
 
-def _patch_client(mock_response: MagicMock) -> patch:
+def _patch_client(mock_response: MagicMock) -> Any:
     mock_client = MagicMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
