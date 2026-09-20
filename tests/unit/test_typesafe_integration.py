@@ -110,7 +110,7 @@ async def test_fetch_models_prices_the_listing() -> None:
     with _patch_client(_mock_models_response(payload)):
         models = await provider.fetch_models()
 
-    assert [m.id for m in models] == ["jev-latest", "jev-preview"]
+    assert [m.id for m in models] == ["jev-latest", "jev-preview", "jev-1.13.0"]
     for model in models:
         # Input priced, output free; rates usable (zero is a real price).
         assert model.pricing.prompt == pytest.approx(0.042 / 1_000_000)
@@ -128,10 +128,14 @@ async def test_fetch_models_handles_error() -> None:
         side_effect=RuntimeError("upstream down")
     )
 
-    with _patch_client(mock_response):
+    with (
+        _patch_client(mock_response),
+        patch("routstr.upstream.typesafe.logger") as mock_logger,
+    ):
         models = await provider.fetch_models()
 
     assert models == []
+    mock_logger.warning.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -147,5 +151,28 @@ async def test_fetch_models_defaults_unknown_model_rates() -> None:
     with _patch_client(_mock_models_response(payload)):
         models = await provider.fetch_models()
 
-    assert len(models) == 1
-    assert models[0].pricing.prompt == pytest.approx(0.042 / 1_000_000)
+    by_id = {m.id: m for m in models}
+    assert "jev-2.0" in by_id
+    assert by_id["jev-2.0"].pricing.prompt == pytest.approx(0.042 / 1_000_000)
+    assert by_id["jev-2.0"].created == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_does_not_duplicate_listed_versioned_id() -> None:
+    provider = TypeSafeUpstreamProvider(api_key="test")
+    payload = {
+        "models": [
+            {
+                "name": "jev-1.13.0",
+                "description": "Jev 1.13",
+                "release_date": "2026-09-17T00:00:00Z",
+            }
+        ]
+    }
+
+    with _patch_client(_mock_models_response(payload)):
+        models = await provider.fetch_models()
+
+    assert [m.id for m in models] == ["jev-1.13.0"]
+    assert models[0].description == "Jev 1.13"
+    assert models[0].created > 0
