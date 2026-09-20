@@ -105,7 +105,7 @@ async def test_bearer_timeout_propagates_504(
         "forward_with_trailer",
         AsyncMock(
             side_effect=EhbpTimeoutError(
-                "EHBP upstream inference.tinfoil.sh timed out after 60s connecting"
+                "EHBP upstream inference.tinfoil.sh timed out after 600s connecting"
             )
         ),
     )
