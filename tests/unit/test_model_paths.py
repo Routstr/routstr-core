@@ -272,6 +272,17 @@ async def _set_provider_fee(engine: AsyncEngine, provider_id: int, fee: float) -
         await session.commit()
 
 
+async def _set_provider_base_url(
+    engine: AsyncEngine, provider_id: int, base_url: str
+) -> None:
+    async with AsyncSession(engine) as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        assert provider is not None
+        provider.base_url = base_url
+        session.add(provider)
+        await session.commit()
+
+
 def _paths_of(payload: dict, model_id: str) -> set[str]:
     for entry in payload["data"]:
         if entry["id"] == model_id:
@@ -289,7 +300,7 @@ def _expected_path(
     endpoint_tag: str | None = None,
 ) -> str:
     return mp.encode_model_path(
-        f"https://provider-{provider_id}", provider_id, model_id, endpoint_tag
+        f"https://provider-{provider_id}", model_id, endpoint_tag
     )
 
 
@@ -308,7 +319,6 @@ def _path_entry(
     return {
         "path": _expected_path(provider_id, model_id, endpoint_tag),
         "provider": {
-            "id": provider_id,
             "slug": provider_slug or f"p{provider_id}",
             "type": provider_type
             or ("anthropic" if provider_id == 1 else "openrouter"),
@@ -368,21 +378,20 @@ def test_public_provider_url_preserves_public_urls_without_ports() -> None:
     assert mp.public_provider_url("http://localhost") == "http://localhost"
 
 
-def test_encode_model_path_includes_complete_route_identity() -> None:
+def test_encode_model_path_omits_provider_id() -> None:
     assert mp.encode_model_path(
-        "https://openrouter.ai/api/v1", 42, "anthropic/claude-sonnet-4"
+        "https://openrouter.ai/api/v1", "anthropic/claude-sonnet-4"
     ) == (
         "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1"
-        "&provider-id=42&model-id=anthropic%2Fclaude-sonnet-4"
+        "&model-id=anthropic%2Fclaude-sonnet-4"
     )
     assert mp.encode_model_path(
         "https://openrouter.ai/api/v1",
-        42,
         "anthropic/claude-sonnet-4",
         "google-vertex/us-east5",
     ) == (
         "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1"
-        "&provider-id=42&model-id=anthropic%2Fclaude-sonnet-4"
+        "&model-id=anthropic%2Fclaude-sonnet-4"
         "&endpoint=google-vertex%2Fus-east5"
     )
 
@@ -506,7 +515,7 @@ async def test_direct_path_masks_private_configured_provider_url(
     await mp.refresh_model_paths([provider])
 
     assert _paths_of(await mp.get_all_model_paths(), "local-model") == {
-        mp.encode_model_path("http://localhost", 1, "local-model")
+        mp.encode_model_path("http://localhost", "local-model")
     }
 
 
@@ -886,7 +895,7 @@ async def test_openrouter_provider_adds_endpoint_paths(
     assert {
         item["endpoint"]["name"] for item in payload["data"] if item["endpoint"]
     } == {"Google"}
-    assert {item["provider"]["id"] for item in payload["data"]} == {2}
+    assert {item["provider"]["slug"] for item in payload["data"]} == {"p2"}
 
 
 @pytest.mark.asyncio
@@ -982,6 +991,97 @@ async def test_path_pricing_uses_the_provider_fee_of_its_own_provider(
     assert anthropic["sats_pricing"]["prompt"] == pytest.approx(
         0.000005 * 1.5 / sats_quote
     )
+
+
+@pytest.mark.asyncio
+async def test_providers_sharing_a_url_collapse_onto_the_cheapest_path(
+    patched_session: AsyncEngine, sats_quote: float
+) -> None:
+    """One selector per URL, describing the provider routing will actually use."""
+    shared_url = "https://shared.example/v1"
+    await _set_provider_base_url(patched_session, 1, shared_url)
+    await _set_provider_base_url(patched_session, 2, shared_url)
+    await _set_provider_fee(patched_session, 1, 2.0)
+    await _set_provider_fee(patched_session, 2, 1.1)
+
+    await mp.refresh_model_paths(
+        [
+            _FakeProvider(
+                provider_type="anthropic",
+                base_url=shared_url,
+                models=[_model("shared-model")],
+                db_id=1,
+            ),
+            _FakeProvider(
+                provider_type="openrouter",
+                base_url=shared_url,
+                models=[_model("shared-model")],
+                db_id=2,
+            ),
+        ]
+    )
+
+    payload = await mp.get_paths_for_model("shared-model")
+    assert [item["path"] for item in payload["data"]] == [
+        mp.encode_model_path(shared_url, "shared-model")
+    ]
+    assert payload["data"][0]["provider"] == {"slug": "p2", "type": "openrouter"}
+
+
+@pytest.mark.asyncio
+async def test_collapsed_path_advertises_the_cheapest_provider_pricing(
+    patched_session: AsyncEngine, sats_quote: float
+) -> None:
+    shared_url = "https://shared.example/v1"
+    await _set_provider_base_url(patched_session, 1, shared_url)
+    await _set_provider_base_url(patched_session, 2, shared_url)
+    await _set_provider_fee(patched_session, 1, 2.0)
+    await _set_provider_fee(patched_session, 2, 1.1)
+
+    priced = _model("shared-model")
+    priced.pricing = {"prompt": "0.000005", "completion": "0.000005"}
+
+    await mp.refresh_model_paths(
+        [
+            _FakeProvider(
+                provider_type="anthropic",
+                base_url=shared_url,
+                models=[priced],
+                db_id=1,
+            ),
+            _FakeProvider(
+                provider_type="openrouter",
+                base_url=shared_url,
+                models=[priced],
+                db_id=2,
+            ),
+        ]
+    )
+
+    payload = await mp.get_paths_for_model("shared-model")
+    assert len(payload["data"]) == 1
+    assert payload["data"][0]["model"]["pricing"]["prompt"] == pytest.approx(
+        0.000005 * 1.1
+    )
+
+
+@pytest.mark.asyncio
+async def test_paths_advertise_no_provider_id(patched_session: AsyncEngine) -> None:
+    await mp.refresh_model_paths(
+        [
+            _FakeProvider(
+                provider_type="anthropic",
+                base_url="https://provider-1",
+                models=[_model("claude-x")],
+                db_id=1,
+            )
+        ]
+    )
+
+    payload = await mp.get_all_model_paths()
+    entry = payload["data"][0]["paths"][0]
+    assert "provider-id" not in entry["path"]
+    assert "id" not in entry["provider"]
 
 
 @pytest.mark.asyncio

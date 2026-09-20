@@ -2,11 +2,16 @@
 
 Exposes every selectable upstream route a Routstr model is reachable through.
 A path is a standard percent-encoded query string containing the configured
-upstream URL, provider ID, client-visible model ID and, for an exact OpenRouter
-endpoint, its machine-readable tag::
+upstream URL, client-visible model ID and, for an exact OpenRouter endpoint,
+its machine-readable tag::
 
-    url=https%3A%2F%2Fapi.anthropic.com%2Fv1&provider-id=12&model-id=claude-sonnet-4
-    url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&provider-id=42&model-id=claude-sonnet-4&endpoint=google-vertex%2Fus
+    url=https%3A%2F%2Fapi.anthropic.com%2Fv1&model-id=claude-sonnet-4
+    url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&model-id=claude-sonnet-4&endpoint=google-vertex%2Fus
+
+A path names no provider, so several providers sharing an upstream URL collapse
+onto one selector that routes to the cheapest of them. ``provider-id`` is still
+accepted when decoding so paths issued before that change keep pinning the exact
+provider they named.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import ipaddress
 import json
 import random
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -117,16 +123,11 @@ def public_provider_url(base_url: str) -> str:
 
 def encode_model_path(
     base_url: str,
-    provider_id: int,
     model_id: str,
     endpoint_tag: str | None = None,
 ) -> str:
-    """Encode the complete upstream route selector advertised to clients."""
-    components: list[tuple[str, str | int]] = [
-        ("url", base_url),
-        ("provider-id", provider_id),
-        ("model-id", model_id),
-    ]
+    """Encode the upstream route selector advertised to clients."""
+    components = [("url", base_url), ("model-id", model_id)]
     if endpoint_tag:
         components.append(("endpoint", endpoint_tag))
     return urlencode(components)
@@ -137,9 +138,9 @@ class ModelPathSelector:
     """Decoded client-supplied route selector."""
 
     base_url: str
-    provider_id: int
     model_id: str
     endpoint_tag: str | None = None
+    provider_id: int | None = None
 
 
 def decode_model_path(path: str) -> ModelPathSelector | None:
@@ -166,20 +167,21 @@ def decode_model_path(path: str) -> ModelPathSelector | None:
         return None
     base_url = params.get("url", "")
     model_id = params.get("model-id", "")
-    raw_provider_id = params.get("provider-id", "")
-    if not base_url or not model_id or not raw_provider_id:
+    if not base_url or not model_id:
         return None
-    try:
-        provider_id = int(raw_provider_id)
-    except ValueError:
-        return None
-    if provider_id <= 0:
-        return None
+    provider_id: int | None = None
+    if (raw_provider_id := params.get("provider-id")) is not None:
+        try:
+            provider_id = int(raw_provider_id)
+        except ValueError:
+            return None
+        if provider_id <= 0:
+            return None
     return ModelPathSelector(
         base_url=base_url,
-        provider_id=provider_id,
         model_id=model_id,
         endpoint_tag=params.get("endpoint") or None,
+        provider_id=provider_id,
     )
 
 
@@ -490,9 +492,7 @@ async def _collect_provider_paths(
         model_id = exposed_model_id(model)
         return DiscoveredPath(
             model_id=model_id,
-            path=encode_model_path(
-                provider_identity.base_url, provider_identity.id, model_id
-            ),
+            path=encode_model_path(provider_identity.base_url, model_id),
             provider=provider_identity,
             model_metadata=_serialize_model_metadata(model, model_id),
         )
@@ -529,7 +529,6 @@ async def _collect_provider_paths(
                     model_id=model_id,
                     path=encode_model_path(
                         provider_identity.base_url,
-                        provider_identity.id,
                         model_id,
                         endpoint.tag,
                     ),
@@ -900,7 +899,6 @@ def _serialize_path(row: ModelPathRow, provider_fee: float) -> dict[str, Any]:
     return {
         "path": row.path,
         "provider": {
-            "id": row.upstream_provider_id,
             "slug": row.provider_slug,
             "type": row.provider_type,
         },
@@ -912,6 +910,25 @@ def _serialize_path(row: ModelPathRow, provider_fee: float) -> dict[str, Any]:
 async def _provider_fees(session: "AsyncSession") -> dict[int, float]:
     rows = (await session.exec(select(UpstreamProviderRow))).all()
     return {row.id: row.provider_fee for row in rows if row.id is not None}
+
+
+def _cheapest_rows_by_path(
+    rows: Iterable[ModelPathRow], fees: dict[int, float]
+) -> list[tuple[ModelPathRow, float]]:
+    """Collapse rows sharing a path onto the cheapest provider, with its fee.
+
+    Routing sends a provider-less path to the cheapest provider on that URL, so
+    the advertised slug and pricing must come from that same provider or clients
+    are quoted a price they will never be charged.
+    """
+    best: dict[tuple[str, str], tuple[ModelPathRow, float]] = {}
+    for row in rows:
+        key = (row.model_id, row.path)
+        fee = fees.get(row.upstream_provider_id, 1.01)
+        incumbent = best.get(key)
+        if incumbent is None or fee < incumbent[1]:
+            best[key] = (row, fee)
+    return list(best.values())
 
 
 async def get_all_model_paths() -> dict:
@@ -929,16 +946,9 @@ async def get_all_model_paths() -> dict:
         fees = await _provider_fees(session)
 
     grouped: dict[str, list[dict[str, Any]]] = {}
-    seen_paths: dict[str, set[str]] = {}
-    updated_at = 0
-    for row in rows:
-        updated_at = max(updated_at, row.updated_at)
-        if row.path in seen_paths.setdefault(row.model_id, set()):
-            continue
-        seen_paths[row.model_id].add(row.path)
-        grouped.setdefault(row.model_id, []).append(
-            _serialize_path(row, fees.get(row.upstream_provider_id, 1.01))
-        )
+    updated_at = max((row.updated_at for row in rows), default=0)
+    for row, fee in _cheapest_rows_by_path(rows, fees):
+        grouped.setdefault(row.model_id, []).append(_serialize_path(row, fee))
     data = [
         {
             "id": grouped_model_id,
@@ -974,13 +984,8 @@ async def get_paths_for_model(model_id: str) -> dict:
                 rows = await load_rows(session, unprefixed_id)
         fees = await _provider_fees(session)
 
-    seen: set[str] = set()
-    paths: list[dict] = []
-    updated_at = 0
-    for row in rows:
-        updated_at = max(updated_at, row.updated_at)
-        if row.path in seen:
-            continue
-        seen.add(row.path)
-        paths.append(_serialize_path(row, fees.get(row.upstream_provider_id, 1.01)))
+    updated_at = max((row.updated_at for row in rows), default=0)
+    paths = [
+        _serialize_path(row, fee) for row, fee in _cheapest_rows_by_path(rows, fees)
+    ]
     return {"data": paths, "updated_at": updated_at or None}
