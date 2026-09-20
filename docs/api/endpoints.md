@@ -345,13 +345,13 @@ GET /v1/models/paths
       "id": "anthropic/claude-sonnet-4",
       "paths": [
         {
-          "path": "url=https%3A%2F%2Fapi.anthropic.com%2Fv1&provider-id=12&model-id=anthropic%2Fclaude-sonnet-4",
-          "provider": {"id": 12, "slug": "anthropic-primary", "type": "anthropic"},
+          "path": "url=https%3A%2F%2Fapi.anthropic.com%2Fv1&model-id=anthropic%2Fclaude-sonnet-4",
+          "provider": {"slug": "anthropic-primary", "type": "anthropic"},
           "endpoint": null
         },
         {
-          "path": "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&provider-id=42&model-id=anthropic%2Fclaude-sonnet-4&endpoint=google-vertex%2Fus",
-          "provider": {"id": 42, "slug": "openrouter-main", "type": "openrouter"},
+          "path": "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&model-id=anthropic%2Fclaude-sonnet-4&endpoint=google-vertex%2Fus",
+          "provider": {"slug": "openrouter-main", "type": "openrouter"},
           "endpoint": {"tag": "google-vertex/us", "name": "Google"}
         }
       ]
@@ -362,13 +362,21 @@ GET /v1/models/paths
 ```
 
 `path` is an opaque, percent-encoded selector. Clients must store and return it
-unchanged rather than parsing or reconstructing it. It identifies the exact
-configured route with `url`, `provider-id`, and `model-id`. To avoid exposing
-private network details, a configured private IP address or any URL with an
-explicit port is advertised as `http://localhost`. OpenRouter routes additionally
-preserve the exact machine-readable endpoint `tag`. Provider slugs/types and
-endpoint names remain display data. When request-side selection is implemented,
-an endpoint tag must not silently fall back to another backend.
+unchanged rather than parsing or reconstructing it. It identifies the route with
+`url` and `model-id`. To avoid exposing private network details, a configured
+private IP address or any URL with an explicit port is advertised as
+`http://localhost`. OpenRouter routes additionally preserve the exact
+machine-readable endpoint `tag`. Provider slugs/types and endpoint names remain
+display data. When request-side selection is implemented, an endpoint tag must
+not silently fall back to another backend.
+
+A path names no provider, so several configured providers sharing an upstream URL
+collapse onto a single path. Such a path always routes to the cheapest of those
+providers, and the advertised slug, type and pricing describe that same cheapest
+provider. A pinned path never fails over: if the selected provider errors, the
+error is returned rather than retried elsewhere. Paths issued before this change
+still carry `provider-id` and are still honoured, pinning the exact provider they
+name.
 
 ### List Paths for One Model
 

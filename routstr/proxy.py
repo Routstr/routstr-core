@@ -132,12 +132,18 @@ def _candidate_for_selector(
     selector: ModelPathSelector,
     candidates: list[tuple[Model, BaseUpstreamProvider]],
 ) -> tuple[Model, BaseUpstreamProvider] | None:
+    """Resolve a route selector to one candidate.
+
+    ``candidates`` is ranked by cost, so the first URL match is the cheapest
+    provider configured against that URL. A selector still carrying a legacy
+    ``provider-id`` keeps pinning that exact provider instead.
+    """
     for model_obj, upstream in candidates:
-        if (
-            upstream.db_id == selector.provider_id
-            and public_provider_url(upstream.base_url) == selector.base_url
-        ):
-            return model_obj, upstream
+        if public_provider_url(upstream.base_url) != selector.base_url:
+            continue
+        if selector.provider_id is not None and upstream.db_id != selector.provider_id:
+            continue
+        return model_obj, upstream
     return None
 
 
@@ -536,10 +542,14 @@ async def _proxy(
     if selector is not None:
         pinned = _candidate_for_selector(selector, candidates)
         if pinned is None:
+            target = (
+                f"provider {selector.provider_id}"
+                if selector.provider_id is not None
+                else f"'{selector.base_url}'"
+            )
             return create_error_response(
                 "invalid_model_path",
-                f"Model '{selector.model_id}' is not routable through provider "
-                f"{selector.provider_id}",
+                f"Model '{selector.model_id}' is not routable through {target}",
                 404,
                 request=request,
             )
