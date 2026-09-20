@@ -262,6 +262,10 @@ _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     "responses": frozenset({"POST"}),
     "messages": frozenset({"POST"}),
     "embeddings": frozenset({"POST"}),
+    # TypeSafe System One decision endpoint: POST {state, model, questions}
+    # -> {answers, usage}. Non-streaming, JSON in/out; billed from the
+    # response's usage exactly like embeddings.
+    "systemone": frozenset({"POST"}),
     "models": frozenset({"GET"}),
     "attestation": frozenset({"GET"}),
     "tee/attestation": frozenset({"GET"}),

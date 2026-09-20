@@ -303,7 +303,7 @@ def _openai_completion_path(path: str) -> str | None:
 def _x_cashu_path_has_settlement_handler(path: str) -> bool:
     canonical = path.rstrip("/")
     return _openai_completion_path(canonical) is not None or canonical.endswith(
-        ("embeddings", "messages", "messages/count_tokens")
+        ("embeddings", "messages", "messages/count_tokens", "systemone")
     )
 
 
@@ -3155,6 +3155,7 @@ class BaseUpstreamProvider:
                 or path.endswith("embeddings")
                 or path.endswith("messages")
                 or path.endswith("messages/count_tokens")
+                or path.endswith("systemone")
             ):
                 if path.endswith("messages"):
                     client_wants_streaming = False
