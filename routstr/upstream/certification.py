@@ -36,7 +36,9 @@ import argparse
 import asyncio
 import json
 import math
+import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -45,6 +47,7 @@ import httpx
 
 from ..core.logging import get_logger
 from ..payment.cost_calculation import calculate_cost
+from ..payment.rates import coerce_rate
 from ..payment.usage import normalize_usage
 
 if TYPE_CHECKING:
@@ -63,6 +66,11 @@ TICKS = {STATUS_OK: "☑️", STATUS_WARN: "⚠️", STATUS_FAIL: "❌"}
 # upstream, and bounded enough that a dead host fails the row rather than
 # the request.
 PROBE_TIMEOUT_SECONDS = 15.0
+
+# An upper bound for a caller-supplied timeout. The admin endpoint accepts a
+# timeout override, and without a ceiling that override could hold the
+# request open for as long as the caller likes.
+MAX_PROBE_TIMEOUT_SECONDS = 60.0
 
 # The cheapest request that still exercises the usage/cost path: one token
 # out. Anything larger only spends more upstream credit for no extra
@@ -88,14 +96,48 @@ def certification_row(
     detail: str,
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build one row of the certification report."""
+    """Build one row of the certification report.
+
+    ``evidence`` is coerced to a dict so the row contract holds by
+    construction rather than by caller discipline — a caller that passes a
+    list or a string still produces a row a client can read.
+    """
     return {
         "id": row_id,
         "status": status,
         "title": title,
         "detail": detail,
-        "evidence": evidence if evidence is not None else {},
+        "evidence": evidence if isinstance(evidence, dict) else {},
     }
+
+
+def safe_row(
+    row_id: str,
+    title: str,
+    builder: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    """Run a row builder, turning any raise into a ``fail`` row.
+
+    The report is the diagnostic; it must never be the thing that fails. A
+    builder tripping over a hostile payload — a non-finite count, a body of
+    the wrong shape — becomes a ``fail`` row carrying the exception instead
+    of escaping the endpoint as a 500.
+    """
+    try:
+        return builder()
+    except Exception as exc:  # noqa: BLE001 - a raising check is a row status
+        described = f"{type(exc).__name__}: {exc}"
+        logger.warning(
+            "Certification check raised",
+            extra={"row_id": row_id, "error": described},
+        )
+        return certification_row(
+            row_id,
+            STATUS_FAIL,
+            title,
+            f"The {row_id} check could not run: {described}.",
+            {"error": described},
+        )
 
 
 # The operator-facing goals, each mapped onto the rows that decide it. A
@@ -269,12 +311,16 @@ def endpoint_validity_row(base_url: str) -> dict[str, Any]:
     problems: list[str] = []
     if parsed.scheme not in ("http", "https"):
         problems.append(f"scheme {parsed.scheme!r} is not http or https")
-    if not parsed.netloc:
+    # ``netloc`` is truthy for a hostless authority like ``http://:8080``
+    # (``.netloc == ':8080'``) even though there is no host to connect to —
+    # only ``.hostname`` answers "is there a host here".
+    if not parsed.hostname:
         problems.append("no host component")
     evidence: dict[str, Any] = {
         "base_url": base_url,
         "scheme": parsed.scheme,
-        "host": parsed.netloc,
+        "host": parsed.hostname,
+        "port": parsed.port,
         "path": parsed.path,
     }
     if problems:
@@ -332,17 +378,18 @@ def heartbeat_row(probe: ProbeResult) -> dict[str, Any]:
 
 def models_payload_row(probe: ProbeResult) -> dict[str, Any]:
     """Check the ``/models`` payload matches the OpenAI list shape."""
-    if probe.models_payload is None:
+    payload = probe.models_payload
+    if not isinstance(payload, dict):
         return certification_row(
             "endpoint.models_payload",
             STATUS_FAIL,
             "Models payload has the expected shape",
             f"Could not read a JSON object from {probe.models_url}: "
-            f"{probe.models_error}.",
+            f"{probe.models_error or type(payload).__name__}.",
             {"url": probe.models_url, "error": probe.models_error},
         )
 
-    data = probe.models_payload.get("data")
+    data = payload.get("data")
     if not isinstance(data, list):
         return certification_row(
             "endpoint.models_payload",
@@ -351,14 +398,16 @@ def models_payload_row(probe: ProbeResult) -> dict[str, Any]:
             f'Expected a top-level "data" list, got {type(data).__name__}.',
             {
                 "url": probe.models_url,
-                "top_level_keys": sorted(probe.models_payload.keys()),
+                "top_level_keys": sorted(payload.keys()),
             },
         )
 
+    # An empty id is not an id — the CLI discovery path refuses it, so the
+    # row must not certify it either.
     ids = [
-        item.get("id")
+        item["id"]
         for item in data
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]
     ]
     evidence: dict[str, Any] = {
         "url": probe.models_url,
@@ -371,7 +420,7 @@ def models_payload_row(probe: ProbeResult) -> dict[str, Any]:
             "endpoint.models_payload",
             STATUS_FAIL,
             "Models payload has the expected shape",
-            f'The "data" list carries no entry with a string "id" '
+            f'The "data" list carries no entry with a non-empty string "id" '
             f"({len(data)} entries).",
             evidence,
         )
@@ -416,18 +465,31 @@ def usage_capture_row(probe: ProbeResult) -> dict[str, Any]:
             f"{PROBE_MAX_TOKENS}-token probe.",
             evidence,
         )
-    if probe.chat_payload is None:
+    if probe.chat_payload is None or not isinstance(probe.chat_payload, dict):
         evidence["error"] = probe.chat_error
         return certification_row(
             "usage.capture",
             STATUS_FAIL,
             "Token usage captured from a completion",
-            f"The completion body was not a JSON object: {probe.chat_error}.",
+            f"The completion body was not a JSON object: "
+            f"{probe.chat_error or type(probe.chat_payload).__name__}.",
             evidence,
         )
 
     raw_usage = probe.chat_payload.get("usage")
-    normalized = normalize_usage(raw_usage)
+    try:
+        normalized = normalize_usage(raw_usage)
+    except Exception as exc:  # noqa: BLE001 - a malformed usage object is a row status
+        evidence["usage"] = _truncate(raw_usage)
+        evidence["error"] = f"{type(exc).__name__}: {exc}"
+        return certification_row(
+            "usage.capture",
+            STATUS_FAIL,
+            "Token usage captured from a completion",
+            f"The completion's usage object could not be read: "
+            f"{type(exc).__name__}: {exc}.",
+            evidence,
+        )
     evidence["usage"] = raw_usage
     if normalized is None:
         return certification_row(
@@ -472,24 +534,26 @@ def _reported_usd_cost(payload: dict[str, Any]) -> float:
 
     Mirrors ``_resolve_usd_cost``'s priority (``cost_details.total_cost``
     then ``total_cost`` then ``cost``) so this check knows which branch of
-    the engine it is verifying. It is written out here rather than imported
-    on purpose: the point of the cost row is an independent re-derivation,
-    and reusing the engine's own helper would make a wrong priority
-    self-consistent and therefore invisible.
+    the engine it is verifying. Coercion goes through the shared
+    ``coerce_rate`` — the one definition of what an upstream-supplied
+    number is — so this helper and the engine agree on *whether* a cost was
+    reported; only the arithmetic below is re-derived independently. Using
+    a private coercion here would disagree with the engine on numeric
+    strings and booleans and manufacture false failures.
     """
     usage = payload.get("usage")
     if not isinstance(usage, dict):
         return 0.0
     cost_details = usage.get("cost_details")
     if isinstance(cost_details, dict):
-        total = cost_details.get("total_cost")
-        if isinstance(total, (int, float)) and math.isfinite(total) and total > 0:
-            return float(total)
+        total = coerce_rate(cost_details.get("total_cost"))
+        if total is not None and total > 0:
+            return total
     for source in (usage, payload):
         for field in ("total_cost", "cost"):
-            value = source.get(field)
-            if isinstance(value, (int, float)) and math.isfinite(value) and value > 0:
-                return float(value)
+            value = coerce_rate(source.get(field))
+            if value is not None and value > 0:
+                return value
     return 0.0
 
 
@@ -504,6 +568,11 @@ def _expected_token_msats(sats_pricing: Any, usage: Any) -> tuple[int, int, int]
     cache term or a changed rounding rule shows up as a mismatch.
 
     Returns ``(total_msats, input_msats, output_msats)``.
+
+    Raises ``ValueError`` when a rate is not finite: ``math.ceil`` on an
+    infinite sum raises ``ValueError`` and on ``NaN`` produces an
+    unrepresentable result, so a non-finite rate is rejected explicitly
+    here rather than surfacing as an opaque crash.
     """
     input_rate = float(sats_pricing.prompt) * 1_000_000.0
     output_rate = float(sats_pricing.completion) * 1_000_000.0
@@ -513,6 +582,10 @@ def _expected_token_msats(sats_pricing: Any, usage: Any) -> tuple[int, int, int]
     cache_write_rate = (
         float(sats_pricing.input_cache_write or 0.0) * 1_000_000.0 or input_rate
     )
+
+    rates = (input_rate, output_rate, cache_read_rate, cache_write_rate)
+    if not all(math.isfinite(rate) for rate in rates):
+        raise ValueError(f"non-finite pricing rate in {rates!r}")
 
     calc_input = round(usage.input_tokens / 1000 * input_rate, 3)
     calc_output = round(usage.output_tokens / 1000 * output_rate, 3)
@@ -528,6 +601,10 @@ def _expected_usd_msats(
     reported_usd: float, provider_fee: float, sats_to_usd: float
 ) -> int:
     """Re-derive the upstream-reported-USD charge, fee applied then converted."""
+    if not all(math.isfinite(x) for x in (reported_usd, provider_fee, sats_to_usd)):
+        raise ValueError("non-finite input to the USD charge derivation")
+    if sats_to_usd <= 0:
+        raise ValueError("sats/USD price must be positive")
     return math.ceil(reported_usd * provider_fee / sats_to_usd * 1000)
 
 
@@ -549,8 +626,11 @@ def cost_prompt_completion_row(
     """
     from ..payment.cost_calculation import CostDataError
 
-    payload = probe.chat_payload or {}
-    usage = normalize_usage(payload.get("usage"))
+    payload = probe.chat_payload if isinstance(probe.chat_payload, dict) else {}
+    try:
+        usage = normalize_usage(payload.get("usage"))
+    except Exception:  # noqa: BLE001 - a malformed usage object is a row status
+        usage = None
     evidence: dict[str, Any] = {
         "model_id": model.id,
         "forwarded_model_id": model.forwarded_model_id,
@@ -596,16 +676,30 @@ def cost_prompt_completion_row(
         )
 
     reported_usd = _reported_usd_cost(payload)
-    if reported_usd > 0:
-        expected_total = _expected_usd_msats(reported_usd, provider_fee, sats_to_usd)
-        expected_input: int | None = None
-        expected_output: int | None = None
-        basis = "upstream_reported_usd"
-    else:
-        expected_total, expected_input, expected_output = _expected_token_msats(
-            model.sats_pricing, usage
+    try:
+        if reported_usd > 0:
+            expected_total = _expected_usd_msats(
+                reported_usd, provider_fee, sats_to_usd
+            )
+            expected_input: int | None = None
+            expected_output: int | None = None
+            basis = "upstream_reported_usd"
+        else:
+            expected_total, expected_input, expected_output = _expected_token_msats(
+                model.sats_pricing, usage
+            )
+            basis = "configured_token_pricing"
+    except (ValueError, OverflowError) as exc:
+        evidence["error"] = f"{type(exc).__name__}: {exc}"
+        evidence["reported_usd"] = reported_usd or None
+        return certification_row(
+            "cost.prompt_completion",
+            STATUS_FAIL,
+            "Prompt and completion cost calculated",
+            f"The expected charge could not be derived from the configured "
+            f"pricing: {type(exc).__name__}: {exc}.",
+            evidence,
         )
-        basis = "configured_token_pricing"
 
     actual_total = int(cost_data.total_msats)
     actual_input = int(cost_data.input_msats)
@@ -688,10 +782,24 @@ async def run_live_checks(
         timeout=timeout,
     )
     rows = [
-        endpoint_validity_row(base_url),
-        heartbeat_row(probe),
-        models_payload_row(probe),
-        usage_capture_row(probe),
+        safe_row(
+            "endpoint.validity",
+            "Upstream URL is well-formed",
+            lambda: endpoint_validity_row(base_url),
+        ),
+        safe_row(
+            "endpoint.reachable", "Endpoint responds", lambda: heartbeat_row(probe)
+        ),
+        safe_row(
+            "endpoint.models_payload",
+            "Models payload has the expected shape",
+            lambda: models_payload_row(probe),
+        ),
+        safe_row(
+            "usage.capture",
+            "Token usage captured from a completion",
+            lambda: usage_capture_row(probe),
+        ),
     ]
 
     cost_data: Any = None
@@ -718,13 +826,17 @@ async def run_live_checks(
         )
 
     rows.append(
-        cost_prompt_completion_row(
-            model=model,
-            probe=probe,
-            cost_data=cost_data,
-            provider_fee=provider_fee,
-            sats_to_usd=sats_to_usd,
-            pricing_known=pricing_known,
+        safe_row(
+            "cost.prompt_completion",
+            "Prompt and completion cost calculated",
+            lambda: cost_prompt_completion_row(
+                model=model,
+                probe=probe,
+                cost_data=cost_data,
+                provider_fee=provider_fee,
+                sats_to_usd=sats_to_usd,
+                pricing_known=pricing_known,
+            ),
         )
     )
     return rows
@@ -756,8 +868,45 @@ def _first_model_id(probe: ProbeResult) -> str | None:
 
 
 def _as_price(value: Any) -> float | None:
-    if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
-        return float(value)
+    """A USD-per-token price from outside the node, or ``None``.
+
+    Shares ``coerce_rate`` — the one definition of a usable rate — so an
+    explicit ``--prompt-price`` is validated exactly like a litellm-derived
+    one: a boolean, a negative or a non-finite value is not a price.
+    """
+    return coerce_rate(value)
+
+
+async def _resolve_sats_usd_price(override: float | None) -> float | None:
+    """The sats/USD price for a standalone run, or ``None`` if unavailable.
+
+    ``SATS_USD_PRICE`` is a module global populated by the app's lifespan
+    background task, so a fresh ``python -m`` process has none and
+    ``sats_usd_price()`` raises ``ValueError``. That must not abort a
+    certification run: fall back to the BTC global, then try the exchange
+    feed once, and return ``None`` rather than raising so the cost row can
+    degrade to a ``warn`` and the rest of the report still prints.
+    """
+    if override is not None:
+        return override if math.isfinite(override) and override > 0 else None
+
+    from ..payment import price as price_module
+
+    if price_module.SATS_USD_PRICE:
+        return float(price_module.SATS_USD_PRICE)
+    if price_module.BTC_USD_PRICE:
+        return float(price_module.BTC_USD_PRICE) / price_module.SATS_PER_BTC
+
+    try:
+        await price_module._update_prices()
+    except Exception as exc:  # noqa: BLE001 - no price is a row status
+        logger.warning(
+            "Could not initialize the sats/USD price for the standalone run",
+            extra={"error": f"{type(exc).__name__}: {exc}"},
+        )
+        return None
+    if price_module.SATS_USD_PRICE:
+        return float(price_module.SATS_USD_PRICE)
     return None
 
 
@@ -805,13 +954,13 @@ async def certify_upstream_url(
     completion_price: float | None = None,
     provider_fee: float = 1.0,
     timeout: float = PROBE_TIMEOUT_SECONDS,
+    sats_usd_price: float | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Certify an arbitrary upstream URL without touching the node's DB."""
     from ..payment.models import litellm_cost_entry
-    from ..payment.price import sats_usd_price
 
-    sats_to_usd = sats_usd_price()
+    sats_to_usd = await _resolve_sats_usd_price(sats_usd_price)
     target: dict[str, Any] = {"base_url": base_url, "model_id": model_id}
 
     if not model_id:
@@ -849,28 +998,36 @@ async def certify_upstream_url(
 
     entry = litellm_cost_entry(model_id) or {}
     resolved_prompt = (
-        prompt_price
+        _as_price(prompt_price)
         if prompt_price is not None
         else _as_price(entry.get("input_cost_per_token"))
     )
     resolved_completion = (
-        completion_price
+        _as_price(completion_price)
         if completion_price is not None
         else _as_price(entry.get("output_cost_per_token"))
     )
-    pricing_known = resolved_prompt is not None and resolved_completion is not None
+    pricing_known = (
+        resolved_prompt is not None
+        and resolved_completion is not None
+        and sats_to_usd is not None
+    )
     target["prompt_price_usd"] = resolved_prompt
     target["completion_price_usd"] = resolved_completion
+    target["sats_usd_price"] = sats_to_usd
 
     model = _model_from_usd_pricing(
-        model_id, resolved_prompt or 0.0, resolved_completion or 0.0, sats_to_usd
+        model_id,
+        resolved_prompt or 0.0,
+        resolved_completion or 0.0,
+        sats_to_usd or 1.0,
     )
     rows = await run_live_checks(
         base_url,
         api_key,
         model,
         provider_fee=provider_fee,
-        sats_to_usd=sats_to_usd,
+        sats_to_usd=sats_to_usd or 1.0,
         client=client,
         timeout=timeout,
         pricing_known=pricing_known,
@@ -896,8 +1053,33 @@ def render_checklist(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _route_logs_to_stderr() -> None:
+    """Move the app's stdout log handlers to stderr.
+
+    ``routstr.core.logging`` configures its handlers onto ``sys.stdout``, so
+    a machine-readable run would otherwise interleave log records with the
+    document. Stdout is the report's channel; logs belong on stderr.
+    """
+    import logging
+
+    loggers = [logging.getLogger()]
+    loggers.extend(
+        obj
+        for obj in logging.root.manager.loggerDict.values()
+        if isinstance(obj, logging.Logger)
+    )
+    for logger in loggers:
+        for handler in list(logger.handlers):
+            if (
+                isinstance(handler, logging.StreamHandler)
+                and getattr(handler, "stream", None) is sys.stdout
+            ):
+                handler.setStream(sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the checklist against one or more upstream base URLs."""
+    _route_logs_to_stderr()
     parser = argparse.ArgumentParser(
         prog="python -m routstr.upstream.certification",
         description=(
@@ -936,6 +1118,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Provider fee multiplier applied by the cost check",
     )
     parser.add_argument(
+        "--sats-usd-price",
+        type=float,
+        default=None,
+        help=(
+            "USD per satoshi for the cost check. Defaults to the node's "
+            "live rate, initialized from the exchange feed when unset."
+        ),
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=PROBE_TIMEOUT_SECONDS,
@@ -943,6 +1134,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--json", action="store_true", help="Emit the raw report as JSON"
+    )
+    parser.add_argument(
+        "--json-out",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write the raw JSON report to PATH ('-' for stdout). Unlike "
+            "--json, nothing else is written there, so the file is always "
+            "parseable — use this in pipelines."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -958,15 +1159,24 @@ def main(argv: list[str] | None = None) -> int:
                     completion_price=args.completion_price,
                     provider_fee=args.provider_fee,
                     timeout=args.timeout,
+                    sats_usd_price=args.sats_usd_price,
                 )
             )
         return results
 
     results = asyncio.run(_run_all())
 
+    if args.json_out is not None:
+        document = json.dumps(results, indent=2, default=str)
+        if args.json_out == "-":
+            print(document)
+        else:
+            with open(args.json_out, "w", encoding="utf-8") as handle:
+                handle.write(document + "\n")
+
     if args.json:
         print(json.dumps(results, indent=2, default=str))
-    else:
+    elif args.json_out is None:
         for result in results:
             print(render_checklist(result))
             print()
