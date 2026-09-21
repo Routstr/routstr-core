@@ -91,6 +91,19 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
         if input_usd < 0 or output_usd < 0 or (input_usd == 0 and output_usd == 0):
             return None
 
+        # Venice ships a discounted cache-read rate as ``cache_input`` (e.g.
+        # deepseek-v4-1-flash: $0.0075/1M vs $0.375/1M input). Dropping it
+        # left ``input_cache_read`` at 0, which billing reads as "no cache
+        # rate" and falls back to the FULL input rate — a 50x overcharge on
+        # cache hits. A malformed/negative cache rate coerces to None and is
+        # treated as absent, never carried (same rule as the OpenRouter rung).
+        cache_read_usd = _as_float(pricing_info.get("cache_input", {}).get("usd"))
+        input_cache_read = (
+            cache_read_usd / 1_000_000
+            if cache_read_usd is not None and cache_read_usd > 0
+            else 0.0
+        )
+
         capabilities = model_spec.get("capabilities", {})
         input_modalities = ["text"]
         if capabilities.get("supportsVision", False):
@@ -101,6 +114,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
             completion=output_usd / 1_000_000,
             context_length=model_spec.get("availableContextTokens"),
             source="native",
+            input_cache_read=input_cache_read,
             input_modalities=input_modalities,
         )
 
