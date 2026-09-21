@@ -58,7 +58,8 @@ async def test_invoice_read_transaction_closes_before_external_mint_io(
         return wallet
 
     with patch(
-        "routstr.lightning.get_wallet", side_effect=get_wallet_without_open_db_transaction
+        "routstr.lightning.get_wallet",
+        side_effect=get_wallet_without_open_db_transaction,
     ):
         await check_invoice_payment(stored, integration_session)
 
@@ -191,9 +192,7 @@ async def test_failed_final_commit_rolls_back_claim_and_credit_for_retry(
         assert unchanged.balance == 100_000
 
     async with AsyncSession(integration_engine, expire_on_commit=False) as retry:
-        settled, _ = await _finalize_invoice_settlement(
-            snapshot, retry, 1_700_000_001
-        )
+        settled, _ = await _finalize_invoice_settlement(snapshot, retry, 1_700_000_001)
         assert settled
 
     async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
@@ -302,9 +301,7 @@ async def test_expiry_cas_cannot_overwrite_concurrent_paid_invoice(
             assert result.rowcount == 1
             await paid.commit()
 
-        expired = await _expire_invoice_if_authoritatively_unpaid(
-            stale, caller, True
-        )
+        expired = await _expire_invoice_if_authoritatively_unpaid(stale, caller, True)
 
     assert expired is False
     assert stale.status == "paid"
@@ -381,8 +378,9 @@ async def test_sweep_expires_only_overdue_pending_invoices(
     overdue = _lightning_invoice(expires_at=now - 1)
     fresh = _lightning_invoice(expires_at=now + 3600)
     settling = _lightning_invoice(expires_at=now - 1, status="settlement_pending")
+    outgoing = _lightning_invoice(expires_at=now - 1, direction="out")
     async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
-        seed.add_all([overdue, fresh, settling])
+        seed.add_all([overdue, fresh, settling, outgoing])
         await seed.commit()
 
     await _expire_overdue_invoices(now)
@@ -392,6 +390,7 @@ async def test_sweep_expires_only_overdue_pending_invoices(
             (overdue, "expired"),
             (fresh, "pending"),
             (settling, "settlement_pending"),
+            (outgoing, "pending"),
         ):
             stored = await verify.get(LightningInvoice, invoice.id)
             assert stored is not None
@@ -409,8 +408,11 @@ async def test_watch_batch_expires_overdue_invoices_and_keeps_settling_rows(
     settling = _lightning_invoice(
         expires_at=now - 86_400, created_at=now - 86_400, status="settlement_pending"
     )
+    outgoing = _lightning_invoice(
+        expires_at=now + 3600, created_at=now, direction="out"
+    )
     async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
-        seed.add_all([overdue, fresh, settling])
+        seed.add_all([overdue, fresh, settling, outgoing])
         await seed.commit()
 
     polled: list[str] = []
@@ -425,6 +427,7 @@ async def test_watch_batch_expires_overdue_invoices_and_keeps_settling_rows(
 
     assert fresh.id in polled
     assert settling.id in polled
+    assert outgoing.id not in polled
 
     async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
         stored = await verify.get(LightningInvoice, overdue.id)

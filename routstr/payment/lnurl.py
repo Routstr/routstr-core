@@ -325,7 +325,7 @@ async def raw_send_to_lnurl(
     unit: str,
     amount: int | None = None,
     *,
-    on_melt_quote: Callable[[str], Awaitable[None]] | None = None,
+    on_melt_quote: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> int:
     """Send funds to an LNURL address.
 
@@ -413,7 +413,7 @@ async def raw_send_to_lnurl(
         raise LNURLError("Cashu melt fees exceed the requested gross amount")
 
     if on_melt_quote is not None:
-        await on_melt_quote(melt_quote_resp.quote)
+        await on_melt_quote(melt_quote_resp.quote, bolt11_invoice)
 
     assert selected_proofs is not None
     proofs = selected_proofs

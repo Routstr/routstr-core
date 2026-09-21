@@ -942,6 +942,7 @@ async def _expire_overdue_invoices(now: int) -> int:
         expired = await expiry_session.exec(  # type: ignore[call-overload]
             update(LightningInvoice)
             .where(
+                col(LightningInvoice.direction) == "in",
                 col(LightningInvoice.status) == "pending",
                 col(LightningInvoice.expires_at) < now,
             )
@@ -959,13 +960,17 @@ async def _process_invoice_watch_batch(session: AsyncSession, prev_now: int) -> 
         logger.info("Expired overdue invoices", extra={"invoice_count": swept})
     settling = await session.exec(
         select(LightningInvoice)
-        .where(col(LightningInvoice.status) == "settlement_pending")
+        .where(
+            col(LightningInvoice.direction) == "in",
+            col(LightningInvoice.status) == "settlement_pending",
+        )
         .order_by(col(LightningInvoice.created_at))
         .limit(INVOICE_WATCH_BATCH_LIMIT // 2)
     )
     unpaid = await session.exec(
         select(LightningInvoice)
         .where(
+            col(LightningInvoice.direction) == "in",
             col(LightningInvoice.status) == "pending",
             col(LightningInvoice.expires_at) >= now,
         )
@@ -975,6 +980,7 @@ async def _process_invoice_watch_batch(session: AsyncSession, prev_now: int) -> 
     recoverable = await session.exec(
         select(LightningInvoice)
         .where(
+            col(LightningInvoice.direction) == "in",
             col(LightningInvoice.status) == "expired",
             col(LightningInvoice.expires_at) > now - INVOICE_EXPIRY_GRACE_SECONDS,
         )

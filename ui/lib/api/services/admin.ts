@@ -938,6 +938,7 @@ export class AdminService {
   static async getLightningInvoices(
     status?: string,
     purpose?: string,
+    direction?: string,
     search?: string,
     limit: number = 50,
     offset: number = 0
@@ -945,6 +946,7 @@ export class AdminService {
     const params = new URLSearchParams();
     if (status) params.append('status', status);
     if (purpose) params.append('purpose', purpose);
+    if (direction) params.append('direction', direction);
     if (search) params.append('search', search);
     params.append('limit', limit.toString());
     params.append('offset', offset.toString());
@@ -1304,9 +1306,17 @@ export interface LightningInvoice {
   amount_sats: number;
   description: string;
   payment_hash: string;
-  status: 'pending' | 'paid' | 'expired' | 'cancelled';
+  status:
+    | 'pending'
+    | 'settlement_pending'
+    | 'paid'
+    | 'failed'
+    | 'expired'
+    | 'cancelled'
+    | 'reconciliation_required';
   api_key_hash: string | null;
-  purpose: 'create' | 'topup';
+  direction: 'in' | 'out';
+  purpose: 'create' | 'topup' | 'payout';
   created_at: number;
   expires_at: number;
   paid_at: number | null;

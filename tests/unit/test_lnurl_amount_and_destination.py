@@ -192,7 +192,7 @@ async def test_raw_send_to_lnurl_requotes_for_exact_input_fees_without_recursion
 
     assert paid == 485_000
     assert wallet.melt_quote.await_count == 2
-    checkpoint.assert_awaited_once_with("q2")
+    checkpoint.assert_awaited_once_with("q2", "lnbc1...")
     wallet.select_to_send.assert_not_called()
     selected = wallet.melt.await_args.kwargs["proofs"]
     assert sum(proof.amount for proof in selected) == 500
@@ -358,9 +358,7 @@ def _patch_getaddrinfo(ip: str) -> Any:
 
     loop = MagicMock()
     loop.getaddrinfo = fake_getaddrinfo
-    return patch.object(
-        lnurl_module.asyncio, "get_running_loop", return_value=loop
-    )
+    return patch.object(lnurl_module.asyncio, "get_running_loop", return_value=loop)
 
 
 @pytest.mark.asyncio

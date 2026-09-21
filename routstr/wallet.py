@@ -35,7 +35,7 @@ from .mint import (
     mint_cooldown_remaining,
     run_mint_operation,
 )
-from .payment.lnurl import raw_send_to_lnurl
+from .payment.lnurl import MeltOutcomeAmbiguousError, raw_send_to_lnurl
 
 # cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28; see the module
 # docstring. Installed at import so no mint call can run before the patch.
@@ -1540,6 +1540,27 @@ async def fetch_all_balances(
     )
 
 
+async def _settle_payout_history(
+    quote_id: str, *, status: str, amount_sats: int | None = None
+) -> None:
+    """Best-effort history update after the external payment outcome is known."""
+    try:
+        async with db.create_session() as session:
+            await db.settle_lightning_payout(
+                session, quote_id, status=status, amount_sats=amount_sats
+            )
+    except Exception as e:
+        logger.error(
+            "Failed to update Lightning payout history",
+            extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "quote_id": quote_id,
+                "status": status,
+            },
+        )
+
+
 async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
     """Send only conservatively proven owner funds for one wallet."""
     try:
@@ -1588,13 +1609,51 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
             else _sats_to_msats(settings.min_payout_sat)
         )
         if available_balance > min_amount:
-            amount_received = await raw_send_to_lnurl(
-                wallet,
-                proofs,
-                settings.receive_ln_address,
-                unit,
-                amount=available_balance,
-            )
+            payout_quote_id: str | None = None
+
+            async def record_payout(quote_id: str, bolt11: str) -> None:
+                nonlocal payout_quote_id
+                payout_quote_id = quote_id
+                async with db.create_session() as session:
+                    await db.record_lightning_payout(
+                        session,
+                        quote_id=quote_id,
+                        bolt11=bolt11,
+                        amount_sats=(
+                            available_balance
+                            if unit == "sat"
+                            else _msats_to_sats(available_balance)
+                        ),
+                        mint_url=mint_url,
+                        destination=settings.receive_ln_address,
+                    )
+
+            try:
+                amount_received = await raw_send_to_lnurl(
+                    wallet,
+                    proofs,
+                    settings.receive_ln_address,
+                    unit,
+                    amount=available_balance,
+                    on_melt_quote=record_payout,
+                )
+            except Exception as e:
+                if payout_quote_id is not None:
+                    await _settle_payout_history(
+                        payout_quote_id,
+                        status=(
+                            "reconciliation_required"
+                            if isinstance(e, MeltOutcomeAmbiguousError)
+                            else "failed"
+                        ),
+                    )
+                raise
+            if payout_quote_id is not None:
+                await _settle_payout_history(
+                    payout_quote_id,
+                    status="paid",
+                    amount_sats=_msats_to_sats(amount_received),
+                )
             logger.info(
                 "Payout sent successfully",
                 extra={
@@ -1866,6 +1925,7 @@ async def periodic_routstr_fee_payout() -> None:
                                 payout_unit,
                             )
                         if completed:
+                            await _settle_payout_history(payout_quote_id, status="paid")
                             logger.info(
                                 "Routstr fee payout reconciled as paid",
                                 extra={"payout_quote_id": payout_quote_id},
@@ -1880,6 +1940,9 @@ async def periodic_routstr_fee_payout() -> None:
                                 payout_unit,
                             )
                         if restored:
+                            await _settle_payout_history(
+                                payout_quote_id, status="failed"
+                            )
                             logger.warning(
                                 "Routstr fee payout reconciled as unpaid and restored for retry",
                                 extra={"payout_quote_id": payout_quote_id},
@@ -1910,7 +1973,7 @@ async def periodic_routstr_fee_payout() -> None:
 
                 attempt_quote_id: str | None = None
 
-                async def checkpoint_quote(quote_id: str) -> None:
+                async def checkpoint_quote(quote_id: str, bolt11: str) -> None:
                     nonlocal attempt_quote_id
                     async with db.create_session() as session:
                         checkpointed = await db.reset_routstr_fee(
@@ -1923,6 +1986,15 @@ async def periodic_routstr_fee_payout() -> None:
                     if not checkpointed:
                         raise _RoutstrFeePayoutAlreadyClaimed
                     attempt_quote_id = quote_id
+                    async with db.create_session() as session:
+                        await db.record_lightning_payout(
+                            session,
+                            quote_id=quote_id,
+                            bolt11=bolt11,
+                            amount_sats=accumulated_sats,
+                            mint_url=settings.primary_mint,
+                            destination=ROUTSTR_LN_ADDRESS,
+                        )
 
                 try:
                     amount_received = await raw_send_to_lnurl(
@@ -1949,6 +2021,12 @@ async def periodic_routstr_fee_payout() -> None:
                             extra={"payout_in_progress_msats": paid_msats},
                             exc_info=isinstance(e, Exception),
                         )
+                        async with db.create_session() as session:
+                            await db.settle_lightning_payout(
+                                session,
+                                attempt_quote_id,
+                                status="reconciliation_required",
+                            )
                     if not isinstance(e, Exception):
                         raise
                     continue
@@ -1969,6 +2047,9 @@ async def periodic_routstr_fee_payout() -> None:
                         extra={"payout_in_progress_msats": paid_msats},
                         exc_info=isinstance(e, Exception),
                     )
+                    await _settle_payout_history(
+                        attempt_quote_id, status="reconciliation_required"
+                    )
                     if not isinstance(e, Exception):
                         raise
                     continue
@@ -1977,7 +2058,16 @@ async def periodic_routstr_fee_payout() -> None:
                         "Routstr fee payout sent but checkpoint was not completed; awaiting quote reconciliation",
                         extra={"payout_in_progress_msats": paid_msats},
                     )
+                    await _settle_payout_history(
+                        attempt_quote_id, status="reconciliation_required"
+                    )
                     continue
+
+                await _settle_payout_history(
+                    attempt_quote_id,
+                    status="paid",
+                    amount_sats=_msats_to_sats(amount_received),
+                )
 
                 logger.info(
                     "Routstr fee payout sent",
@@ -1995,8 +2085,8 @@ async def periodic_routstr_fee_payout() -> None:
 
 def _quote_callback(
     notify: Callable[[str, str], Awaitable[None]], mint: str
-) -> Callable[[str], Awaitable[None]]:
-    async def callback(quote_id: str) -> None:
+) -> Callable[[str, str], Awaitable[None]]:
+    async def callback(quote_id: str, _bolt11: str) -> None:
         await notify(quote_id, mint)
 
     return callback

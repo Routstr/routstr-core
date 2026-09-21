@@ -13,7 +13,7 @@ Covers two regressions from the auto-payout / primary-mint audit
 from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -53,11 +53,20 @@ def _one_cycle_sleep() -> Callable[[float], Coroutine[Any, Any, None]]:
 
 @pytest.mark.asyncio
 async def test_periodic_payout_includes_primary_mint_not_in_cashu_mints() -> None:
-    """primary_mint absent from cashu_mints is still paid out."""
+    """primary_mint absent from cashu_mints is paid out and recorded."""
     from routstr.core.settings import settings
 
     get_wallet = AsyncMock(return_value=MagicMock())
-    raw_send = AsyncMock(return_value=1000)
+    record_payout = AsyncMock()
+    settle_payout = AsyncMock()
+
+    async def send(*args: object, **kwargs: object) -> int:
+        await kwargs["on_melt_quote"](  # type: ignore[index,operator]
+            "quote-1", "lnbc1payout"
+        )
+        return 1_000_000
+
+    raw_send = AsyncMock(side_effect=send)
 
     with (
         patch.object(settings, "cashu_mints", []),
@@ -84,6 +93,8 @@ async def test_periodic_payout_includes_primary_mint_not_in_cashu_mints() -> Non
             "routstr.wallet.db.total_user_liability",
             AsyncMock(return_value=0),
         ),
+        patch("routstr.wallet.db.record_lightning_payout", record_payout),
+        patch("routstr.wallet.db.settle_lightning_payout", settle_payout),
         patch("routstr.wallet.raw_send_to_lnurl", raw_send),
     ):
         with pytest.raises(_LoopBreak):
@@ -92,6 +103,20 @@ async def test_periodic_payout_includes_primary_mint_not_in_cashu_mints() -> Non
     processed = {call.args[0] for call in get_wallet.await_args_list}
     assert processed == {"http://primary:3338"}
     assert raw_send.await_count >= 1
+    record_payout.assert_awaited_once_with(
+        ANY,
+        quote_id="quote-1",
+        bolt11="lnbc1payout",
+        amount_sats=100_000,
+        mint_url="http://primary:3338",
+        destination="owner@ln.tld",
+    )
+    settle_payout.assert_awaited_once_with(
+        ANY,
+        "quote-1",
+        status="paid",
+        amount_sats=1_000,
+    )
 
 
 @pytest.mark.asyncio

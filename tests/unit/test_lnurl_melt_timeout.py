@@ -319,8 +319,9 @@ async def test_raw_send_to_lnurl_checkpoints_quote_before_melt_dispatch() -> Non
     wallet, proofs = _wallet()
     events: list[str] = []
 
-    async def checkpoint(quote_id: str) -> None:
+    async def checkpoint(quote_id: str, bolt11: str) -> None:
         assert quote_id == "q"
+        assert bolt11 == "lnbc1..."
         events.append("checkpoint")
 
     async def melt(**_kwargs: object) -> MagicMock:

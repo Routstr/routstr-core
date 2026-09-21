@@ -264,7 +264,8 @@ function LightningInvoiceTable({
           </EmptyMedia>
           <EmptyTitle>No invoices found</EmptyTitle>
           <EmptyDescription>
-            Lightning invoices created via /lightning/invoice will show here.
+            Lightning invoices created via /lightning/invoice and payouts sent
+            to your Lightning address will show here.
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -288,6 +289,33 @@ function LightningInvoiceTable({
           className='border-red-500/20 bg-red-500/10 text-red-500'
         >
           Expired
+        </Badge>
+      );
+    if (status === 'failed')
+      return (
+        <Badge
+          variant='outline'
+          className='border-red-500/20 bg-red-500/10 text-red-500'
+        >
+          Failed
+        </Badge>
+      );
+    if (status === 'settlement_pending')
+      return (
+        <Badge
+          variant='outline'
+          className='border-amber-500/20 bg-amber-500/10 text-amber-500'
+        >
+          Settling
+        </Badge>
+      );
+    if (status === 'reconciliation_required')
+      return (
+        <Badge
+          variant='outline'
+          className='border-amber-500/20 bg-amber-500/10 text-amber-500'
+        >
+          Reconciling
         </Badge>
       );
     if (status === 'cancelled')
@@ -315,6 +343,7 @@ function LightningInvoiceTable({
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead>Direction</TableHead>
               <TableHead>Purpose</TableHead>
               <TableHead>Amount</TableHead>
               <TableHead>Status</TableHead>
@@ -328,6 +357,11 @@ function LightningInvoiceTable({
           <TableBody>
             {invoices.map((inv) => (
               <TableRow key={inv.id}>
+                <TableCell>
+                  <Badge variant='outline' className='capitalize'>
+                    {inv.direction === 'out' ? 'Sent' : 'Received'}
+                  </Badge>
+                </TableCell>
                 <TableCell>
                   <span className='capitalize'>{inv.purpose}</span>
                 </TableCell>
@@ -514,15 +548,27 @@ export default function TransactionsPage() {
     placeholderData: keepPreviousData,
   });
 
-  const LIGHTNING_STATUSES = ['pending', 'paid', 'expired', 'cancelled'];
+  const LIGHTNING_STATUSES = [
+    'pending',
+    'settlement_pending',
+    'paid',
+    'failed',
+    'expired',
+    'cancelled',
+    'reconciliation_required',
+  ];
   const lightningStatusParam = LIGHTNING_STATUSES.includes(status)
     ? status
+    : undefined;
+  const lightningDirectionParam = ['in', 'out'].includes(type)
+    ? type
     : undefined;
 
   const lightningQuery = useQuery({
     queryKey: [
       'lightning-invoices',
       lightningStatusParam,
+      lightningDirectionParam,
       searchParam,
       lightningPage,
     ],
@@ -530,6 +576,7 @@ export default function TransactionsPage() {
       AdminService.getLightningInvoices(
         lightningStatusParam,
         undefined,
+        lightningDirectionParam,
         searchParam,
         PAGE_SIZE,
         lightningPage * PAGE_SIZE
@@ -727,6 +774,13 @@ export default function TransactionsPage() {
                     <SelectItem value='collected'>Collected</SelectItem>
                     <SelectItem value='swept'>Swept</SelectItem>
                     <SelectItem value='paid'>Paid (Lightning)</SelectItem>
+                    <SelectItem value='settlement_pending'>
+                      Settling (Lightning)
+                    </SelectItem>
+                    <SelectItem value='failed'>Failed (Lightning)</SelectItem>
+                    <SelectItem value='reconciliation_required'>
+                      Reconciling (Lightning)
+                    </SelectItem>
                     <SelectItem value='expired'>Expired (Lightning)</SelectItem>
                     <SelectItem value='cancelled'>
                       Cancelled (Lightning)
