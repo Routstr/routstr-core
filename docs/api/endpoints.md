@@ -200,6 +200,84 @@ POST /v1/embeddings
 }
 ```
 
+## System One (TypeSafe Decisions)
+
+### Evaluate State
+
+Evaluate a state against typed questions (noul / choice / score) on a TypeSafe
+System One decision model (e.g. `jev-latest`). Requires a `typesafe` upstream
+provider on the node.
+
+```http
+POST /v1/systemone
+```
+
+**Request Body:**
+
+```json
+{
+  "model": "jev-latest",
+  "state": "Help! My payouts have been failing for 3 days.",
+  "questions": {
+    "is_urgent": {
+      "type": "noul",
+      "instructions": "Does this convey urgency?"
+    }
+  }
+}
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `model` | string | Yes | - | TypeSafe alias (`jev-latest`, `jev-preview`) or versioned id (`jev-1.13.0`) |
+| `state` | string/object/array | Yes | - | Content to evaluate |
+| `questions` | map<string, Question> | Yes | - | Typed questions; answers keyed identically |
+
+**Response:**
+
+```json
+{
+  "model": "jev-latest",
+  "answers": {
+    "is_urgent": {
+      "type": "noul",
+      "noul": 0.95
+    }
+  },
+  "usage": {
+    "input_tokens": 312,
+    "output_tokens": 48
+  }
+}
+```
+
+Billing is input-token based (output tokens are free on Jev); the response's
+`usage` is the settlement seam, exactly like embeddings.
+
+**Notes:**
+
+- The response `model` echoes the id you requested (e.g. `jev-latest`), not the
+  resolved build (`jev-1.13.0`) TypeSafe returns. Routstr also adds its standard
+  `id`, `cost`, `metadata.routstr` and `usage.*_msats` fields.
+- TypeSafe's `GET /v1/models` lists aliases only; the node additionally seeds
+  the known versioned ids so they can be requested directly.
+- TypeSafe answers `429 Too Many Requests` and `529 Overloaded` when throttled.
+  Both are forwarded as upstream errors; retry with exponential backoff.
+
+**Enabling the provider:**
+
+1. Admin UI → Providers → *TypeSafe* (base URL is fixed to
+   `https://api.typesafe.ai/v1`), paste your `api.typesafe.ai` key. Or
+   `POST /admin/api/upstream-providers` with
+   `{"provider_type": "typesafe", "api_key": "<key>"}`.
+2. On a node with an empty provider table, setting `TYPESAFE_API_KEY` seeds
+   the provider automatically.
+3. `jev-latest`, `jev-preview` and `jev-1.13.0` are catalogued with the
+   published rate ($0.042 per million input tokens, output free). Override the
+   model row if TypeSafe changes pricing.
+
 ## Images (Coming Soon)
 
 ### Create Image
@@ -345,13 +423,13 @@ GET /v1/models/paths
       "id": "anthropic/claude-sonnet-4",
       "paths": [
         {
-          "path": "url=https%3A%2F%2Fapi.anthropic.com%2Fv1&provider-id=12&model-id=anthropic%2Fclaude-sonnet-4",
-          "provider": {"id": 12, "slug": "anthropic-primary", "type": "anthropic"},
+          "path": "url=https%3A%2F%2Fapi.anthropic.com%2Fv1&model-id=anthropic%2Fclaude-sonnet-4",
+          "provider": {"slug": "anthropic-primary", "type": "anthropic"},
           "endpoint": null
         },
         {
-          "path": "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&provider-id=42&model-id=anthropic%2Fclaude-sonnet-4&endpoint=google-vertex%2Fus",
-          "provider": {"id": 42, "slug": "openrouter-main", "type": "openrouter"},
+          "path": "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&model-id=anthropic%2Fclaude-sonnet-4&endpoint=google-vertex%2Fus",
+          "provider": {"slug": "openrouter-main", "type": "openrouter"},
           "endpoint": {"tag": "google-vertex/us", "name": "Google"}
         }
       ]
@@ -362,13 +440,21 @@ GET /v1/models/paths
 ```
 
 `path` is an opaque, percent-encoded selector. Clients must store and return it
-unchanged rather than parsing or reconstructing it. It identifies the exact
-configured route with `url`, `provider-id`, and `model-id`. To avoid exposing
-private network details, a configured private IP address or any URL with an
-explicit port is advertised as `http://localhost`. OpenRouter routes additionally
-preserve the exact machine-readable endpoint `tag`. Provider slugs/types and
-endpoint names remain display data. When request-side selection is implemented,
-an endpoint tag must not silently fall back to another backend.
+unchanged rather than parsing or reconstructing it. It identifies the route with
+`url` and `model-id`. To avoid exposing private network details, a configured
+private IP address or any URL with an explicit port is advertised as
+`http://localhost`. OpenRouter routes additionally preserve the exact
+machine-readable endpoint `tag`. Provider slugs/types and endpoint names remain
+display data. When request-side selection is implemented, an endpoint tag must
+not silently fall back to another backend.
+
+A path names no provider, so several configured providers sharing an upstream URL
+collapse onto a single path. Such a path always routes to the cheapest of those
+providers, and the advertised slug, type and pricing describe that same cheapest
+provider. A pinned path never fails over: if the selected provider errors, the
+error is returned rather than retried elsewhere. Paths issued before this change
+still carry `provider-id` and are still honoured, pinning the exact provider they
+name.
 
 ### List Paths for One Model
 

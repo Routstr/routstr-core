@@ -75,17 +75,31 @@ async def _run_proxy(
 
 def test_decode_model_path_round_trips_encode() -> None:
     selector = decode_model_path(
-        encode_model_path("https://openrouter.ai/api/v1", 7, MODEL_ID, "deepinfra/fp8")
+        encode_model_path("https://openrouter.ai/api/v1", MODEL_ID, "deepinfra/fp8")
     )
     assert selector is not None
     assert selector.base_url == "https://openrouter.ai/api/v1"
-    assert selector.provider_id == 7
+    assert selector.provider_id is None
     assert selector.model_id == MODEL_ID
     assert selector.endpoint_tag == "deepinfra/fp8"
 
 
+def test_encoded_path_carries_no_provider_id() -> None:
+    assert "provider-id" not in encode_model_path("http://localhost", MODEL_ID)
+
+
+def test_decode_model_path_still_accepts_a_legacy_provider_id() -> None:
+    selector = decode_model_path(
+        "url=http%3A%2F%2Flocalhost&provider-id=7&model-id=test-model"
+    )
+    assert selector is not None
+    assert selector.provider_id == 7
+    assert selector.base_url == "http://localhost"
+    assert selector.model_id == MODEL_ID
+
+
 def test_decode_model_path_without_endpoint_has_no_tag() -> None:
-    selector = decode_model_path(encode_model_path("http://localhost", 1, MODEL_ID))
+    selector = decode_model_path(encode_model_path("http://localhost", MODEL_ID))
     assert selector is not None
     assert selector.endpoint_tag is None
 
@@ -94,10 +108,12 @@ def test_decode_model_path_without_endpoint_has_no_tag() -> None:
     "path",
     [
         "",
-        "url=http://localhost&model-id=test-model",
         "url=http://localhost&provider-id=abc&model-id=test-model",
+        "url=http://localhost&provider-id=0&model-id=test-model",
         "provider-id=1&model-id=test-model",
         "url=http://localhost&provider-id=1",
+        "model-id=test-model",
+        "url=http://localhost",
     ],
 )
 def test_decode_model_path_rejects_malformed_selectors(path: str) -> None:
@@ -105,20 +121,63 @@ def test_decode_model_path_rejects_malformed_selectors(path: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_path_routes_to_the_selected_provider() -> None:
-    first, selected = _make_upstream(1), _make_upstream(2)
+async def test_model_path_routes_to_the_cheapest_provider_sharing_the_url() -> None:
+    # get_candidates ranks by cost, so the first match for a provider-less
+    # selector is the cheapest provider configured against that URL.
+    cheapest, pricier = _make_upstream(1), _make_upstream(2)
     request = _make_request(
         {
             "authorization": "Bearer sk-mpkey",
-            "x-routstr-model-path": encode_model_path("http://localhost", 2, MODEL_ID),
+            "x-routstr-model-path": encode_model_path("http://localhost", MODEL_ID),
         },
         json.dumps({"model": MODEL_ID}).encode(),
     )
 
-    await _run_proxy(request, [(MagicMock(), first), (MagicMock(), selected)])
+    await _run_proxy(request, [(MagicMock(), cheapest), (MagicMock(), pricier)])
 
-    selected.forward_request.assert_awaited_once()
-    first.forward_request.assert_not_awaited()
+    cheapest.forward_request.assert_awaited_once()
+    pricier.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cheapest_provider_failure_does_not_fall_back_to_the_pricier_one() -> (
+    None
+):
+    cheapest, pricier = _make_upstream(1, status_code=503), _make_upstream(2)
+    request = _make_request(
+        {
+            "authorization": "Bearer sk-mpkey",
+            "x-routstr-model-path": encode_model_path("http://localhost", MODEL_ID),
+        },
+        json.dumps({"model": MODEL_ID}).encode(),
+    )
+
+    response = await _run_proxy(
+        request, [(MagicMock(), cheapest), (MagicMock(), pricier)]
+    )
+
+    assert response.status_code == 503
+    cheapest.forward_request.assert_awaited_once()
+    pricier.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_provider_id_still_pins_that_exact_provider() -> None:
+    cheapest, pinned = _make_upstream(1), _make_upstream(2)
+    request = _make_request(
+        {
+            "authorization": "Bearer sk-mpkey",
+            "x-routstr-model-path": (
+                f"url=http%3A%2F%2Flocalhost&provider-id=2&model-id={MODEL_ID}"
+            ),
+        },
+        json.dumps({"model": MODEL_ID}).encode(),
+    )
+
+    await _run_proxy(request, [(MagicMock(), cheapest), (MagicMock(), pinned)])
+
+    pinned.forward_request.assert_awaited_once()
+    cheapest.forward_request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -131,7 +190,7 @@ async def test_model_path_failure_is_returned_without_falling_back(
     request = _make_request(
         {
             "authorization": "Bearer sk-mpkey",
-            "x-routstr-model-path": encode_model_path("http://localhost", 1, MODEL_ID),
+            "x-routstr-model-path": encode_model_path("http://localhost", MODEL_ID),
         },
         json.dumps({"model": MODEL_ID}).encode(),
     )
@@ -146,12 +205,14 @@ async def test_model_path_failure_is_returned_without_falling_back(
 
 
 @pytest.mark.asyncio
-async def test_unknown_provider_in_model_path_is_rejected() -> None:
+async def test_unknown_legacy_provider_in_model_path_is_rejected() -> None:
     upstream = _make_upstream(1)
     request = _make_request(
         {
             "authorization": "Bearer sk-mpkey",
-            "x-routstr-model-path": encode_model_path("http://localhost", 99, MODEL_ID),
+            "x-routstr-model-path": (
+                f"url=http%3A%2F%2Flocalhost&provider-id=99&model-id={MODEL_ID}"
+            ),
         },
         json.dumps({"model": MODEL_ID}).encode(),
     )
@@ -170,7 +231,7 @@ async def test_model_path_disagreeing_with_the_body_model_is_rejected() -> None:
         {
             "authorization": "Bearer sk-mpkey",
             "x-routstr-model-path": encode_model_path(
-                "http://localhost", 1, "other-model"
+                "http://localhost", "other-model"
             ),
         },
         json.dumps({"model": MODEL_ID}).encode(),
@@ -207,7 +268,7 @@ async def test_endpoint_tag_pins_the_upstream_subprovider() -> None:
         {
             "authorization": "Bearer sk-mpkey",
             "x-routstr-model-path": encode_model_path(
-                "https://openrouter.ai/api/v1", 1, MODEL_ID, "deepinfra/fp8"
+                "https://openrouter.ai/api/v1", MODEL_ID, "deepinfra/fp8"
             ),
         },
         json.dumps({"model": MODEL_ID}).encode(),
@@ -245,7 +306,7 @@ async def test_selector_url_must_match_configured_provider() -> None:
         {
             "authorization": "Bearer key",
             "x-routstr-model-path": encode_model_path(
-                "http://169.254.169.254", 1, MODEL_ID
+                "http://169.254.169.254", MODEL_ID
             ),
         },
         json.dumps({"model": MODEL_ID}).encode(),
@@ -266,7 +327,7 @@ async def test_endpoint_pin_cannot_be_stripped_on_retry() -> None:
         {
             "authorization": "Bearer key",
             "x-routstr-model-path": encode_model_path(
-                upstream.base_url, 1, MODEL_ID, "deepinfra/fp8"
+                upstream.base_url, MODEL_ID, "deepinfra/fp8"
             ),
         },
         json.dumps({"model": MODEL_ID}).encode(),
@@ -298,7 +359,7 @@ async def test_cashu_receives_endpoint_pinned_body(path: str, handler: str) -> N
         {
             "x-cashu": "test-token",
             "x-routstr-model-path": encode_model_path(
-                upstream.base_url, 1, MODEL_ID, "deepinfra/fp8"
+                upstream.base_url, MODEL_ID, "deepinfra/fp8"
             ),
         },
         json.dumps(
@@ -354,7 +415,7 @@ async def test_cashu_pin_reaches_http_transport(path: str, status_code: int) -> 
         {
             "x-cashu": "test-token",
             "x-routstr-model-path": encode_model_path(
-                upstream.base_url, 1, MODEL_ID, "deepinfra/fp8"
+                upstream.base_url, MODEL_ID, "deepinfra/fp8"
             ),
         },
         json.dumps({"model": MODEL_ID, "provider": {"allow_fallbacks": True}}).encode(),
@@ -418,7 +479,7 @@ async def test_pinned_exception_does_not_fall_back() -> None:
     request = _make_request(
         {
             "authorization": "Bearer key",
-            "x-routstr-model-path": encode_model_path(first.base_url, 1, MODEL_ID),
+            "x-routstr-model-path": encode_model_path(first.base_url, MODEL_ID),
         },
         json.dumps({"model": MODEL_ID}).encode(),
     )
@@ -442,7 +503,7 @@ async def test_unsupported_endpoint_pins_fail_before_payment(
     headers = {
         "x-cashu": "test-token",
         "x-routstr-model-path": encode_model_path(
-            upstream.base_url, 1, MODEL_ID, "deepinfra/fp8"
+            upstream.base_url, MODEL_ID, "deepinfra/fp8"
         ),
     }
     if is_ehbp:
@@ -471,7 +532,7 @@ async def test_ehbp_pin_does_not_fall_back(cashu: bool) -> None:
     headers = {
         "ehbp-encapsulated-key": "sealed",
         "x-routstr-model": MODEL_ID,
-        "x-routstr-model-path": encode_model_path(selected.base_url, 1, MODEL_ID),
+        "x-routstr-model-path": encode_model_path(selected.base_url, MODEL_ID),
     }
     headers.update({"x-cashu": "token"} if cashu else {"authorization": "Bearer key"})
     request = _make_request(headers, b"encrypted-body")
@@ -495,7 +556,7 @@ async def test_duplicate_header_fields_are_rejected() -> None:
     from starlette.datastructures import Headers
 
     selected = _make_upstream(1)
-    route = encode_model_path(selected.base_url, 1, MODEL_ID).encode()
+    route = encode_model_path(selected.base_url, MODEL_ID).encode()
     request = _make_request({}, json.dumps({"model": MODEL_ID}).encode())
     request.headers = Headers(
         raw=[
@@ -512,7 +573,7 @@ async def test_duplicate_header_fields_are_rejected() -> None:
 @pytest.mark.asyncio
 async def test_attestation_does_not_ignore_model_path() -> None:
     request = _make_request(
-        {"x-routstr-model-path": encode_model_path("http://localhost", 1, MODEL_ID)},
+        {"x-routstr-model-path": encode_model_path("http://localhost", MODEL_ID)},
         b"",
     )
     request.method = "GET"
@@ -528,7 +589,7 @@ async def test_model_fallback_list_is_rejected_when_pinned() -> None:
     request = _make_request(
         {
             "authorization": "Bearer key",
-            "x-routstr-model-path": encode_model_path(selected.base_url, 1, MODEL_ID),
+            "x-routstr-model-path": encode_model_path(selected.base_url, MODEL_ID),
         },
         json.dumps({"model": MODEL_ID, "models": ["other-model"]}).encode(),
     )
@@ -564,7 +625,7 @@ async def test_pinned_recovery_stays_on_selected_provider(
         {
             "authorization": "Bearer key",
             "x-routstr-model-path": encode_model_path(
-                selected.base_url, 1, MODEL_ID, endpoint
+                selected.base_url, MODEL_ID, endpoint
             ),
         },
         json.dumps(
@@ -608,7 +669,7 @@ async def test_pinned_recovery_preserves_routing_fields(
         {
             "authorization": "Bearer key",
             "x-routstr-model-path": encode_model_path(
-                selected.base_url, 1, MODEL_ID, endpoint
+                selected.base_url, MODEL_ID, endpoint
             ),
         },
         json.dumps(
