@@ -121,6 +121,7 @@ async def _seed_and_init(
     provider = await _make_provider(
         session, provider_fee=provider_fee, base_url=base_url
     )
+    assert provider.id is not None
     session.add(
         _model_row(
             provider.id,
@@ -475,6 +476,7 @@ async def test_certify_with_no_served_model(
     unusable pricing), the live checks should be skipped as warn, not
     crash."""
     provider = await _make_provider(integration_session)
+    assert provider.id is not None
     # A negative prompt price makes has_usable_pricing() return False,
     # withholding the model from the served map.
     session_add = _model_row(
