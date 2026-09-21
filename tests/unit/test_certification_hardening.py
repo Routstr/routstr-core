@@ -50,13 +50,10 @@ def _probe(**kwargs: Any) -> ProbeResult:
     )
 
 
-# ---------------------------------------------------------------------------
-# Defect: a non-finite token count crashed the billing path.
-#
+# Regression: a non-finite token count crashed the billing path.
 # ``json.loads`` accepts the bare ``Infinity``/``NaN`` literals, so an
 # upstream can put them on the wire; ``int(inf)`` raised OverflowError and
 # ``int(nan)`` raised ValueError inside ``parse_token_count``.
-# ---------------------------------------------------------------------------
 
 
 class TestNonFiniteTokenCounts:
@@ -111,10 +108,8 @@ class TestNonFiniteTokenCounts:
         assert row["status"] == STATUS_WARN
 
 
-# ---------------------------------------------------------------------------
-# Defect: ``certification_row`` stored non-dict evidence verbatim, so the
+# Regression: ``certification_row`` stored non-dict evidence verbatim, so the
 # row contract ("evidence is always a dict") held only by caller discipline.
-# ---------------------------------------------------------------------------
 
 
 class TestEvidenceContract:
@@ -128,10 +123,8 @@ class TestEvidenceContract:
         assert row["evidence"] == {"a": 1}
 
 
-# ---------------------------------------------------------------------------
-# Defect: ``http://:8080/v1`` was certified as a valid endpoint because
+# Regression: ``http://:8080/v1`` was certified as a valid endpoint because
 # ``netloc`` is truthy for a hostless authority.
-# ---------------------------------------------------------------------------
 
 
 class TestEndpointValidity:
@@ -157,11 +150,9 @@ class TestEndpointValidity:
         assert row["status"] == STATUS_OK, url
 
 
-# ---------------------------------------------------------------------------
-# Defect: the payload builders called ``.get()`` on whatever they were
+# Regression: the payload builders called ``.get()`` on whatever they were
 # given, so a wrong-typed body raised AttributeError instead of producing a
 # verdict.
-# ---------------------------------------------------------------------------
 
 
 class TestPayloadTypeGuards:
@@ -184,10 +175,8 @@ class TestPayloadTypeGuards:
         assert row["evidence"]["usable_ids"] == 0
 
 
-# ---------------------------------------------------------------------------
-# Defect: an empty-string id was counted as "usable" by the payload row but
+# Regression: an empty-string id was counted as "usable" by the payload row but
 # rejected by the CLI's discovery path — the two disagreed on one response.
-# ---------------------------------------------------------------------------
 
 
 class TestModelIdAgreement:
@@ -204,10 +193,8 @@ class TestModelIdAgreement:
         assert row["evidence"]["usable_ids"] == 1
 
 
-# ---------------------------------------------------------------------------
-# Defect: the independent cost re-derivation disagreed with the engine on
+# Regression: the independent cost re-derivation disagreed with the engine on
 # coercion (numeric strings, booleans), manufacturing false failures.
-# ---------------------------------------------------------------------------
 
 
 class TestReportedCostCoercionParity:
@@ -230,10 +217,8 @@ class TestReportedCostCoercionParity:
         assert _reported_usd_cost(payload) == pytest.approx(0.001)
 
 
-# ---------------------------------------------------------------------------
-# Defect: ``_expected_token_msats`` ran ``math.ceil`` on a non-finite sum,
+# Regression: ``_expected_token_msats`` ran ``math.ceil`` on a non-finite sum,
 # raising an opaque error instead of a describable one.
-# ---------------------------------------------------------------------------
 
 
 class TestNonFinitePricing:
@@ -267,9 +252,7 @@ class TestNonFinitePricing:
         assert total == inp + outp
 
 
-# ---------------------------------------------------------------------------
-# Defect: a row builder raising escaped as a 500 from the admin endpoint.
-# ---------------------------------------------------------------------------
+# Regression: a row builder raising escaped as a 500 from the admin endpoint.
 
 
 class TestSafeRow:
@@ -289,10 +272,8 @@ class TestSafeRow:
         assert row["status"] == STATUS_OK
 
 
-# ---------------------------------------------------------------------------
-# Defect: explicit ``--prompt-price`` bypassed validation, so a negative
+# Regression: explicit ``--prompt-price`` bypassed validation, so a negative
 # rate could be fed into the cost engine.
-# ---------------------------------------------------------------------------
 
 
 class TestExplicitPriceValidation:
@@ -314,12 +295,10 @@ class TestExplicitPriceValidation:
         assert _as_price("1e-7") == pytest.approx(1e-7)
 
 
-# ---------------------------------------------------------------------------
-# Defect: the standalone CLI was dead on arrival — ``sats_usd_price()``
+# Regression: the standalone CLI was dead on arrival — ``sats_usd_price()``
 # raises in a fresh process because the module global is only populated by
 # the app's lifespan task. These run the CLI as a subprocess so the fresh
 # process is the thing under test.
-# ---------------------------------------------------------------------------
 
 
 def _run_cli(*args: str, timeout: float = 90.0) -> subprocess.CompletedProcess[str]:

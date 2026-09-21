@@ -55,12 +55,10 @@ class NormalizedUsage(BaseModel):
 def parse_token_count(value: object) -> int:
     """Parse a token count from various formats (int, float, str, bool).
 
-    A non-finite count is not a count. ``json.loads`` accepts the bare
-    ``Infinity``/``NaN`` literals and overflows ``1e999`` to ``inf``, so an
-    upstream — or an attacker who controls one — can put them on the wire.
-    ``int(inf)`` raises ``OverflowError`` and ``int(nan)`` raises
-    ``ValueError``; either would turn a billing path into a 500. Same rule as
-    ``is_usable_rate``: reject the value, do not crash on it.
+    ``json.loads`` accepts bare ``Infinity``/``NaN`` and overflows ``1e999`` to
+    ``inf``, so an upstream can put them on the wire. ``int()`` raises on both,
+    which would turn a billing path into a 500; reject them like
+    ``is_usable_rate`` does instead.
     """
     if isinstance(value, bool):
         return 0

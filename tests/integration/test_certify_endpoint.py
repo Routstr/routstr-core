@@ -224,7 +224,6 @@ async def test_certify_all_ok(
     assert "rows" in body
     assert "checklist" in body
 
-    # All live rows should be ok
     live_row_ids = [
         "endpoint.validity",
         "endpoint.reachable",
@@ -236,7 +235,6 @@ async def test_certify_all_ok(
         row = _find_row(body["rows"], row_id)
         assert row["status"] == "ok", f"{row_id}: {row}"
 
-    # All checklist goals should be ok
     for item in body["checklist"]:
         assert item["status"] == "ok", f"{item['goal']}: {item}"
 
@@ -267,7 +265,6 @@ async def test_certify_heartbeat_fail_on_500(
     assert row["status"] == "fail"
     assert row["evidence"]["status_code"] == 500
 
-    # heartbeat goal should be fail
     heartbeat_goal = next(
         item for item in body["checklist"] if item["goal"] == "heartbeat"
     )
@@ -338,7 +335,6 @@ async def test_certify_usage_warn_when_no_usage(
     respx.get("https://certify-upstream.example/v1/models").mock(
         return_value=Response(200, json=_mock_models_response())
     )
-    # No "usage" key in the chat response
     respx.post("https://certify-upstream.example/v1/chat/completions").mock(
         return_value=Response(
             200,
@@ -494,7 +490,6 @@ async def test_certify_with_no_served_model(
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # Live rows should be warn (skipped)
     for row_id in ["endpoint.reachable", "usage.capture", "cost.prompt_completion"]:
         row = _find_row(body["rows"], row_id)
         assert row["status"] == "warn", f"{row_id}: {row}"

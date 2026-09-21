@@ -1267,12 +1267,10 @@ def _served_model_for_provider(model_id: str, provider_pk: int) -> Model | None:
 class _ModelEvaluation:
     """One enabled model row's facts, built once and shared by every row.
 
-    ``configured`` is the fee-applied USD view built fresh from the row, or
-    ``None`` when the stored row could not be parsed (``build_error`` then
-    carries the exception). ``served`` is this provider's live candidate for
-    the model, or ``None`` when it is not being served at all — e.g. an
-    unusable stored price holds it back from the served map even though the
-    row itself is enabled.
+    ``configured`` is the fee-applied USD view of the row, or ``None`` when the
+    row could not be parsed (``build_error`` carries the exception). ``served``
+    is this provider's live candidate, or ``None`` when the model is withheld
+    from the served map despite the row being enabled.
     """
 
     model_id: str
@@ -1422,10 +1420,9 @@ def _report_row_cache_rate(
     checked = 0
     unknown: list[dict[str, object]] = []
     for ev in evaluations:
-        # Scoped to served models only, like every sibling row: a model the
-        # routing algorithm withholds from the served map (e.g. an unusable
-        # stored price) has no cache-billing behaviour to certify here —
-        # ``pricing.enabled_models_served`` already flags it as unserved.
+        # Served models only, like every sibling row: an unserved model has no
+        # cache-billing behaviour to certify, and
+        # ``pricing.enabled_models_served`` already flags it.
         if ev.served is None or ev.configured is None:
             continue
         checked += 1
@@ -1514,18 +1511,15 @@ async def certify_upstream_provider(
 ) -> dict[str, object]:
     """Live certification checks for a configured upstream provider.
 
-    Unlike the read-only ``GET …/report``, this endpoint probes the
-    upstream over the network: it calls ``/models`` and sends a one-token
-    completion, then runs the node's own cost engine on the real response.
-    It never enters the billing path — no reservation, no Cashu, no wallet
-    — so it cannot spend the node's wallet. It costs at most one
-    completion's worth of upstream credit.
+    Unlike the read-only ``GET …/report``, this probes the upstream over the
+    network and runs the node's cost engine on the real response. It never
+    enters the billing path, so it costs at most one completion's worth of
+    upstream credit and nothing from the node's wallet.
 
-    The response carries the four ``pricing.*`` rows from the read-only
-    report (re-derived here so the certification is self-contained) plus
-    the five live/derived rows from
-    :mod:`routstr.upstream.certification`, and a ``checklist`` summarising
-    the four operator-facing goals with ``ok``/``warn``/``fail`` ticks.
+    Returns the read-only report's four ``pricing.*`` rows (re-derived here so
+    the certification is self-contained), the live rows from
+    :mod:`routstr.upstream.certification`, and a ``checklist`` of the
+    operator-facing goals.
     """
     from ..payment.price import sats_usd_price
     from ..upstream.certification import (
@@ -1558,9 +1552,8 @@ async def certify_upstream_provider(
 
     model_id = payload.model_id
     if not model_id and enabled_rows:
-        # Pick the first enabled row that is actually being served — a
-        # model withheld from the served map would fail the chat probe for
-        # a reason unrelated to the endpoint's health.
+        # Prefer a served model: one withheld from the served map would fail
+        # the chat probe for a reason unrelated to the endpoint's health.
         for ev in evaluations:
             if ev.served is not None:
                 model_id = ev.served.id
@@ -1634,8 +1627,8 @@ async def certify_upstream_provider(
         ]
     else:
         sats_to_usd = sats_usd_price()
-        # Clamp the admin-supplied timeout: the probe must never be able to
-        # hold the request open indefinitely.
+        # Clamp the admin-supplied timeout so a probe cannot hold the request
+        # open indefinitely.
         requested = (
             payload.timeout_seconds
             if payload.timeout_seconds is not None

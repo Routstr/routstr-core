@@ -1,33 +1,12 @@
-"""Certification checks for an upstream provider endpoint.
+"""Live certification checks for an upstream provider endpoint.
 
-PR #717 established the row contract — ``{id, status, title, detail,
-evidence}`` with ``status`` in ``{ok, warn, fail}`` — and the four pricing
-rows derived from the database row plus the in-process served map. Those
-rows deliberately never touch the network. This module adds the checks that
-*must* touch the network, and the checklist view that maps the
-operator-facing goals onto rows:
+Extends the read-only pricing rows, which never touch the network, with the
+ones that must: a ``/models`` heartbeat and a one-token completion.
 
-=========================  =========================================
-Goal                       Row(s)
-=========================  =========================================
-Heartbeat                  ``endpoint.reachable``
-Usage data                 ``usage.capture``
-Cost data                  ``cost.prompt_completion``
-Pricing in ``/v1/models``  ``pricing.served_matches_configured``,
-                           ``pricing.enabled_models_served``
-=========================  =========================================
-
-**Money safety.** Every live check calls the upstream directly with
-``httpx`` — exactly like the existing ``POST /api/models/test`` probe — and
-never enters the node's billing path. No reservation is taken, no Cashu
-token is minted or spent, and the probe asks for a single token
-(``max_tokens=1``). A probe therefore costs the operator at most one
-completion's worth of upstream spend and nothing from the node's wallet.
-
-**Why a separate endpoint.** ``GET …/report`` promises the operator a
-cheap, non-blocking read. A live probe can hang for the length of its
-timeout and spends upstream credit, so it lives behind
-``POST …/certify`` instead of being folded into the read.
+Probes call the upstream directly with ``httpx``, never through the node's
+billing path — no reservation, no Cashu, at most one token of upstream spend.
+They sit behind ``POST …/certify`` rather than the read-only ``GET …/report``
+because they can block for the length of the timeout.
 """
 
 from __future__ import annotations
@@ -61,31 +40,22 @@ STATUS_FAIL = "fail"
 
 TICKS = {STATUS_OK: "☑️", STATUS_WARN: "⚠️", STATUS_FAIL: "❌"}
 
-# A probe must never be able to wedge an admin request. Fifteen seconds is
-# generous for a `/models` listing or a one-token completion on a healthy
-# upstream, and bounded enough that a dead host fails the row rather than
-# the request.
+# Bounded so a dead upstream fails the row rather than wedging the request.
 PROBE_TIMEOUT_SECONDS = 15.0
 
-# An upper bound for a caller-supplied timeout. The admin endpoint accepts a
-# timeout override, and without a ceiling that override could hold the
-# request open for as long as the caller likes.
+# Ceiling for the caller-supplied timeout override.
 MAX_PROBE_TIMEOUT_SECONDS = 60.0
 
-# The cheapest request that still exercises the usage/cost path: one token
-# out. Anything larger only spends more upstream credit for no extra
-# signal.
+# The cheapest request that still exercises the usage/cost path.
 PROBE_MAX_TOKENS = 1
 PROBE_PROMPT = "ping"
 
-# The reservation ceiling is irrelevant to the token-priced path — it is
-# only the amount held before settlement — but ``calculate_cost`` requires
-# one. Any value at or above the real charge behaves identically.
+# ``calculate_cost`` demands a reservation ceiling; any value at or above the
+# real charge behaves identically.
 _PROBE_MAX_COST_MSATS = 1_000_000_000
 
-# Rounding in ``_calculate_from_tokens`` truncates the output component and
-# folds the remainder into the input component, so a one-millisatoshi
-# difference is arithmetic, not drift.
+# ``_calculate_from_tokens`` truncates the output component and folds the
+# remainder into the input one, so a one-msat difference is arithmetic.
 COST_TOLERANCE_MSATS = 1
 
 
@@ -96,12 +66,8 @@ def certification_row(
     detail: str,
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build one row of the certification report.
-
-    ``evidence`` is coerced to a dict so the row contract holds by
-    construction rather than by caller discipline — a caller that passes a
-    list or a string still produces a row a client can read.
-    """
+    """Build one row, coercing ``evidence`` to a dict so the row contract
+    holds by construction rather than by caller discipline."""
     return {
         "id": row_id,
         "status": status,
@@ -116,13 +82,8 @@ def safe_row(
     title: str,
     builder: Callable[[], dict[str, Any]],
 ) -> dict[str, Any]:
-    """Run a row builder, turning any raise into a ``fail`` row.
-
-    The report is the diagnostic; it must never be the thing that fails. A
-    builder tripping over a hostile payload — a non-finite count, a body of
-    the wrong shape — becomes a ``fail`` row carrying the exception instead
-    of escaping the endpoint as a 500.
-    """
+    """Run a row builder, turning any raise into a ``fail`` row: the report is
+    the diagnostic, so it must never be the thing that 500s."""
     try:
         return builder()
     except Exception as exc:  # noqa: BLE001 - a raising check is a row status
@@ -140,10 +101,8 @@ def safe_row(
         )
 
 
-# The operator-facing goals, each mapped onto the rows that decide it. A
-# goal is ``ok`` only when every row it names is ``ok``; any ``fail`` makes
-# it ``fail``; anything else (a ``warn``, or a row that did not run) makes
-# it ``warn``. Kept as data so the checklist and the row set cannot drift.
+# Operator-facing goals mapped onto the rows that decide them: ``ok`` only when
+# every named row is ``ok``, ``fail`` if any fails, ``warn`` otherwise.
 CHECKLIST_GOALS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
         "heartbeat",
@@ -169,7 +128,6 @@ CHECKLIST_GOALS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 
 
 def build_checklist(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Summarise the rows as the four operator-facing goals with ticks."""
     by_id = {row["id"]: row for row in rows}
     checklist: list[dict[str, Any]] = []
     for goal, label, row_ids in CHECKLIST_GOALS:
@@ -295,25 +253,17 @@ async def probe_upstream(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Row builders
-#
-# Every builder below is pure: it turns an already-fetched fact (a probe
-# result, a model, a computed cost) into a row. The network lives only in
-# ``probe_upstream`` and ``run_live_checks``, so a test can exercise each
-# verdict — including the failure ones — without a socket.
-# ---------------------------------------------------------------------------
+# Row builders are pure: the network lives only in ``probe_upstream`` and
+# ``run_live_checks``, so every verdict is testable without a socket.
 
 
 def endpoint_validity_row(base_url: str) -> dict[str, Any]:
-    """Check the configured base URL is a well-formed http(s) endpoint."""
     parsed = urlparse(base_url or "")
     problems: list[str] = []
     if parsed.scheme not in ("http", "https"):
         problems.append(f"scheme {parsed.scheme!r} is not http or https")
-    # ``netloc`` is truthy for a hostless authority like ``http://:8080``
-    # (``.netloc == ':8080'``) even though there is no host to connect to —
-    # only ``.hostname`` answers "is there a host here".
+    # ``netloc`` is truthy for a hostless authority like ``http://:8080``;
+    # only ``.hostname`` answers whether there is a host to connect to.
     if not parsed.hostname:
         problems.append("no host component")
     evidence: dict[str, Any] = {
@@ -343,7 +293,6 @@ def endpoint_validity_row(base_url: str) -> dict[str, Any]:
 
 
 def heartbeat_row(probe: ProbeResult) -> dict[str, Any]:
-    """Check the upstream's ``/models`` responds — the heartbeat."""
     evidence: dict[str, Any] = {
         "url": probe.models_url,
         "status_code": probe.models_status,
@@ -377,7 +326,6 @@ def heartbeat_row(probe: ProbeResult) -> dict[str, Any]:
 
 
 def models_payload_row(probe: ProbeResult) -> dict[str, Any]:
-    """Check the ``/models`` payload matches the OpenAI list shape."""
     payload = probe.models_payload
     if not isinstance(payload, dict):
         return certification_row(
@@ -402,8 +350,6 @@ def models_payload_row(probe: ProbeResult) -> dict[str, Any]:
             },
         )
 
-    # An empty id is not an id — the CLI discovery path refuses it, so the
-    # row must not certify it either.
     ids = [
         item["id"]
         for item in data
@@ -436,10 +382,8 @@ def models_payload_row(probe: ProbeResult) -> dict[str, Any]:
 def usage_capture_row(probe: ProbeResult) -> dict[str, Any]:
     """Check a completion comes back with token usage the node can bill on.
 
-    A missing ``usage`` object is the root of the ``(0+0)`` billing bug —
-    the node has nothing to price, so the request settles for free. That is
-    a real defect in the upstream's OpenAI compatibility, but it does not
-    make the endpoint unusable, so it is a ``warn`` rather than a ``fail``.
+    A missing ``usage`` object means the node has nothing to price and the
+    request settles for free. Broken, but still usable, so ``warn``.
     """
     evidence: dict[str, Any] = {
         "url": probe.chat_url,
@@ -532,14 +476,9 @@ def _truncate(value: Any, limit: int = 400) -> Any:
 def _reported_usd_cost(payload: dict[str, Any]) -> float:
     """The upstream-reported USD cost, or 0.0 when it reported none.
 
-    Mirrors ``_resolve_usd_cost``'s priority (``cost_details.total_cost``
-    then ``total_cost`` then ``cost``) so this check knows which branch of
-    the engine it is verifying. Coercion goes through the shared
-    ``coerce_rate`` — the one definition of what an upstream-supplied
-    number is — so this helper and the engine agree on *whether* a cost was
-    reported; only the arithmetic below is re-derived independently. Using
-    a private coercion here would disagree with the engine on numeric
-    strings and booleans and manufacture false failures.
+    Mirrors ``_resolve_usd_cost``'s priority and shares ``coerce_rate``, so
+    this helper and the engine agree on *whether* a cost was reported; only
+    the arithmetic below is re-derived independently.
     """
     usage = payload.get("usage")
     if not isinstance(usage, dict):
@@ -560,19 +499,12 @@ def _reported_usd_cost(payload: dict[str, Any]) -> float:
 def _expected_token_msats(sats_pricing: Any, usage: Any) -> tuple[int, int, int]:
     """Re-derive the token-priced charge independently of the engine.
 
-    ``_calculate_from_tokens`` prices at *msats per 1000 tokens*, rounds
-    each component to three decimals, ceilings the sum, then folds the
-    cache cost into the input component by truncating the output one. The
-    arithmetic is reproduced here — rather than calling the engine and
-    comparing it to itself — so a swapped input/output rate, a dropped
-    cache term or a changed rounding rule shows up as a mismatch.
+    Reproduces ``_calculate_from_tokens``'s arithmetic rather than calling the
+    engine and comparing it to itself, so a swapped rate, a dropped cache term
+    or a changed rounding rule shows up as a mismatch.
 
-    Returns ``(total_msats, input_msats, output_msats)``.
-
-    Raises ``ValueError`` when a rate is not finite: ``math.ceil`` on an
-    infinite sum raises ``ValueError`` and on ``NaN`` produces an
-    unrepresentable result, so a non-finite rate is rejected explicitly
-    here rather than surfacing as an opaque crash.
+    Returns ``(total_msats, input_msats, output_msats)``. Raises ``ValueError``
+    on a non-finite rate, which would otherwise crash ``math.ceil`` downstream.
     """
     input_rate = float(sats_pricing.prompt) * 1_000_000.0
     output_rate = float(sats_pricing.completion) * 1_000_000.0
@@ -619,10 +551,8 @@ def cost_prompt_completion_row(
 ) -> dict[str, Any]:
     """Check the node's cost engine prices a real completion correctly.
 
-    Both the prompt and the completion component are checked: the engine
-    truncates the output component and folds the remainder into the input
-    component so that ``input + output == total`` exactly, which means a
-    wrong rate on *either* side shows up as a mismatch here.
+    Both components are checked, since the engine folds the truncated output
+    remainder into the input one to keep ``input + output == total``.
     """
     from ..payment.cost_calculation import CostDataError
 
@@ -842,17 +772,9 @@ async def run_live_checks(
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Standalone runner
-#
-# ``certify_upstream_url`` deliberately reads nothing from the node's
-# database: the point of the CLI is to certify a URL *before* it is
-# configured, or one the operator does not want to write into the node at
-# all. The four pricing rows therefore do not apply here — they compare a
-# stored row against the served map, neither of which exists for a bare
-# URL — and the cost row falls back to litellm's cost map (or explicit
-# prices) instead of a configured row.
-# ---------------------------------------------------------------------------
+# The standalone runner certifies a URL before it is configured, so it reads
+# nothing from the node's database: the pricing rows do not apply, and the cost
+# row falls back to litellm's cost map or explicit prices.
 
 
 def _first_model_id(probe: ProbeResult) -> str | None:
@@ -870,9 +792,8 @@ def _first_model_id(probe: ProbeResult) -> str | None:
 def _as_price(value: Any) -> float | None:
     """A USD-per-token price from outside the node, or ``None``.
 
-    Shares ``coerce_rate`` — the one definition of a usable rate — so an
-    explicit ``--prompt-price`` is validated exactly like a litellm-derived
-    one: a boolean, a negative or a non-finite value is not a price.
+    Shares ``coerce_rate`` so an explicit ``--prompt-price`` is validated
+    exactly like a litellm-derived one.
     """
     return coerce_rate(value)
 
@@ -1036,7 +957,6 @@ async def certify_upstream_url(
 
 
 def render_checklist(result: dict[str, Any]) -> str:
-    """Render one certification result as the operator-facing checklist."""
     target = result.get("target", {})
     lines = [f"Upstream certification — {target.get('base_url')}"]
     if target.get("model_id"):
@@ -1054,12 +974,8 @@ def render_checklist(result: dict[str, Any]) -> str:
 
 
 def _route_logs_to_stderr() -> None:
-    """Move the app's stdout log handlers to stderr.
-
-    ``routstr.core.logging`` configures its handlers onto ``sys.stdout``, so
-    a machine-readable run would otherwise interleave log records with the
-    document. Stdout is the report's channel; logs belong on stderr.
-    """
+    """Move the app's stdout log handlers to stderr, so log records cannot
+    interleave with the report."""
     import logging
 
     loggers = [logging.getLogger()]
