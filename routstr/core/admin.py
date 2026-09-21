@@ -1500,6 +1500,147 @@ async def get_upstream_provider_report(provider_id: str) -> dict[str, object]:
     }
 
 
+class CertifyRequest(BaseModel):
+    model_id: str | None = None
+    timeout_seconds: float | None = None
+
+
+@admin_router.post(
+    "/api/upstream-providers/{provider_id}/certify",
+    dependencies=[Depends(require_admin_api)],
+)
+async def certify_upstream_provider(
+    provider_id: str, payload: CertifyRequest
+) -> dict[str, object]:
+    """Live certification checks for a configured upstream provider.
+
+    Unlike the read-only ``GET …/report``, this endpoint probes the
+    upstream over the network: it calls ``/models`` and sends a one-token
+    completion, then runs the node's own cost engine on the real response.
+    It never enters the billing path — no reservation, no Cashu, no wallet
+    — so it cannot spend the node's wallet. It costs at most one
+    completion's worth of upstream credit.
+
+    The response carries the four ``pricing.*`` rows from the read-only
+    report (re-derived here so the certification is self-contained) plus
+    the five live/derived rows from
+    :mod:`routstr.upstream.certification`, and a ``checklist`` summarising
+    the four operator-facing goals with ``ok``/``warn``/``fail`` ticks.
+    """
+    from ..payment.price import sats_usd_price
+    from ..upstream.certification import (
+        build_checklist,
+        run_live_checks,
+    )
+
+    async with create_session() as session:
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        provider_pk = _provider_pk(provider)
+        result = await session.exec(
+            select(ModelRow).where(
+                ModelRow.upstream_provider_id == provider_pk,
+                ModelRow.enabled,
+            )
+        )
+        enabled_rows = list(result.all())
+
+    evaluations = [
+        _evaluate_model_row(row, provider, provider_pk) for row in enabled_rows
+    ]
+    pricing_rows = [
+        _report_row_served_matches_configured(evaluations),
+        _report_row_sats_pricing_present(evaluations),
+        _report_row_enabled_models_served(evaluations),
+        _report_row_cache_rate(evaluations),
+    ]
+
+    model_id = payload.model_id
+    if not model_id and enabled_rows:
+        # Pick the first enabled row that is actually being served — a
+        # model withheld from the served map would fail the chat probe for
+        # a reason unrelated to the endpoint's health.
+        for ev in evaluations:
+            if ev.served is not None:
+                model_id = ev.served.id
+                break
+        if model_id is None:
+            model_id = enabled_rows[0].id
+
+    from ..proxy import get_candidates
+
+    model_obj = None
+    if model_id:
+        for model, _upstream in get_candidates(model_id) or []:
+            if model.upstream_provider_id == provider_pk:
+                model_obj = model
+                break
+    if model_obj is None:
+        from ..upstream.certification import (
+            STATUS_WARN,
+            certification_row,
+        )
+
+        live_rows = [
+            certification_row(
+                "endpoint.validity",
+                STATUS_WARN,
+                "Upstream URL is well-formed",
+                "No served model is available for this provider, so the "
+                "live checks could not run.",
+                {"base_url": provider.base_url},
+            ),
+            certification_row(
+                "endpoint.reachable",
+                STATUS_WARN,
+                "Endpoint responds",
+                "Skipped — no model to probe.",
+                {},
+            ),
+            certification_row(
+                "endpoint.models_payload",
+                STATUS_WARN,
+                "Models payload has the expected shape",
+                "Skipped — no model to probe.",
+                {},
+            ),
+            certification_row(
+                "usage.capture",
+                STATUS_WARN,
+                "Token usage captured from a completion",
+                "Skipped — no model to probe.",
+                {},
+            ),
+            certification_row(
+                "cost.prompt_completion",
+                STATUS_WARN,
+                "Prompt and completion cost calculated",
+                "Skipped — no model to probe.",
+                {},
+            ),
+        ]
+    else:
+        sats_to_usd = sats_usd_price()
+        timeout = (
+            payload.timeout_seconds if payload.timeout_seconds is not None else 15.0
+        )
+        live_rows = await run_live_checks(
+            provider.base_url,
+            provider.api_key,
+            model_obj,
+            provider_fee=provider.provider_fee,
+            sats_to_usd=sats_to_usd,
+            timeout=timeout,
+        )
+
+    rows = pricing_rows + live_rows
+    return {
+        "provider_id": provider.id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "rows": rows,
+        "checklist": build_checklist(rows),
+    }
+
+
 class CreateAccountRequest(BaseModel):
     provider_type: str
 
