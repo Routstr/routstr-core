@@ -111,6 +111,85 @@ async def test_native_model_spec_resolves_and_captures_metadata() -> None:
     or_feed.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_native_model_spec_carries_cache_read_price() -> None:
+    """Venice's ``cache_input`` rate must reach ``input_cache_read``.
+
+    Regression: the native parser read only ``input``/``output`` and dropped
+    ``cache_input``, leaving ``input_cache_read`` at 0 — which billing reads
+    as "no cache rate" and falls back to the FULL input rate, a ~50x
+    overcharge on cache hits (deepseek-v4-1-flash: $0.0075 vs $0.375 per 1M).
+    """
+    payload = {
+        "data": [
+            {
+                "id": "venice-flash",
+                "owned_by": "venice",
+                "model_spec": {
+                    "name": "Venice Flash",
+                    "availableContextTokens": 1000000,
+                    "pricing": {
+                        "input": {"usd": 0.375},
+                        "cache_input": {"usd": 0.0075},
+                        "output": {"usd": 1.5},
+                    },
+                },
+            }
+        ]
+    }
+
+    with _patch_models_endpoint(payload):
+        with patch(
+            "routstr.payment.models.async_fetch_openrouter_models",
+            AsyncMock(return_value=[]),
+        ):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    model = _model_by_id(models, "venice-flash")
+    assert model.enabled is True
+    assert model.pricing.prompt == pytest.approx(0.375 / 1_000_000)
+    assert model.pricing.input_cache_read == pytest.approx(0.0075 / 1_000_000)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_rate", [-0.0075, "Infinity", "not-a-number"])
+async def test_native_model_spec_drops_malformed_cache_rate(bad_rate: object) -> None:
+    """A malformed ``cache_input`` costs the cache rate, not the model.
+
+    The token prices still resolve; the cache rate falls back to 0 (absent),
+    mirroring the OpenRouter rung's drop-don't-carry rule.
+    """
+    payload = {
+        "data": [
+            {
+                "id": "venice-badcache",
+                "owned_by": "venice",
+                "model_spec": {
+                    "name": "Venice Bad Cache",
+                    "availableContextTokens": 65536,
+                    "pricing": {
+                        "input": {"usd": 0.375},
+                        "cache_input": {"usd": bad_rate},
+                        "output": {"usd": 1.5},
+                    },
+                },
+            }
+        ]
+    }
+
+    with _patch_models_endpoint(payload):
+        with patch(
+            "routstr.payment.models.async_fetch_openrouter_models",
+            AsyncMock(return_value=[]),
+        ):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    model = _model_by_id(models, "venice-badcache")
+    assert model.enabled is True
+    assert model.pricing.prompt == pytest.approx(0.375 / 1_000_000)
+    assert model.pricing.input_cache_read == 0.0
+
+
 # ---------------------------------------------------------------------------
 # native model_spec validation — a bogus native price is not authoritative
 # ---------------------------------------------------------------------------
