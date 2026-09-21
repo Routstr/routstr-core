@@ -1529,6 +1529,8 @@ async def certify_upstream_provider(
     """
     from ..payment.price import sats_usd_price
     from ..upstream.certification import (
+        MAX_PROBE_TIMEOUT_SECONDS,
+        PROBE_TIMEOUT_SECONDS,
         build_checklist,
         run_live_checks,
     )
@@ -1570,7 +1572,19 @@ async def certify_upstream_provider(
 
     model_obj = None
     if model_id:
-        for model, _upstream in get_candidates(model_id) or []:
+        try:
+            candidates = get_candidates(model_id) or []
+        except Exception as exc:  # noqa: BLE001 - a broken served map is a warn
+            logger.warning(
+                "Could not read the served map for certification",
+                extra={
+                    "provider_id": provider.id,
+                    "model_id": model_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            candidates = []
+        for model, _upstream in candidates:
             if model.upstream_provider_id == provider_pk:
                 model_obj = model
                 break
@@ -1620,9 +1634,14 @@ async def certify_upstream_provider(
         ]
     else:
         sats_to_usd = sats_usd_price()
-        timeout = (
-            payload.timeout_seconds if payload.timeout_seconds is not None else 15.0
+        # Clamp the admin-supplied timeout: the probe must never be able to
+        # hold the request open indefinitely.
+        requested = (
+            payload.timeout_seconds
+            if payload.timeout_seconds is not None
+            else PROBE_TIMEOUT_SECONDS
         )
+        timeout = min(max(requested, 1.0), MAX_PROBE_TIMEOUT_SECONDS)
         live_rows = await run_live_checks(
             provider.base_url,
             provider.api_key,

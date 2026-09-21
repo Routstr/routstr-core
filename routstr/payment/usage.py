@@ -38,6 +38,8 @@ names do not collide, so a single union parser is safe; a vendor whose fields
 would genuinely conflict needs a dedicated branch here.
 """
 
+import math
+
 from pydantic.v1 import BaseModel
 
 
@@ -51,18 +53,27 @@ class NormalizedUsage(BaseModel):
 
 
 def parse_token_count(value: object) -> int:
-    """Parse a token count from various formats (int, float, str, bool)."""
+    """Parse a token count from various formats (int, float, str, bool).
+
+    A non-finite count is not a count. ``json.loads`` accepts the bare
+    ``Infinity``/``NaN`` literals and overflows ``1e999`` to ``inf``, so an
+    upstream — or an attacker who controls one — can put them on the wire.
+    ``int(inf)`` raises ``OverflowError`` and ``int(nan)`` raises
+    ``ValueError``; either would turn a billing path into a 500. Same rule as
+    ``is_usable_rate``: reject the value, do not crash on it.
+    """
     if isinstance(value, bool):
         return 0
     if isinstance(value, int):
         return max(0, value)
     if isinstance(value, float):
-        return max(0, int(value))
+        return max(0, int(value)) if math.isfinite(value) else 0
     if isinstance(value, str):
         try:
-            return max(0, int(float(value)))
-        except ValueError:
+            parsed = float(value)
+        except (ValueError, OverflowError):
             return 0
+        return max(0, int(parsed)) if math.isfinite(parsed) else 0
     return 0
 
 
