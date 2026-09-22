@@ -18,10 +18,14 @@ from routstr.core.db import (
     TerminalOutcomeEpoch,
     TerminalOutcomeWriterRun,
 )
-from routstr.core.terminal_outcomes import (
-    TerminalOutcomeContext,
+from routstr.core.terminal_outcome_writer import (
+    SessionFactory,
     TerminalOutcomeWriter,
     _PersistResult,
+    _QueuedOutcome,
+)
+from routstr.core.terminal_outcomes import (
+    TerminalOutcomeContext,
     cashu_retained_msats,
     record_terminal_outcome,
 )
@@ -38,7 +42,7 @@ class MutableClock:
 @pytest.fixture
 async def ledger(
     tmp_path: Path,
-) -> AsyncGenerator[tuple[AsyncEngine, outcomes_module.SessionFactory], None]:
+) -> AsyncGenerator[tuple[AsyncEngine, SessionFactory], None]:
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{tmp_path / 'terminal-outcomes.db'}"
     )
@@ -78,7 +82,7 @@ def _record(
 
 
 async def test_writer_persists_one_immutable_outcome_and_closes_own_run(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, sessions = ledger
@@ -118,7 +122,7 @@ async def test_writer_persists_one_immutable_outcome_and_closes_own_run(
 
 
 async def test_writer_allocates_after_latest_closed_epoch(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
     day = date(2026, 8, 31)
@@ -154,7 +158,7 @@ async def test_writer_allocates_after_latest_closed_epoch(
 
 
 async def test_conflicting_duplicate_rotates_epoch_without_overwriting(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, sessions = ledger
@@ -191,7 +195,7 @@ async def test_conflicting_duplicate_rotates_epoch_without_overwriting(
 
 
 async def test_temporary_insert_failure_retries_retained_item_without_rotation(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, sessions = ledger
@@ -208,7 +212,7 @@ async def test_temporary_insert_failure_retries_retained_item_without_rotation(
     attempts = 0
 
     async def fail_once(
-        queued: outcomes_module._QueuedOutcome,
+        queued: _QueuedOutcome,
     ) -> _PersistResult:
         nonlocal attempts
         attempts += 1
@@ -230,7 +234,7 @@ async def test_temporary_insert_failure_retries_retained_item_without_rotation(
 
 
 async def test_queue_overflow_is_nonblocking_and_rotates_epoch(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, sessions = ledger
@@ -249,7 +253,7 @@ async def test_queue_overflow_is_nonblocking_and_rotates_epoch(
     )
 
     async def blocked_insert(
-        queued: outcomes_module._QueuedOutcome,
+        queued: _QueuedOutcome,
     ) -> _PersistResult:
         entered.set()
         await release.wait()
@@ -280,7 +284,7 @@ async def test_queue_overflow_is_nonblocking_and_rotates_epoch(
 
 
 async def test_live_workers_do_not_rotate_and_clean_stop_closes_only_owner(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
     timestamp = _timestamp(date(2026, 8, 31))
@@ -314,7 +318,7 @@ async def test_live_workers_do_not_rotate_and_clean_stop_closes_only_owner(
 
 
 async def test_worker_that_starts_collecting_late_voids_the_day_it_missed(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
     day = date(2026, 8, 31)
@@ -344,7 +348,7 @@ async def test_worker_that_starts_collecting_late_voids_the_day_it_missed(
 
 
 async def test_stale_run_rotates_once_with_concurrent_recovery(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
     lost_day = date(2026, 8, 30)
@@ -393,7 +397,7 @@ async def test_stale_run_rotates_once_with_concurrent_recovery(
 
 
 async def test_recovery_does_not_claim_a_late_earlier_loss(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, sessions = ledger
@@ -459,12 +463,12 @@ def test_record_wrapper_never_raises_on_invalid_or_failed_submission(
     class StubWriter:
         def __init__(self) -> None:
             self.losses: list[str] = []
-            self.submissions: list[outcomes_module._QueuedOutcome] = []
+            self.submissions: list[_QueuedOutcome] = []
 
         def declare_loss(self, reason: str, lost_day: date | None = None) -> None:
             self.losses.append(reason)
 
-        def submit(self, outcome: outcomes_module._QueuedOutcome) -> bool:
+        def submit(self, outcome: _QueuedOutcome) -> bool:
             self.submissions.append(outcome)
             if outcome.outcome_id == "request-submit-error":
                 raise RuntimeError("submission failed")
@@ -534,7 +538,7 @@ def test_cashu_retained_msats_uses_exact_persisted_units(
 
 
 async def test_collection_pause_excludes_disabled_days_after_restart(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
     day = date(2026, 9, 1)
@@ -559,7 +563,7 @@ async def test_collection_pause_excludes_disabled_days_after_restart(
 
 @pytest.mark.parametrize("charge", [0, 1200])
 async def test_encrypted_settlement_persists_once_after_successful_debit(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
     charge: int,
 ) -> None:
@@ -621,7 +625,7 @@ async def test_encrypted_settlement_persists_once_after_successful_debit(
 
 
 async def test_writer_failure_does_not_fail_settlement_and_marks_gap(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from routstr.auth import get_reservation_snapshot, pay_for_request
@@ -635,7 +639,7 @@ async def test_writer_failure_does_not_fail_settlement_and_marks_gap(
     monkeypatch.setattr("routstr.upstream.ehbp.ROUTSTR_FEE_PERCENT", 0)
     assert await writer.start()
 
-    def unavailable(_: outcomes_module._QueuedOutcome) -> bool:
+    def unavailable(_: _QueuedOutcome) -> bool:
         raise OSError("synthetic stats storage failure")
 
     monkeypatch.setattr(writer, "submit", unavailable)
@@ -671,7 +675,7 @@ async def test_writer_failure_does_not_fail_settlement_and_marks_gap(
 
 
 async def test_unclean_restart_preserves_days_before_last_durable_flush(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
     first_day = date(2026, 9, 1)
@@ -708,7 +712,7 @@ async def test_unclean_restart_preserves_days_before_last_durable_flush(
 
 @pytest.mark.parametrize("fresh_process", [False, True])
 async def test_failed_writer_start_cannot_backfill_missed_days_as_zero(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
     fresh_process: bool,
 ) -> None:
@@ -743,7 +747,7 @@ async def test_failed_writer_start_cannot_backfill_missed_days_as_zero(
 
 
 async def test_disable_closes_coverage_after_background_rotation_is_stopped(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, sessions = ledger
@@ -760,7 +764,7 @@ async def test_disable_closes_coverage_after_background_rotation_is_stopped(
 
 
 async def test_restart_alongside_live_writer_preserves_continuous_coverage(
-    ledger: tuple[AsyncEngine, outcomes_module.SessionFactory],
+    ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
     first_day = date(2026, 9, 1)
