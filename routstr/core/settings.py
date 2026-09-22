@@ -11,6 +11,14 @@ from typing import Any
 from pydantic.v1 import BaseModel, BaseSettings, Field
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+# Mints a fresh node trusts out of the box, shared by the settings default and
+# the primary-mint fallback. Defined before the Settings class because the
+# default_factory lambda resolves it at class-definition time.
+DEFAULT_CASHU_MINTS: list[str] = [
+    "https://mint.minibits.cash/Bitcoin",
+    "https://mint.cubabitcoin.org",
+]
+
 
 class Settings(BaseSettings):
     class Config:
@@ -37,7 +45,12 @@ class Settings(BaseSettings):
     onion_url: str = Field(default="", env="ONION_URL")
 
     # Cashu
-    cashu_mints: list[str] = Field(default_factory=list, env="CASHU_MINTS")
+    # Mints a fresh node trusts out of the box. Setting CASHU_MINTS (env or
+    # dashboard) replaces this list entirely; an explicitly empty value yields
+    # an empty list (no trusted mints beyond primary_mint).
+    cashu_mints: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_CASHU_MINTS), env="CASHU_MINTS"
+    )
     receive_ln_address: str = Field(default="", env="RECEIVE_LN_ADDRESS")
     primary_mint: str = Field(default="", env="PRIMARY_MINT_URL")
     primary_mint_unit: str = Field(default="sat", env="PRIMARY_MINT_UNIT")
@@ -256,7 +269,7 @@ def _apply_to_live_settings(data: dict[str, Any]) -> None:
 
 
 def _compute_primary_mint(cashu_mints: list[str]) -> str:
-    return cashu_mints[0] if cashu_mints else "https://mint.minibits.cash/Bitcoin"
+    return cashu_mints[0] if cashu_mints else DEFAULT_CASHU_MINTS[0]
 
 
 def derive_npub_from_nsec(nsec: str) -> str | None:

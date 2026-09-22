@@ -139,6 +139,15 @@ Which mints to accept payments from:
 | --------- | ------------------------------- |
 | **Mints** | List of trusted Cashu mint URLs |
 
+A fresh node ships with two mints preconfigured:
+
+- `https://mint.minibits.cash/Bitcoin`
+- `https://mint.cubabitcoin.org`
+
+Setting `CASHU_MINTS` (env) or editing the list in the dashboard replaces this
+default entirely. An explicitly empty value leaves only the primary mint
+trusted.
+
 ### Lightning Withdrawals
 
 Automatic profit withdrawal:
@@ -197,7 +206,7 @@ Use environment variables for:
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
 | `NSEC`               | Legacy seed for the Nostr private key (otherwise set from the admin UI) | —                |
 | `ENABLE_ANALYTICS_SHARING` | Enable usage analytics sharing to Nostr | `true`                         |
-| `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin` |
+| `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin,https://mint.cubabitcoin.org` |
 | `MINT_OPERATION_CONCURRENCY` | Concurrent mint/unit balance reads | `4` |
 | `MINT_OPERATION_TIMEOUT_SECONDS` | Per-attempt timeout for mint network calls | `30` |
 | `MINT_MAX_CONCURRENCY` | Concurrent operations allowed per mint (`0` disables the limit) | `4` |

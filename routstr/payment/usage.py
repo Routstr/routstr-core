@@ -15,6 +15,9 @@ names and in whether cached tokens are included in the input count:
   top-level, additive to (not included in) ``input_tokens``.
 * DeepSeek: ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``, with
   ``prompt_tokens = hit + miss``.
+* OpenAI Responses API: ``input_tokens_details.cached_tokens`` (and
+  ``cache_write_tokens``), included in ``input_tokens`` — same inclusive
+  semantics as ``prompt_tokens``, but under the Responses API field names.
 
 What decides whether cached tokens must be subtracted out of the input count is
 **which prompt field the vendor uses**, not which cache field appears:
@@ -22,6 +25,10 @@ What decides whether cached tokens must be subtracted out of the input count is
 * ``prompt_tokens`` present -> cached + cache-write tokens are *included* in it
   (OpenAI family, DeepSeek, OpenRouter, litellm); subtract both so
   ``input_tokens`` holds only the regular-rate portion.
+* ``input_tokens_details`` present -> OpenAI Responses API; ``input_tokens``
+  *includes* cached + cache-write tokens, so subtract both. This disambiguates
+  the field-name collision with Anthropic native, which never sends
+  ``input_tokens_details``.
 * only ``input_tokens`` (Anthropic native) -> cached tokens are *additive*;
   leave ``input_tokens`` untouched.
 
@@ -78,6 +85,8 @@ def _extract_cache_tokens(usage_data: dict) -> tuple[int, int]:
     * Nested ``prompt_tokens_details``: ``cached_tokens`` for reads;
       ``cache_creation_tokens`` (litellm) or ``cache_write_tokens``
       (OpenRouter) for writes.
+    * Nested ``input_tokens_details`` (OpenAI Responses API): ``cached_tokens``
+      for reads, ``cache_write_tokens`` for writes.
     * DeepSeek: ``prompt_cache_hit_tokens`` for reads (no write concept).
     """
     cache_read = parse_token_count(usage_data.get("cache_read_input_tokens", 0))
@@ -92,6 +101,13 @@ def _extract_cache_tokens(usage_data: dict) -> tuple[int, int]:
                 prompt_details, "cache_creation_tokens", "cache_write_tokens"
             )
 
+    input_details = usage_data.get("input_tokens_details")
+    if isinstance(input_details, dict):
+        if not cache_read:
+            cache_read = parse_token_count(input_details.get("cached_tokens", 0))
+        if not cache_write:
+            cache_write = parse_token_count(input_details.get("cache_write_tokens", 0))
+
     if not cache_read:
         # DeepSeek: prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens
         cache_read = parse_token_count(usage_data.get("prompt_cache_hit_tokens", 0))
@@ -103,22 +119,28 @@ def normalize_usage(usage_data: object) -> NormalizedUsage | None:
     """Map a vendor usage dict onto the canonical shape, or None if absent.
 
     Cached reads and writes are subtracted from the input count exactly once,
-    only for dialects that report a ``prompt_tokens`` grand total that already
-    includes them (OpenAI family, DeepSeek, OpenRouter, litellm). Anthropic
-    native reports them additively under ``input_tokens`` and is left untouched.
+    only for dialects whose input grand total already includes them: the
+    ``prompt_tokens`` family (OpenAI chat completions, DeepSeek, OpenRouter,
+    litellm) and the OpenAI Responses API (``input_tokens`` inclusive,
+    identified by the presence of ``input_tokens_details``). Anthropic native
+    reports them additively under ``input_tokens`` and is left untouched.
     """
     if not isinstance(usage_data, dict):
         return None
 
-    output_tokens = _first_token_count(
-        usage_data, "completion_tokens", "output_tokens"
-    )
+    output_tokens = _first_token_count(usage_data, "completion_tokens", "output_tokens")
     cache_read, cache_write = _extract_cache_tokens(usage_data)
 
     # ``prompt_tokens`` is the inclusive grand total; ``input_tokens`` (Anthropic
     # native) excludes cached tokens. The field chosen decides whether to subtract.
     if "prompt_tokens" in usage_data:
         input_tokens = parse_token_count(usage_data.get("prompt_tokens", 0))
+        input_tokens = max(0, input_tokens - cache_read - cache_write)
+    elif isinstance(usage_data.get("input_tokens_details"), dict):
+        # OpenAI Responses API: ``input_tokens`` is also an inclusive grand
+        # total (cached tokens are a subset of it), signalled by the nested
+        # ``input_tokens_details`` object Anthropic native never sends.
+        input_tokens = parse_token_count(usage_data.get("input_tokens", 0))
         input_tokens = max(0, input_tokens - cache_read - cache_write)
     else:
         input_tokens = parse_token_count(usage_data.get("input_tokens", 0))

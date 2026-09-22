@@ -137,15 +137,22 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
             if should_log:
                 duration = time.time() - start_time
+                extra: dict[str, object] = {
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": path,
+                    "status_code": response.status_code,
+                    "duration_ms": round(duration * 1000, 2),
+                }
+                if response.status_code >= 400:
+                    error_detail = getattr(request.state, "error_detail", None)
+                    if isinstance(error_detail, dict):
+                        extra["error_type"] = error_detail.get("error_type")
+                        extra["error_code"] = error_detail.get("error_code")
+                        extra["error_message"] = error_detail.get("error_message")
                 logger.info(
                     "Request completed",
-                    extra={
-                        "request_id": request_id,
-                        "method": request.method,
-                        "path": path,
-                        "status_code": response.status_code,
-                        "duration_ms": round(duration * 1000, 2),
-                    },
+                    extra=extra,
                 )
             if hasattr(response, "headers"):
                 response.headers["x-routstr-request-id"] = request_id

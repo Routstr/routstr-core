@@ -54,6 +54,21 @@ class EhbpTimeoutError(UpstreamError):
         )
 
 
+def _error_message_from_detail(detail: object) -> str | None:
+    """Extract a message from an HTTPException ``detail``, capped at 200 chars."""
+    if isinstance(detail, dict):
+        error = detail.get("error")
+        if isinstance(error, dict):
+            msg = error.get("message")
+            return str(msg)[:200] if isinstance(msg, str) else None
+        if isinstance(error, str):
+            return error[:200]
+        return None
+    if isinstance(detail, str):
+        return detail[:200]
+    return None
+
+
 async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle HTTP exceptions and include request ID in response."""
     request_id = getattr(request.state, "request_id", "unknown")
@@ -63,28 +78,41 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
     detail = getattr(exc, "detail", str(exc))
     path = request.url.path
 
-    # 4xx is client behaviour; the uvicorn access log already records it.
+    error_type: str | None = None
+    error_code: str | None = None
+    if isinstance(detail, dict):
+        error = detail.get("error")
+        if isinstance(error, dict):
+            error_type = error.get("type")
+            error_code = error.get("code")
+
+    # 5xx logs as error/warning, 4xx at INFO.
     if status_code >= 500:
-        error_type = None
-        if isinstance(detail, dict):
-            error = detail.get("error")
-            if isinstance(error, dict):
-                error_type = error.get("type")
-        log = (
+        log_fn = (
             logger.warning
             if error_type in {"mint_unreachable", "mint_rate_limited"}
             else logger.error
         )
-        log(
-            f"HTTP {status_code} on {path}: {detail}",
-            extra={
-                "request_id": request_id,
-                "status_code": status_code,
-                "detail": detail,
-                "path": path,
-                "error_type": error_type,
-            },
-        )
+    else:
+        log_fn = logger.info
+    log_fn(
+        f"HTTP {status_code} on {path}: {detail}",
+        extra={
+            "request_id": request_id,
+            "status_code": status_code,
+            "detail": detail,
+            "path": path,
+            "error_type": error_type,
+            "error_code": error_code,
+            "level": "http" if status_code < 500 else "server",
+        },
+    )
+    # Stash for LoggingMiddleware's completion log.
+    request.state.error_detail = {
+        "error_type": error_type,
+        "error_code": error_code,
+        "error_message": _error_message_from_detail(detail),
+    }
 
     if isinstance(detail, dict) and "error" in detail:
         content = {"detail": detail, **detail}

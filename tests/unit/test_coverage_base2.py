@@ -116,6 +116,54 @@ def test_fold_cache_preserves_total() -> None:
     assert usage.prompt_tokens == 100
 
 
+def test_fold_cache_openai_dialect_prompt_tokens_untouched() -> None:
+    """Venice/OpenAI shape: prompt_tokens already includes cached tokens.
+
+    Regression: folding cache_read into prompt_tokens double-counted the
+    cache (14075 real prompt shown as 27997 after a 13922-token cache read).
+    """
+    from routstr.upstream.base import BaseUpstreamProvider
+
+    usage = {
+        "prompt_tokens": 14075,
+        "completion_tokens": 24,
+        "total_tokens": 14099,
+        "prompt_tokens_details": {"cached_tokens": 13922},
+        "cache_read_input_tokens": 13922,
+    }
+    BaseUpstreamProvider._fold_cache_into_input_tokens(usage)
+    assert usage["prompt_tokens"] == 14075
+    assert usage["cache_read_input_tokens"] == 13922
+
+
+def test_fold_cache_anthropic_dialect_folds_input_tokens() -> None:
+    """Anthropic-native shape: input_tokens excludes cache, so it is folded."""
+    from routstr.upstream.base import BaseUpstreamProvider
+
+    usage = {
+        "input_tokens": 153,
+        "output_tokens": 24,
+        "cache_read_input_tokens": 13922,
+        "cache_creation_input_tokens": 0,
+    }
+    BaseUpstreamProvider._fold_cache_into_input_tokens(usage)
+    assert usage["input_tokens"] == 153 + 13922
+
+
+def test_fold_cache_litellm_mirror_folds_only_input_tokens() -> None:
+    """Both fields present (litellm mirror): fold input_tokens only."""
+    from routstr.upstream.base import BaseUpstreamProvider
+
+    usage = {
+        "prompt_tokens": 14075,  # inclusive grand total
+        "input_tokens": 153,  # additive Anthropic mirror
+        "cache_read_input_tokens": 13922,
+    }
+    BaseUpstreamProvider._fold_cache_into_input_tokens(usage)
+    assert usage["prompt_tokens"] == 14075
+    assert usage["input_tokens"] == 153 + 13922
+
+
 # ===========================================================================
 # get_cached_models / get_cached_model_by_id
 # ===========================================================================

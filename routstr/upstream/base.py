@@ -433,6 +433,14 @@ class BaseUpstreamProvider:
         ``cache_creation_input_tokens`` fields are left in place for clients
         that want the breakdown.
 
+        Which field may be folded mirrors ``normalize_usage`` exactly:
+        Anthropic-native ``input_tokens`` *excludes* the cached portion and
+        needs the roll-up, while a ``prompt_tokens`` grand total (OpenAI
+        family, DeepSeek, OpenRouter, litellm) *already includes* it —
+        folding there double-counts the cache in the visible prompt total
+        (Venice showed 27997 prompt tokens for a 14075-token prompt after a
+        13922-token cache read).
+
         For Anthropic-shaped responses (``input_tokens`` present), the cache
         fields are forced to ``0`` when the upstream omitted them, so the
         client always sees a consistent shape.
@@ -459,11 +467,10 @@ class BaseUpstreamProvider:
                 usage["input_tokens"] = int(usage.get("input_tokens") or 0) + extra
             except (TypeError, ValueError):
                 pass
-        if "prompt_tokens" in usage:
-            try:
-                usage["prompt_tokens"] = int(usage.get("prompt_tokens") or 0) + extra
-            except (TypeError, ValueError):
-                pass
+        # ``prompt_tokens`` is deliberately left untouched: in every dialect
+        # that reports it, it is an inclusive grand total that already
+        # contains the cached portion — the same assumption
+        # ``normalize_usage`` subtracts against when billing.
 
     def _apply_provider_field(self, response_json: object) -> None:
         """Stamp the routstr ``provider`` field onto an upstream response payload.
