@@ -1,9 +1,10 @@
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from cashu.core.base import BlindedSignature, Proof, Unit
+from cashu.core.base import BlindedMessage, BlindedSignature, Proof, Unit
 from cashu.core.crypto import b_dhke
 from cashu.core.models import PostMeltQuoteResponse
 from cashu.wallet.v1_api import LedgerAPI
@@ -21,8 +22,13 @@ from routstr.wallet import _payout_mint_and_unit
     [(0, 0, 0, 0), (0, 7, 10, 3), (300000, 7, 10, 3)],
 )
 async def test_capped_payout_recovers_all_change_with_real_cashu_sdk(
-    unit, scale, liability, input_fee, reserve, actual_fee
-):
+    unit: str,
+    scale: int,
+    liability: int,
+    input_fee: int,
+    reserve: int,
+    actual_fee: int,
+) -> None:
     MintRateGuard._guards.clear()
     private_key = b_dhke.PrivateKey()
     proof = Proof(
@@ -48,7 +54,7 @@ async def test_capped_payout_recovers_all_change_with_real_cashu_sdk(
     w.sign_proofs_inplace_melt = Mock(side_effect=lambda ps, outputs, quote: ps)
     w._store_proofs = AsyncMock()
 
-    async def invalidate(ps):
+    async def invalidate(ps: list[Proof]) -> None:
         w.proofs = [p for p in w.proofs if p not in ps]
 
     w.invalidate = AsyncMock(side_effect=invalidate)
@@ -59,9 +65,9 @@ async def test_capped_payout_recovers_all_change_with_real_cashu_sdk(
             [f"path-{i}" for i in range(n)],
         )
     )
-    quotes = {}
+    quotes: dict[str, PostMeltQuoteResponse] = {}
 
-    async def quote(invoice):
+    async def quote(invoice: str) -> PostMeltQuoteResponse:
         amount_msat = int(invoice)
         amount = amount_msat // 1000 if unit == "sat" else amount_msat
         q = PostMeltQuoteResponse(
@@ -82,7 +88,9 @@ async def test_capped_payout_recovers_all_change_with_real_cashu_sdk(
     blank_count = 0
     paid_amount = 0
 
-    async def mint_melt(quote_id, inputs, outputs):
+    async def mint_melt(
+        quote_id: str, inputs: list[Proof], outputs: list[BlindedMessage]
+    ) -> PostMeltQuoteResponse:
         nonlocal selected_total, returned_change, blank_count, paid_amount
         q = quotes[quote_id]
         selected_total = sum(p.amount for p in inputs)
@@ -104,7 +112,7 @@ async def test_capped_payout_recovers_all_change_with_real_cashu_sdk(
         return q.model_copy(update={"state": "PAID", "change": signatures})
 
     @asynccontextmanager
-    async def session():
+    async def session() -> AsyncIterator[Mock]:
         yield Mock()
 
     with (

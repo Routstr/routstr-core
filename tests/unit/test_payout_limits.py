@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -8,7 +9,7 @@ from routstr.wallet import _payout_mint_and_unit
 
 
 @asynccontextmanager
-async def session():
+async def session() -> AsyncIterator[Mock]:
     yield Mock()
 
 
@@ -19,8 +20,8 @@ async def session():
     [(1000, 0, 100), (80, 30000, 50), (20, 20000, None), (0, 0, None), (10, 0, None)],
 )
 async def test_payout_limits_and_proof_refresh(
-    unit, scale, balance, liability, expected
-):
+    unit: str, scale: int, balance: int, liability: int, expected: int | None
+) -> None:
     send = AsyncMock()
     get_wallet = AsyncMock()
     check = AsyncMock(side_effect=lambda ps, w: ps)
@@ -48,6 +49,7 @@ async def test_payout_limits_and_proof_refresh(
     if expected is None:
         send.assert_not_awaited()
     else:
+        assert send.await_args is not None
         assert send.await_args.kwargs["amount"] == expected * scale
     if balance <= 10:
         check.assert_not_awaited()
@@ -55,7 +57,7 @@ async def test_payout_limits_and_proof_refresh(
 
 
 @pytest.mark.asyncio
-async def test_failed_proof_check_never_pays_partial_balance():
+async def test_failed_proof_check_never_pays_partial_balance() -> None:
     send = AsyncMock()
     with (
         patch("routstr.wallet.get_wallet", AsyncMock()),

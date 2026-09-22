@@ -1,10 +1,11 @@
 import asyncio
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
-from cashu.core.base import ProofSpentState
+from cashu.core.base import Proof, ProofSpentState
 
 from routstr import checkstate
 from routstr.checkstate import _learned_sizes, filter_unspent_proofs
@@ -12,7 +13,7 @@ from routstr.mint import MintRateGuard, fail_fast_mint_operations
 
 
 @pytest.fixture(autouse=True)
-def isolate():
+def isolate() -> Iterator[None]:
     _learned_sizes.clear()
     MintRateGuard._guards.clear()
     yield
@@ -20,17 +21,17 @@ def isolate():
     MintRateGuard._guards.clear()
 
 
-def proofs(count):
+def proofs(count: int) -> list[Proof]:
     return [Mock(Y=str(i)) for i in range(count)]
 
 
-def response(batch):
+def response(batch: list[Proof]) -> SimpleNamespace:
     return SimpleNamespace(
         states=[SimpleNamespace(Y=p.Y, state=ProofSpentState.unspent) for p in batch]
     )
 
 
-def rejection(status):
+def rejection(status: int) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://mint.test/v1/checkstate")
     return httpx.HTTPStatusError(
         "rejected",
@@ -43,7 +44,7 @@ def rejection(status):
     )
 
 
-def wallet(check):
+def wallet(check: Callable[[list[Proof]], object]) -> Mock:
     return Mock(
         url="https://mint.test",
         check_proof_state=AsyncMock(side_effect=check),
@@ -53,10 +54,10 @@ def wallet(check):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [413, 500])
-async def test_adapts_and_reuses_size_without_skipping_proofs(status):
-    checked = []
+async def test_adapts_and_reuses_size_without_skipping_proofs(status: int) -> None:
+    checked: list[Proof] = []
 
-    async def check(batch):
+    async def check(batch: list[Proof]) -> SimpleNamespace:
         if len(batch) > 120:
             raise rejection(status)
         checked.extend(batch)
@@ -74,8 +75,8 @@ async def test_adapts_and_reuses_size_without_skipping_proofs(status):
 
 
 @pytest.mark.asyncio
-async def test_size_fallback_works_inside_cooldown_probe_under_wallet_guard():
-    async def check(batch):
+async def test_size_fallback_works_inside_cooldown_probe_under_wallet_guard() -> None:
+    async def check(batch: list[Proof]) -> SimpleNamespace:
         if len(batch) > 2:
             raise rejection(500)
         return response(batch)
@@ -89,7 +90,7 @@ async def test_size_fallback_works_inside_cooldown_probe_under_wallet_guard():
 
 
 @pytest.mark.asyncio
-async def test_429_is_not_a_size_signal():
+async def test_429_is_not_a_size_signal() -> None:
     w = wallet(Mock(side_effect=rejection(429)))
     with pytest.raises(httpx.HTTPStatusError):
         await filter_unspent_proofs(proofs(1000), w, retry_on_rate_limit=False)
@@ -100,7 +101,7 @@ async def test_429_is_not_a_size_signal():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 401, 422, 503])
-async def test_other_http_errors_are_not_split(status):
+async def test_other_http_errors_are_not_split(status: int) -> None:
     w = wallet(Mock(side_effect=rejection(status)))
     with pytest.raises(httpx.HTTPStatusError):
         await filter_unspent_proofs(proofs(10), w)
@@ -108,7 +109,7 @@ async def test_other_http_errors_are_not_split(status):
 
 
 @pytest.mark.asyncio
-async def test_singleton_failure_is_bounded_and_does_not_poison_cache():
+async def test_singleton_failure_is_bounded_and_does_not_poison_cache() -> None:
     w = wallet(Mock(side_effect=rejection(500)))
     with pytest.raises(httpx.HTTPStatusError):
         await filter_unspent_proofs(proofs(1000), w)
@@ -129,7 +130,7 @@ async def test_singleton_failure_is_bounded_and_does_not_poison_cache():
 
 
 @pytest.mark.asyncio
-async def test_request_budget_counts_successes_and_failures():
+async def test_request_budget_counts_successes_and_failures() -> None:
     w = wallet(response)
     with (
         patch.object(checkstate, "_DEFAULT_BATCH_SIZE", 1),
@@ -142,8 +143,8 @@ async def test_request_budget_counts_successes_and_failures():
 
 
 @pytest.mark.asyncio
-async def test_total_deadline_cancels_slow_check():
-    async def check(batch):
+async def test_total_deadline_cancels_slow_check() -> None:
+    async def check(batch: list[Proof]) -> None:
         await asyncio.Event().wait()
 
     w = wallet(check)
@@ -157,8 +158,8 @@ async def test_total_deadline_cancels_slow_check():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("malformation", ["missing", "reordered", "unknown"])
-async def test_invalid_response_fails_closed(malformation):
-    def check(batch):
+async def test_invalid_response_fails_closed(malformation: str) -> None:
+    def check(batch: list[Proof]) -> SimpleNamespace:
         result = response(batch)
         if malformation == "missing":
             result.states.pop()
@@ -175,7 +176,7 @@ async def test_invalid_response_fails_closed(malformation):
 
 
 @pytest.mark.asyncio
-async def test_only_unspent_proofs_are_spendable():
+async def test_only_unspent_proofs_are_spendable() -> None:
     ps = proofs(3)
     states = [ProofSpentState.unspent, ProofSpentState.pending, ProofSpentState.spent]
     w = wallet(
@@ -188,7 +189,7 @@ async def test_only_unspent_proofs_are_spendable():
 
 
 @pytest.mark.asyncio
-async def test_learned_size_is_per_mint_and_expires():
+async def test_learned_size_is_per_mint_and_expires() -> None:
     w = wallet(response)
     ps = proofs(5)
     _learned_sizes[w.url] = (1, 0)
@@ -209,11 +210,11 @@ async def test_learned_size_is_per_mint_and_expires():
 
 
 @pytest.mark.asyncio
-async def test_smaller_later_batch_failure_does_not_skip_or_return_partial():
+async def test_smaller_later_batch_failure_does_not_skip_or_return_partial() -> None:
     ps = proofs(9)
-    checked = []
+    checked: list[Proof] = []
 
-    def check(batch):
+    def check(batch: list[Proof]) -> SimpleNamespace:
         if batch[0] is not ps[0] and len(batch) > 1:
             raise rejection(500)
         checked.extend(batch)
@@ -227,7 +228,9 @@ async def test_smaller_later_batch_failure_does_not_skip_or_return_partial():
 
 @pytest.mark.parametrize("status", [413, 500])
 @pytest.mark.parametrize("body", [{"detail": "too big"}, "<html>error</html>"])
-def test_wallet_adapter_preserves_checkstate_http_status(status, body):
+def test_wallet_adapter_preserves_checkstate_http_status(
+    status: int, body: dict[str, str] | str
+) -> None:
     from routstr.wallet import Wallet
 
     request = httpx.Request("POST", "https://mint.test/v1/checkstate")
@@ -242,8 +245,7 @@ def test_wallet_adapter_preserves_checkstate_http_status(status, body):
 
 
 @pytest.mark.asyncio
-async def test_default_batch_fits_real_sdk_model():
-    from cashu.core.base import Proof
+async def test_default_batch_fits_real_sdk_model() -> None:
     from cashu.core.models import PostCheckStateRequest
 
     limit = PostCheckStateRequest.model_json_schema()["properties"]["Ys"]["maxItems"]
@@ -251,9 +253,9 @@ async def test_default_batch_fits_real_sdk_model():
         Proof(id="00", amount=1, secret=f"sdk-{i}", C="02" + "00" * 32)
         for i in range(limit + 1)
     ]
-    sizes = []
+    sizes: list[int] = []
 
-    def check(batch):
+    def check(batch: list[Proof]) -> SimpleNamespace:
         payload = PostCheckStateRequest(Ys=[p.Y for p in batch])
         sizes.append(len(payload.Ys))
         return response(batch)
@@ -264,10 +266,10 @@ async def test_default_batch_fits_real_sdk_model():
 
 
 @pytest.mark.asyncio
-async def test_scan_deadline_opens_cooldown_for_next_guarded_scan():
+async def test_scan_deadline_opens_cooldown_for_next_guarded_scan() -> None:
     from routstr.mint import MintCooldownError
 
-    async def check(batch):
+    async def check(batch: list[Proof]) -> None:
         await asyncio.Event().wait()
 
     w = wallet(check)
@@ -282,10 +284,10 @@ async def test_scan_deadline_opens_cooldown_for_next_guarded_scan():
 
 
 @pytest.mark.asyncio
-async def test_external_cancellation_does_not_open_cooldown():
+async def test_external_cancellation_does_not_open_cooldown() -> None:
     started = asyncio.Event()
 
-    async def check(batch):
+    async def check(batch: list[Proof]) -> None:
         started.set()
         await asyncio.Event().wait()
 
@@ -299,7 +301,7 @@ async def test_external_cancellation_does_not_open_cooldown():
 
 
 @pytest.mark.asyncio
-async def test_scan_deadline_preserves_longer_rate_limit_cooldown():
+async def test_scan_deadline_preserves_longer_rate_limit_cooldown() -> None:
     w = wallet(response)
     guard = MintRateGuard.get(w.url)
     guard.apply_rate_limit_cooldown(120)
