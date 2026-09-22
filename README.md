@@ -51,9 +51,25 @@ curl https://api.routstr.com/v1/chat/completions \
 
 ## Quick Start (Docker)
 
-If you are a node runner, start a Routstr Core instance using Docker Compose:
+If you are a node runner, the recommended way to start Routstr Core is to clone
+the repository at the latest release and run it with Docker Compose:
 
-1. **Prepare your `.env`**:
+1. **Clone the latest release**:
+   ```bash
+   git clone https://github.com/Routstr/routstr-core.git
+   cd routstr-core
+   git checkout v0.4.7   # current release — see https://github.com/Routstr/routstr-core/releases/latest
+   ```
+
+   Docker Compose builds the node and the admin dashboard from source, so there
+   is no image to pull.
+
+2. **Prepare your `.env`**:
+   ```bash
+   cp .env.example .env
+   ```
+
+   Then edit it with your details:
    ```bash
    # Optional: encrypts node secrets at rest. If unset, the node generates a key
    # on first start, writes it to routstr_secret.key, and prints it once — back
@@ -76,12 +92,14 @@ If you are a node runner, start a Routstr Core instance using Docker Compose:
    uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
    ```
 
-2. **Start the services**:
+3. **Start the services**:
    ```bash
    docker compose up -d
    ```
 
-3. **Get your admin password**:
+   The first start builds both images (the dashboard build takes a few minutes).
+
+4. **Get your admin password**:
    On first start the node generates an admin password and logs it once with the
    `/admin` URL. Read it from the logs:
    ```bash
@@ -89,7 +107,7 @@ If you are a node runner, start a Routstr Core instance using Docker Compose:
    ```
    (Lost it? Reset with `docker compose exec routstr /.venv/bin/python scripts/reset_admin_password.py --regenerate`.)
 
-4. **Configure**:
+5. **Configure**:
    Open [http://localhost:8000/admin/](http://localhost:8000/admin/) to connect your AI providers and set pricing.
 
 For full instructions, see the **[Provider Quick Start Guide](https://docs.routstr.com/provider/quickstart/)**.
