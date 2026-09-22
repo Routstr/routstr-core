@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from cashu.core.base import Proof
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlmodel import col, update
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -13,12 +14,15 @@ from routstr.core.db import ApiKey, LightningInvoice
 from routstr.lightning import (
     INVOICE_EXPIRY_GRACE_SECONDS,
     INVOICE_WATCH_BATCH_LIMIT,
+    InvoiceRecoverRequest,
     _expire_invoice_if_authoritatively_unpaid,
     _expire_overdue_invoices,
     _finalize_invoice_settlement,
     _InvoiceSettlement,
     _process_invoice_watch_batch,
     check_invoice_payment,
+    get_invoice_status,
+    recover_invoice,
 )
 
 
@@ -621,3 +625,34 @@ async def test_recovery_tail_cannot_starve_owed_or_live_invoices(
     assert len(polled) == INVOICE_WATCH_BATCH_LIMIT
     assert {inv.id for inv in settling} <= set(polled)
     assert {inv.id for inv in fresh} <= set(polled)
+
+
+@pytest.mark.asyncio
+async def test_public_invoice_endpoints_ignore_payout_rows(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    """A payout's bolt11/id must not let /recover or /status touch the row."""
+    payout = _lightning_invoice(
+        direction="out",
+        purpose="payout",
+        expires_at=int(time.time()) - 1,
+    )
+    async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
+        seed.add(payout)
+        await seed.commit()
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as session:
+        with pytest.raises(HTTPException) as recover_error:
+            await recover_invoice(
+                InvoiceRecoverRequest(bolt11=payout.bolt11), session, False
+            )
+        with pytest.raises(HTTPException) as status_error:
+            await get_invoice_status(payout.id, session, False)
+    assert recover_error.value.status_code == 404
+    assert status_error.value.status_code == 404
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        stored = await verify.get(LightningInvoice, payout.id)
+        assert stored is not None
+        assert stored.status == "pending"

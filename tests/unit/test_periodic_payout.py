@@ -17,7 +17,11 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
-from routstr.wallet import _payout_units, periodic_payout
+from routstr.wallet import (
+    _payout_units,
+    _reconcile_stale_payout_history,
+    periodic_payout,
+)
 
 # Sentinel interval used to break the otherwise-infinite payout loop after
 # exactly one full cycle.
@@ -262,11 +266,12 @@ async def test_periodic_payout_handles_session_creation_failure() -> None:
         with pytest.raises(_LoopBreak):
             await periodic_payout()
 
-    # The liability session is opened per mint/unit (sat + msat), and each
-    # DB failure retains the cycle-specific alert wording while remaining
-    # isolated to its own iteration.
-    assert create_session.call_count == 2
-    assert logger.error.call_count == 2
+    # Per mint/unit (sat + msat) a session is opened twice: once by the stale
+    # payout-history sweep and once for the liability read. Each DB failure is
+    # logged and isolated to its own step; the liability error keeps the
+    # cycle-specific alert wording.
+    assert create_session.call_count == 4
+    assert logger.error.call_count == 4
     message = logger.error.call_args.args[0]
     extra = logger.error.call_args.kwargs["extra"]
     assert message == "Error in periodic payout cycle: RuntimeError"
@@ -280,3 +285,101 @@ async def test_payout_units_excludes_units_the_sender_cannot_pay() -> None:
         AsyncMock(return_value=["usd", "sat", "eur", "msat"]),
     ):
         assert await _payout_units("http://mint:3338") == ["sat", "msat"]
+
+
+@pytest.mark.asyncio
+async def test_payout_history_write_failure_does_not_block_payout() -> None:
+    """A failing history insert is logged; the melt and settlement still run."""
+    from routstr.core.settings import settings
+
+    get_wallet = AsyncMock(return_value=MagicMock())
+    record_payout = AsyncMock(side_effect=RuntimeError("database is locked"))
+    settle_payout = AsyncMock()
+    logger = MagicMock()
+
+    async def send(*args: object, **kwargs: object) -> int:
+        await kwargs["on_melt_quote"](  # type: ignore[index,operator]
+            "quote-1", "lnbc1payout"
+        )
+        return 1_000_000
+
+    raw_send = AsyncMock(side_effect=send)
+
+    with (
+        patch.object(settings, "cashu_mints", []),
+        patch.object(settings, "primary_mint", "http://primary:3338"),
+        patch.object(settings, "receive_ln_address", "owner@ln.tld"),
+        patch.object(settings, "payout_interval_seconds", _INTERVAL),
+        patch.object(settings, "min_payout_sat", 10),
+        patch("routstr.wallet.asyncio.sleep", _one_cycle_sleep()),
+        patch("routstr.wallet.db.create_session", _fake_session),
+        patch(
+            "routstr.wallet._get_supported_mint_units",
+            AsyncMock(return_value=["sat"]),
+        ),
+        patch("routstr.wallet.get_wallet", get_wallet),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            MagicMock(return_value=[MagicMock(amount=100_000)]),
+        ),
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            AsyncMock(side_effect=lambda proofs, wallet: proofs),
+        ),
+        patch("routstr.wallet.db.total_user_liability", AsyncMock(return_value=0)),
+        patch(
+            "routstr.wallet.db.list_unsettled_lightning_payouts",
+            AsyncMock(return_value=[]),
+        ),
+        patch("routstr.wallet.db.record_lightning_payout", record_payout),
+        patch("routstr.wallet.db.settle_lightning_payout", settle_payout),
+        patch("routstr.wallet.raw_send_to_lnurl", raw_send),
+        patch("routstr.wallet.logger", logger),
+    ):
+        with pytest.raises(_LoopBreak):
+            await periodic_payout()
+
+    record_payout.assert_awaited_once()
+    assert raw_send.await_count == 1
+    settle_payout.assert_awaited_once_with(
+        ANY, "quote-1", status="paid", amount_sats=1_000
+    )
+    messages = [call.args[0] for call in logger.error.call_args_list]
+    assert "Failed to record Lightning payout history" in messages
+
+
+@pytest.mark.asyncio
+async def test_stale_payout_history_is_reconciled_from_mint_state() -> None:
+    """Stale out-rows follow the mint's verdict; pending/unknown are left alone."""
+    stale = [
+        MagicMock(payment_hash="q-paid"),
+        MagicMock(payment_hash="q-unpaid"),
+        MagicMock(payment_hash="q-pending"),
+        MagicMock(payment_hash="q-unknown"),
+    ]
+    states = {
+        "q-paid": "paid",
+        "q-unpaid": "unpaid",
+        "q-pending": "pending",
+        "q-unknown": "unknown",
+    }
+    settle_payout = AsyncMock()
+
+    async def _state(_mint: str, _unit: str, quote_id: str) -> str:
+        return states[quote_id]
+
+    with (
+        patch("routstr.wallet.db.create_session", _fake_session),
+        patch(
+            "routstr.wallet.db.list_unsettled_lightning_payouts",
+            AsyncMock(return_value=stale),
+        ),
+        patch("routstr.wallet._check_bolt11_payment_status_locked", _state),
+        patch("routstr.wallet.db.settle_lightning_payout", settle_payout),
+    ):
+        await _reconcile_stale_payout_history("http://mint:3338", "sat")
+
+    assert settle_payout.await_args_list == [
+        ((ANY, "q-paid"), {"status": "paid", "amount_sats": None}),
+        ((ANY, "q-unpaid"), {"status": "failed", "amount_sats": None}),
+    ]

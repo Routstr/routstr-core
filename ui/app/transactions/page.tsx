@@ -757,7 +757,7 @@ export default function TransactionsPage() {
                   <SelectContent>
                     <SelectItem value='all'>All Types</SelectItem>
                     <SelectItem value='in'>Incoming (Payments)</SelectItem>
-                    <SelectItem value='out'>Outgoing (Refunds)</SelectItem>
+                    <SelectItem value='out'>Outgoing (Refunds & Payouts)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

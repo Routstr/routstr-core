@@ -1050,6 +1050,10 @@ async def settle_lightning_payout(
     )
     payout = result.first()
     if payout is None:
+        logger.warning(
+            "No Lightning payout history row for quote",
+            extra={"quote_id": quote_id, "status": status},
+        )
         return
     payout.status = status
     if status == "paid":
@@ -1058,6 +1062,24 @@ async def settle_lightning_payout(
             payout.amount_sats = amount_sats
     session.add(payout)
     await session.commit()
+
+
+UNSETTLED_PAYOUT_STATUSES = ("pending", "reconciliation_required")
+
+
+async def list_unsettled_lightning_payouts(
+    session: AsyncSession, mint_url: str, *, created_before: int
+) -> list[LightningInvoice]:
+    """Payout rows whose mint outcome was never written back to history."""
+    result = await session.exec(
+        select(LightningInvoice)
+        .where(col(LightningInvoice.direction) == "out")
+        .where(col(LightningInvoice.mint_url) == mint_url)
+        .where(col(LightningInvoice.status).in_(UNSETTLED_PAYOUT_STATUSES))
+        .where(col(LightningInvoice.created_at) < created_before)
+        .order_by(col(LightningInvoice.created_at))
+    )
+    return list(result.all())
 
 
 async def total_user_liability(db_session: AsyncSession) -> int:

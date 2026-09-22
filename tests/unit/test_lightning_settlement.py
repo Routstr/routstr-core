@@ -37,6 +37,7 @@ def _invoice(**overrides: object) -> SimpleNamespace:
         "payment_hash": "quote-1",
         "amount_sats": 100,
         "purpose": "create",
+        "direction": "in",
         "status": "pending",
         "paid_at": None,
         "api_key_hash": None,

@@ -1540,6 +1540,81 @@ async def fetch_all_balances(
     )
 
 
+PAYOUT_HISTORY_STALE_SECONDS = 600
+
+
+async def _record_payout_history(
+    *,
+    quote_id: str,
+    bolt11: str,
+    amount_sats: int,
+    mint_url: str,
+    destination: str,
+) -> None:
+    """Best-effort history insert; a history failure must never block a payout."""
+    try:
+        async with db.create_session() as session:
+            await db.record_lightning_payout(
+                session,
+                quote_id=quote_id,
+                bolt11=bolt11,
+                amount_sats=amount_sats,
+                mint_url=mint_url,
+                destination=destination,
+            )
+    except Exception as e:
+        logger.error(
+            "Failed to record Lightning payout history",
+            extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "quote_id": quote_id,
+                "mint_url": mint_url,
+            },
+        )
+
+
+async def _reconcile_stale_payout_history(mint_url: str, unit: str) -> None:
+    """Resolve payout rows left pending by a crash or an ambiguous melt.
+
+    Runs under ``wallet_operation_guard``. Only writes what the mint asserts
+    (paid/unpaid); quotes still pending or unreachable are left for later.
+    """
+    try:
+        cutoff = int(time.time()) - PAYOUT_HISTORY_STALE_SECONDS
+        async with db.create_session() as session:
+            stale = await db.list_unsettled_lightning_payouts(
+                session, mint_url, created_before=cutoff
+            )
+        for payout in stale:
+            quote_state = await _check_bolt11_payment_status_locked(
+                mint_url, unit, payout.payment_hash
+            )
+            if quote_state == "paid":
+                await _settle_payout_history(payout.payment_hash, status="paid")
+            elif quote_state == "unpaid":
+                await _settle_payout_history(payout.payment_hash, status="failed")
+            else:
+                continue
+            logger.info(
+                "Reconciled stale Lightning payout history",
+                extra={
+                    "quote_id": payout.payment_hash,
+                    "mint_url": mint_url,
+                    "quote_state": quote_state,
+                },
+            )
+    except Exception as e:
+        logger.error(
+            "Failed to reconcile Lightning payout history",
+            extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "mint_url": mint_url,
+            },
+        )
+
+
 async def _settle_payout_history(
     quote_id: str, *, status: str, amount_sats: int | None = None
 ) -> None:
@@ -1614,19 +1689,17 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
             async def record_payout(quote_id: str, bolt11: str) -> None:
                 nonlocal payout_quote_id
                 payout_quote_id = quote_id
-                async with db.create_session() as session:
-                    await db.record_lightning_payout(
-                        session,
-                        quote_id=quote_id,
-                        bolt11=bolt11,
-                        amount_sats=(
-                            available_balance
-                            if unit == "sat"
-                            else _msats_to_sats(available_balance)
-                        ),
-                        mint_url=mint_url,
-                        destination=settings.receive_ln_address,
-                    )
+                await _record_payout_history(
+                    quote_id=quote_id,
+                    bolt11=bolt11,
+                    amount_sats=(
+                        available_balance
+                        if unit == "sat"
+                        else _msats_to_sats(available_balance)
+                    ),
+                    mint_url=mint_url,
+                    destination=settings.receive_ln_address,
+                )
 
             try:
                 amount_received = await raw_send_to_lnurl(
@@ -1699,6 +1772,7 @@ async def periodic_payout() -> None:
                     # Proof mutation, liability observation, and sending are one
                     # cross-process critical section. Credits take the same lock.
                     async with wallet_operation_guard():
+                        await _reconcile_stale_payout_history(mint_url, unit)
                         await _payout_mint_and_unit(mint_url, unit)
         except Exception as e:
             logger.error(
@@ -1986,15 +2060,13 @@ async def periodic_routstr_fee_payout() -> None:
                     if not checkpointed:
                         raise _RoutstrFeePayoutAlreadyClaimed
                     attempt_quote_id = quote_id
-                    async with db.create_session() as session:
-                        await db.record_lightning_payout(
-                            session,
-                            quote_id=quote_id,
-                            bolt11=bolt11,
-                            amount_sats=accumulated_sats,
-                            mint_url=settings.primary_mint,
-                            destination=ROUTSTR_LN_ADDRESS,
-                        )
+                    await _record_payout_history(
+                        quote_id=quote_id,
+                        bolt11=bolt11,
+                        amount_sats=accumulated_sats,
+                        mint_url=settings.primary_mint,
+                        destination=ROUTSTR_LN_ADDRESS,
+                    )
 
                 try:
                     amount_received = await raw_send_to_lnurl(
@@ -2021,12 +2093,9 @@ async def periodic_routstr_fee_payout() -> None:
                             extra={"payout_in_progress_msats": paid_msats},
                             exc_info=isinstance(e, Exception),
                         )
-                        async with db.create_session() as session:
-                            await db.settle_lightning_payout(
-                                session,
-                                attempt_quote_id,
-                                status="reconciliation_required",
-                            )
+                        await _settle_payout_history(
+                            attempt_quote_id, status="reconciliation_required"
+                        )
                     if not isinstance(e, Exception):
                         raise
                     continue

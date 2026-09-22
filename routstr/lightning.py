@@ -443,7 +443,8 @@ async def get_invoice_status(
     structured_errors: bool = Depends(_uses_v2_errors),
 ) -> InvoiceStatusResponse:
     invoice = await session.get(LightningInvoice, invoice_id)
-    if not invoice:
+    # Payout rows (direction="out") are operator history, never user invoices.
+    if not invoice or invoice.direction != "in":
         raise _invoice_error(
             404,
             "Invoice not found",
@@ -486,7 +487,9 @@ async def recover_invoice(
     structured_errors: bool = Depends(_uses_v2_errors),
 ) -> InvoiceStatusResponse:
     result = await session.exec(
-        select(LightningInvoice).where(LightningInvoice.bolt11 == request.bolt11)
+        select(LightningInvoice)
+        .where(LightningInvoice.bolt11 == request.bolt11)
+        .where(col(LightningInvoice.direction) == "in")
     )
     invoice = result.first()
 
