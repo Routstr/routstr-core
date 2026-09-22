@@ -417,6 +417,8 @@ async def raw_send_to_lnurl(
 
     assert selected_proofs is not None
     proofs = selected_proofs
+    # Cashu uses this argument only to size blank outputs, not set mint fees.
+    change_budget = sum(proof.amount for proof in proofs) - quoted_amount
     await wallet.set_reserved_for_send(proofs, reserved=True)
 
     try:
@@ -424,7 +426,7 @@ async def raw_send_to_lnurl(
             lambda: wallet.melt(
                 proofs=proofs,
                 invoice=bolt11_invoice,
-                fee_reserve_sat=melt_quote_resp.fee_reserve,
+                fee_reserve_sat=change_budget,
                 quote_id=melt_quote_resp.quote,
             ),
             op_name="lnurl_melt",

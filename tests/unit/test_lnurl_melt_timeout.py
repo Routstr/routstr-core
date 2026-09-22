@@ -66,6 +66,33 @@ def _lnurl_patches() -> tuple[Any, Any]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["timeout", "pending"])
+async def test_oversized_proof_change_budget_preserves_ambiguous_melt(
+    outcome: str,
+) -> None:
+    wallet, proofs = _wallet()
+    proofs[0].amount = 524288
+    if outcome == "timeout":
+        wallet.melt.side_effect = httpx.ReadTimeout("response lost")
+    else:
+        wallet.melt.return_value = MagicMock(state=MeltQuoteState.pending)
+    wallet.get_melt_quote = AsyncMock(
+        return_value=MagicMock(state=MeltQuoteState.pending)
+    )
+    data_patch, invoice_patch = _lnurl_patches()
+    with data_patch, invoice_patch, pytest.raises(MeltOutcomeAmbiguousError):
+        await raw_send_to_lnurl(wallet, proofs, "owner@ln.tld", "sat", amount=1000)
+    wallet.melt.assert_awaited_once()
+    assert wallet.melt.await_args.kwargs["fee_reserve_sat"] == 524288 - QUOTE_AMOUNT_SAT
+    wallet.set_reserved_for_send.assert_awaited_once_with(proofs, reserved=True)
+    if outcome == "timeout":
+        wallet.set_reserved_for_melt.assert_awaited_once_with(
+            proofs, reserved=True, quote_id="q"
+        )
+    wallet.get_melt_quote.assert_awaited_once_with("q")
+
+
+@pytest.mark.asyncio
 async def test_raw_send_to_lnurl_direct_unpaid_is_retry_safe() -> None:
     wallet, proofs = _wallet()
     wallet.melt = AsyncMock(return_value=MagicMock(state=MeltQuoteState.unpaid))

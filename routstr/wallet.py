@@ -21,6 +21,7 @@ from pydantic_core import PydanticUndefined
 from sqlmodel import col, select, update
 
 from .cashu_compat import install_cashu_httpx_shim
+from .checkstate import filter_unspent_proofs
 from .core import db, get_logger
 from .core.db import store_cashu_transaction_with_retry as store_cashu_transaction
 from .core.settings import settings
@@ -143,6 +144,12 @@ class Wallet(_CashuWallet):
                 request=resp.request,
                 response=resp,
             )
+        if resp.status_code in {413, 500} and resp.request.url.path.endswith(
+            "/v1/checkstate"
+        ):
+            # Preserve size/HTTP diagnostics even when a proxy or mint returns
+            # JSON with a detail field. Mutation error handling stays unchanged.
+            resp.raise_for_status()
         try:
             response_data = resp.json()
         except json.JSONDecodeError:
@@ -1165,6 +1172,7 @@ async def get_wallet(
     retry_on_rate_limit: bool = True,
     force_reload: bool = False,
     load_proofs: bool = True,
+    force_reload_proofs: bool = False,
 ) -> Wallet:
     global _wallets, _wallet_last_load, _wallet_last_mint_load, _wallet_load_locks
     id = f"{mint_url}_{unit}"
@@ -1197,6 +1205,7 @@ async def get_wallet(
                 last_proof_load = _wallet_last_load.get(id)
                 if (
                     force_reload
+                    or force_reload_proofs
                     or last_proof_load is None
                     or now - last_proof_load
                     >= _WALLET_PROOF_RELOAD_MIN_INTERVAL_SECONDS
@@ -1231,29 +1240,9 @@ async def slow_filter_spend_proofs(
     *,
     retry_on_rate_limit: bool = True,
 ) -> list[Proof]:
-    if not proofs:
-        return []
-    _proofs = []
-    _spent_proofs = []
-    # Keep proof-state checks in large batches. Mint quotas count HTTP requests,
-    # so smaller batches make balance reads slower and more likely to hit 429s.
-    batch_size = 1000
-    for i in range(0, len(proofs), batch_size):
-        pb = proofs[i : i + batch_size]
-        proof_states = await run_mint_operation(
-            lambda: wallet.check_proof_state(pb),
-            op_name="check_proof_state",
-            mint_url=str(wallet.url),
-            retry_on_rate_limit=retry_on_rate_limit,
-        )
-        for proof, state in zip(pb, proof_states.states):
-            if str(state.state) != "spent":
-                _proofs.append(proof)
-            else:
-                _spent_proofs.append(proof)
-    if _spent_proofs:
-        await wallet.set_reserved_for_send(_spent_proofs, reserved=True)
-    return _proofs
+    return await filter_unspent_proofs(
+        proofs, wallet, retry_on_rate_limit=retry_on_rate_limit
+    )
 
 
 class BalanceDetail(TypedDict, total=False):
@@ -1641,12 +1630,16 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
     try:
         # Runs under wallet_operation_guard; a cached wallet may carry a proof
         # snapshot up to 30s stale from another process's reservation, so the
-        # cross-process lock is only safe with a fresh reload.
-        wallet = await get_wallet(mint_url, unit, force_reload=True)
+        # cross-process lock is only safe with fresh local proofs, not a
+        # forced network refresh of every keyset.
+        wallet = await get_wallet(mint_url, unit, force_reload_proofs=True)
         proofs = get_proofs_per_mint_and_unit(wallet, mint_url, unit, not_reserved=True)
-        if not proofs:
-            # Nothing to pay out, so skip the settle delay rather than hold the
-            # cross-process guard (and block credits) for a wallet with no funds.
+        min_amount = (
+            settings.min_payout_sat
+            if unit == "sat"
+            else _sats_to_msats(settings.min_payout_sat)
+        )
+        if sum(proof.amount for proof in proofs) <= min_amount:
             return
         proofs = await slow_filter_spend_proofs(proofs, wallet)
         await asyncio.sleep(5)
@@ -1678,12 +1671,13 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
             user_balance = _msats_to_sats_ceil(user_balance)
         proofs_balance = sum(proof.amount for proof in proofs)
         available_balance = proofs_balance - user_balance
-        min_amount = (
-            settings.min_payout_sat
+        max_amount = (
+            settings.max_payout_sat
             if unit == "sat"
-            else _sats_to_msats(settings.min_payout_sat)
+            else _sats_to_msats(settings.max_payout_sat)
         )
         if available_balance > min_amount:
+            payout_amount = min(available_balance, max_amount)
             payout_quote_id: str | None = None
 
             async def record_payout(quote_id: str, bolt11: str) -> None:
@@ -1693,9 +1687,9 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
                     quote_id=quote_id,
                     bolt11=bolt11,
                     amount_sats=(
-                        available_balance
+                        payout_amount
                         if unit == "sat"
-                        else _msats_to_sats(available_balance)
+                        else _msats_to_sats(payout_amount)
                     ),
                     mint_url=mint_url,
                     destination=settings.receive_ln_address,
@@ -1707,7 +1701,7 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
                     proofs,
                     settings.receive_ln_address,
                     unit,
-                    amount=available_balance,
+                    amount=payout_amount,
                     on_melt_quote=record_payout,
                 )
             except Exception as e:
@@ -1733,6 +1727,7 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
                     "mint_url": mint_url,
                     "unit": unit,
                     "balance": available_balance,
+                    "amount": payout_amount,
                     "amount_received": amount_received,
                 },
             )
