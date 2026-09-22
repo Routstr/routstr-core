@@ -15,6 +15,14 @@ from PIL import Image
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
+from ..core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_NODE,
+    ERROR_SCOPE_UPSTREAM,
+    client_code_for_upstream_error,
+    client_status_for_upstream_error,
+    upstream_status_details,
+)
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..core.settings import settings
@@ -654,13 +662,16 @@ def create_error_response(
     token: str | None = None,
     code: str | int | None = None,
     details: dict[str, object] | None = None,
+    error_scope: str | None = None,
 ) -> Response:
     """Create a standardized error response.
 
     ``code`` is a stable, machine-readable classification (e.g.
     ``UPSTREAM_RATE_LIMIT``); when omitted it defaults to the HTTP status code
     for backwards compatibility. ``details`` carries optional structured,
-    redaction-safe context.
+    redaction-safe context. ``error_scope`` marks the failure as attributable
+    to a specific hop (``upstream``) and is emitted as the
+    :data:`ERROR_SCOPE_HEADER` response header.
     """
     error_obj: dict[str, object] = {
         "message": redact_org_ids(message),
@@ -669,6 +680,11 @@ def create_error_response(
     }
     if details is not None:
         error_obj["details"] = details
+    headers: dict[str, str] = {}
+    if token:
+        headers["X-Cashu"] = token
+    if error_scope is not None:
+        headers[ERROR_SCOPE_HEADER] = error_scope
     return Response(
         content=json.dumps(
             {
@@ -678,7 +694,7 @@ def create_error_response(
         ),
         status_code=status_code,
         media_type="application/json",
-        headers={"X-Cashu": token} if token else {},
+        headers=headers,
     )
 
 
@@ -687,13 +703,37 @@ def create_upstream_error_response(
     request: Request,
     fallback_status: int = 502,
 ) -> Response:
-    """Build an error response from an :class:`UpstreamError`, preserving its
-    structured ``code``, ``details``, and original ``status_code``."""
+    """Build an error response from an :class:`UpstreamError`.
+
+    Upstream-scoped failures (the default) are reported as
+    :data:`UPSTREAM_ERROR_STATUS` with ``error.code = UPSTREAM_UNAVAILABLE`` and
+    the :data:`ERROR_SCOPE_HEADER` header, so a caller can tell "this node is
+    healthy, one provider hop failed" from "this node is broken" — the latter
+    keeps answering 500 and carries no scope header. The provider's own status
+    stays discoverable in ``error.details.upstream_status`` and in the message.
+
+    Node-scoped failures and rate limits keep their own status: a node fault
+    must never be disguised as an upstream one, and 429 carries a retry hint
+    clients already act on.
+    """
+    status_code = error.status_code or fallback_status
+    code = getattr(error, "code", None)
+    details = getattr(error, "details", None)
+    if getattr(error, "scope", ERROR_SCOPE_UPSTREAM) == ERROR_SCOPE_NODE:
+        return create_error_response(
+            "upstream_error",
+            str(error),
+            status_code,
+            request=request,
+            code=code,
+            details=details,
+        )
     return create_error_response(
         "upstream_error",
         str(error),
-        error.status_code or fallback_status,
+        client_status_for_upstream_error(status_code, code),
         request=request,
-        code=getattr(error, "code", None),
-        details=getattr(error, "details", None),
+        code=client_code_for_upstream_error(status_code, code),
+        details=upstream_status_details(details, status_code),
+        error_scope=ERROR_SCOPE_UPSTREAM,
     )

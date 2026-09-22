@@ -264,7 +264,12 @@ Billing is input-token based (output tokens are free on Jev); the response's
 - TypeSafe's `GET /v1/models` lists aliases only; the node additionally seeds
   the known versioned ids so they can be requested directly.
 - TypeSafe answers `429 Too Many Requests` and `529 Overloaded` when throttled.
-  Both are forwarded as upstream errors; retry with exponential backoff.
+  Both are forwarded as upstream errors; retry with exponential backoff. The
+  `429` keeps its status and `error.code = UPSTREAM_RATE_LIMIT`; the `529`
+  (a provider 5xx) is reported as `424` + `error.code = UPSTREAM_UNAVAILABLE`
+  with `X-Routstr-Error-Scope: upstream` and the provider's own status in
+  `error.upstream_status` — this node is healthy, so a 5xx here must not be
+  read as node health.
 
 **Enabling the provider:**
 

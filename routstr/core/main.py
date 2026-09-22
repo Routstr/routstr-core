@@ -289,6 +289,10 @@ app.add_middleware(
     expose_headers=[
         "x-routstr-request-id",
         "x-cashu",
+        # Attribution scope for upstream-caused failures. Browser clients must
+        # be able to read it, otherwise they cannot tell an upstream blip
+        # (424, X-Routstr-Error-Scope: upstream) from a node fault (500).
+        "x-routstr-error-scope",
         "x-routstr-cost-msats",
         "x-routstr-cost-usd",
         "x-routstr-input-cost-msats",

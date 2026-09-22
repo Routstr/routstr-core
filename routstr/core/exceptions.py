@@ -5,6 +5,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from .error_scope import ERROR_SCOPE_UPSTREAM, UPSTREAM_ERROR_STATUS
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -18,6 +19,18 @@ class UpstreamError(Exception):
     string-matching the message. ``details`` holds optional structured,
     redaction-safe context. Both default to ``None`` for backwards
     compatibility.
+
+    ``scope`` records who the failure belongs to. ``"upstream"`` (the default,
+    since this class describes a provider hop that failed) means the node
+    stayed healthy and the failure is reported to the caller as a non-5xx
+    ``424`` with ``error.code = UPSTREAM_UNAVAILABLE`` (see
+    :mod:`routstr.core.error_scope`). ``"node"`` means a fault inside this
+    process that merely surfaced while talking to a provider; those keep their
+    status so a node failure is never disguised as an upstream one.
+
+    ``status_code`` always stays the provider's own status (or the status the
+    failure was classified with) — the caller-visible mapping happens once, at
+    response construction.
     """
 
     def __init__(
@@ -26,11 +39,13 @@ class UpstreamError(Exception):
         status_code: int = 502,
         code: str | None = None,
         details: dict[str, object] | None = None,
+        scope: str = ERROR_SCOPE_UPSTREAM,
     ):
         self.message = message
         self.status_code = status_code
         self.code = code
         self.details = details
+        self.scope = scope
         super().__init__(message)
 
 
@@ -38,8 +53,10 @@ class EhbpTimeoutError(UpstreamError):
     """Raised when an EHBP upstream times out waiting for a response.
 
     Distinct from a generic :class:`UpstreamError` so callers can map the
-    failure to a ``504 Gateway Timeout`` with a stable ``UPSTREAM_TIMEOUT``
-    code instead of a misleading ``500`` internal server error.
+    failure to a stable ``UPSTREAM_TIMEOUT`` code instead of a misleading
+    ``500`` internal server error. The status is the upstream-failure status
+    (424, deliberately non-5xx): the timeout happened on the provider hop, and
+    reporting it as 504 told callers this node was the broken one.
 
     ``details`` carries optional structured, redaction-safe context and is
     forwarded to the client by ``create_upstream_error_response``.
@@ -48,7 +65,7 @@ class EhbpTimeoutError(UpstreamError):
     def __init__(self, message: str, details: dict[str, object] | None = None):
         super().__init__(
             message,
-            status_code=504,
+            status_code=UPSTREAM_ERROR_STATUS,
             code="UPSTREAM_TIMEOUT",
             details=details,
         )

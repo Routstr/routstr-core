@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Optional
 
 import httpx
@@ -7,6 +8,12 @@ from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic.v1 import BaseModel
 
+from ..core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
+    UPSTREAM_UNAVAILABLE,
+)
 from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
 from ..payment.models import Architecture, Model, Pricing
@@ -138,6 +145,34 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
                 response_headers = dict(resp.headers)
                 response_headers.pop("content-encoding", None)
                 response_headers.pop("content-length", None)
+                if resp.status_code >= 500:
+                    # The attestation host is an upstream hop too: a 5xx there
+                    # says the provider is broken, not this node. Report it with
+                    # the upstream-failure status so a caller does not mark the
+                    # node down, and keep the host's status discoverable.
+                    logger.warning(
+                        "Tinfoil attestation upstream returned %s",
+                        resp.status_code,
+                        extra={"status_code": resp.status_code},
+                    )
+                    return Response(
+                        content=json.dumps(
+                            {
+                                "error": {
+                                    "type": "upstream_error",
+                                    "code": UPSTREAM_UNAVAILABLE,
+                                    "message": (
+                                        "Attestation upstream returned "
+                                        f"{resp.status_code}"
+                                    ),
+                                    "upstream_status": resp.status_code,
+                                }
+                            }
+                        ),
+                        status_code=UPSTREAM_ERROR_STATUS,
+                        media_type="application/json",
+                        headers={ERROR_SCOPE_HEADER: ERROR_SCOPE_UPSTREAM},
+                    )
                 return Response(
                     content=resp.content,
                     status_code=resp.status_code,

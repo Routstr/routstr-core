@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from routstr.core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
+)
 from routstr.core.exceptions import EhbpTimeoutError, UpstreamError
 from routstr.upstream import ehbp as ehbp_module
 
 # ---------------------------------------------------------------------------
-# forward_ehbp_x_cashu_request — timeout fails closed with a refund + 504
+# forward_ehbp_x_cashu_request — timeout fails closed with a refund + 424
+#
+# The EHBP hop is an upstream: a timeout there must not be reported as a 5xx
+# (which would read as *this node* being down). See
+# CORE-UPSTREAM-5XX-NOT-NODE-DOWN.
 # ---------------------------------------------------------------------------
 
 
@@ -48,7 +58,7 @@ def _ehbp_upstream_mocks() -> tuple[MagicMock, MagicMock]:
 
 
 @pytest.mark.asyncio
-async def test_x_cashu_timeout_refunds_and_returns_504(
+async def test_x_cashu_timeout_refunds_and_returns_424(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -78,27 +88,34 @@ async def test_x_cashu_timeout_refunds_and_returns_504(
         upstream=upstream,
     )
 
-    assert response.status_code == 504
+    # 424, not 504: the timeout belongs to the upstream hop, and a 5xx would
+    # tell the caller this node is broken.
+    assert response.status_code == UPSTREAM_ERROR_STATUS
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
     assert response.headers["X-Cashu"] == "refund-token"
+    body = json.loads(bytes(response.body))
+    assert body["error"]["type"] == "upstream_timeout"
+    assert body["error"]["code"] == "UPSTREAM_TIMEOUT"
     send_cashu_refund_mock.assert_awaited_once_with(1000, "msat", None, "req-123")
 
 
 # ---------------------------------------------------------------------------
 # forward_ehbp_request — the bearer path must let the timeout through, so
-# proxy.py can answer 504 instead of flattening it to a generic 500
+# proxy.py can answer 424 instead of flattening it to a generic 500
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_bearer_timeout_propagates_504(
+async def test_bearer_timeout_propagates_424(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A timed-out bearer request must not be rewritten to a 500.
 
     ``forward_ehbp_request`` ends in a bare ``except Exception`` that turns any
     error into ``UpstreamError(..., status_code=500)``. The ``except
-    UpstreamError: raise`` above it is the only thing preserving the 504 that
-    ``proxy.py`` returns to the client, so this test pins that handler.
+    UpstreamError: raise`` above it is the only thing preserving the upstream
+    timeout status that ``proxy.py`` returns to the client, so this test pins
+    that handler.
     """
     monkeypatch.setattr(
         ehbp_module,
@@ -126,6 +143,7 @@ async def test_bearer_timeout_propagates_504(
             model_obj=model_obj,
         )
 
-    assert exc_info.value.status_code == 504
+    assert exc_info.value.status_code == UPSTREAM_ERROR_STATUS
     assert exc_info.value.code == "UPSTREAM_TIMEOUT"
+    assert exc_info.value.scope == ERROR_SCOPE_UPSTREAM
     assert isinstance(exc_info.value, UpstreamError)

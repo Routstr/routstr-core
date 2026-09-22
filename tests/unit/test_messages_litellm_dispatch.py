@@ -1597,7 +1597,8 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
     handler_name: str, forward_attr: str
 ) -> None:
     """A transport failure while forwarding (after the token is spent) maps to
-    502 upstream_error, never a retryable cashu_mint_unreachable."""
+    424 + UPSTREAM_UNAVAILABLE (upstream-attributed, CORE-UPSTREAM-5XX-NOT-NODE-DOWN),
+    never a retryable cashu_mint_unreachable."""
     provider = _make_provider()
     model = _make_model()
     request = _make_request()
@@ -1623,9 +1624,14 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
             model_obj=model,
         )
 
-    assert response.status_code == 502
+    # The token is spent, so the failure belongs to the provider hop: the
+    # caller gets a non-5xx 424 with the attribution header instead of a 502
+    # that reads as this node being down.
+    assert response.status_code == 424
+    assert response.headers["X-Routstr-Error-Scope"] == "upstream"
     body = json.loads(bytes(response.body))
     assert body["error"]["type"] == "upstream_error"
+    assert body["error"]["code"] == "UPSTREAM_UNAVAILABLE"
     assert body["error"]["code"] != "cashu_mint_unreachable"
 
 

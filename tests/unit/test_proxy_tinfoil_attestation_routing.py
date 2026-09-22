@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.responses import Response
 from httpx import ASGITransport, AsyncClient
 
 from routstr import proxy as proxy_module
+from routstr.core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
+    UPSTREAM_UNAVAILABLE,
+)
 
 
 @pytest.fixture
@@ -150,3 +158,145 @@ def test_attestation_upstream_selection_is_tinfoil_only() -> None:
     assert proxy_module._select_unauthenticated_get_upstreams(
         "attestationjunk", [non_tinfoil, tinfoil]
     ) == [non_tinfoil, tinfoil]
+
+
+# --------------------------------------------------------------------------- #
+# Acceptance: CORE-UPSTREAM-5XX-NOT-NODE-DOWN on the unauthenticated GET path
+#
+# An upstream 5xx on these paths must be reported as 424 + UPSTREAM_UNAVAILABLE
+# with the X-Routstr-Error-Scope: upstream header, must stay retryable across
+# candidates, and must never be re-labelled as a node fault.
+# --------------------------------------------------------------------------- #
+
+
+def _attributed_424() -> Response:
+    """The response a provider hands back for an upstream-attributed 5xx."""
+    import json as _json
+
+    return Response(
+        content=_json.dumps(
+            {
+                "error": {
+                    "type": "upstream_error",
+                    "code": UPSTREAM_UNAVAILABLE,
+                    "message": "Attestation upstream returned 503",
+                    "upstream_status": 503,
+                }
+            }
+        ).encode(),
+        status_code=UPSTREAM_ERROR_STATUS,
+        media_type="application/json",
+        headers={ERROR_SCOPE_HEADER: ERROR_SCOPE_UPSTREAM},
+    )
+
+
+def _attestation_provider(forward: AsyncMock) -> MagicMock:
+    provider = MagicMock()
+    provider.provider_type = "tinfoil"
+    provider.prepare_headers = MagicMock(return_value={})
+    provider.forward_get_request = forward
+    return provider
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_get_returns_attributed_424_when_all_fail(
+    monkeypatch: pytest.MonkeyPatch, proxy_app: FastAPI
+) -> None:
+    tinfoil = _attestation_provider(AsyncMock(return_value=_attributed_424()))
+    monkeypatch.setattr(proxy_module, "_upstreams", [tinfoil])
+
+    async with AsyncClient(
+        transport=ASGITransport(app=proxy_app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/attestation")
+
+    assert response.status_code == UPSTREAM_ERROR_STATUS
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+    payload = json.loads(response.content)
+    assert payload["error"]["code"] == UPSTREAM_UNAVAILABLE
+    assert payload["error"]["upstream_status"] == 503
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_get_fails_over_past_an_attributed_424(
+    monkeypatch: pytest.MonkeyPatch, proxy_app: FastAPI
+) -> None:
+    """An upstream-attributed 424 stays retryable: the caller sees the healthy
+    provider's response and never the upstream error."""
+    failing = _attestation_provider(AsyncMock(return_value=_attributed_424()))
+    healthy = _attestation_provider(
+        AsyncMock(return_value=Response(status_code=200, content=b'{"ok":true}'))
+    )
+    monkeypatch.setattr(proxy_module, "_upstreams", [failing, healthy])
+
+    async with AsyncClient(
+        transport=ASGITransport(app=proxy_app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/attestation")
+
+    assert response.status_code == 200
+    assert response.content == b'{"ok":true}'
+    failing.forward_get_request.assert_awaited_once()
+    healthy.forward_get_request.assert_awaited_once()
+    assert ERROR_SCOPE_HEADER not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_attestation_host_5xx_is_attributed_to_the_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Tinfoil attestation hop itself maps its 5xx to 424 + upstream scope."""
+    from routstr.upstream.tinfoil import TinfoilUpstreamProvider
+
+    class _FakeClient:
+        async def __aenter__(self) -> "_FakeClient":
+            return self
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+        async def get(self, _url: str, headers: dict | None = None) -> httpx.Response:
+            return httpx.Response(status_code=503, content=b"atc down")
+
+    monkeypatch.setattr(
+        "routstr.upstream.tinfoil.httpx.AsyncClient", lambda **_kw: _FakeClient()
+    )
+    provider = TinfoilUpstreamProvider(api_key="k")
+
+    response = await provider._proxy_attestation({})
+
+    assert response.status_code == UPSTREAM_ERROR_STATUS
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+    payload = json.loads(bytes(response.body))
+    assert payload["error"]["type"] == "upstream_error"
+    assert payload["error"]["code"] == UPSTREAM_UNAVAILABLE
+    assert payload["error"]["upstream_status"] == 503
+
+
+@pytest.mark.asyncio
+async def test_attestation_host_4xx_passes_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from routstr.upstream.tinfoil import TinfoilUpstreamProvider
+
+    class _FakeClient:
+        async def __aenter__(self) -> "_FakeClient":
+            return self
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+        async def get(self, _url: str, headers: dict | None = None) -> httpx.Response:
+            return httpx.Response(status_code=404, content=b"missing")
+
+    monkeypatch.setattr(
+        "routstr.upstream.tinfoil.httpx.AsyncClient", lambda **_kw: _FakeClient()
+    )
+    provider = TinfoilUpstreamProvider(api_key="k")
+
+    response = await provider._proxy_attestation({})
+
+    assert response.status_code == 404
+    assert bytes(response.body) == b"missing"
