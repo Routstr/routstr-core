@@ -2,179 +2,97 @@
 
 Production deployment guide for Routstr Provider nodes.
 
-## All-in-One Docker Image (Preferred)
+## Quick Start (Recommended)
 
-The easiest way to deploy Routstr is using the all-in-one Docker image from Docker Hub, which includes both the FastAPI backend and the Next.js admin dashboard in a single container.
-
-### Quick Start
-
-```bash
-docker run -d \
-  --name routstr \
-  -p 8000:8000 \
-  -v routstr-data:/app/data \
-  -e DATABASE_URL="sqlite:////app/data/routstr.db" \
-  9qeklajc/routstr:latest
-```
-
-Access your node:
-- **API & Admin Dashboard**: http://localhost:8000
-
-### Docker Compose Setup
-
-Create `docker-compose.yml`:
-
-```yaml
-version: '3.8'
-
-services:
-  routstr:
-    image: 9qeklajc/routstr:latest
-    container_name: routstr
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    volumes:
-      - routstr-data:/app/data
-    environment:
-      DATABASE_URL: "sqlite:////app/data/routstr.db"
-      LOG_LEVEL: "info"
-
-volumes:
-  routstr-data:
-```
-
-Start it:
+The recommended way to run a provider node is to clone the repository at the
+**latest release** and start the stack with Docker Compose. Compose builds both
+the node and the admin dashboard from source, so there is no image to pull and no
+dashboard build to keep in sync with the node.
 
 ```bash
+git clone https://github.com/Routstr/routstr-core.git
+cd routstr-core
+
+# Check out a release (v0.4.7 is current — see the releases page for the newest tag)
+git checkout v0.4.7
+
+# Compose reads its configuration from .env
+cp .env.example .env
+
 docker compose up -d
 ```
 
----
-
-## Docker Compose (Recommended)
-
-For production, use Docker Compose with persistent storage and optional Tor support.
-
-Use the included `compose.yml` for a flexible setup that handles both the UI and the node execution. This is useful for development or when you want to manage Tor as a separate service.
+Then open your node:
+- **API & Admin Dashboard**: <http://localhost:8000>
+- **Admin login**: the password is generated and logged once on first start
 
 ```bash
-docker compose up -d
+docker compose logs routstr | grep -i admin
 ```
 
-This will:
-1.  **Build the UI**: Compiles the frontend and copies it to a shared volume.
-2.  **Start Routstr**: Runs the Python node, mounting the built UI.
-3.  **Start Tor**: Provides anonymous access via a `.onion` address.
+!!! note "The first start takes a few minutes"
+    `docker compose up` builds both images locally, and the Next.js dashboard
+    build is the slow part. Later starts reuse the built images.
+
+!!! tip "Always tracking the newest release"
+    To check out whatever `releases/latest` currently points at, use:
+
+    ```bash
+    git clone https://github.com/Routstr/routstr-core.git
+    cd routstr-core
+    git checkout "$(curl -sSL -o /dev/null -w '%{url_effective}' \
+      https://github.com/Routstr/routstr-core/releases/latest | sed 's|.*/tag/||')"
+    ```
+
+    Omitting the `git checkout` entirely leaves you on `main` — newer, but not a
+    tested release.
 
 ---
 
-## With Tor (Anonymous Access)
+## What Docker Compose Starts
 
-Add Tor to serve your node as a hidden service—no port forwarding needed.
+`compose.yml` brings up three services:
 
-```yaml
-services:
-  routstr:
-    image: ghcr.io/routstr/proxy:latest
-    container_name: routstr
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    environment:
-      - TOR_PROXY_URL=socks5://tor:9050
-      # Keep the database (and the key file generated beside it) on the volume.
-      - DATABASE_URL=sqlite:////app/data/routstr.db
-    depends_on:
-      - tor
-
-  tor:
-    image: ghcr.io/hundehausen/tor-hidden-service:latest
-    container_name: tor
-    restart: unless-stopped
-    volumes:
-      - ./tor-data:/var/lib/tor
-    environment:
-      - HS_ROUTER=routstr:8000:80
-```
-
-After starting, find your `.onion` address:
-
-```bash
-docker exec tor cat /var/lib/tor/hidden_service/hostname
-```
-
-See [Tor Support](tor.md) for details.
+1. **ui** — builds the Next.js admin dashboard and copies the result into the
+   shared `./ui_out` volume.
+2. **routstr** — the Python node, serving the API and the dashboard built above.
+3. **tor** — serves the node as a `.onion` hidden service, so no port forwarding
+   is needed. See [Tor Support](tor.md) for how to read your `.onion` address.
 
 ---
 
 ## Pre-Configuration (Optional)
 
-While everything can be configured via the dashboard, you can pre-configure settings with environment variables for automated deployments.
-
-### Using Environment Variables
-
-```yaml
-services:
-  routstr:
-    image: ghcr.io/routstr/proxy:latest
-    environment:
-      # Pre-configure upstream (optional)
-      - UPSTREAM_BASE_URL=https://api.openai.com/v1
-      - UPSTREAM_API_KEY=sk-proj-...
-      
-      # The admin password is generated and logged once on first start; set
-      # ADMIN_PASSWORD here only as a legacy seed for an existing deployment.
-      
-      # Node identity
-      - NAME=My Provider Node
-      - DESCRIPTION=Fast GPT-4 access via Lightning
-      
-      # Lightning withdrawals
-      - RECEIVE_LN_ADDRESS=me@walletofsatoshi.com
-
-      # Keep the database (and the key file generated beside it) on the volume.
-      - DATABASE_URL=sqlite:////app/data/routstr.db
-    volumes:
-      - ./data:/app/data
-```
-
-### Using an .env File
-
-```yaml
-services:
-  routstr:
-    image: ghcr.io/routstr/proxy:latest
-    env_file:
-      - .env
-    volumes:
-      - ./data:/app/data
-```
-
-Example `.env`:
+Everything can be configured from the dashboard after first start, but you can
+pre-configure a deployment by editing the `.env` file you created above:
 
 ```bash
+# Upstream (optional — can also be set from the dashboard)
 UPSTREAM_BASE_URL=https://api.openai.com/v1
 UPSTREAM_API_KEY=sk-proj-...
-# Keep the database (and the key file generated beside it) on the mounted volume.
-DATABASE_URL=sqlite:////app/data/routstr.db
+
 # Encrypts node secrets at rest. Optional — if unset, a key is generated next to
 # your database (on the same volume) and its file is named once for backup. Set
 # it explicitly to manage the key yourself.
 ROUTSTR_SECRET_KEY=
+
+# Node identity
 NAME=My Provider Node
+DESCRIPTION=Fast GPT-4 access via Lightning
+
+# Lightning withdrawals
 RECEIVE_LN_ADDRESS=me@walletofsatoshi.com
 ```
 
+The admin password is generated and logged once on first start; set
+`ADMIN_PASSWORD` only as a legacy seed for an existing deployment.
+
 !!! note "Secret key persistence"
     If you leave `ROUTSTR_SECRET_KEY` unset, the node generates one and stores it
-    as `routstr_secret.key` **next to your database**, so it persists on the same
-    volume as your data — just include that volume in your backups. For stronger
-    isolation (keeping the key off the data volume), set `ROUTSTR_SECRET_KEY` from
-    a secrets manager instead.
+    as `routstr_secret.key` **next to your database**, so it persists alongside
+    your data — just include that in your backups. For stronger isolation
+    (keeping the key off the data volume), set `ROUTSTR_SECRET_KEY` from a
+    secrets manager instead.
 
 See [Configuration](configuration.md) for all available options.
 
@@ -182,17 +100,21 @@ See [Configuration](configuration.md) for all available options.
 
 ## Persistence
 
-Point `DATABASE_URL` inside `/app/data` (as the examples above do) so everything
-Routstr persists lands on the mounted volume:
+With the default `compose.yml` the repository directory is mounted into the
+container, so everything Routstr persists stays in the directory you cloned:
 
 | Path | Contents |
 |------|----------|
-| `routstr.db` | SQLite database (settings, API keys, sessions) |
+| `keys.db` | SQLite database (settings, API keys, sessions) |
 | `routstr_secret.key` | Auto-generated master key, written beside the database when `ROUTSTR_SECRET_KEY` is unset |
 | `.wallet/` | Cashu wallet data (your Bitcoin!) |
+| `logs/` | Node logs |
 
 !!! warning "Back Up Your Data"
-    The `./data` volume contains your wallet. Losing it means losing funds. Back up regularly.
+    Your cloned directory holds your wallet and your master key. Losing it means
+    losing funds. Back it up regularly — and don't delete the checkout to
+    "start fresh" without copying `keys.db`, `routstr_secret.key` and `.wallet/`
+    first.
 
 ---
 
@@ -233,26 +155,34 @@ server {
 
 ## Updates
 
-Pull the latest image and restart:
+Check out the new release and rebuild:
 
 ```bash
-docker compose pull
-docker compose up -d
+git fetch --tags
+git checkout v0.4.7   # or the tag you are moving to
+docker compose up -d --build
 ```
+
+`--build` is required: Compose reuses an existing image for a service unless you
+ask it to rebuild.
+
+!!! warning "Back up first"
+    Copy `keys.db`, `routstr_secret.key` and `.wallet/` before updating, and read
+    the release notes for the version you are moving to.
 
 ---
 
-## Building from Source
+## Building Without Starting
 
-### Using Docker Compose
-The easiest way to build everything from source:
+`docker compose up -d` already builds from source. To build the images
+explicitly without starting them:
 
 ```bash
 docker compose build
 ```
 
-### Individual Components
-If you prefer building the node only (requires manual UI build first):
+To build only the node image (the dashboard must already be built into
+`./ui_out`):
 
 ```bash
 docker build -t routstr-node .
