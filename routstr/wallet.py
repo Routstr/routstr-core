@@ -36,7 +36,7 @@ from .mint import (
     mint_cooldown_remaining,
     run_mint_operation,
 )
-from .payment.lnurl import MeltOutcomeAmbiguousError, raw_send_to_lnurl
+from .payment.lnurl import MeltUnpaidError, raw_send_to_lnurl
 
 # cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28; see the module
 # docstring. Installed at import so no mint call can run before the patch.
@@ -1709,9 +1709,9 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
                     await _settle_payout_history(
                         payout_quote_id,
                         status=(
-                            "reconciliation_required"
-                            if isinstance(e, MeltOutcomeAmbiguousError)
-                            else "failed"
+                            "failed"
+                            if isinstance(e, MeltUnpaidError)
+                            else "reconciliation_required"
                         ),
                     )
                 raise

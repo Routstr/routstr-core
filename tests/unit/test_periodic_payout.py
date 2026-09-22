@@ -18,6 +18,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
+from routstr.payment.lnurl import MeltOutcomeAmbiguousError, MeltUnpaidError
 from routstr.wallet import (
     _payout_units,
     _reconcile_stale_payout_history,
@@ -396,6 +397,68 @@ async def test_payout_history_records_the_capped_amount() -> None:
         amount_sats=250_000,
         mint_url="http://mint:3338",
         destination="owner@ln.tld",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (MeltUnpaidError("mint confirmed unpaid"), "failed"),
+        (MeltOutcomeAmbiguousError("outcome unknown"), "reconciliation_required"),
+        (RuntimeError("HTTP 500 after dispatch"), "reconciliation_required"),
+    ],
+)
+async def test_payout_history_marks_failed_only_on_proven_non_payment(
+    error: Exception, expected_status: str
+) -> None:
+    """Only a mint-confirmed unpaid melt is recorded as failed."""
+    from routstr.core.settings import settings
+
+    settle_payout = AsyncMock()
+
+    async def send(*args: object, **kwargs: object) -> int:
+        await kwargs["on_melt_quote"](  # type: ignore[index,operator]
+            "quote-err", "lnbc1err"
+        )
+        raise error
+
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch.object(settings, "primary_mint", "http://mint:3338"),
+        patch.object(settings, "receive_ln_address", "owner@ln.tld"),
+        patch.object(settings, "payout_interval_seconds", _INTERVAL),
+        patch.object(settings, "min_payout_sat", 10),
+        patch.object(settings, "max_payout_sat", 250_000),
+        patch("routstr.wallet.asyncio.sleep", _one_cycle_sleep()),
+        patch("routstr.wallet.db.create_session", _fake_session),
+        patch(
+            "routstr.wallet._get_supported_mint_units",
+            AsyncMock(return_value=["sat"]),
+        ),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=MagicMock())),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            MagicMock(return_value=[MagicMock(amount=1_000_000)]),
+        ),
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            AsyncMock(side_effect=lambda proofs, wallet: proofs),
+        ),
+        patch("routstr.wallet.db.total_user_liability", AsyncMock(return_value=0)),
+        patch(
+            "routstr.wallet.db.list_unsettled_lightning_payouts",
+            AsyncMock(return_value=[]),
+        ),
+        patch("routstr.wallet.db.record_lightning_payout", AsyncMock()),
+        patch("routstr.wallet.db.settle_lightning_payout", settle_payout),
+        patch("routstr.wallet.raw_send_to_lnurl", AsyncMock(side_effect=send)),
+    ):
+        with pytest.raises(_LoopBreak):
+            await periodic_payout()
+
+    settle_payout.assert_awaited_once_with(
+        ANY, "quote-err", status=expected_status, amount_sats=None
     )
 
 
