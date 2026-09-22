@@ -12,12 +12,21 @@ Covers two regressions from the auto-payout / primary-mint audit
 
 from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from routstr.wallet import _payout_units, periodic_payout
+
+
+@pytest.fixture(autouse=True)
+def isolate_wallet_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "routstr.wallet._WALLET_OPERATION_LOCK", tmp_path / "wallet.lock"
+    )
+
 
 # Sentinel interval used to break the otherwise-infinite payout loop after
 # exactly one full cycle.
@@ -156,7 +165,7 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
     from routstr.core.settings import settings
 
     async def _get_wallet(
-        mint_url: str, unit: str, force_reload: bool = False
+        mint_url: str, unit: str, force_reload_proofs: bool = False
     ) -> MagicMock:
         if mint_url == "http://bad:3338":
             raise RuntimeError("mint unreachable")
@@ -219,6 +228,7 @@ async def test_periodic_payout_handles_session_creation_failure() -> None:
         patch.object(settings, "payout_interval_seconds", _INTERVAL),
         patch("routstr.wallet.asyncio.sleep", _one_cycle_sleep()),
         patch("routstr.wallet.db.create_session", create_session),
+        patch.object(settings, "min_payout_sat", 10),
         patch(
             "routstr.wallet._get_supported_mint_units",
             AsyncMock(return_value=["sat", "msat"]),
@@ -255,3 +265,45 @@ async def test_payout_units_excludes_units_the_sender_cannot_pay() -> None:
         AsyncMock(return_value=["usd", "sat", "eur", "msat"]),
     ):
         assert await _payout_units("http://mint:3338") == ["sat", "msat"]
+
+
+@pytest.mark.asyncio
+async def test_periodic_payout_caps_amount_at_max_payout_sat() -> None:
+    """Available balance above max_payout_sat is capped for a single payout."""
+    from routstr.core.settings import settings
+
+    raw_send = AsyncMock(return_value=1000)
+
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch.object(settings, "primary_mint", "http://mint:3338"),
+        patch.object(settings, "receive_ln_address", "owner@ln.tld"),
+        patch.object(settings, "payout_interval_seconds", _INTERVAL),
+        patch.object(settings, "min_payout_sat", 10),
+        patch.object(settings, "max_payout_sat", 250_000),
+        patch("routstr.wallet.asyncio.sleep", _one_cycle_sleep()),
+        patch("routstr.wallet.db.create_session", _fake_session),
+        patch(
+            "routstr.wallet._get_supported_mint_units",
+            AsyncMock(return_value=["sat"]),
+        ),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=MagicMock())),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            MagicMock(return_value=[MagicMock(amount=1_000_000)]),
+        ),
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            AsyncMock(side_effect=lambda proofs, wallet: proofs),
+        ),
+        patch(
+            "routstr.wallet.db.total_user_liability",
+            AsyncMock(return_value=0),
+        ),
+        patch("routstr.wallet.raw_send_to_lnurl", raw_send),
+    ):
+        with pytest.raises(_LoopBreak):
+            await periodic_payout()
+
+    assert raw_send.await_count >= 1
+    assert raw_send.await_args_list[0].kwargs["amount"] == 250_000

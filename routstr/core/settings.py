@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     # Minimum available balance (in satoshis) before profit is paid out over
     # Lightning
     min_payout_sat: int = Field(default=210, gt=0, env="MIN_PAYOUT_SAT")
+    # Gross payout budget in sats, including fees.
+    max_payout_sat: int = Field(default=250_000, gt=0, env="MAX_PAYOUT_SAT")
     # Interval (seconds) between periodic payout attempts. Must be positive.
     payout_interval_seconds: int = Field(
         default=900, gt=0, env="PAYOUT_INTERVAL_SECONDS"

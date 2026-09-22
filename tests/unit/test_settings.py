@@ -207,9 +207,7 @@ async def test_settings_initialize_discards_unknown_keys() -> None:
 
         # Simulate older persisted key name and an unknown key.
         await session.exec(  # type: ignore
-            text(
-                "UPDATE settings SET data = :data WHERE id = 1"
-            ).bindparams(
+            text("UPDATE settings SET data = :data WHERE id = 1").bindparams(
                 data='{"name":"LegacyNode","nostr_analytics_enabled":false,"unknown_key":123}'
             )
         )
@@ -279,7 +277,9 @@ async def test_upstream_api_key_survives_persistence(
         await SettingsService.initialize(session)
         await session.exec(  # type: ignore
             text("UPDATE settings SET data = :d WHERE id = 1").bindparams(
-                d=json.dumps({"name": "LegacyNode", "upstream_api_key": "sk-only-in-db"})
+                d=json.dumps(
+                    {"name": "LegacyNode", "upstream_api_key": "sk-only-in-db"}
+                )
             )
         )
         await session.commit()
