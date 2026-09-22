@@ -509,14 +509,17 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     status: str = Field(
         default="pending",
         description=(
-            "pending, settlement_pending, paid, expired, cancelled, "
+            "pending, settlement_pending, paid, failed, expired, cancelled, "
             "reconciliation_required"
         ),
     )
     api_key_hash: str | None = Field(
         default=None, description="Associated API key hash for topup operations"
     )
-    purpose: str = Field(description="create or topup")
+    direction: str = Field(
+        default="in", description="in for incoming invoices, out for payouts"
+    )
+    purpose: str = Field(description="create, topup or payout")
     mint_url: str | None = Field(
         default=None,
         description="Mint URL where the quote was created (fallback tracking)",
@@ -1003,6 +1006,80 @@ async def complete_routstr_fee_payout(
     result = await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
     return result.rowcount == 1
+
+
+async def record_lightning_payout(
+    session: AsyncSession,
+    *,
+    quote_id: str,
+    bolt11: str,
+    amount_sats: int,
+    mint_url: str,
+    destination: str,
+) -> None:
+    """Record a dispatched payout so it shows up in the Lightning history."""
+    session.add(
+        LightningInvoice(
+            id=uuid.uuid4().hex,
+            bolt11=bolt11,
+            amount_sats=amount_sats,
+            description=f"Payout to {destination}",
+            payment_hash=quote_id,
+            status="pending",
+            direction="out",
+            purpose="payout",
+            mint_url=mint_url,
+            # Payouts settle or fail at the mint; they never expire on our side.
+            expires_at=int(time.time()),
+        )
+    )
+    await session.commit()
+
+
+async def settle_lightning_payout(
+    session: AsyncSession,
+    quote_id: str,
+    *,
+    status: str,
+    amount_sats: int | None = None,
+) -> None:
+    result = await session.exec(
+        select(LightningInvoice)
+        .where(col(LightningInvoice.payment_hash) == quote_id)
+        .where(col(LightningInvoice.direction) == "out")
+    )
+    payout = result.first()
+    if payout is None:
+        logger.warning(
+            "No Lightning payout history row for quote",
+            extra={"quote_id": quote_id, "status": status},
+        )
+        return
+    payout.status = status
+    if status == "paid":
+        payout.paid_at = int(time.time())
+        if amount_sats is not None:
+            payout.amount_sats = amount_sats
+    session.add(payout)
+    await session.commit()
+
+
+UNSETTLED_PAYOUT_STATUSES = ("pending", "reconciliation_required")
+
+
+async def list_unsettled_lightning_payouts(
+    session: AsyncSession, mint_url: str, *, created_before: int
+) -> list[LightningInvoice]:
+    """Payout rows whose mint outcome was never written back to history."""
+    result = await session.exec(
+        select(LightningInvoice)
+        .where(col(LightningInvoice.direction) == "out")
+        .where(col(LightningInvoice.mint_url) == mint_url)
+        .where(col(LightningInvoice.status).in_(UNSETTLED_PAYOUT_STATUSES))
+        .where(col(LightningInvoice.created_at) < created_before)
+        .order_by(col(LightningInvoice.created_at))
+    )
+    return list(result.all())
 
 
 async def total_user_liability(db_session: AsyncSession) -> int:

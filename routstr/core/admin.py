@@ -2051,6 +2051,7 @@ async def get_transactions_api(
 async def get_lightning_invoices_api(
     status: str | None = None,
     purpose: str | None = None,
+    direction: str | None = None,
     search: str | None = None,
     limit: int = 50,
     offset: int = 0,
@@ -2063,6 +2064,8 @@ async def get_lightning_invoices_api(
             base = base.where(LightningInvoice.status == status)
         if purpose:
             base = base.where(LightningInvoice.purpose == purpose)
+        if direction:
+            base = base.where(LightningInvoice.direction == direction)
         if search:
             pattern = f"%{search}%"
             base = base.where(
