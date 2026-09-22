@@ -33,8 +33,8 @@ def _make_cost_data(total_msats: int = 5000) -> CostData:
         total_usd=0.00025,
         input_tokens=100,
         output_tokens=50,
-        input_observed=True,
-        output_observed=True,
+        input_source="reported",
+        output_source="reported",
     )
 
 
@@ -43,10 +43,10 @@ def test_zero_usage_x_cashu_preserves_captured_presence() -> None:
     context = TerminalOutcomeContext(
         outcome_id="zero-usage",
         model_identifier="author/model",
-        input_observed=True,
-        output_observed=True,
-        cache_read_observed=False,
-        cache_creation_observed=False,
+        input_source="reported",
+        output_source="reported",
+        cache_read_source="missing",
+        cache_creation_source="missing",
     )
 
     with patch("routstr.upstream.base.record_terminal_outcome", record):
@@ -58,8 +58,7 @@ def test_zero_usage_x_cashu_preserves_captured_presence() -> None:
         )
 
     recorded_context = record.call_args.args[0]
-    assert recorded_context.input_observed is True
-    assert recorded_context.output_observed is True
+    assert recorded_context.input_source == recorded_context.output_source == "reported"
     assert record.call_args.kwargs["revenue_msats"] == 10_000
 
 
@@ -147,10 +146,9 @@ async def test_non_streaming_cost_sats_value_rounds_down() -> None:
     )
     record.assert_called_once()
     recorded_context = record.call_args.args[0]
-    assert recorded_context.input_observed is True
-    assert recorded_context.output_observed is True
-    assert recorded_context.cache_read_observed is False
-    assert recorded_context.cache_creation_observed is False
+    assert recorded_context.input_source == recorded_context.output_source == "reported"
+    assert recorded_context.cache_read_source == "missing"
+    assert recorded_context.cache_creation_source == "missing"
     assert record.call_args.kwargs["revenue_msats"] == 2000
     assert settlement_order == ["refund", "record"]
 
@@ -378,6 +376,5 @@ async def test_native_messages_stream_keeps_input_usage_in_stats() -> None:
     outcome = writer.submit.call_args.args[0]
     assert outcome.revenue_msats == 5
     assert (outcome.input_tokens, outcome.output_tokens) == (10, 5)
-    assert outcome.input_observed is outcome.output_observed is True
     assert outcome.input_source == outcome.output_source == "reported"
     writer.declare_loss.assert_not_called()

@@ -230,26 +230,11 @@ def _record_x_cashu_terminal_outcome(
             )
             if isinstance(value, str):
                 metadata[name] = value
-    context = replace(
-        context,
-        **metadata,
-        input_observed=bool(_cost_field(cost_data, "input_observed"))
-        if cost_data is not None
-        else context.input_observed is True,
-        output_observed=bool(_cost_field(cost_data, "output_observed"))
-        if cost_data is not None
-        else context.output_observed is True,
-        cache_read_observed=bool(_cost_field(cost_data, "cache_read_observed"))
-        if cost_data is not None
-        else context.cache_read_observed is True,
-        cache_creation_observed=bool(_cost_field(cost_data, "cache_creation_observed"))
-        if cost_data is not None
-        else context.cache_creation_observed is True,
-    )
+    context = replace(context, **metadata)
     if usage is not None:
         # Stats keep what upstream reported, even where billing did not parse it.
         presence = usage_field_presence(usage)
-        context = replace(context, **presence.as_dict(), **presence.sources_dict())
+        context = replace(context, **presence.sources_dict())
     counted: CostMetadata = cost_data if cost_data is not None else {}
     record_terminal_outcome(
         context,
@@ -3342,15 +3327,7 @@ class BaseUpstreamProvider:
             terminal_context = outcome_state.settlement_context()
             if terminal_context is not None:
                 _record_x_cashu_terminal_outcome(
-                    replace(
-                        terminal_context,
-                        input_observed=usage_presence.input_observed,
-                        output_observed=usage_presence.output_observed,
-                        cache_read_observed=usage_presence.cache_read_observed,
-                        cache_creation_observed=(
-                            usage_presence.cache_creation_observed
-                        ),
-                    ),
+                    replace(terminal_context, **usage_presence.sources_dict()),
                     cost_data,
                     amount=amount,
                     unit=unit,

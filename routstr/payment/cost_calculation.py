@@ -46,10 +46,6 @@ class CostData(BaseModel):
     output_source: str = Field(default="missing", exclude=True)
     cache_read_source: str = Field(default="missing", exclude=True)
     cache_creation_source: str = Field(default="missing", exclude=True)
-    input_observed: bool = Field(default=False, exclude=True)
-    output_observed: bool = Field(default=False, exclude=True)
-    cache_read_observed: bool = Field(default=False, exclude=True)
-    cache_creation_observed: bool = Field(default=False, exclude=True)
     # Actual debit after finalization; None means settlement has not run yet.
     charged_msats: int | None = None
     upstream_usd: float = Field(default=0.0, exclude=True)
@@ -87,7 +83,6 @@ def _empty_cost(
         cache_creation_input_tokens=0,
         cache_read_msats=0,
         cache_creation_msats=0,
-        **presence.as_dict(),
         **presence.sources_dict(),
     )
 
@@ -339,7 +334,6 @@ async def calculate_cost(
             cache_creation_input_tokens=cache_creation_tokens,
             cache_read_msats=0,
             cache_creation_msats=0,
-            **presence.as_dict(),
             **presence.sources_dict(),
         )
 
@@ -647,7 +641,6 @@ def _calculate_from_usd_cost(
         cache_creation_msats=cache_creation_msats,
         upstream_usd=reported_usd,
         pricing_source="reported_usd",
-        **presence.as_dict(),
         **presence.sources_dict(),
     )
 
@@ -722,6 +715,5 @@ def _calculate_from_tokens(
         cache_read_msats=int(calc_cache_read_msats),
         cache_creation_msats=int(calc_cache_write_msats),
         pricing_source=pricing_source,
-        **presence.as_dict(),
         **presence.sources_dict(),
     )

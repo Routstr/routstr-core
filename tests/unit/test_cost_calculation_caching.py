@@ -55,10 +55,9 @@ async def test_openai_cache_subtraction() -> None:
     assert result.input_tokens == 1000  # 2000 - 1000
     assert result.cache_read_input_tokens == 1000
     assert result.output_tokens == 100
-    assert result.input_observed is True
-    assert result.output_observed is True
-    assert result.cache_read_observed is True
-    assert result.cache_creation_observed is False
+    assert result.input_source == result.output_source == "reported"
+    assert result.cache_read_source == "reported"
+    assert result.cache_creation_source == "missing"
 
 
 # ============================================================================
@@ -780,10 +779,8 @@ async def test_missing_usage_block(mock_fixed_pricing: None) -> None:
     assert result.input_tokens == 0
     assert result.cache_read_input_tokens == 0
     assert result.output_tokens == 0
-    assert result.input_observed is False
-    assert result.output_observed is False
-    assert result.cache_read_observed is False
-    assert result.cache_creation_observed is False
+    assert result.input_source == result.output_source == "missing"
+    assert result.cache_read_source == result.cache_creation_source == "missing"
 
 
 # ============================================================================
@@ -817,18 +814,14 @@ async def test_explicit_zero_presence_survives_cost_calculation(
     result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
-    assert result.input_observed is True
-    assert result.output_observed is True
-    assert result.cache_read_observed is True
-    assert result.cache_creation_observed is True
-    assert "input_observed" not in result.dict()
     assert result.input_source == result.output_source == "reported"
+    assert result.cache_read_source == result.cache_creation_source == "reported"
     assert "input_source" not in result.dict()
     assert "pricing_source" not in result.dict()
 
 
 @pytest.mark.asyncio
-async def test_estimated_usage_cost_is_unobserved(mock_fixed_pricing: None) -> None:
+async def test_estimated_usage_cost_is_not_reported(mock_fixed_pricing: None) -> None:
     response = {
         "model": "gpt-4",
         "usage": {
@@ -843,8 +836,6 @@ async def test_estimated_usage_cost_is_unobserved(mock_fixed_pricing: None) -> N
     assert isinstance(result, CostData)
     assert result.input_tokens == 12
     assert result.output_tokens == 3
-    assert result.input_observed is False
-    assert result.output_observed is False
     assert result.input_source == result.output_source == "estimated"
     assert result.cache_read_source == result.cache_creation_source == "missing"
     assert result.pricing_source == "fixed"

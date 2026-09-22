@@ -119,10 +119,10 @@ async def test_finalize_actual_cost_payment_updates_balance_and_releases_reserve
             "output_tokens": 20,
             "input_msats": 500,
             "output_msats": 700,
-            "input_observed": True,
-            "output_observed": True,
-            "cache_read_observed": True,
-            "cache_creation_observed": False,
+            "input_source": "reported",
+            "output_source": "reported",
+            "cache_read_source": "reported",
+            "cache_creation_source": "missing",
         },
         reservation_snapshot=reservation,
         terminal_outcome=terminal_outcome,
@@ -144,10 +144,6 @@ async def test_finalize_actual_cost_payment_updates_balance_and_releases_reserve
             output_source="reported",
             cache_read_source="reported",
             cache_creation_source="missing",
-            input_observed=True,
-            output_observed=True,
-            cache_read_observed=True,
-            cache_creation_observed=False,
         ),
         input_tokens=10,
         output_tokens=20,
@@ -299,14 +295,6 @@ async def test_unmeasured_ehbp_releases_reservation(
         TerminalOutcomeContext(
             outcome_id="ehbp-unmeasured-outcome",
             model_identifier="tinfoil/model",
-            input_source="missing",
-            output_source="missing",
-            cache_read_source="missing",
-            cache_creation_source="missing",
-            input_observed=False,
-            output_observed=False,
-            cache_read_observed=False,
-            cache_creation_observed=False,
         ),
         input_tokens=0,
         output_tokens=0,
@@ -444,10 +432,10 @@ async def test_x_cashu_ledger_failure_cannot_trigger_full_refund(
                 "output_tokens": 5,
                 "input_msats": 1_000,
                 "output_msats": 999,
-                "input_observed": True,
-                "output_observed": True,
-                "cache_read_observed": False,
-                "cache_creation_observed": False,
+                "input_source": "reported",
+                "output_source": "reported",
+                "cache_read_source": "missing",
+                "cache_creation_source": "missing",
                 "actual_model": "served-model",
                 "actual_model_identifier": "served/canonical-model",
             }
@@ -496,5 +484,5 @@ async def test_x_cashu_ledger_failure_cannot_trigger_full_refund(
     submission = writer.submissions[0]
     assert getattr(submission, "model_identifier") == "served/canonical-model"
     assert getattr(submission, "revenue_msats") == 2_000
-    assert getattr(submission, "input_observed") is True
-    assert getattr(submission, "output_observed") is True
+    assert getattr(submission, "input_source") == "reported"
+    assert getattr(submission, "output_source") == "reported"

@@ -271,8 +271,8 @@ class TestComputeEhbpActualCost:
         assert result["total_msats"] == 0
         assert result["input_tokens"] == 0
         assert result["output_tokens"] == 0
-        assert result["input_observed"] is False
-        assert result["output_observed"] is False
+        assert result["input_source"] == "missing"
+        assert result["output_source"] == "missing"
 
     @pytest.mark.asyncio
     async def test_usage_parsed_and_clamped(self) -> None:
@@ -308,10 +308,10 @@ class TestComputeEhbpActualCost:
             assert result["total_tokens"] == 109
             assert result["input_msats"] == 10
             assert result["output_msats"] == 20
-            assert result["input_observed"] is True
-            assert result["output_observed"] is True
-            assert result["cache_read_observed"] is False
-            assert result["cache_creation_observed"] is False
+            assert result["input_source"] == "reported"
+            assert result["output_source"] == "reported"
+            assert result["cache_read_source"] == "missing"
+            assert result["cache_creation_source"] == "missing"
 
     @pytest.mark.asyncio
     async def test_cache_fields_propagated(self) -> None:
@@ -386,8 +386,8 @@ class TestComputeEhbpActualCost:
             assert result["total_msats"] == 0
             assert result["input_tokens"] == input_count
             assert result["output_tokens"] == output_count
-            assert result["input_observed"] is True
-            assert result["output_observed"] is True
+            assert result["input_source"] == "reported"
+            assert result["output_source"] == "reported"
 
     @pytest.mark.asyncio
     async def test_partially_malformed_usage_preserves_independent_presence(
@@ -406,8 +406,8 @@ class TestComputeEhbpActualCost:
         assert result["total_msats"] == 0
         assert result["input_tokens"] == 7
         assert result["output_tokens"] == 0
-        assert result["input_observed"] is True
-        assert result["output_observed"] is False
+        assert result["input_source"] == "reported"
+        assert result["output_source"] == "missing"
 
     @pytest.mark.asyncio
     async def test_model_match_no_actual_model_key(self) -> None:

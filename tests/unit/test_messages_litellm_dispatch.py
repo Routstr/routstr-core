@@ -651,8 +651,8 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
     assert combined["usage"]["estimated"] is True
     assert combined["model"] == "openai/gpt-4o-mini"
     assert captured_cost_call["reservation_snapshot"] is reservation
-    assert captured_cost_call["usage_presence"].input_observed is True
-    assert captured_cost_call["usage_presence"].output_observed is True
+    assert captured_cost_call["usage_presence"].input_source == "reported"
+    assert captured_cost_call["usage_presence"].output_source == "reported"
 
 
 @pytest.mark.asyncio
@@ -759,8 +759,8 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
     assert combined["usage"]["output_tokens"] == 4
     assert combined["model"] == "openai/gpt-4o-mini"
     assert captured["reservation_snapshot"] is reservation
-    assert captured["usage_presence"].input_observed is True
-    assert captured["usage_presence"].output_observed is True
+    assert captured["usage_presence"].input_source == "reported"
+    assert captured["usage_presence"].output_source == "reported"
 
 
 # ---------------------------------------------------------------------------
@@ -946,8 +946,8 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
     get_cost_call = mock_get_cost.await_args
     assert get_cost_call is not None
     usage_presence = get_cost_call.args[3]
-    assert usage_presence.input_observed is True
-    assert usage_presence.output_observed is True
+    assert usage_presence.input_source == "reported"
+    assert usage_presence.output_source == "reported"
 
     emitted: list[bytes] = []
     async for chunk in result.body_iterator:

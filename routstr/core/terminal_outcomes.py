@@ -39,10 +39,6 @@ Clock = Callable[[], int]
 class TerminalOutcomeContext:
     outcome_id: str | None
     model_identifier: str | None
-    input_observed: bool | None = None
-    output_observed: bool | None = None
-    cache_read_observed: bool | None = None
-    cache_creation_observed: bool | None = None
 
     served_model_identifier: str | None = None
     pricing_source: str | None = None
@@ -64,10 +60,6 @@ class _QueuedOutcome:
     output_source: str
     cache_read_source: str
     cache_creation_source: str
-    input_observed: bool | None
-    output_observed: bool | None
-    cache_read_observed: bool | None
-    cache_creation_observed: bool | None
     input_tokens: int
     output_tokens: int
     cache_read_input_tokens: int
@@ -808,15 +800,8 @@ def record_terminal_outcome(
             output_tokens = counted.output_tokens
             cache_read_input_tokens = counted.cache_read_tokens
             cache_creation_input_tokens = counted.cache_write_tokens
-        observed = (
-            context.input_observed,
-            context.output_observed,
-            context.cache_read_observed,
-            context.cache_creation_observed,
-        )
         sources = {
-            name + "_source": getattr(context, name + "_source")
-            or ("reported" if getattr(context, name + "_observed") else "missing")
+            name + "_source": getattr(context, name + "_source") or "missing"
             for name in ("input", "output", "cache_read", "cache_creation")
         }
         tokens = (
@@ -835,7 +820,6 @@ def record_terminal_outcome(
                 source not in {"reported", "estimated", "missing"}
                 for source in sources.values()
             )
-            or any(value is not None and type(value) is not bool for value in observed)
             or any(not _valid_nonnegative_int(value, _MAX_TOKENS) for value in tokens)
             or not _valid_nonnegative_int(revenue_msats, _MAX_REVENUE_MSATS)
             or not _valid_nonnegative_int(timestamp)
@@ -853,10 +837,6 @@ def record_terminal_outcome(
                 served_model_identifier=context.served_model_identifier,
                 pricing_source=context.pricing_source,
                 **sources,
-                input_observed=context.input_observed,
-                output_observed=context.output_observed,
-                cache_read_observed=context.cache_read_observed,
-                cache_creation_observed=context.cache_creation_observed,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cache_read_input_tokens=cache_read_input_tokens,

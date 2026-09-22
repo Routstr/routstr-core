@@ -210,10 +210,10 @@ def test_usage_presence_counts_explicit_zero_across_dialects() -> None:
     )
 
     assert presence == UsageFieldPresence(
-        input_observed=True,
-        output_observed=True,
-        cache_read_observed=True,
-        cache_creation_observed=True,
+        input_source="reported",
+        output_source="reported",
+        cache_read_source="reported",
+        cache_creation_source="reported",
     )
 
 
@@ -239,13 +239,14 @@ def test_usage_presence_recognizes_responses_cache_details() -> None:
         }
     )
 
-    assert presence.input_observed is True
-    assert presence.output_observed is True
-    assert presence.cache_read_observed is True
-    assert presence.cache_creation_observed is False
+    assert presence == UsageFieldPresence(
+        input_source="reported",
+        output_source="reported",
+        cache_read_source="reported",
+    )
 
 
-def test_locally_estimated_usage_is_not_observed() -> None:
+def test_locally_estimated_usage_is_not_reported() -> None:
     presence = usage_field_presence(
         {
             "input_tokens": 12,
@@ -254,8 +255,6 @@ def test_locally_estimated_usage_is_not_observed() -> None:
         }
     )
 
-    assert presence.input_observed is False
-    assert presence.output_observed is False
     assert presence.sources_dict() == {
         "input_source": "estimated",
         "output_source": "estimated",

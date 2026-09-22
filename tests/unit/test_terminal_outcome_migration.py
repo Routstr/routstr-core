@@ -71,10 +71,6 @@ def test_terminal_outcome_migration_round_trips(tmp_path: Path) -> None:
             "output_source",
             "cache_read_source",
             "cache_creation_source",
-            "input_observed",
-            "output_observed",
-            "cache_read_observed",
-            "cache_creation_observed",
             "input_tokens",
             "output_tokens",
             "cache_read_input_tokens",
@@ -92,13 +88,6 @@ def test_terminal_outcome_migration_round_trips(tmp_path: Path) -> None:
             assert outcome_columns[column] == ("BIGINT", 1)
         assert outcome_columns["terminal_day"] == ("DATE", 1)
         assert outcome_columns["model_identifier"] == ("VARCHAR", 0)
-        for column in (
-            "input_observed",
-            "output_observed",
-            "cache_read_observed",
-            "cache_creation_observed",
-        ):
-            assert outcome_columns[column] == ("BOOLEAN", 0)
         outcome_index = connection.execute(
             "PRAGMA index_info(ix_terminal_outcomes_terminal_day_terminal_at_ms)"
         ).fetchall()
@@ -163,19 +152,17 @@ def test_terminal_outcome_migration_round_trips(tmp_path: Path) -> None:
         connection.execute(
             "INSERT INTO terminal_outcomes "
             "(outcome_id, terminal_at_ms, terminal_day, model_identifier, "
-            "input_observed, output_observed, cache_read_observed, cache_creation_observed, "
             "input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, revenue_msats) VALUES "
             "('request-1', 1, '2026-08-31', 'author/model', "
-            "NULL, NULL, NULL, NULL, 10, 5, 0, 0, 1999)"
+            "10, 5, 0, 0, 1999)"
         )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO terminal_outcomes "
                 "(outcome_id, terminal_at_ms, terminal_day, model_identifier, "
-                "input_observed, output_observed, cache_read_observed, cache_creation_observed, "
                 "input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, revenue_msats) VALUES "
                 "('request-invalid', 2, '2026-08-31', 'author/model', "
-                "NULL, NULL, NULL, NULL, -1, 0, 0, 0, 0)"
+                "-1, 0, 0, 0, 0)"
             )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(

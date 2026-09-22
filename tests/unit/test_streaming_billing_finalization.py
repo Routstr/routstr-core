@@ -157,8 +157,8 @@ async def test_post_commit_failure_cannot_release_charged_reservation() -> None:
         input_msats=0,
         output_msats=0,
         total_msats=500,
-        input_observed=True,
-        cache_read_observed=True,
+        input_source="reported",
+        cache_read_source="reported",
     )
     async with AsyncSession(engine, expire_on_commit=False) as session:
         session.add(key)
@@ -202,14 +202,10 @@ async def test_post_commit_failure_cannot_release_charged_reservation() -> None:
                 outcome_id="post-commit-refresh-failure",
                 model_identifier="test-model",
                 pricing_source="missing",
-                input_source="missing",
+                input_source="reported",
                 output_source="missing",
-                cache_read_source="missing",
+                cache_read_source="reported",
                 cache_creation_source="missing",
-                input_observed=True,
-                output_observed=False,
-                cache_read_observed=True,
-                cache_creation_observed=False,
             ),
             input_tokens=0,
             output_tokens=0,
@@ -878,8 +874,6 @@ async def test_native_messages_stats_ignore_network_chunk_boundaries(
         assert outcome.revenue_msats == charged
         assert (outcome.input_tokens, outcome.output_tokens) == tokens
         assert (outcome.input_source, outcome.output_source) == sources
-        assert outcome.input_observed is (sources[0] == "reported")
-        assert outcome.output_observed is (sources[1] == "reported")
         writer.declare_loss.assert_not_called()
     finally:
         await engine.dispose()
@@ -1078,10 +1072,10 @@ async def test_client_disconnect_midstream_estimates_usage_and_stops_heartbeat(
         recorded_context = record_outcome.call_args.args[0]
         assert recorded_context.outcome_id == terminal_outcome.outcome_id
         assert recorded_context.model_identifier == terminal_outcome.model_identifier
-        assert recorded_context.input_observed is False
-        assert recorded_context.output_observed is False
-        assert recorded_context.cache_read_observed is False
-        assert recorded_context.cache_creation_observed is False
+        assert recorded_context.input_source == "estimated"
+        assert recorded_context.output_source == "estimated"
+        assert recorded_context.cache_read_source == "missing"
+        assert recorded_context.cache_creation_source == "missing"
         assert record_outcome.call_args.kwargs["revenue_msats"] == 70
     else:
         # Billing settles, but an early disconnect is not a completed outcome.

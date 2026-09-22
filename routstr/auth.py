@@ -1217,26 +1217,16 @@ async def adjust_payment_for_tokens(
                 output_source=cost.output_source,
                 cache_read_source=cost.cache_read_source,
                 cache_creation_source=cost.cache_creation_source,
-                input_observed=cost.input_observed,
-                output_observed=cost.output_observed,
-                cache_read_observed=cost.cache_read_observed,
-                cache_creation_observed=cost.cache_creation_observed,
             )
             if terminal_usage is not None:
                 recorded_usage = {**(recorded_usage or {}), **terminal_usage}
                 presence = UsageFieldPresence(
-                    input_observed=cost.input_observed,
-                    output_observed=cost.output_observed,
-                    cache_read_observed=cost.cache_read_observed,
-                    cache_creation_observed=cost.cache_creation_observed,
-                    input_estimated=cost.input_source == "estimated",
-                    output_estimated=cost.output_source == "estimated",
-                    cache_read_estimated=cost.cache_read_source == "estimated",
-                    cache_creation_estimated=cost.cache_creation_source == "estimated",
+                    input_source=cost.input_source,
+                    output_source=cost.output_source,
+                    cache_read_source=cost.cache_read_source,
+                    cache_creation_source=cost.cache_creation_source,
                 ).merged(usage_field_presence(terminal_usage))
-                context = replace(
-                    context, **presence.as_dict(), **presence.sources_dict()
-                )
+                context = replace(context, **presence.sources_dict())
             record_terminal_outcome(
                 context,
                 input_tokens=cost.input_tokens,

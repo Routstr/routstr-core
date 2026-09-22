@@ -104,7 +104,7 @@ async def test_writer_persists_one_immutable_outcome_and_closes_own_run(
         runs = (await session.exec(select(TerminalOutcomeWriterRun))).all()
     assert len(stored) == 1
     assert stored[0].terminal_day == day
-    assert stored[0].input_observed is None
+    assert stored[0].input_source == "missing"
     assert stored[0].revenue_msats == 2000
     assert len(epochs) == 1
     assert epochs[0].coverage_start_day == day + timedelta(days=1)
@@ -587,10 +587,10 @@ async def test_encrypted_settlement_persists_once_after_successful_debit(
             "total_msats": charge,
             "input_tokens": 10,
             "output_tokens": 20,
-            "input_observed": True,
-            "output_observed": True,
-            "cache_read_observed": False,
-            "cache_creation_observed": False,
+            "input_source": "reported",
+            "output_source": "reported",
+            "cache_read_source": "missing",
+            "cache_creation_source": "missing",
             "pricing_source": "configured",
         }
         args = (

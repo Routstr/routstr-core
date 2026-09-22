@@ -234,14 +234,7 @@ def _context_with_presence(
     context: TerminalOutcomeContext,
     presence: UsageFieldPresence,
 ) -> TerminalOutcomeContext:
-    return replace(
-        context,
-        input_observed=presence.input_observed,
-        output_observed=presence.output_observed,
-        cache_read_observed=presence.cache_read_observed,
-        cache_creation_observed=presence.cache_creation_observed,
-        **presence.sources_dict(),
-    )
+    return replace(context, **presence.sources_dict())
 
 
 def _context_with_served_model(
@@ -263,10 +256,10 @@ def _context_with_served_model(
 
 def _cost_info_presence(cost_info: Mapping[str, object]) -> UsageFieldPresence:
     return UsageFieldPresence(
-        input_observed=cost_info.get("input_observed") is True,
-        output_observed=cost_info.get("output_observed") is True,
-        cache_read_observed=cost_info.get("cache_read_observed") is True,
-        cache_creation_observed=cost_info.get("cache_creation_observed") is True,
+        input_source=str(cost_info.get("input_source", "missing")),
+        output_source=str(cost_info.get("output_source", "missing")),
+        cache_read_source=str(cost_info.get("cache_read_source", "missing")),
+        cache_creation_source=str(cost_info.get("cache_creation_source", "missing")),
     )
 
 
@@ -454,7 +447,6 @@ def _build_cost_info(
         "cache_read_msats": cache_read_msats,
         "cache_creation_msats": cache_creation_msats,
         "total_usd": total_usd,
-        **presence.as_dict(),
         **presence.sources_dict(),
         "pricing_source": pricing_source,
     }
@@ -905,17 +897,6 @@ async def finalize_ehbp_max_cost_payment(
     if not released:
         await _stop_reservation_heartbeat(reservation.release_id)
     if released and terminal_outcome is not None:
-        terminal_outcome = _context_with_presence(
-            terminal_outcome,
-            UsageFieldPresence(
-                input_observed=terminal_outcome.input_observed is True,
-                output_observed=terminal_outcome.output_observed is True,
-                cache_read_observed=terminal_outcome.cache_read_observed is True,
-                cache_creation_observed=(
-                    terminal_outcome.cache_creation_observed is True
-                ),
-            ),
-        )
         usage = unpriced_cost({"usage": usage_data})
         record_terminal_outcome(
             terminal_outcome,

@@ -45,13 +45,6 @@ from typing import TypedDict
 from pydantic.v1 import BaseModel
 
 
-class UsageObservedFields(TypedDict):
-    input_observed: bool
-    output_observed: bool
-    cache_read_observed: bool
-    cache_creation_observed: bool
-
-
 class UsageSources(TypedDict):
     input_source: str
     output_source: str
@@ -61,53 +54,36 @@ class UsageSources(TypedDict):
 
 @dataclass(frozen=True)
 class UsageFieldPresence:
-    """Whether each canonical usage dimension was parseably reported."""
+    """Where each canonical usage count came from: reported, estimated or missing."""
 
-    input_observed: bool = False
-    output_observed: bool = False
-    cache_read_observed: bool = False
-    cache_creation_observed: bool = False
-    input_estimated: bool = False
-    output_estimated: bool = False
-    cache_read_estimated: bool = False
-    cache_creation_estimated: bool = False
+    input_source: str = "missing"
+    output_source: str = "missing"
+    cache_read_source: str = "missing"
+    cache_creation_source: str = "missing"
 
     def sources_dict(self) -> UsageSources:
-        def source(name: str) -> str:
-            if getattr(self, name + "_observed"):
-                return "reported"
-            return "estimated" if getattr(self, name + "_estimated") else "missing"
-
         return {
-            "input_source": source("input"),
-            "output_source": source("output"),
-            "cache_read_source": source("cache_read"),
-            "cache_creation_source": source("cache_creation"),
+            "input_source": self.input_source,
+            "output_source": self.output_source,
+            "cache_read_source": self.cache_read_source,
+            "cache_creation_source": self.cache_creation_source,
         }
 
     def merged(self, other: "UsageFieldPresence") -> "UsageFieldPresence":
+        def stronger(a: str, b: str) -> str:
+            for label in ("reported", "estimated"):
+                if label in (a, b):
+                    return label
+            return "missing"
+
         return UsageFieldPresence(
-            input_estimated=self.input_estimated or other.input_estimated,
-            output_estimated=self.output_estimated or other.output_estimated,
-            cache_read_estimated=self.cache_read_estimated
-            or other.cache_read_estimated,
-            cache_creation_estimated=self.cache_creation_estimated
-            or other.cache_creation_estimated,
-            input_observed=self.input_observed or other.input_observed,
-            output_observed=self.output_observed or other.output_observed,
-            cache_read_observed=(self.cache_read_observed or other.cache_read_observed),
-            cache_creation_observed=(
-                self.cache_creation_observed or other.cache_creation_observed
+            input_source=stronger(self.input_source, other.input_source),
+            output_source=stronger(self.output_source, other.output_source),
+            cache_read_source=stronger(self.cache_read_source, other.cache_read_source),
+            cache_creation_source=stronger(
+                self.cache_creation_source, other.cache_creation_source
             ),
         )
-
-    def as_dict(self) -> UsageObservedFields:
-        return {
-            "input_observed": self.input_observed,
-            "output_observed": self.output_observed,
-            "cache_read_observed": self.cache_read_observed,
-            "cache_creation_observed": self.cache_creation_observed,
-        }
 
 
 class NormalizedUsage(BaseModel):
@@ -161,47 +137,41 @@ def _has_parseable_field(data: object, *fields: str) -> bool:
 
 
 def usage_field_presence(usage_data: object) -> UsageFieldPresence:
-    """Capture raw usage-field presence before numeric normalization.
+    """Label each raw usage count before numeric normalization.
 
-    Locally estimated usage is intentionally unobserved. Explicit zero is
-    observed, while an absent or unusable value is not.
+    Explicit zero is reported, while an absent or unusable value is missing.
     """
     if not isinstance(usage_data, dict):
         return UsageFieldPresence()
 
+    found = "estimated" if usage_data.get("estimated") is True else "reported"
+
+    def source(present: bool) -> str:
+        return found if present else "missing"
+
     prompt_details = usage_data.get("prompt_tokens_details")
     input_details = usage_data.get("input_tokens_details")
-    cache_read_observed = (
-        _has_parseable_field(usage_data, "cache_read_input_tokens")
-        or _has_parseable_field(prompt_details, "cached_tokens")
-        or _has_parseable_field(input_details, "cached_tokens")
-        or _has_parseable_field(usage_data, "prompt_cache_hit_tokens")
-    )
-    cache_creation_observed = (
-        _has_parseable_field(usage_data, "cache_creation_input_tokens")
-        or _has_parseable_field(
-            prompt_details, "cache_creation_tokens", "cache_write_tokens"
-        )
-        or _has_parseable_field(input_details, "cache_write_tokens")
-    )
-    presence = UsageFieldPresence(
-        input_observed=_has_parseable_field(
-            usage_data, "prompt_tokens", "input_tokens"
+    return UsageFieldPresence(
+        input_source=source(
+            _has_parseable_field(usage_data, "prompt_tokens", "input_tokens")
         ),
-        output_observed=_has_parseable_field(
-            usage_data, "completion_tokens", "output_tokens"
+        output_source=source(
+            _has_parseable_field(usage_data, "completion_tokens", "output_tokens")
         ),
-        cache_read_observed=cache_read_observed,
-        cache_creation_observed=cache_creation_observed,
+        cache_read_source=source(
+            _has_parseable_field(usage_data, "cache_read_input_tokens")
+            or _has_parseable_field(prompt_details, "cached_tokens")
+            or _has_parseable_field(input_details, "cached_tokens")
+            or _has_parseable_field(usage_data, "prompt_cache_hit_tokens")
+        ),
+        cache_creation_source=source(
+            _has_parseable_field(usage_data, "cache_creation_input_tokens")
+            or _has_parseable_field(
+                prompt_details, "cache_creation_tokens", "cache_write_tokens"
+            )
+            or _has_parseable_field(input_details, "cache_write_tokens")
+        ),
     )
-    if usage_data.get("estimated") is True:
-        return UsageFieldPresence(
-            input_estimated=presence.input_observed,
-            output_estimated=presence.output_observed,
-            cache_read_estimated=presence.cache_read_observed,
-            cache_creation_estimated=presence.cache_creation_observed,
-        )
-    return presence
 
 
 def _first_token_count(usage_data: dict, *fields: str) -> int:
