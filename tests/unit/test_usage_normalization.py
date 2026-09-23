@@ -15,7 +15,12 @@ os.environ.setdefault("LIGHTNING_ADDRESS", "test@stm.to")
 
 import pytest
 
-from routstr.payment.usage import NormalizedUsage, normalize_usage
+from routstr.payment.usage import (
+    NormalizedUsage,
+    UsageFieldPresence,
+    normalize_usage,
+    usage_field_presence,
+)
 
 # ============================================================================
 # The union parser: one canonical shape for all known dialects
@@ -190,3 +195,69 @@ def test_normalize_usage_never_negative() -> None:
     assert result is not None
     assert result.input_tokens == 0
     assert result.cache_read_tokens == 150
+
+
+def test_usage_presence_counts_explicit_zero_across_dialects() -> None:
+    presence = usage_field_presence(
+        {
+            "prompt_tokens": 0,
+            "completion_tokens": "0",
+            "prompt_tokens_details": {
+                "cached_tokens": 0.0,
+                "cache_write_tokens": "0",
+            },
+        }
+    )
+
+    assert presence == UsageFieldPresence(
+        input_source="reported",
+        output_source="reported",
+        cache_read_source="reported",
+        cache_creation_source="reported",
+    )
+
+
+def test_usage_presence_rejects_missing_and_unparseable_fields() -> None:
+    presence = usage_field_presence(
+        {
+            "input_tokens": None,
+            "output_tokens": "not-a-number",
+            "cache_read_input_tokens": -1,
+            "cache_creation_input_tokens": False,
+        }
+    )
+
+    assert presence == UsageFieldPresence()
+
+
+def test_usage_presence_recognizes_responses_cache_details() -> None:
+    presence = usage_field_presence(
+        {
+            "input_tokens": 12,
+            "output_tokens": 3,
+            "input_tokens_details": {"cached_tokens": 0},
+        }
+    )
+
+    assert presence == UsageFieldPresence(
+        input_source="reported",
+        output_source="reported",
+        cache_read_source="reported",
+    )
+
+
+def test_locally_estimated_usage_is_not_reported() -> None:
+    presence = usage_field_presence(
+        {
+            "input_tokens": 12,
+            "output_tokens": 3,
+            "estimated": True,
+        }
+    )
+
+    assert presence.sources_dict() == {
+        "input_source": "estimated",
+        "output_source": "estimated",
+        "cache_read_source": "missing",
+        "cache_creation_source": "missing",
+    }
