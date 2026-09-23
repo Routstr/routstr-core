@@ -130,6 +130,10 @@ async def test_capped_payout_recovers_all_change_with_real_cashu_sdk(
             AsyncMock(return_value=liability * 1000),
         ),
         patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
+            AsyncMock(return_value=liability * 1000),
+        ),
+        patch(
             "routstr.payment.lnurl.get_lnurl_data",
             AsyncMock(
                 return_value={

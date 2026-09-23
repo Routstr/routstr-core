@@ -701,18 +701,65 @@ class Bolt11PaymentPlan:
         return maximum if self.unit == "sat" else (maximum + 999) // 1000
 
 
+def _to_msats(amount: int, unit: str) -> int:
+    return _sats_to_msats(amount) if unit == "sat" else amount
+
+
+async def _other_wallets_unreserved_msats(mint_url: str, unit: str) -> int:
+    """Sum unreserved proofs of every other trusted wallet, in msats.
+
+    Reads local proof snapshots only. A wallet that cannot be loaded counts
+    as empty, which can only shrink the owner surplus.
+    """
+    total = 0
+    for other_mint in _mints_to_inspect():
+        for other_unit in ("sat", "msat"):
+            if (other_mint, other_unit) == (mint_url, unit):
+                continue
+            try:
+                wallet = await get_wallet(other_mint, other_unit)
+            except Exception as e:
+                logger.debug(
+                    "Wallet excluded from owner surplus",
+                    extra={
+                        "mint_url": other_mint,
+                        "unit": other_unit,
+                        "error": str(e),
+                    },
+                )
+                continue
+            proofs = get_proofs_per_mint_and_unit(
+                wallet, other_mint, other_unit, not_reserved=True
+            )
+            total += _to_msats(sum(proof.amount for proof in proofs), other_unit)
+    return total
+
+
 async def _owner_balance_for_mint_and_unit(
     mint_url: str, unit: str, proofs_balance: int
 ) -> int:
-    """Return spendable node-owned funds without crossing user liabilities."""
+    """Return owner funds in one wallet, in that wallet's unit, never negative.
+
+    A key's refund mint is a preference, not funding provenance: a key topped
+    up from a second mint keeps its original refund mint. So two bounds apply.
+    The wallet keeps the liability declared against it, so refunds drawn from
+    it stay serviceable. All wallets together keep the total liability, so
+    misattributed customer funds are never paid out as profit.
+    """
+    others_msats = await _other_wallets_unreserved_msats(mint_url, unit)
     async with db.create_session() as session:
-        # Refund mint is a preference, not funding provenance. Mirror payout's
-        # conservative rule and protect the full liability at every mint.
-        user_liability = await db.total_user_liability(session)
-    # API-key balances are stored in msats. Cashu ``sat`` proofs are not.
-    if unit == "sat":
-        user_liability = _msats_to_sats_ceil(user_liability)
-    return max(0, proofs_balance - user_liability)
+        mint_liability = await db.user_liability_for_mint_and_unit(
+            session, mint_url, unit
+        )
+        total_liability = await db.total_user_liability(session)
+    proofs_msats = _to_msats(proofs_balance, unit)
+    surplus_msats = min(
+        proofs_msats - mint_liability,
+        proofs_msats + others_msats - total_liability,
+    )
+    # Cashu ``sat`` proofs are whole sats; round the surplus down, never up.
+    surplus = _msats_to_sats(surplus_msats) if unit == "sat" else surplus_msats
+    return max(0, surplus)
 
 
 async def maximum_owner_cashu_balance_sats() -> int:
@@ -1650,15 +1697,12 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
         )
         return
 
-    # Fetch liability after the proofs snapshot and settle delay while the
+    # Read liabilities after the proofs snapshot and settle delay while the
     # wallet operation guard excludes concurrent proof mutation and crediting.
     try:
-        async with db.create_session() as session:
-            # ApiKey stores a refund preference, not funding provenance. Until
-            # liabilities have a durable per-credit ledger, subtract the total
-            # liability from every wallet rather than risk calling customer
-            # funds owner profit on the wrong mint.
-            user_balance = await db.total_user_liability(session)
+        available_balance = await _owner_balance_for_mint_and_unit(
+            mint_url, unit, sum(proof.amount for proof in proofs)
+        )
     except Exception as e:
         logger.error(
             f"Error in periodic payout cycle: {type(e).__name__}",
@@ -1667,10 +1711,6 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
         return
 
     try:
-        if unit == "sat":
-            user_balance = _msats_to_sats_ceil(user_balance)
-        proofs_balance = sum(proof.amount for proof in proofs)
-        available_balance = proofs_balance - user_balance
         max_amount = (
             settings.max_payout_sat
             if unit == "sat"

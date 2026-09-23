@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
@@ -39,13 +39,18 @@ async def test_payout_limits_and_proof_refresh(
         patch(
             "routstr.wallet.db.total_user_liability", AsyncMock(return_value=liability)
         ),
+        patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
+            AsyncMock(return_value=liability),
+        ),
         patch("routstr.wallet.asyncio.sleep", sleep),
         patch("routstr.wallet.raw_send_to_lnurl", send),
     ):
         await _payout_mint_and_unit("https://mint.test", unit)
-    get_wallet.assert_awaited_once_with(
-        "https://mint.test", unit, force_reload_proofs=True
-    )
+    reloads = [
+        c for c in get_wallet.await_args_list if c.kwargs.get("force_reload_proofs")
+    ]
+    assert reloads == [call("https://mint.test", unit, force_reload_proofs=True)]
     if expected is None:
         send.assert_not_awaited()
     else:

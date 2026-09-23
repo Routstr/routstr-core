@@ -107,6 +107,10 @@ async def test_periodic_payout_includes_primary_mint_not_in_cashu_mints() -> Non
             "routstr.wallet.db.total_user_liability",
             AsyncMock(return_value=0),
         ),
+        patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
+            AsyncMock(return_value=0),
+        ),
         patch("routstr.wallet.db.record_lightning_payout", record_payout),
         patch("routstr.wallet.db.settle_lightning_payout", settle_payout),
         patch("routstr.wallet.raw_send_to_lnurl", raw_send),
@@ -181,6 +185,10 @@ async def test_periodic_payout_releases_session_before_slow_mint_send() -> None:
             "routstr.wallet.db.total_user_liability",
             AsyncMock(return_value=0),
         ),
+        patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
+            AsyncMock(return_value=0),
+        ),
         patch("routstr.wallet.raw_send_to_lnurl", AsyncMock(side_effect=raw_send)),
     ):
         with pytest.raises(_LoopBreak):
@@ -229,6 +237,10 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
             "routstr.wallet.db.total_user_liability",
             AsyncMock(return_value=0),
         ),
+        patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
+            AsyncMock(return_value=0),
+        ),
         patch("routstr.wallet.raw_send_to_lnurl", raw_send),
     ):
         with pytest.raises(_LoopBreak):
@@ -237,7 +249,9 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
     # The bad mint raised on get_wallet for both units, yet the good mint was
     # still reached and paid out for both units — failures are isolated.
     good_calls = [
-        c for c in get_wallet.await_args_list if c.args[0] == "http://good:3338"
+        c
+        for c in get_wallet.await_args_list
+        if c.args[0] == "http://good:3338" and c.kwargs.get("force_reload_proofs")
     ]
     assert len(good_calls) == 2  # sat + msat
     assert raw_send.await_count == 2  # good mint paid for both units
@@ -331,6 +345,10 @@ async def test_periodic_payout_caps_amount_at_max_payout_sat() -> None:
             "routstr.wallet.db.total_user_liability",
             AsyncMock(return_value=0),
         ),
+        patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
+            AsyncMock(return_value=0),
+        ),
         patch("routstr.wallet.raw_send_to_lnurl", raw_send),
     ):
         with pytest.raises(_LoopBreak):
@@ -379,6 +397,10 @@ async def test_payout_history_records_the_capped_amount() -> None:
             AsyncMock(side_effect=lambda proofs, wallet: proofs),
         ),
         patch("routstr.wallet.db.total_user_liability", AsyncMock(return_value=0)),
+        patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
+            AsyncMock(return_value=0),
+        ),
         patch(
             "routstr.wallet.db.list_unsettled_lightning_payouts",
             AsyncMock(return_value=[]),
@@ -447,6 +469,10 @@ async def test_payout_history_marks_failed_only_on_proven_non_payment(
         ),
         patch("routstr.wallet.db.total_user_liability", AsyncMock(return_value=0)),
         patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
+            AsyncMock(return_value=0),
+        ),
+        patch(
             "routstr.wallet.db.list_unsettled_lightning_payouts",
             AsyncMock(return_value=[]),
         ),
@@ -503,6 +529,10 @@ async def test_payout_history_write_failure_does_not_block_payout() -> None:
             AsyncMock(side_effect=lambda proofs, wallet: proofs),
         ),
         patch("routstr.wallet.db.total_user_liability", AsyncMock(return_value=0)),
+        patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
+            AsyncMock(return_value=0),
+        ),
         patch(
             "routstr.wallet.db.list_unsettled_lightning_payouts",
             AsyncMock(return_value=[]),
