@@ -6,7 +6,7 @@ than the whole liability, so only the largest wallet could ever pay out.
 """
 
 from collections.abc import AsyncIterator, Iterator
-from contextlib import ExitStack, asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -40,31 +40,36 @@ def _wallets(
 
 
 @contextmanager
+def _env() -> Iterator[None]:
+    with (
+        patch("routstr.wallet.db.create_session", _session),
+        patch.object(settings, "cashu_mints", [MINT_A, MINT_B]),
+        patch.object(settings, "primary_mint", MINT_A),
+    ):
+        yield
+
+
+@contextmanager
 def _liabilities(per_mint_sats: dict[str, int], total_sats: int) -> Iterator[None]:
     async def per_mint(_session: object, mint_url: str, unit: str) -> int:
         return per_mint_sats.get(mint_url, 0) * 1000
 
-    with ExitStack() as stack:
-        for target in (
-            patch(
-                "routstr.wallet.db.user_liability_for_mint_and_unit",
-                AsyncMock(side_effect=per_mint),
-            ),
-            patch(
-                "routstr.wallet.db.total_user_liability",
-                AsyncMock(return_value=total_sats * 1000),
-            ),
-            patch("routstr.wallet.db.create_session", _session),
-            patch.object(settings, "cashu_mints", [MINT_A, MINT_B]),
-            patch.object(settings, "primary_mint", MINT_A),
-        ):
-            stack.enter_context(target)
+    with (
+        _env(),
+        patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
+            AsyncMock(side_effect=per_mint),
+        ),
+        patch(
+            "routstr.wallet.db.total_user_liability",
+            AsyncMock(return_value=total_sats * 1000),
+        ),
+    ):
         yield
 
 
 @pytest.mark.asyncio
 async def test_owner_balance_keeps_only_the_wallets_own_liability() -> None:
-    """Mint B's surplus is bounded by B's liability, not by A's."""
     get_wallet, get_proofs = _wallets({MINT_A: 400, MINT_B: 270})
     with (
         _liabilities({MINT_A: 216, MINT_B: 34}, total_sats=250),
@@ -89,7 +94,7 @@ async def test_owner_balance_never_exceeds_global_surplus() -> None:
 
 @pytest.mark.asyncio
 async def test_unloadable_wallet_counts_as_empty() -> None:
-    """A wallet that cannot be read shrinks the surplus rather than inflating it."""
+    """Shrinks the surplus rather than inflating it."""
     get_wallet, get_proofs = _wallets(
         {MINT_A: 400, MINT_B: 270}, unreachable=frozenset({MINT_A})
     )
@@ -139,7 +144,7 @@ async def test_msat_wallet_surplus_is_not_rounded(
     """Either bound can bind, and neither is rounded to whole sats."""
     get_wallet, get_proofs = _wallets({MINT_A: 0, MINT_B: 0})
     with (
-        _liabilities({}, total_sats=0),
+        _env(),
         patch("routstr.wallet.get_wallet", get_wallet),
         patch("routstr.wallet.get_proofs_per_mint_and_unit", get_proofs),
         patch(

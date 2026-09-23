@@ -1,9 +1,4 @@
-"""Real-DB coverage for db.user_liability_for_mint_and_unit.
-
-Verifies the per-mint liability query that bounds owner payout: it sums key
-balances and unresolved refund claims for one (mint_url, unit), excludes
-resolved claims and other mints/units, and drops keys with no refund mint.
-"""
+"""Real-DB coverage for the per-mint liability query that bounds owner payout."""
 
 from typing import AsyncGenerator
 
@@ -88,7 +83,7 @@ async def test_sums_key_balances_for_the_mint_and_unit(session: AsyncSession) ->
 
 @pytest.mark.asyncio
 async def test_adds_unresolved_refunds_to_key_balances(session: AsyncSession) -> None:
-    # One open claim per key, so each unresolved status needs its own key.
+    # Only one pending/ambiguous claim per key is allowed.
     await _add_key(session, "a", 1000)
     await _add_refund(session, "a", 300, "pending")
     await _add_key(session, "b", 0)

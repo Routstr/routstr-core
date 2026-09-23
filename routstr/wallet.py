@@ -830,9 +830,7 @@ async def _prepare_bolt11_payment(invoice: str) -> Bolt11PaymentPlan:
                 )
                 if owner_balance < required:
                     continue
-                owner_balance_msats = (
-                    owner_balance * 1000 if unit == "sat" else owner_balance
-                )
+                owner_balance_msats = _to_msats(owner_balance, unit)
                 candidates.append(
                     (owner_balance_msats, wallet, proofs, quote, mint_url, unit)
                 )
@@ -1693,8 +1691,9 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
         )
         return
 
-    # Read liabilities after the proofs snapshot and settle delay while the
-    # wallet operation guard excludes concurrent proof mutation and crediting.
+    # Read liabilities and the other wallets' proofs after this wallet's proofs
+    # snapshot and settle delay, while the wallet operation guard excludes
+    # concurrent proof mutation and crediting.
     try:
         available_balance = await _owner_balance_for_mint_and_unit(
             mint_url, unit, sum(proof.amount for proof in proofs)

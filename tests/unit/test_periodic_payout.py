@@ -14,7 +14,7 @@ from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
-from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -248,11 +248,13 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
 
     # The bad mint raised on get_wallet for both units, yet the good mint was
     # still reached and paid out for both units — failures are isolated.
-    for unit in ("sat", "msat"):
-        assert (
-            call("http://good:3338", unit, force_reload_proofs=True)
-            in get_wallet.await_args_list
-        )
+    good_reloads = [
+        c
+        for c in get_wallet.await_args_list
+        if c.args[0] == "http://good:3338" and c.kwargs.get("force_reload_proofs")
+    ]
+    # Two payout reads, plus two cross-wallet reads for the global payout bound.
+    assert len(good_reloads) == 4
     assert raw_send.await_count == 2  # good mint paid for both units
 
 
