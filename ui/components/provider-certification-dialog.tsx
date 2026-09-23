@@ -221,6 +221,7 @@ export function ProviderCertificationDialog({
   onOpenChange,
 }: ProviderCertificationDialogProps) {
   const [checkCache, setCheckCache] = useState(true);
+  const [workspaceTab, setWorkspaceTab] = useState<'setup' | 'results'>('setup');
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
   const [pathModes, setPathModes] = useState<Record<string, ModelPathMode>>({});
   const [selectedModelPaths, setSelectedModelPaths] = useState<
@@ -250,6 +251,7 @@ export function ProviderCertificationDialog({
     }) => {
       const completed: ModelCertificationResult[] = [];
       setResults([]);
+      setWorkspaceTab('results');
 
       for (const [index, run] of modelRuns.entries()) {
         setCurrentModel({
@@ -296,6 +298,7 @@ export function ProviderCertificationDialog({
   useEffect(() => {
     if (!open) {
       resetCertification();
+      setWorkspaceTab('setup');
       setSelectedModelIds([]);
       setPathModes({});
       setSelectedModelPaths({});
@@ -419,8 +422,8 @@ export function ProviderCertificationDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className='max-h-[90dvh] overflow-y-auto sm:max-w-[780px]'>
-        <DialogHeader>
+      <DialogContent className='flex h-[90dvh] max-h-[90dvh] flex-col overflow-hidden sm:max-w-[780px]'>
+        <DialogHeader className='shrink-0'>
           <DialogTitle>Certify upstream models</DialogTitle>
           <DialogDescription>
             Select models, then use the provider default, choose specific
@@ -429,268 +432,366 @@ export function ProviderCertificationDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className='space-y-2'>
-          <div className='flex items-center justify-between gap-3'>
-            <Label>Models</Label>
-            <div className='flex items-center gap-2'>
-              <span className='text-muted-foreground text-xs'>
-                {selectedModelIds.length} selected
-              </span>
-              {selectedModelIds.length > 0 && !certify.isPending && (
-                <Button
-                  type='button'
-                  variant='ghost'
-                  size='sm'
-                  onClick={() => {
-                    setSelectedModelIds([]);
-                    setPathModes({});
-                    setSelectedModelPaths({});
-                    setResults([]);
-                    resetCertification();
-                  }}
-                >
-                  Clear
-                </Button>
+        <Tabs
+          value={workspaceTab}
+          onValueChange={(value) =>
+            setWorkspaceTab(value as 'setup' | 'results')
+          }
+          className='min-h-0 flex-1 overflow-hidden'
+        >
+          <TabsList className='grid w-full shrink-0 grid-cols-2'>
+            <TabsTrigger value='setup'>Setup</TabsTrigger>
+            <TabsTrigger
+              value='results'
+              disabled={!certify.isPending && results.length === 0}
+            >
+              Results
+              {(certify.isPending || results.length > 0) && (
+                <Badge variant='secondary' className='ml-1 px-1.5 py-0 text-xs'>
+                  {results.length}/{targetCount}
+                </Badge>
               )}
-            </div>
-          </div>
-          <Command className='h-auto rounded-md border'>
-            <CommandInput
-              placeholder='Search models by name or ID…'
-              disabled={models.isLoading || certify.isPending}
-            />
-            <CommandList className='max-h-[min(18rem,40dvh)]'>
-              <CommandEmpty>
-                {models.isLoading ? 'Loading models…' : 'No models found'}
-              </CommandEmpty>
-              {renderModelGroup('Configured models', configuredOptions)}
-              {renderModelGroup('Discovered models', discoveredOptions)}
-            </CommandList>
-          </Command>
-          {models.isError && (
-            <p className='text-destructive text-sm'>
-              {getErrorMessage(models.error)}
-            </p>
-          )}
-          {selectedModelIds.map((modelId) => {
-            const paths = pathsForModel(modelId);
-            const mode = pathModes[modelId] ?? 'default';
-            const selectedPaths = selectedModelPaths[modelId] ?? [];
-            return (
-              <div key={modelId} className='space-y-3 rounded-md border p-3'>
-                <div className='min-w-0'>
-                  <div className='truncate text-sm font-medium'>
-                    {namesById.get(modelId) ?? modelId}
-                  </div>
-                  <div className='text-muted-foreground truncate font-mono text-xs'>
-                    {modelId}
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent
+            value='setup'
+            className='mt-0 min-h-0 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col'
+          >
+            <div className='min-h-0 flex-1 space-y-4 overflow-y-auto pr-1'>
+              <div className='space-y-2'>
+                <div className='flex items-center justify-between gap-3'>
+                  <Label>Models</Label>
+                  <div className='flex items-center gap-2'>
+                    <span className='text-muted-foreground text-xs'>
+                      {selectedModelIds.length} selected
+                    </span>
+                    {selectedModelIds.length > 0 && !certify.isPending && (
+                      <Button
+                        type='button'
+                        variant='ghost'
+                        size='sm'
+                        onClick={() => {
+                          setSelectedModelIds([]);
+                          setPathModes({});
+                          setSelectedModelPaths({});
+                          setResults([]);
+                          resetCertification();
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    )}
                   </div>
                 </div>
-                {paths.length > 0 ? (
-                  <>
-                    <ToggleGroup
-                      type='single'
-                      variant='outline'
-                      size='sm'
-                      value={mode}
-                      onValueChange={(value) => {
-                        if (!value) return;
-                        setPathModes((current) => ({
-                          ...current,
-                          [modelId]: value as ModelPathMode,
-                        }));
-                      }}
-                      disabled={certify.isPending}
-                      className='w-full justify-start'
-                    >
-                      <ToggleGroupItem value='default'>Default</ToggleGroupItem>
-                      <ToggleGroupItem value='selected'>Choose paths</ToggleGroupItem>
-                      <ToggleGroupItem value='all'>All paths</ToggleGroupItem>
-                    </ToggleGroup>
-                    {mode === 'default' && (
-                      <p className='text-muted-foreground text-xs'>
-                        Uses the upstream provider&apos;s normal model routing.
-                      </p>
-                    )}
-                    {mode === 'selected' && (
-                      <Popover>
-                        <PopoverTrigger asChild>
-                          <Button
-                            type='button'
-                            variant='outline'
-                            size='sm'
-                            className='w-full justify-between'
-                            disabled={certify.isPending}
-                          >
-                            <span className='truncate'>
-                              {selectedPaths.length === 0
-                                ? 'Select paths'
-                                : `${selectedPaths.length} path${selectedPaths.length === 1 ? '' : 's'} selected`}
-                            </span>
-                            <ChevronDown className='h-4 w-4' />
-                          </Button>
-                        </PopoverTrigger>
-                        <PopoverContent
-                          align='start'
-                          className='w-80 max-w-[calc(100vw-2rem)] p-2'
-                        >
-                          <div className='max-h-64 space-y-1 overflow-y-auto overscroll-contain'>
-                            {paths.map((path) => {
-                              const checked = selectedPaths.includes(path.path);
-                              return (
-                                <label
-                                  key={path.path}
-                                  className='hover:bg-muted flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm'
-                                >
-                                  <Checkbox
-                                    checked={checked}
-                                    onCheckedChange={(value) =>
-                                      setSelectedModelPaths((current) => {
-                                        const previous = current[modelId] ?? [];
-                                        return {
-                                          ...current,
-                                          [modelId]:
-                                            value === true
-                                              ? [...previous, path.path]
-                                              : previous.filter(
-                                                  (item) => item !== path.path
-                                                ),
-                                        };
-                                      })
-                                    }
-                                  />
-                                  <span className='min-w-0 truncate'>
-                                    {pathLabel(path)}
-                                  </span>
-                                </label>
-                              );
-                            })}
-                          </div>
-                        </PopoverContent>
-                      </Popover>
-                    )}
-                    {mode === 'all' && (
-                      <p className='text-muted-foreground text-xs'>
-                        All {paths.length} paths will run in parallel.
-                      </p>
-                    )}
-                  </>
-                ) : (
-                  <p className='text-muted-foreground text-xs'>
-                    Only the provider default route is available.
+                <Command className='h-auto rounded-md border'>
+                  <CommandInput
+                    placeholder='Search models by name or ID…'
+                    disabled={models.isLoading || certify.isPending}
+                  />
+                  <CommandList className='max-h-64'>
+                    <CommandEmpty>
+                      {models.isLoading ? 'Loading models…' : 'No models found'}
+                    </CommandEmpty>
+                    {renderModelGroup('Configured models', configuredOptions)}
+                    {renderModelGroup('Discovered models', discoveredOptions)}
+                  </CommandList>
+                </Command>
+                {models.isError && (
+                  <p className='text-destructive text-sm'>
+                    {getErrorMessage(models.error)}
                   </p>
                 )}
               </div>
-            );
-          })}
-          {modelsNeedingPath.length > 0 && (
-            <p className='text-muted-foreground text-xs'>
-              Choose at least one path for each model using “Choose paths”.
-            </p>
-          )}
-        </div>
 
-        <div className='flex flex-wrap items-center justify-between gap-3'>
-          <div className='flex items-center gap-2'>
-            <Checkbox
-              id={`certify-cache-${provider.id}`}
-              checked={checkCache}
-              onCheckedChange={(value) => setCheckCache(value === true)}
-              disabled={certify.isPending}
-            />
-            <Label htmlFor={`certify-cache-${provider.id}`} className='text-sm'>
-              Probe prompt caching and margin
-            </Label>
-          </div>
-          <Button
-            variant='outline'
-            size='sm'
-            onClick={() =>
-              certify.mutate({
-                modelRuns,
-                includeCache: checkCache,
-              })
-            }
-            disabled={
-              certify.isPending ||
-              selectedModelIds.length === 0 ||
-              modelsNeedingPath.length > 0
-            }
-            className='gap-1.5'
-          >
-            {certify.isPending ? (
-              <Loader2 className='h-4 w-4 animate-spin' />
-            ) : (
-              <RotateCcw className='h-4 w-4' />
-            )}
-            {certify.isPending
-              ? `Running ${currentModel?.index ?? 1} of ${currentModel?.total ?? selectedModelIds.length}`
-              : results.length > 0
-                ? `Run ${targetCount} route${targetCount === 1 ? '' : 's'} again`
-                : `Certify ${targetCount || ''} route${targetCount === 1 ? '' : 's'}`}
-          </Button>
-        </div>
-
-        {currentModel && (
-          <div className='text-muted-foreground flex items-center gap-2 text-sm'>
-            <Loader2 className='h-4 w-4 animate-spin' />
-            Probing {namesById.get(currentModel.id) ?? currentModel.id}
-            {currentModel.pathCount > 1
-              ? ` across ${currentModel.pathCount} paths in parallel`
-              : ''}{' '}
-            — model {currentModel.index} of {currentModel.total}
-          </div>
-        )}
-
-        {results.length > 0 && (
-          <Tabs
-            key={results.map((result) => result.resultKey).join('|')}
-            defaultValue={results[0].resultKey}
-            className='space-y-3'
-          >
-            <div className='overflow-x-auto'>
-              <TabsList variant='line' className='min-w-max'>
-                {results.map((result) => {
-                  const status = resultStatus(result);
-                  const Icon =
-                    status === 'error' ? XCircle : STATUS_STYLES[status].icon;
-                  return (
-                    <TabsTrigger
-                      key={result.resultKey}
-                      value={result.resultKey}
-                      title={`${namesById.get(result.modelId) ?? result.modelId} · ${result.pathLabel}`}
-                      className='max-w-64'
-                    >
-                      <Icon
-                        className={cn(
-                          status === 'ok' && 'text-emerald-600',
-                          status === 'warn' && 'text-amber-600',
-                          (status === 'fail' || status === 'error') &&
-                            'text-red-600'
+              {selectedModelIds.map((modelId) => {
+                const paths = pathsForModel(modelId);
+                const mode = pathModes[modelId] ?? 'default';
+                const selectedPaths = selectedModelPaths[modelId] ?? [];
+                return (
+                  <div key={modelId} className='space-y-3 rounded-md border p-3'>
+                    <div className='min-w-0'>
+                      <div className='truncate text-sm font-medium'>
+                        {namesById.get(modelId) ?? modelId}
+                      </div>
+                      <div className='text-muted-foreground truncate font-mono text-xs'>
+                        {modelId}
+                      </div>
+                    </div>
+                    {paths.length > 0 ? (
+                      <>
+                        <ToggleGroup
+                          type='single'
+                          variant='outline'
+                          size='sm'
+                          value={mode}
+                          onValueChange={(value) => {
+                            if (!value) return;
+                            setPathModes((current) => ({
+                              ...current,
+                              [modelId]: value as ModelPathMode,
+                            }));
+                          }}
+                          disabled={certify.isPending}
+                          className='w-full justify-start'
+                        >
+                          <ToggleGroupItem value='default'>Default</ToggleGroupItem>
+                          <ToggleGroupItem value='selected'>
+                            Choose paths
+                          </ToggleGroupItem>
+                          <ToggleGroupItem value='all'>All paths</ToggleGroupItem>
+                        </ToggleGroup>
+                        {mode === 'default' && (
+                          <p className='text-muted-foreground text-xs'>
+                            Uses the upstream provider&apos;s normal model routing.
+                          </p>
                         )}
-                      />
-                      <span className='truncate'>
-                        {namesById.get(result.modelId) ?? result.modelId} ·{' '}
-                        {result.pathLabel}
-                      </span>
-                    </TabsTrigger>
-                  );
-                })}
-              </TabsList>
-            </div>
-            {results.map((result) => (
-              <TabsContent key={result.resultKey} value={result.resultKey}>
-                {result.report ? (
-                  <CertificationReport report={result.report} />
-                ) : (
-                  <div className='rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-400'>
-                    {result.error ?? 'Certification failed'}
+                        {mode === 'selected' && (
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <Button
+                                type='button'
+                                variant='outline'
+                                size='sm'
+                                className='w-full justify-between'
+                                disabled={certify.isPending}
+                              >
+                                <span className='truncate'>
+                                  {selectedPaths.length === 0
+                                    ? 'Select paths'
+                                    : `${selectedPaths.length} path${selectedPaths.length === 1 ? '' : 's'} selected`}
+                                </span>
+                                <ChevronDown className='h-4 w-4' />
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent
+                              align='start'
+                              className='w-80 max-w-[calc(100vw-2rem)] p-2'
+                            >
+                              <div className='max-h-64 space-y-1 overflow-y-auto overscroll-contain'>
+                                {paths.map((path) => {
+                                  const checked = selectedPaths.includes(
+                                    path.path
+                                  );
+                                  return (
+                                    <label
+                                      key={path.path}
+                                      className='hover:bg-muted flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm'
+                                    >
+                                      <Checkbox
+                                        checked={checked}
+                                        onCheckedChange={(value) =>
+                                          setSelectedModelPaths((current) => {
+                                            const previous =
+                                              current[modelId] ?? [];
+                                            return {
+                                              ...current,
+                                              [modelId]:
+                                                value === true
+                                                  ? [...previous, path.path]
+                                                  : previous.filter(
+                                                      (item) =>
+                                                        item !== path.path
+                                                    ),
+                                            };
+                                          })
+                                        }
+                                      />
+                                      <span className='min-w-0 truncate'>
+                                        {pathLabel(path)}
+                                      </span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                        )}
+                        {mode === 'all' && (
+                          <p className='text-muted-foreground text-xs'>
+                            All {paths.length} paths will run in parallel.
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <p className='text-muted-foreground text-xs'>
+                        Only the provider default route is available.
+                      </p>
+                    )}
                   </div>
+                );
+              })}
+              {modelsNeedingPath.length > 0 && (
+                <p className='text-muted-foreground text-xs'>
+                  Choose at least one path for each model using “Choose paths”.
+                </p>
+              )}
+            </div>
+
+            <div className='mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3 border-t pt-3'>
+              <div className='flex items-center gap-2'>
+                <Checkbox
+                  id={`certify-cache-${provider.id}`}
+                  checked={checkCache}
+                  onCheckedChange={(value) => setCheckCache(value === true)}
+                  disabled={certify.isPending}
+                />
+                <Label
+                  htmlFor={`certify-cache-${provider.id}`}
+                  className='text-sm'
+                >
+                  Probe prompt caching and margin
+                </Label>
+              </div>
+              <Button
+                variant='outline'
+                size='sm'
+                onClick={() =>
+                  certify.mutate({
+                    modelRuns,
+                    includeCache: checkCache,
+                  })
+                }
+                disabled={
+                  certify.isPending ||
+                  selectedModelIds.length === 0 ||
+                  modelsNeedingPath.length > 0
+                }
+                className='gap-1.5'
+              >
+                {certify.isPending ? (
+                  <Loader2 className='h-4 w-4 animate-spin' />
+                ) : (
+                  <RotateCcw className='h-4 w-4' />
                 )}
-              </TabsContent>
-            ))}
-          </Tabs>
-        )}
+                {certify.isPending
+                  ? `Running ${currentModel?.index ?? 1} of ${currentModel?.total ?? selectedModelIds.length}`
+                  : results.length > 0
+                    ? `Run ${targetCount} route${targetCount === 1 ? '' : 's'} again`
+                    : `Certify ${targetCount || ''} route${targetCount === 1 ? '' : 's'}`}
+              </Button>
+            </div>
+          </TabsContent>
+
+          <TabsContent
+            value='results'
+            className='mt-0 min-h-0 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col'
+          >
+            {currentModel && (
+              <div className='text-muted-foreground flex shrink-0 items-center gap-2 rounded-md border p-3 text-sm'>
+                <Loader2 className='h-4 w-4 animate-spin' />
+                <span className='min-w-0 truncate'>
+                  Probing {namesById.get(currentModel.id) ?? currentModel.id}
+                  {currentModel.pathCount > 1
+                    ? ` across ${currentModel.pathCount} paths in parallel`
+                    : ''}{' '}
+                  — model {currentModel.index} of {currentModel.total}
+                </span>
+              </div>
+            )}
+
+            {results.length === 0 ? (
+              <div className='text-muted-foreground flex min-h-0 flex-1 items-center justify-center text-center text-sm'>
+                Results will appear here as certification completes.
+              </div>
+            ) : (
+              <Tabs
+                key={results.map((result) => result.resultKey).join('|')}
+                defaultValue={results[0].resultKey}
+                className='min-h-0 flex-1 overflow-hidden'
+              >
+                <div className='max-h-28 shrink-0 overflow-y-auto rounded-md border p-2'>
+                  <TabsList className='flex h-auto w-full flex-wrap justify-start gap-1 bg-transparent p-0'>
+                    {results.map((result, index) => {
+                      const status = resultStatus(result);
+                      const Icon =
+                        status === 'error'
+                          ? XCircle
+                          : STATUS_STYLES[status].icon;
+                      const modelRouteNumber = results
+                        .slice(0, index + 1)
+                        .filter((item) => item.modelId === result.modelId).length;
+                      const modelRouteCount = results.filter(
+                        (item) => item.modelId === result.modelId
+                      ).length;
+                      return (
+                        <TabsTrigger
+                          key={result.resultKey}
+                          value={result.resultKey}
+                          title={namesById.get(result.modelId) ?? result.modelId}
+                          className='h-7 min-w-0 max-w-44 gap-1 px-2 text-xs'
+                        >
+                          <Icon
+                            className={cn(
+                              status === 'ok' && 'text-emerald-600',
+                              status === 'warn' && 'text-amber-600',
+                              (status === 'fail' || status === 'error') &&
+                                'text-red-600'
+                            )}
+                          />
+                          <span className='truncate'>
+                            {namesById.get(result.modelId) ?? result.modelId}
+                          </span>
+                          {modelRouteCount > 1 && (
+                            <span className='text-muted-foreground'>
+                              {modelRouteNumber}
+                            </span>
+                          )}
+                        </TabsTrigger>
+                      );
+                    })}
+                  </TabsList>
+                </div>
+
+                <div className='min-h-0 flex-1 overflow-y-auto pr-1'>
+                  {results.map((result) => {
+                    const status = resultStatus(result);
+                    return (
+                      <TabsContent
+                        key={result.resultKey}
+                        value={result.resultKey}
+                        className='space-y-3'
+                      >
+                        <div className='bg-muted/30 space-y-2 rounded-md border p-3'>
+                          <div className='flex flex-wrap items-center justify-between gap-2'>
+                            <div className='font-medium'>
+                              {namesById.get(result.modelId) ?? result.modelId}
+                            </div>
+                            {status === 'error' ? (
+                              <Badge
+                                variant='outline'
+                                className='border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-400'
+                              >
+                                Error
+                              </Badge>
+                            ) : (
+                              <StatusBadge status={status} />
+                            )}
+                          </div>
+                          <div className='grid gap-1 text-xs'>
+                            <span className='text-muted-foreground'>
+                              Model path
+                            </span>
+                            <div className='rounded bg-background px-2 py-1.5 font-medium'>
+                              {result.pathLabel}
+                            </div>
+                          </div>
+                        </div>
+                        {result.report ? (
+                          <CertificationReport report={result.report} />
+                        ) : (
+                          <div className='rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-400'>
+                            {result.error ?? 'Certification failed'}
+                          </div>
+                        )}
+                      </TabsContent>
+                    );
+                  })}
+                </div>
+              </Tabs>
+            )}
+          </TabsContent>
+        </Tabs>
       </DialogContent>
     </Dialog>
   );
