@@ -28,6 +28,7 @@ from .db import (
     CashuTransaction,
     CliToken,
     LightningInvoice,
+    ModelPathRow,
     ModelRow,
     UpstreamProviderRow,
     create_session,
@@ -1234,6 +1235,30 @@ async def get_provider_models(provider_id: str) -> dict[str, object]:
             m for m in upstream_models if m.id not in db_model_ids
         ]
 
+        path_result = await session.exec(
+            select(ModelPathRow).where(
+                ModelPathRow.upstream_provider_id == provider_pk
+            )
+        )
+        path_rows = list(path_result.all())
+        paths_by_public_id: dict[str, list[dict[str, object]]] = {}
+        for row in path_rows:
+            paths_by_public_id.setdefault(row.model_id.lower(), []).append(
+                {
+                    "path": row.path,
+                    "endpoint_tag": row.endpoint_tag,
+                    "endpoint_name": row.endpoint_name,
+                }
+            )
+
+        from ..upstream.model_paths import public_model_id
+
+        certification_paths: dict[str, list[dict[str, object]]] = {}
+        for model in [*db_models, *filtered_remote_models]:
+            forwarded_id = model.forwarded_model_id or model.id
+            paths = paths_by_public_id.get(public_model_id(forwarded_id).lower(), [])
+            certification_paths[model.id] = paths
+
         return {
             "provider": {
                 "id": provider.id,
@@ -1247,6 +1272,7 @@ async def get_provider_models(provider_id: str) -> dict[str, object]:
             # missing one; show the operator the value that needs fixing.
             "db_models": [json_compliant(m.dict()) for m in db_models],
             "remote_models": [json_compliant(m.dict()) for m in filtered_remote_models],
+            "certification_paths": certification_paths,
         }
 
 
@@ -1499,7 +1525,9 @@ async def get_upstream_provider_report(provider_id: str) -> dict[str, object]:
 
 class CertifyRequest(BaseModel):
     model_id: str | None = None
+    model_path: str | None = None
     timeout_seconds: float | None = None
+    check_cache: bool = True
 
 
 @admin_router.post(
@@ -1540,6 +1568,36 @@ async def certify_upstream_provider(
         )
         enabled_rows = list(result.all())
 
+        endpoint_tag: str | None = None
+        selected_path: ModelPathRow | None = None
+        if payload.model_path is not None:
+            from ..proxy import _model_ids_match
+            from ..upstream.model_paths import decode_model_path
+
+            selector = decode_model_path(payload.model_path)
+            if selector is None:
+                raise HTTPException(status_code=400, detail="Malformed model path")
+            if payload.model_id is None or not _model_ids_match(
+                payload.model_id, selector.model_id
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Model path does not match the selected model",
+                )
+            path_result = await session.exec(
+                select(ModelPathRow).where(
+                    ModelPathRow.upstream_provider_id == provider_pk,
+                    ModelPathRow.path == payload.model_path,
+                )
+            )
+            selected_path = path_result.first()
+            if selected_path is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Model path is not available for this provider",
+                )
+            endpoint_tag = selector.endpoint_tag
+
     evaluations = [
         _evaluate_model_row(row, provider, provider_pk) for row in enabled_rows
     ]
@@ -1561,7 +1619,7 @@ async def certify_upstream_provider(
         if model_id is None:
             model_id = enabled_rows[0].id
 
-    from ..proxy import get_candidates
+    from ..proxy import get_candidates, get_upstreams
 
     model_obj = None
     if model_id:
@@ -1581,11 +1639,33 @@ async def certify_upstream_provider(
             if model.upstream_provider_id == provider_pk:
                 model_obj = model
                 break
+
+        # A model selected from the provider's discovered catalog may not have
+        # a database override and therefore may not appear in get_candidates().
+        # The active upstream cache carries the same fee-adjusted USD and sats
+        # pricing used by the proxy, so it is the authoritative fallback for a
+        # pre-configuration certification probe.
+        if model_obj is None:
+            for upstream in get_upstreams():
+                if getattr(upstream, "db_id", None) != provider_pk:
+                    continue
+                model_obj = next(
+                    (
+                        model
+                        for model in upstream.get_cached_models()
+                        if model.id == model_id
+                        or model.forwarded_model_id == model_id
+                    ),
+                    None,
+                )
+                if model_obj is not None:
+                    break
     if model_obj is None:
         from ..upstream.certification import (
             STATUS_WARN,
             certification_row,
         )
+        from ..upstream.certification_cache import skipped_cache_rows
 
         live_rows = [
             certification_row(
@@ -1624,9 +1704,19 @@ async def certify_upstream_provider(
                 "Skipped — no model to probe.",
                 {},
             ),
+            *skipped_cache_rows("Skipped — no model to probe."),
         ]
     else:
         sats_to_usd = sats_usd_price()
+        if selected_path is not None:
+            from ..upstream.model_paths import apply_model_path_pricing
+
+            model_obj = apply_model_path_pricing(
+                model_obj,
+                selected_path,
+                provider.provider_fee,
+                sats_to_usd,
+            )
         # Clamp the admin-supplied timeout so a probe cannot hold the request
         # open indefinitely.
         requested = (
@@ -1642,6 +1732,8 @@ async def certify_upstream_provider(
             provider_fee=provider.provider_fee,
             sats_to_usd=sats_to_usd,
             timeout=timeout,
+            check_cache=payload.check_cache,
+            endpoint_tag=endpoint_tag,
         )
 
     rows = pricing_rows + live_rows

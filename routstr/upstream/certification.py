@@ -28,6 +28,7 @@ from ..core.logging import get_logger
 from ..payment.cost_calculation import calculate_cost
 from ..payment.rates import coerce_rate
 from ..payment.usage import normalize_usage
+from .model_paths import is_openrouter_base_url
 
 if TYPE_CHECKING:
     from ..payment.models import Model
@@ -124,6 +125,16 @@ CHECKLIST_GOALS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "Pricing in /v1/models — cost updates reflected in the models list",
         ("pricing.served_matches_configured", "pricing.enabled_models_served"),
     ),
+    (
+        "caching",
+        "Prompt caching — cache hits reported and billed at the cache rate",
+        ("cache.reported", "cache.billing"),
+    ),
+    (
+        "margin",
+        "Margin — node charge covers the upstream's cost",
+        ("cost.margin",),
+    ),
 )
 
 
@@ -159,6 +170,7 @@ class ProbeResult:
     base_url: str
     models_url: str
     chat_url: str
+    endpoint_tag: str | None = None
     models_status: int | None = None
     models_payload: dict[str, Any] | None = None
     models_error: str | None = None
@@ -174,6 +186,7 @@ async def probe_upstream(
     api_key: str,
     model_id: str,
     *,
+    endpoint_tag: str | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = PROBE_TIMEOUT_SECONDS,
 ) -> ProbeResult:
@@ -187,6 +200,7 @@ async def probe_upstream(
         base_url=base_url,
         models_url=f"{base}/models",
         chat_url=f"{base}/chat/completions",
+        endpoint_tag=endpoint_tag,
     )
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -226,6 +240,11 @@ async def probe_upstream(
             "max_tokens": PROBE_MAX_TOKENS,
             "stream": False,
         }
+        if endpoint_tag:
+            request_body["provider"] = {
+                "order": [endpoint_tag],
+                "allow_fallbacks": False,
+            }
         try:
             response = await client.post(
                 result.chat_url, json=request_body, headers=headers
@@ -702,12 +721,19 @@ async def run_live_checks(
     client: httpx.AsyncClient | None = None,
     timeout: float = PROBE_TIMEOUT_SECONDS,
     pricing_known: bool = True,
+    check_cache: bool = True,
+    endpoint_tag: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Probe one upstream once and build the five live/derived rows."""
+    """Probe one upstream and build the live/derived rows.
+
+    ``check_cache`` adds the prompt-cache and margin rows, which cost two
+    more completions against a long prompt.
+    """
     probe = await probe_upstream(
         base_url,
         api_key,
         model.forwarded_model_id or model.id,
+        endpoint_tag=endpoint_tag,
         client=client,
         timeout=timeout,
     )
@@ -769,6 +795,37 @@ async def run_live_checks(
             ),
         )
     )
+
+    from .certification_cache import run_cache_checks, skipped_cache_rows
+
+    if not check_cache:
+        rows.extend(skipped_cache_rows("Skipped — cache checks disabled."))
+    elif probe.chat_payload is None:
+        rows.extend(
+            skipped_cache_rows("Skipped — the completion probe did not succeed.")
+        )
+    elif is_openrouter_base_url(base_url) and endpoint_tag is None:
+        rows.extend(
+            skipped_cache_rows(
+                "Skipped — select an exact OpenRouter model path so both cache "
+                "requests use the same upstream endpoint."
+            )
+        )
+    else:
+        rows.extend(
+            await run_cache_checks(
+                base_url,
+                api_key,
+                model,
+                provider_fee=provider_fee,
+                sats_to_usd=sats_to_usd,
+                probe_payload=probe.chat_payload,
+                client=client,
+                timeout=timeout,
+                pricing_known=pricing_known,
+                endpoint_tag=endpoint_tag,
+            )
+        )
     return rows
 
 
@@ -877,6 +934,7 @@ async def certify_upstream_url(
     timeout: float = PROBE_TIMEOUT_SECONDS,
     sats_usd_price: float | None = None,
     client: httpx.AsyncClient | None = None,
+    check_cache: bool = True,
 ) -> dict[str, Any]:
     """Certify an arbitrary upstream URL without touching the node's DB."""
     from ..payment.models import litellm_cost_entry
@@ -911,6 +969,9 @@ async def certify_upstream_url(
                     {},
                 ),
             ]
+            from .certification_cache import skipped_cache_rows
+
+            rows.extend(skipped_cache_rows("Skipped — no model to probe."))
             return {
                 "target": target,
                 "rows": rows,
@@ -952,6 +1013,7 @@ async def certify_upstream_url(
         client=client,
         timeout=timeout,
         pricing_known=pricing_known,
+        check_cache=check_cache,
     )
     return {"target": target, "rows": rows, "checklist": build_checklist(rows)}
 
@@ -1061,6 +1123,11 @@ def main(argv: list[str] | None = None) -> int:
             "parseable — use this in pipelines."
         ),
     )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Skip the prompt-cache and margin rows (saves two long completions)",
+    )
     args = parser.parse_args(argv)
 
     async def _run_all() -> list[dict[str, Any]]:
@@ -1076,6 +1143,7 @@ def main(argv: list[str] | None = None) -> int:
                     provider_fee=args.provider_fee,
                     timeout=args.timeout,
                     sats_usd_price=args.sats_usd_price,
+                    check_cache=not args.no_cache,
                 )
             )
         return results

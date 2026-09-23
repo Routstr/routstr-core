@@ -20,8 +20,9 @@ from httpx import AsyncClient, Response
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.admin import admin_sessions
-from routstr.core.db import ModelRow, UpstreamProviderRow
+from routstr.core.db import ModelPathRow, ModelRow, UpstreamProviderRow
 from routstr.proxy import reinitialize_upstreams
+from routstr.upstream.model_paths import encode_model_path
 
 
 # The conftest patches ``routstr.payment.price.sats_usd_price``, but
@@ -174,6 +175,33 @@ def _mock_chat_response(
     }
 
 
+def _caching_upstream(*, cached_tokens: int = 2900, report_cost: bool = True) -> Any:
+    """Side effect that answers the one-token probe and then two long
+    prompts, reporting a cache hit (and optionally a USD cost) on the
+    repeated one — the shape an OpenAI-compatible caching upstream returns."""
+    long_calls = {"n": 0}
+
+    def _respond(request: Any) -> Response:
+        body = json.loads(request.content)
+        is_long = body["messages"][0]["role"] == "system"
+        if not is_long:
+            usage: dict[str, Any] = {"prompt_tokens": 5, "completion_tokens": 1}
+            if report_cost:
+                usage["cost"] = 9e-7
+        else:
+            long_calls["n"] += 1
+            usage = {"prompt_tokens": 3000, "completion_tokens": 1}
+            if long_calls["n"] > 1 and cached_tokens:
+                usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+            if report_cost:
+                usage["cost"] = 5e-5 if long_calls["n"] > 1 else 4e-4
+        payload = _mock_chat_response()
+        payload["usage"] = usage
+        return Response(200, json=payload)
+
+    return _respond
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_certify_requires_admin_auth(
@@ -205,13 +233,17 @@ async def test_certify_unknown_provider_returns_404(
 async def test_certify_all_ok(
     integration_client: AsyncClient, integration_session: AsyncSession
 ) -> None:
-    provider_id = await _seed_and_init(integration_session, integration_client)
+    provider_id = await _seed_and_init(
+        integration_session,
+        integration_client,
+        pricing_overrides={"input_cache_read": 1.4e-8},
+    )
 
     respx.get("https://certify-upstream.example/v1/models").mock(
         return_value=Response(200, json=_mock_models_response())
     )
     respx.post("https://certify-upstream.example/v1/chat/completions").mock(
-        return_value=Response(200, json=_mock_chat_response())
+        side_effect=_caching_upstream()
     )
 
     resp = await integration_client.post(
@@ -230,6 +262,9 @@ async def test_certify_all_ok(
         "endpoint.models_payload",
         "usage.capture",
         "cost.prompt_completion",
+        "cache.reported",
+        "cache.billing",
+        "cost.margin",
     ]
     for row_id in live_row_ids:
         row = _find_row(body["rows"], row_id)
@@ -237,6 +272,190 @@ async def test_certify_all_ok(
 
     for item in body["checklist"]:
         assert item["status"] == "ok", f"{item['goal']}: {item}"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@respx.mock
+async def test_certify_model_path_pins_every_completion(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    base_url = "https://openrouter.ai/api/v1"
+    provider_id = await _seed_and_init(
+        integration_session,
+        integration_client,
+        pricing_overrides={"input_cache_read": 1.4e-8},
+        base_url=base_url,
+    )
+    model_path = encode_model_path(base_url, "cert-test-model", "azure")
+    integration_session.add(
+        ModelPathRow(
+            model_id="cert-test-model",
+            path=model_path,
+            provider_slug="openrouter",
+            provider_type="openrouter",
+            endpoint_tag="azure",
+            endpoint_name="Azure",
+            model_metadata="{}",
+            upstream_provider_id=provider_id,
+        )
+    )
+    await integration_session.commit()
+
+    respx.get(f"{base_url}/models").mock(
+        return_value=Response(200, json=_mock_models_response())
+    )
+    chat = respx.post(f"{base_url}/chat/completions").mock(
+        side_effect=_caching_upstream()
+    )
+
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/certify",
+        headers=_admin_headers(),
+        json={"model_id": "cert-test-model", "model_path": model_path},
+    )
+    assert resp.status_code == 200, resp.text
+    assert chat.call_count == 3
+    for call in chat.calls:
+        body = json.loads(call.request.content)
+        assert body["provider"] == {
+            "order": ["azure"],
+            "allow_fallbacks": False,
+        }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@respx.mock
+async def test_certify_uses_selected_path_pricing_for_margin(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    base_url = "https://openrouter.ai/api/v1"
+    provider_id = await _seed_and_init(
+        integration_session,
+        integration_client,
+        provider_fee=0.4,
+        pricing_overrides={
+            "prompt": 1e-7,
+            "completion": 5e-7,
+            "input_cache_read": 1e-8,
+        },
+        base_url=base_url,
+    )
+    model_path = encode_model_path(
+        base_url, "cert-test-model", "deepinfra/fp8"
+    )
+    integration_session.add(
+        ModelPathRow(
+            model_id="cert-test-model",
+            path=model_path,
+            provider_slug="openrouter",
+            provider_type="openrouter",
+            endpoint_tag="deepinfra/fp8",
+            endpoint_name="DeepInfra",
+            model_metadata=json.dumps(
+                {
+                    "id": "cert-test-model",
+                    "pricing": {
+                        "prompt": 1.4e-7,
+                        "completion": 4.2e-7,
+                        "input_cache_read": 4.2e-9,
+                    },
+                }
+            ),
+            upstream_provider_id=provider_id,
+        )
+    )
+    await integration_session.commit()
+
+    respx.get(f"{base_url}/models").mock(
+        return_value=Response(200, json=_mock_models_response())
+    )
+    usages = iter(
+        [
+            {
+                "prompt_tokens": 31,
+                "completion_tokens": 1,
+                "cost": 0.00000459,
+            },
+            {
+                "prompt_tokens": 4442,
+                "completion_tokens": 1,
+                "cost": 0.00057802,
+            },
+            {
+                "prompt_tokens": 4442,
+                "completion_tokens": 1,
+                "prompt_tokens_details": {"cached_tokens": 4352},
+                "cost": 0.00005578,
+            },
+        ]
+    )
+
+    def _respond(_request: Any) -> Response:
+        payload = _mock_chat_response()
+        payload["usage"] = next(usages)
+        return Response(200, json=payload)
+
+    respx.post(f"{base_url}/chat/completions").mock(side_effect=_respond)
+    sats_usd = 0.0008616302499999999
+    with patch("routstr.payment.price.sats_usd_price", return_value=sats_usd):
+        resp = await integration_client.post(
+            f"/admin/api/upstream-providers/{provider_id}/certify",
+            headers=_admin_headers(),
+            json={"model_id": "cert-test-model", "model_path": model_path},
+        )
+
+    assert resp.status_code == 200, resp.text
+    margin = _find_row(resp.json()["rows"], "cost.margin")
+    assert [
+        (sample["upstream_msats_with_fee"], sample["configured_msats"])
+        for sample in margin["evidence"]["samples"]
+    ] == [(3, 3), (269, 289), (26, 15)]
+    assert "289 < 269" not in margin["detail"]
+    assert "15 < 26" in margin["detail"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@respx.mock
+async def test_provider_models_includes_certification_paths(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    base_url = "https://openrouter.ai/api/v1"
+    provider_id = await _seed_and_init(
+        integration_session, integration_client, base_url=base_url
+    )
+    model_path = encode_model_path(base_url, "cert-test-model", "azure")
+    integration_session.add(
+        ModelPathRow(
+            model_id="cert-test-model",
+            path=model_path,
+            provider_slug="openrouter",
+            provider_type="openrouter",
+            endpoint_tag="azure",
+            endpoint_name="Azure",
+            model_metadata="{}",
+            upstream_provider_id=provider_id,
+        )
+    )
+    await integration_session.commit()
+    respx.get(f"{base_url}/models").mock(
+        return_value=Response(200, json=_mock_models_response())
+    )
+
+    resp = await integration_client.get(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["certification_paths"]["cert-test-model"] == [
+        {
+            "path": model_path,
+            "endpoint_tag": "azure",
+            "endpoint_name": "Azure",
+        }
+    ]
 
 
 @pytest.mark.integration
@@ -530,6 +749,76 @@ async def test_certify_with_explicit_model_id(
 @pytest.mark.integration
 @pytest.mark.asyncio
 @respx.mock
+async def test_certify_explicit_discovered_model_without_override(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """An operator can probe a discovered model before creating an override."""
+    from routstr.payment.models import (
+        Architecture,
+        Model,
+        Pricing,
+        _update_model_sats_pricing,
+    )
+
+    provider = await _make_provider(integration_session)
+    assert provider.id is not None
+    remote_model = _update_model_sats_pricing(
+        Model(
+            id="remote-model",
+            name="Remote model",
+            description="",
+            created=0,
+            context_length=8192,
+            architecture=Architecture(
+                modality="text",
+                input_modalities=["text"],
+                output_modalities=["text"],
+                tokenizer="unknown",
+                instruct_type=None,
+            ),
+            pricing=Pricing(prompt=1e-7, completion=2e-7),
+            sats_pricing=None,
+            per_request_limits=None,
+            top_provider=None,
+            enabled=True,
+            upstream_provider_id=provider.id,
+            canonical_slug=None,
+        ),
+        0.0005,
+    )
+
+    class FakeUpstream:
+        db_id = provider.id
+
+        def get_cached_models(self) -> list[Model]:
+            return [remote_model]
+
+    respx.get("https://certify-upstream.example/v1/models").mock(
+        return_value=Response(
+            200, json=_mock_models_response(models=[{"id": "remote-model"}])
+        )
+    )
+    respx.post("https://certify-upstream.example/v1/chat/completions").mock(
+        return_value=Response(200, json=_mock_chat_response(model="remote-model"))
+    )
+
+    with patch("routstr.proxy.get_upstreams", return_value=[FakeUpstream()]):
+        resp = await integration_client.post(
+            f"/admin/api/upstream-providers/{provider.id}/certify",
+            headers=_admin_headers(),
+            json={"model_id": "remote-model", "check_cache": False},
+        )
+
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["rows"]
+    assert _find_row(rows, "endpoint.reachable")["status"] == "ok"
+    assert _find_row(rows, "usage.capture")["status"] == "ok"
+    assert _find_row(rows, "cost.prompt_completion")["status"] == "ok"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@respx.mock
 async def test_certify_includes_pricing_rows(
     integration_client: AsyncClient, integration_session: AsyncSession
 ) -> None:
@@ -595,3 +884,119 @@ async def test_certify_row_contract_shape(
         assert set(item) >= {"goal", "label", "status", "tick", "rows"}
         assert item["status"] in {"ok", "warn", "fail"}
         assert item["tick"] in {"☑️", "⚠️", "❌"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@respx.mock
+async def test_certify_cache_warn_when_upstream_never_hits(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    provider_id = await _seed_and_init(integration_session, integration_client)
+    respx.get("https://certify-upstream.example/v1/models").mock(
+        return_value=Response(200, json=_mock_models_response())
+    )
+    respx.post("https://certify-upstream.example/v1/chat/completions").mock(
+        side_effect=_caching_upstream(cached_tokens=0)
+    )
+
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/certify",
+        headers=_admin_headers(),
+        json={},
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["rows"]
+    assert _find_row(rows, "cache.reported")["status"] == "warn"
+    assert _find_row(rows, "cache.billing")["status"] == "warn"
+    goals = {item["goal"]: item["status"] for item in resp.json()["checklist"]}
+    assert goals["caching"] == "warn"
+    assert goals["margin"] == "ok"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@respx.mock
+async def test_certify_cache_billing_warns_without_cache_rate(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    provider_id = await _seed_and_init(integration_session, integration_client)
+    respx.get("https://certify-upstream.example/v1/models").mock(
+        return_value=Response(200, json=_mock_models_response())
+    )
+    respx.post("https://certify-upstream.example/v1/chat/completions").mock(
+        side_effect=_caching_upstream(report_cost=False)
+    )
+
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/certify",
+        headers=_admin_headers(),
+        json={},
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["rows"]
+    assert _find_row(rows, "cache.reported")["status"] == "ok"
+    billing = _find_row(rows, "cache.billing")
+    assert billing["status"] == "warn"
+    assert billing["evidence"]["actual_total_msats"] == 841
+    assert _find_row(rows, "cost.margin")["status"] == "warn"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@respx.mock
+async def test_certify_margin_fails_when_upstream_costs_more(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    provider_id = await _seed_and_init(integration_session, integration_client)
+    respx.get("https://certify-upstream.example/v1/models").mock(
+        return_value=Response(200, json=_mock_models_response())
+    )
+
+    def _expensive(request: Any) -> Response:
+        payload = _mock_chat_response()
+        payload["usage"] = {"prompt_tokens": 5, "completion_tokens": 1, "cost": 1e-3}
+        return Response(200, json=payload)
+
+    respx.post("https://certify-upstream.example/v1/chat/completions").mock(
+        side_effect=_expensive
+    )
+
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/certify",
+        headers=_admin_headers(),
+        json={},
+    )
+    assert resp.status_code == 200, resp.text
+    margin = _find_row(resp.json()["rows"], "cost.margin")
+    assert margin["status"] == "fail"
+    goals = {item["goal"]: item["status"] for item in resp.json()["checklist"]}
+    assert goals["margin"] == "fail"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@respx.mock
+async def test_certify_check_cache_false_skips_probe(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    provider_id = await _seed_and_init(integration_session, integration_client)
+    respx.get("https://certify-upstream.example/v1/models").mock(
+        return_value=Response(200, json=_mock_models_response())
+    )
+    chat = respx.post("https://certify-upstream.example/v1/chat/completions").mock(
+        return_value=Response(200, json=_mock_chat_response())
+    )
+
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/certify",
+        headers=_admin_headers(),
+        json={"check_cache": False},
+    )
+    assert resp.status_code == 200, resp.text
+    assert chat.call_count == 1
+    rows = resp.json()["rows"]
+    for row_id in ("cache.reported", "cache.billing", "cost.margin"):
+        row = _find_row(rows, row_id)
+        assert row["status"] == "warn"
+        assert "disabled" in row["detail"]

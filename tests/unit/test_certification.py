@@ -527,9 +527,12 @@ class TestBuildChecklist:
             self._row("cost.prompt_completion", STATUS_OK),
             self._row("pricing.served_matches_configured", STATUS_OK),
             self._row("pricing.enabled_models_served", STATUS_OK),
+            self._row("cache.reported", STATUS_OK),
+            self._row("cache.billing", STATUS_OK),
+            self._row("cost.margin", STATUS_OK),
         ]
         checklist = build_checklist(rows)
-        assert len(checklist) == 4
+        assert len(checklist) == 6
         for item in checklist:
             assert item["status"] == STATUS_OK
             assert item["tick"] == "☑️"

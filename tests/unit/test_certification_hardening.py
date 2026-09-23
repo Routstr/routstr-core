@@ -337,8 +337,8 @@ class TestCliFreshProcess:
         )
         document = json.loads(out.read_text(encoding="utf-8"))
         assert isinstance(document, list) and document
-        assert len(document[0]["rows"]) == 5
-        assert len(document[0]["checklist"]) == 4
+        assert len(document[0]["rows"]) == 8
+        assert len(document[0]["checklist"]) == 6
 
     def test_dead_host_exits_non_zero(self) -> None:
         result = _run_cli("--url", "http://localhost:1/v1", "--timeout", "1")

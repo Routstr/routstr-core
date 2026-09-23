@@ -37,6 +37,7 @@ from ..core.logging import get_logger
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
 
+    from ..payment.models import Model
     from .base import BaseUpstreamProvider
 
 logger = get_logger(__name__)
@@ -882,6 +883,57 @@ def _price_in_sats(model: dict[str, Any], provider_fee: float) -> None:
     if priced.sats_pricing:
         model["pricing"] = usd.dict()
         model["sats_pricing"] = priced.sats_pricing.dict()
+
+
+def apply_model_path_pricing(
+    model: "Model",
+    row: ModelPathRow,
+    provider_fee: float,
+    sats_to_usd: float,
+) -> "Model":
+    """Return ``model`` priced from an exact endpoint path's own rates.
+
+    Direct paths already use the provider model cache and therefore carry the
+    same pricing as ``model``. OpenRouter endpoint rows instead contain raw,
+    endpoint-specific USD rates; certification must use those rates when its
+    requests are pinned to that endpoint.
+    """
+    if row.endpoint_tag is None:
+        return model
+
+    from ..payment.models import (
+        Pricing,
+        _calculate_usd_max_costs,
+        _update_model_sats_pricing,
+        backfill_cache_pricing,
+    )
+
+    try:
+        metadata = json.loads(row.model_metadata)
+        if not isinstance(metadata, dict) or not isinstance(
+            metadata.get("pricing"), dict
+        ):
+            return model
+        pricing = backfill_cache_pricing(
+            model.forwarded_model_id or row.model_id,
+            Pricing.parse_obj(metadata["pricing"]),
+        )
+        pricing = Pricing.parse_obj(
+            {key: float(value) * provider_fee for key, value in pricing.dict().items()}
+        )
+        priced = model.copy(update={"pricing": pricing, "sats_pricing": None})
+        (
+            pricing.max_prompt_cost,
+            pricing.max_completion_cost,
+            pricing.max_cost,
+        ) = _calculate_usd_max_costs(priced)
+        return _update_model_sats_pricing(priced, sats_to_usd)
+    except Exception as exc:
+        logger.warning(
+            "Could not apply model-path pricing for certification",
+            extra={"model_id": model.id, "path": row.path, "error": str(exc)},
+        )
+        return model
 
 
 def _serialize_path(row: ModelPathRow, provider_fee: float) -> dict[str, Any]:
