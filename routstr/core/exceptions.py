@@ -18,6 +18,11 @@ class UpstreamError(Exception):
     string-matching the message. ``details`` holds optional structured,
     redaction-safe context. Both default to ``None`` for backwards
     compatibility.
+
+    ``from_upstream_response`` is True only when ``status_code`` is the status
+    the upstream itself answered with, as opposed to a status this proxy chose
+    for a transport failure, timeout or internal fault. Callers use it to
+    decide whether a status is safe to retry.
     """
 
     def __init__(
@@ -26,11 +31,13 @@ class UpstreamError(Exception):
         status_code: int = 502,
         code: str | None = None,
         details: dict[str, object] | None = None,
+        from_upstream_response: bool = False,
     ):
         self.message = message
         self.status_code = status_code
         self.code = code
         self.details = details
+        self.from_upstream_response = from_upstream_response
         super().__init__(message)
 
 

@@ -3151,6 +3151,7 @@ class BaseUpstreamProvider:
                         status_code=response.status_code,
                         code=rate_limit.code if rate_limit else None,
                         details=rate_limit.as_details() if rate_limit else None,
+                        from_upstream_response=True,
                     )
 
                 try:
@@ -3526,6 +3527,7 @@ class BaseUpstreamProvider:
                         status_code=response.status_code,
                         code=rate_limit.code if rate_limit else None,
                         details=rate_limit.as_details() if rate_limit else None,
+                        from_upstream_response=True,
                     )
 
                 try:
