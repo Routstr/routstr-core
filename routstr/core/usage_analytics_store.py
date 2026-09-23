@@ -783,7 +783,7 @@ class UsageAnalyticsStore:
             """
             SELECT
                 datetime(
-                    (CAST(strftime('%s', minute_ts) AS INTEGER) / ?) * ?,
+                    (CAST(strftime('%s', minute_ts, 'utc') AS INTEGER) / ?) * ?,
                     'unixepoch'
                 ) AS bucket_ts,
                 COALESCE(SUM(total_requests), 0) AS total_requests,
@@ -1185,7 +1185,7 @@ class UsageAnalyticsStore:
             """
             SELECT
                 datetime(
-                    (CAST(strftime('%s', minute_ts) AS INTEGER) / ?) * ?,
+                    (CAST(strftime('%s', minute_ts, 'utc') AS INTEGER) / ?) * ?,
                     'unixepoch'
                 ) AS bucket_ts,
                 COALESCE(SUM(successful), 0) AS total_successful,
@@ -1240,7 +1240,7 @@ class UsageAnalyticsStore:
                 f"""
                 SELECT
                     datetime(
-                        (CAST(strftime('%s', minute_ts) AS INTEGER) / ?) * ?,
+                        (CAST(strftime('%s', minute_ts, 'utc') AS INTEGER) / ?) * ?,
                         'unixepoch'
                     ) AS bucket_ts,
                     model,
@@ -1300,8 +1300,9 @@ class UsageAnalyticsStore:
         }
 
     def _cutoff_timestamp(self, hours_back: int) -> str:
+        # Stored minutes are server-local log stamps, so the cutoff must be too.
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
-        return cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        return cutoff.astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
     def _minute_key(self, timestamp: Any) -> str | None:
         if not isinstance(timestamp, str) or len(timestamp) != 19:

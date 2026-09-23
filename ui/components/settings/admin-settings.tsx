@@ -129,8 +129,14 @@ export function AdminSettings() {
         settingsPayload = { ...settings, npub: result.npub };
       }
 
+      // Send only what changed here, so a tab opened earlier cannot write back
+      // choices saved since, such as a stats opt-out.
       const updatedData = (await AdminService.updateSettings(
-        settingsPayload
+        Object.fromEntries(
+          Object.entries(settingsPayload).filter(
+            ([key, value]) => !areValuesEqual(value, initialSettings[key])
+          )
+        )
       )) as SettingsData;
       setSettings(updatedData);
       setInitialSettings(updatedData);
