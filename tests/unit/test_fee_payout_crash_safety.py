@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -27,6 +27,21 @@ class _SessionContext:
 
 def _session_context(session: Mock) -> _SessionContext:
     return _SessionContext(session)
+
+
+@pytest.fixture(autouse=True)
+def _mock_lightning_payout_history() -> Generator[
+    tuple[AsyncMock, AsyncMock], None, None
+]:
+    with (
+        patch(
+            "routstr.wallet.db.record_lightning_payout", new_callable=AsyncMock
+        ) as record,
+        patch(
+            "routstr.wallet.db.settle_lightning_payout", new_callable=AsyncMock
+        ) as settle,
+    ):
+        yield record, settle
 
 
 @pytest.mark.asyncio
@@ -178,7 +193,7 @@ async def test_fee_payout_prepares_wallet_then_checkpoints_before_sending() -> N
 
     async def send(*_args: object, **kwargs: object) -> int:
         checkpoint_quote = kwargs["on_melt_quote"]
-        await checkpoint_quote("quote-1")  # type: ignore[operator]
+        await checkpoint_quote("quote-1", "lnbc1payout")  # type: ignore[operator]
         events.append("send")
         return 5
 
@@ -256,7 +271,7 @@ async def test_fee_payout_lost_checkpoint_race_does_not_send() -> None:
 
     async def send(*_args: object, **kwargs: object) -> int:
         checkpoint_quote = kwargs["on_melt_quote"]
-        await checkpoint_quote("quote-1")  # type: ignore[operator]
+        await checkpoint_quote("quote-1", "lnbc1payout")  # type: ignore[operator]
         await dispatched()
         return 5
 
@@ -289,7 +304,9 @@ async def test_fee_payout_lost_checkpoint_race_does_not_send() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fee_payout_finalizes_a_paid_unresolved_quote_without_resending() -> None:
+async def test_fee_payout_finalizes_a_paid_unresolved_quote_without_resending(
+    _mock_lightning_payout_history: tuple[AsyncMock, AsyncMock],
+) -> None:
     session = Mock()
     fee = SimpleNamespace(
         accumulated_msats=10_000,
@@ -331,10 +348,14 @@ async def test_fee_payout_finalizes_a_paid_unresolved_quote_without_resending() 
     )
     restore.assert_not_awaited()
     send.assert_not_awaited()
+    _, settle = _mock_lightning_payout_history
+    settle.assert_awaited_once_with(session, "quote-1", status="paid", amount_sats=None)
 
 
 @pytest.mark.asyncio
-async def test_fee_payout_restores_only_an_unpaid_quote_and_retries() -> None:
+async def test_fee_payout_restores_only_an_unpaid_quote_and_retries(
+    _mock_lightning_payout_history: tuple[AsyncMock, AsyncMock],
+) -> None:
     session = Mock()
     unresolved_fee = SimpleNamespace(
         accumulated_msats=10_000,
@@ -351,7 +372,9 @@ async def test_fee_payout_restores_only_an_unpaid_quote_and_retries() -> None:
     )
 
     async def send(*_args: object, **kwargs: object) -> int:
-        await kwargs["on_melt_quote"]("quote-2")  # type: ignore[index,operator]
+        await kwargs["on_melt_quote"](  # type: ignore[index,operator]
+            "quote-2", "lnbc1payout"
+        )
         return 15
 
     with (
@@ -398,6 +421,8 @@ async def test_fee_payout_restores_only_an_unpaid_quote_and_retries() -> None:
         session, 15_000, "quote-2", wallet.settings.primary_mint, "sat"
     )
     raw_send.assert_awaited_once()
+    _, settle = _mock_lightning_payout_history
+    settle.assert_any_await(session, "quote-1", status="failed", amount_sats=None)
 
 
 @pytest.mark.asyncio
@@ -579,7 +604,7 @@ async def test_fee_payout_keeps_checkpoint_when_send_outcome_is_unknown() -> Non
 
     async def send(*_args: object, **kwargs: object) -> int:
         checkpoint_quote = kwargs["on_melt_quote"]
-        await checkpoint_quote("quote-1")  # type: ignore[operator]
+        await checkpoint_quote("quote-1", "lnbc1payout")  # type: ignore[operator]
         raise TimeoutError("unknown outcome")
 
     with (
@@ -620,7 +645,7 @@ async def test_fee_payout_cancellation_during_send_alerts_and_propagates() -> No
 
     async def cancel_send(*_args: object, **kwargs: object) -> int:
         checkpoint_quote = kwargs["on_melt_quote"]
-        await checkpoint_quote("quote-1")  # type: ignore[operator]
+        await checkpoint_quote("quote-1", "lnbc1payout")  # type: ignore[operator]
         raise asyncio.CancelledError
 
     with (
@@ -666,6 +691,8 @@ async def test_fee_payout_completion_failures_use_sent_checkpoint_alert(
             side_effect=[
                 _session_context(session),
                 _session_context(session),
+                _session_context(session),
+                RuntimeError("pool unavailable"),
                 RuntimeError("pool unavailable"),
             ]
         )
@@ -675,7 +702,7 @@ async def test_fee_payout_completion_failures_use_sent_checkpoint_alert(
 
     async def send(*_args: object, **kwargs: object) -> int:
         checkpoint_quote = kwargs["on_melt_quote"]
-        await checkpoint_quote("quote-1")  # type: ignore[operator]
+        await checkpoint_quote("quote-1", "lnbc1payout")  # type: ignore[operator]
         return 5
 
     with (
@@ -726,7 +753,7 @@ async def test_fee_payout_releases_db_connection_during_send(tmp_path: object) -
     async def send(*_args: object, **kwargs: object) -> int:
         assert engine.pool.checkedout() == 0  # type: ignore[attr-defined]
         checkpoint_quote = kwargs["on_melt_quote"]
-        await checkpoint_quote("quote-1")  # type: ignore[operator]
+        await checkpoint_quote("quote-1", "lnbc1payout")  # type: ignore[operator]
         assert engine.pool.checkedout() == 0  # type: ignore[attr-defined]
         return 5
 

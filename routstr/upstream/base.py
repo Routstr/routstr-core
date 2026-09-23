@@ -63,6 +63,7 @@ from .cache_breakpoints import (
 )
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
 from .litellm_routing import detect_litellm_prefix
+from .model_paths import public_provider_url
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
 from .reasoning_effort import apply_reasoning_effort
 
@@ -483,9 +484,13 @@ class BaseUpstreamProvider:
         Idempotent: re-stamping an already-stamped payload must not nest the
         prefix repeatedly (e.g. never ``"anthropic:anthropic"``). This matters
         because streaming paths can apply the field more than once per chunk.
+
+        Also stamps ``provider_url`` with the upstream base URL that served
+        the request.
         """
         if not isinstance(response_json, dict):
             return
+        response_json["provider_url"] = public_provider_url(self.base_url)
         provider_type = (self.provider_type or "").strip()
         existing = response_json.get("provider")
         existing_str = existing.strip() if isinstance(existing, str) else ""

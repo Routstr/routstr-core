@@ -4,6 +4,7 @@ import json
 import socket
 from collections.abc import AsyncIterator, Generator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import httpx
@@ -31,11 +32,16 @@ from routstr.wallet import (
 
 
 @pytest.fixture(autouse=True)
-def isolate_wallet_runtime_state() -> Generator[None, None, None]:
+def isolate_wallet_runtime_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Generator[None, None, None]:
     """Keep production limiter/wallet caches from leaking across unit tests."""
     from routstr import wallet as wallet_module
     from routstr.core.settings import settings
 
+    monkeypatch.setattr(
+        wallet_module, "_WALLET_OPERATION_LOCK", tmp_path / "wallet.lock"
+    )
     original_concurrency = settings.mint_max_concurrency
     settings.mint_max_concurrency = 0
     wallet_module._MintRateGuard._guards.clear()
@@ -140,6 +146,19 @@ async def test_get_wallet_force_reload_bypasses_reload_interval() -> None:
         await get_wallet("http://mint:3338", "sat", force_reload=True)
 
     assert mock_wallet.load_mint.await_count == 2
+    assert mock_wallet.load_proofs.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_wallet_force_reload_proofs_keeps_cached_keysets() -> None:
+    from routstr.wallet import get_wallet
+
+    mock_wallet = Mock(load_mint=AsyncMock(), load_proofs=AsyncMock())
+    with patch("routstr.wallet.Wallet.with_db", AsyncMock(return_value=mock_wallet)):
+        await get_wallet("http://mint:3338", "sat")
+        await get_wallet("http://mint:3338", "sat", force_reload_proofs=True)
+
+    assert mock_wallet.load_mint.await_count == 1
     assert mock_wallet.load_proofs.await_count == 2
 
 
@@ -1301,10 +1320,12 @@ async def test_execute_bolt11_payment_rereserves_when_cancelled() -> None:
 @pytest.mark.asyncio
 async def test_balance_proof_check_uses_large_batches_to_avoid_rate_limit() -> None:
     """Balance reads must not turn a few hundred proofs into many mint requests."""
+    from cashu.core.base import ProofSpentState
+
     from routstr.wallet import slow_filter_spend_proofs
 
-    proofs = [Mock() for _ in range(250)]
-    states = [Mock(state="UNSPENT") for _ in proofs]
+    proofs = [Mock(Y=str(i)) for i in range(250)]
+    states = [Mock(Y=proof.Y, state=ProofSpentState.unspent) for proof in proofs]
     wallet = Mock()
     wallet.url = "http://mint:3338"
     wallet.check_proof_state = AsyncMock(return_value=Mock(states=states))
@@ -2017,7 +2038,7 @@ async def test_payout_reloads_wallet_snapshot_under_guard() -> None:
         await _payout_mint_and_unit("https://mint.example.com", "sat")
 
     mock_get_wallet.assert_awaited_once_with(
-        "https://mint.example.com", "sat", force_reload=True
+        "https://mint.example.com", "sat", force_reload_proofs=True
     )
 
 

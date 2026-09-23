@@ -1,5 +1,6 @@
 from routstr.upstream.anthropic import AnthropicUpstreamProvider
 from routstr.upstream.base import BaseUpstreamProvider
+from routstr.upstream.generic import GenericUpstreamProvider
 from routstr.upstream.openrouter import OpenRouterUpstreamProvider
 
 
@@ -127,3 +128,53 @@ def test_inject_cost_metadata_sets_provider() -> None:
     p.inject_cost_metadata(response_json, cost_data, key)
 
     assert response_json["provider"] == "openrouter:Anthropic"
+
+
+def test_apply_provider_field_generic_uses_upstream_host() -> None:
+    """A generic upstream has no router-reported provider; the serving host
+    identifies it, mirroring ``openrouter:<sub-provider>``."""
+    p = GenericUpstreamProvider(base_url="https://api.deepseek.com/v1", api_key="k")
+    data: dict = {"id": "chatcmpl-1", "model": "deepseek-chat"}
+    p._apply_provider_field(data)
+    assert data["provider"] == "generic:api.deepseek.com"
+
+
+def test_apply_provider_field_generic_keeps_upstream_reported_provider() -> None:
+    p = GenericUpstreamProvider(base_url="https://api.deepseek.com/v1", api_key="k")
+    data: dict = {"provider": "Fireworks"}
+    p._apply_provider_field(data)
+    assert data["provider"] == "generic:Fireworks"
+
+
+def test_apply_provider_field_generic_idempotent() -> None:
+    p = GenericUpstreamProvider(base_url="https://api.deepseek.com/v1", api_key="k")
+    data: dict = {}
+    p._apply_provider_field(data)
+    p._apply_provider_field(data)
+    assert data["provider"] == "generic:api.deepseek.com"
+
+
+def test_apply_provider_field_sets_provider_url() -> None:
+    """Every provider exposes the upstream base URL it served from."""
+    generic = GenericUpstreamProvider(
+        base_url="https://api.deepseek.com/v1", api_key="k"
+    )
+    data: dict = {}
+    generic._apply_provider_field(data)
+    assert data["provider_url"] == "https://api.deepseek.com/v1"
+
+    openrouter = _make_provider(OpenRouterUpstreamProvider, "openrouter")
+    data = {"provider": "Anthropic"}
+    openrouter._apply_provider_field(data)
+    assert data["provider_url"] == "https://openrouter.ai/api/v1"
+
+
+def test_apply_provider_field_masks_private_upstream() -> None:
+    """Private or port-bearing upstream URLs are masked the same way model
+    paths mask them, so neither ``provider`` nor ``provider_url`` leaks a
+    local address."""
+    p = GenericUpstreamProvider(base_url="http://10.0.0.5:11434/v1", api_key="k")
+    data: dict = {}
+    p._apply_provider_field(data)
+    assert data["provider"] == "generic:localhost"
+    assert data["provider_url"] == "http://localhost"

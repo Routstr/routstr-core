@@ -4,6 +4,7 @@ import httpx
 
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
+from .model_paths import public_provider_url
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -32,6 +33,7 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
         """
         if not isinstance(response_json, dict):
             return
+        response_json["provider_url"] = public_provider_url(self.base_url)
         provider_type = (self.provider_type or "").strip()
         existing = response_json.get("provider")
         sub = existing.strip() if isinstance(existing, str) else ""
