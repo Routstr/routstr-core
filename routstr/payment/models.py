@@ -241,61 +241,98 @@ def _has_valid_pricing(model: dict) -> bool:
     return True
 
 
-async def async_fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
-    """Asynchronously fetch model information from OpenRouter API."""
+# OpenRouter occasionally answers /models with a truncated body, emptying the
+# catalogue behind one log line. Retry, but keep 3 attempts within roughly the
+# old single-attempt budget: this fetch blocks startup and the refresh loop.
+OPENROUTER_MODELS_MAX_ATTEMPTS = 3
+OPENROUTER_MODELS_TIMEOUT_SECONDS = 10
+OPENROUTER_MODELS_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def _is_transient(error: BaseException) -> bool:
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code >= 500
+    return True
+
+
+def _parse_models_response(response: httpx.Response | BaseException) -> list[dict]:
+    if isinstance(response, BaseException):
+        raise response
+    response.raise_for_status()
+    return [
+        model
+        for model in response.json().get("data", [])
+        if ":free" not in model.get("id", "").lower()
+    ]
+
+
+async def _fetch_openrouter_models_once(source_filter: str | None) -> list[dict]:
+    """One attempt. Raises if /models is unusable; embeddings are best-effort."""
     base_url = "https://openrouter.ai/api/v1"
+    timeout = OPENROUTER_MODELS_TIMEOUT_SECONDS
 
-    try:
-        async with httpx.AsyncClient() as client:
-            models_response, embeddings_response = await asyncio.gather(
-                client.get(f"{base_url}/models", timeout=30),
-                client.get(f"{base_url}/embeddings/models", timeout=30),
-                return_exceptions=True,
-            )
+    async with httpx.AsyncClient() as client:
+        models_response, embeddings_response = await asyncio.gather(
+            client.get(f"{base_url}/models", timeout=timeout),
+            client.get(f"{base_url}/embeddings/models", timeout=timeout),
+            return_exceptions=True,
+        )
 
-            def process_models_response(
-                response: httpx.Response | BaseException,
-            ) -> list[dict]:
-                if not isinstance(response, BaseException):
-                    response.raise_for_status()
-                    data = response.json()
-                    return [
-                        model
-                        for model in data.get("data", [])
-                        if ":free" not in model.get("id", "").lower()
-                    ]
+        # Losing /models is what empties the node, so it fails the attempt and
+        # the caller retries. A missing embeddings half must not do the same.
+        models_data = _parse_models_response(models_response)
+        try:
+            models_data.extend(_parse_models_response(embeddings_response))
+        except Exception as e:
+            logger.warning(f"Skipping OpenRouter embeddings models: {e}")
+
+        # Apply source filter and exclusions
+        filtered_models = []
+        for model in models_data:
+            model_id = model.get("id", "")
+
+            if source_filter:
+                source_prefix = f"{source_filter}/"
+                if not model_id.startswith(source_prefix):
+                    continue
+
+                model = dict(model)
+                model["id"] = model_id[len(source_prefix) :]
+                model_id = model["id"]
+
+            if "(free)" in model.get("name", ""):
+                continue
+
+            if not _has_valid_pricing(model):
+                continue
+
+            filtered_models.append(model)
+
+        return filtered_models
+
+
+async def async_fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
+    """Fetch the OpenRouter catalogue; ``[]`` once every attempt has failed."""
+    for attempt in range(1, OPENROUTER_MODELS_MAX_ATTEMPTS + 1):
+        try:
+            return await _fetch_openrouter_models_once(source_filter)
+        except Exception as e:
+            last_attempt = attempt == OPENROUTER_MODELS_MAX_ATTEMPTS
+            if last_attempt or not _is_transient(e):
+                logger.error(
+                    f"Error (async) fetching models from OpenRouter API "
+                    f"after {attempt} attempt(s): {e}"
+                )
                 return []
+            logger.warning(
+                f"OpenRouter models fetch attempt {attempt}/"
+                f"{OPENROUTER_MODELS_MAX_ATTEMPTS} failed: {e}; retrying"
+            )
+            # Jittered so nodes do not retry in lockstep.
+            backoff = OPENROUTER_MODELS_RETRY_BACKOFF_SECONDS * attempt
+            await asyncio.sleep(backoff * random.uniform(0.5, 1.5))
 
-            models_data: list[dict] = []
-            models_data.extend(process_models_response(models_response))
-            models_data.extend(process_models_response(embeddings_response))
-
-            # Apply source filter and exclusions
-            filtered_models = []
-            for model in models_data:
-                model_id = model.get("id", "")
-
-                if source_filter:
-                    source_prefix = f"{source_filter}/"
-                    if not model_id.startswith(source_prefix):
-                        continue
-
-                    model = dict(model)
-                    model["id"] = model_id[len(source_prefix) :]
-                    model_id = model["id"]
-
-                if "(free)" in model.get("name", ""):
-                    continue
-
-                if not _has_valid_pricing(model):
-                    continue
-
-                filtered_models.append(model)
-
-            return filtered_models
-    except Exception as e:
-        logger.error(f"Error (async) fetching models from OpenRouter API: {e}")
-        return []
+    return []
 
 
 def _build_model_from_row(
