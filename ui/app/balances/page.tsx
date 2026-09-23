@@ -4,6 +4,7 @@ import { useCurrencyStore } from '@/lib/stores/currency';
 import { useQuery } from '@tanstack/react-query';
 import { DetailedWalletBalance } from '@/components/detailed-wallet-balance';
 import { TemporaryBalances } from '@/components/temporary-balances';
+import { ReservedProofs } from '@/components/reserved-proofs';
 import { fetchBtcUsdPrice, btcToSatsRate } from '@/lib/exchange-rate';
 import { AppPageShell } from '@/components/app-page-shell';
 import { PageHeader } from '@/components/page-header';
@@ -31,6 +32,11 @@ export default function BalancesPage() {
         <div className='grid gap-6'>
           <DetailedWalletBalance
             refreshInterval={30000}
+            displayUnit={displayUnit}
+            usdPerSat={usdPerSat}
+          />
+          <ReservedProofs
+            refreshInterval={60000}
             displayUnit={displayUnit}
             usdPerSat={usdPerSat}
           />

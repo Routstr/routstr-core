@@ -209,6 +209,33 @@ async def get_balances_api(request: Request) -> list[dict[str, object]]:
     return [dict(d) for d in balance_details]
 
 
+@admin_router.get(
+    "/api/wallet/reserved-proofs", dependencies=[Depends(require_admin_api)]
+)
+async def get_reserved_proofs_api() -> dict[str, object]:
+    """Reserved proofs grouped by melt quote; reads the local wallet only."""
+    from ..reserved_proofs import inspect_reserved_proofs
+
+    return dict(await inspect_reserved_proofs())
+
+
+class ReconcileReservedProofsRequest(BaseModel):
+    key: str | None = None
+
+
+@admin_router.post(
+    "/api/wallet/reserved-proofs/reconcile",
+    dependencies=[Depends(require_admin_api)],
+)
+async def reconcile_reserved_proofs_api(
+    body: ReconcileReservedProofsRequest | None = None,
+) -> dict[str, object]:
+    """Ask the mints how reserved proofs ended and settle confirmed outcomes."""
+    from ..reserved_proofs import reconcile_reserved_proofs
+
+    return dict(await reconcile_reserved_proofs(body.key if body else None))
+
+
 @admin_router.get("/api/settings", dependencies=[Depends(require_admin_api)])
 async def get_settings(request: Request) -> dict:
     data = settings.dict()

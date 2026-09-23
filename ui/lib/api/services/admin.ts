@@ -864,6 +864,21 @@ export class AdminService {
     );
   }
 
+  static async getReservedProofs(): Promise<ReservedProofsInspection> {
+    return await apiClient.get<ReservedProofsInspection>(
+      '/admin/api/wallet/reserved-proofs'
+    );
+  }
+
+  static async reconcileReservedProofs(
+    key?: string
+  ): Promise<ReservedProofsReconcileResponse> {
+    return await apiClient.post<ReservedProofsReconcileResponse>(
+      '/admin/api/wallet/reserved-proofs/reconcile',
+      key ? { key } : {}
+    );
+  }
+
   static async getUsageMetrics(
     interval: number = 15,
     hours: number = 24
@@ -1105,6 +1120,56 @@ export interface TemporaryBalancesResponse {
     total_spent: number;
     total_requests: number;
   };
+}
+
+export type ReservedProofHint = 'paid_at_mint' | 'releasable' | 'check_mint';
+
+export interface ReservedProofGroup {
+  key: string;
+  kind: 'melt' | 'unquoted';
+  mint_url: string | null;
+  unit: string | null;
+  quote_id: string | null;
+  local_state: string | null;
+  quote_amount: number | null;
+  fee_reserve: number | null;
+  created_time: number | null;
+  request: string | null;
+  proof_count: number;
+  proof_amount: number;
+  oldest_reserved_at: string | null;
+  hint: ReservedProofHint;
+}
+
+export interface ReservedProofsInspection {
+  groups: ReservedProofGroup[];
+  totals: Record<string, number>;
+  checked_at: number;
+}
+
+export interface ReservedProofReconcileResult {
+  key: string;
+  kind: 'melt' | 'unquoted';
+  mint_url: string | null;
+  unit: string | null;
+  quote_id: string | null;
+  mint_state: string | null;
+  action:
+    | 'released'
+    | 'settled_paid'
+    | 'left_reserved'
+    | 'checked'
+    | 'skipped'
+    | 'error';
+  released_amount: number;
+  pruned_amount: number;
+  outstanding_amount: number;
+  error: string | null;
+}
+
+export interface ReservedProofsReconcileResponse {
+  results: ReservedProofReconcileResult[];
+  inspection: ReservedProofsInspection;
 }
 
 export interface UsageMetricData {
