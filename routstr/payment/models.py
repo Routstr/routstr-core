@@ -11,6 +11,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from ..core.db import ModelRow, UpstreamProviderRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
+from .image_pricing import ImagePricing
 from .price import sats_usd_price
 from .rates import BILLABLE_PRICING_FIELDS, coerce_rate, is_usable_rate
 
@@ -126,6 +127,7 @@ class Model(BaseModel):
     alias_ids: list[str] | None = None
     forwarded_model_id: str | None = None
     reasoning: Reasoning | None = None
+    image_pricing: ImagePricing | None = None
 
     class Config:
         extra = "ignore"
@@ -345,6 +347,8 @@ def _build_model_from_row(
         json.loads(row.per_request_limits) if row.per_request_limits else None
     )
     top_provider_dict = json.loads(row.top_provider) if row.top_provider else None
+    raw_image_pricing = getattr(row, "image_pricing", None)
+    image_pricing_dict = json.loads(raw_image_pricing) if raw_image_pricing else None
 
     if isinstance(pricing, dict) and float(pricing.get("request", 0.0)) <= 0.0:
         pricing["request"] = max(pricing.get("request", 0.0), 0.0)
@@ -387,6 +391,9 @@ def _build_model_from_row(
         canonical_slug=getattr(row, "canonical_slug", None),
         alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
         forwarded_model_id=getattr(row, "forwarded_model_id", None),
+        image_pricing=ImagePricing.parse_obj(image_pricing_dict)
+        if image_pricing_dict
+        else None,
     )
 
     if apply_provider_fee:

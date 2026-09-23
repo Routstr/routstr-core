@@ -24,6 +24,7 @@ from ..wallet import (
     deserialize_token_from_string,
     is_trusted_source_mint,
 )
+from .image_pricing import image_reservation_msats
 from .responses_input import (
     FILE_ID_URL_PREFIX,
     count_input_images,
@@ -199,6 +200,10 @@ async def calculate_discounted_max_cost(
     model_pricing = model_obj.sats_pricing if model_obj else None
     if not model_pricing:
         return max_cost_for_model
+
+    image_reservation = image_reservation_msats(body, model_obj)
+    if image_reservation is not None:
+        return max(settings.min_request_msat, image_reservation)
 
     tol = settings.tolerance_percentage
     tol_factor = max(0.0, 1 - float(tol) / 100.0)

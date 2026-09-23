@@ -349,6 +349,8 @@ def _expected_serialised_model(provider_id: int) -> dict:
         "enabled": True,
         "forwarded_model_id": _SEEDED_MODEL_ID,
         "id": _SEEDED_MODEL_ID,
+        # Only models that return images carry a per-image price book.
+        "image_pricing": None,
         "name": f"SerTest {_SEEDED_MODEL_ID}",
         "per_request_limits": None,
         "pricing": {

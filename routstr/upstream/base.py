@@ -38,8 +38,10 @@ from ..payment.cost_calculation import (
     CostDataError,
     MaxCostData,
     calculate_cost,
+    calculate_flat_cost,
 )
 from ..payment.helpers import create_error_response
+from ..payment.image_pricing import per_image_sats
 from ..payment.models import (
     Model,
     Pricing,
@@ -62,6 +64,11 @@ from .cache_breakpoints import (
     is_explicit_cache_model,
 )
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
+from .image_generation import (
+    count_generated_images,
+    is_image_generation_path,
+    parse_json_body,
+)
 from .litellm_routing import detect_litellm_prefix
 from .model_paths import public_provider_url
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
@@ -2051,6 +2058,74 @@ class BaseUpstreamProvider:
             )
             raise
 
+    async def handle_image_generation(
+        self,
+        response: httpx.Response,
+        key: ApiKey,
+        session: AsyncSession,
+        max_cost_for_model: int,
+        model_obj: Model | None,
+        reservation_snapshot: ReservationSnapshot | None = None,
+        request_body: bytes | None = None,
+    ) -> Response:
+        """Settle an image response: one flat charge per image returned."""
+        content = await response.aread()
+        content_type = response.headers.get("content-type")
+        image_count = count_generated_images(
+            content, _is_json_content_type(content_type) if content_type else True
+        )
+        sats_per_image = per_image_sats(model_obj, parse_json_body(request_body))
+        model_id = model_obj.id if model_obj else "unknown"
+
+        if image_count > 0 and sats_per_image <= 0:
+            logger.warning(
+                "Image response carries no per-image price; releasing the "
+                "reservation instead of billing a rate we do not have",
+                extra={
+                    "model": model_id,
+                    "image_count": image_count,
+                    "key_hash": key.hashed_key[:8] + "...",
+                },
+            )
+
+        cost_data = await adjust_payment_for_tokens(
+            key,
+            {"model": model_id, "usage": None},
+            session,
+            max_cost_for_model,
+            model_obj,
+            self.provider_fee,
+            reservation_snapshot,
+            precomputed_cost=calculate_flat_cost(image_count, sats_per_image),
+        )
+
+        logger.info(
+            "Settled image generation request",
+            extra={
+                "model": model_id,
+                "image_count": image_count,
+                "sats_per_image": sats_per_image,
+                "key_hash": key.hashed_key[:8] + "...",
+            },
+        )
+
+        # httpx already decoded the body, so the upstream's framing headers no
+        # longer describe it.
+        headers = {
+            name: value
+            for name, value in response.headers.items()
+            if name.lower()
+            not in {"content-length", "content-encoding", "transfer-encoding"}
+        }
+        _inject_cost_response_headers(headers, cost_data)
+
+        return Response(
+            content=content,
+            status_code=response.status_code,
+            headers=headers,
+            media_type=content_type,
+        )
+
     async def _finalize_generic_streaming_payment(
         self,
         key_hash: str,
@@ -3303,6 +3378,21 @@ class BaseUpstreamProvider:
 
             if reservation_snapshot is None:
                 reservation_snapshot = await get_reservation_snapshot(key, session)
+
+            if is_image_generation_path(path) and response.status_code == 200:
+                try:
+                    return await self.handle_image_generation(
+                        response,
+                        key,
+                        session,
+                        max_cost_for_model,
+                        model_obj,
+                        reservation_snapshot=reservation_snapshot,
+                        request_body=request_body,
+                    )
+                finally:
+                    await response.aclose()
+                    await client.aclose()
 
             background_tasks = BackgroundTasks()
             background_tasks.add_task(response.aclose)
