@@ -487,9 +487,7 @@ async def test_pinned_exception_does_not_fall_back() -> None:
         request, [(MagicMock(), first), (MagicMock(), fallback)]
     )
     assert response.status_code == 503
-    # The pin still binds the route to `first`: the 503 is retried on the SAME
-    # upstream, and the route is never relaxed to the fallback.
-    assert first.forward_request.await_count == 2
+    first.forward_request.assert_awaited_once()
     fallback.forward_request.assert_not_awaited()
 
 
@@ -548,11 +546,7 @@ async def test_ehbp_pin_does_not_fall_back(cashu: bool) -> None:
             request, [(MagicMock(), selected), (MagicMock(), fallback)]
         )
     assert response.status_code == 503
-    # The pin still binds the route to `selected`. The bearer/EHBP dispatch runs
-    # inside the candidate loop, so its 503 is retried on the same upstream; the
-    # x-cashu dispatch happens earlier and is not retried. Neither relaxes the
-    # pin to the fallback.
-    assert forward.await_count == (1 if cashu else 2)
+    forward.assert_awaited_once()
     assert forward.await_args is not None
     assert forward.await_args.kwargs["upstream"] is selected
 

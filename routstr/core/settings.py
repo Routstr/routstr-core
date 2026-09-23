@@ -36,10 +36,7 @@ class Settings(BaseSettings):
     # Core
     upstream_base_url: str = Field(default="", env="UPSTREAM_BASE_URL")
     upstream_api_key: str = Field(default="", env="UPSTREAM_API_KEY")
-    # Extra attempts against the SAME upstream when it answers a request with a
-    # transient 5xx (502/503/504). An edge/gateway blip is usually gone by the
-    # next attempt, so retrying in place avoids both a failed request and an
-    # unnecessary failover to a pricier provider. 0 disables the retry.
+    # Extra attempts against the same upstream on a transient 5xx. 0 disables.
     upstream_5xx_retry_attempts: int = Field(
         default=1, ge=0, env="UPSTREAM_5XX_RETRY_ATTEMPTS"
     )
