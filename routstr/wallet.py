@@ -121,7 +121,7 @@ def _msats_to_sats_ceil(amount: int) -> int:
 
 def _mints_to_inspect() -> list[str]:
     """Return configured mints plus the primary mint, without duplicates."""
-    mint_urls = list(settings.cashu_mints)
+    mint_urls = list(dict.fromkeys(settings.cashu_mints))
     if settings.primary_mint and settings.primary_mint not in mint_urls:
         mint_urls.append(settings.primary_mint)
     return mint_urls
@@ -708,8 +708,10 @@ def _to_msats(amount: int, unit: str) -> int:
 async def _other_wallets_unreserved_msats(mint_url: str, unit: str) -> int:
     """Sum unreserved proofs of every other trusted wallet, in msats.
 
-    Reads local proof snapshots only. A wallet that cannot be loaded counts
-    as empty, which can only shrink the owner surplus.
+    This total only ever raises the payout ceiling, so proofs are reloaded from
+    the local db: a cached snapshot up to 30s stale could still hide another
+    process's reservation. A wallet that cannot be loaded counts as empty,
+    which can only shrink the owner surplus.
     """
     total = 0
     for other_mint in _mints_to_inspect():
@@ -717,16 +719,11 @@ async def _other_wallets_unreserved_msats(mint_url: str, unit: str) -> int:
             if (other_mint, other_unit) == (mint_url, unit):
                 continue
             try:
-                wallet = await get_wallet(other_mint, other_unit)
-            except Exception as e:
-                logger.debug(
-                    "Wallet excluded from owner surplus",
-                    extra={
-                        "mint_url": other_mint,
-                        "unit": other_unit,
-                        "error": str(e),
-                    },
+                wallet = await get_wallet(
+                    other_mint, other_unit, force_reload_proofs=True
                 )
+            except Exception as e:
+                logger.debug(f"Wallet {other_mint} {other_unit} excluded: {e}")
                 continue
             proofs = get_proofs_per_mint_and_unit(
                 wallet, other_mint, other_unit, not_reserved=True
@@ -738,13 +735,12 @@ async def _other_wallets_unreserved_msats(mint_url: str, unit: str) -> int:
 async def _owner_balance_for_mint_and_unit(
     mint_url: str, unit: str, proofs_balance: int
 ) -> int:
-    """Return owner funds in one wallet, in that wallet's unit, never negative.
+    """Return owner funds in one wallet, in that wallet's unit.
 
     A key's refund mint is a preference, not funding provenance: a key topped
-    up from a second mint keeps its original refund mint. So two bounds apply.
-    The wallet keeps the liability declared against it, so refunds drawn from
-    it stay serviceable. All wallets together keep the total liability, so
-    misattributed customer funds are never paid out as profit.
+    up from a second mint keeps its original refund mint. Hence two bounds —
+    the per-mint one keeps refunds serviceable from the mint they name, the
+    global one stops misattributed customer funds being paid out as profit.
     """
     others_msats = await _other_wallets_unreserved_msats(mint_url, unit)
     async with db.create_session() as session:
@@ -757,7 +753,7 @@ async def _owner_balance_for_mint_and_unit(
         proofs_msats - mint_liability,
         proofs_msats + others_msats - total_liability,
     )
-    # Cashu ``sat`` proofs are whole sats; round the surplus down, never up.
+    # Cashu ``sat`` proofs are whole sats.
     surplus = _msats_to_sats(surplus_msats) if unit == "sat" else surplus_msats
     return max(0, surplus)
 

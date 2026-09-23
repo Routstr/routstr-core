@@ -47,10 +47,10 @@ async def test_payout_limits_and_proof_refresh(
         patch("routstr.wallet.raw_send_to_lnurl", send),
     ):
         await _payout_mint_and_unit("https://mint.test", unit)
-    reloads = [
-        c for c in get_wallet.await_args_list if c.kwargs.get("force_reload_proofs")
-    ]
-    assert reloads == [call("https://mint.test", unit, force_reload_proofs=True)]
+    # Later awaits belong to the other-wallet scan, which forces a reload too.
+    assert get_wallet.await_args_list[0] == call(
+        "https://mint.test", unit, force_reload_proofs=True
+    )
     if expected is None:
         send.assert_not_awaited()
     else:

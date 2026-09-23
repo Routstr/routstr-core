@@ -1254,8 +1254,13 @@ async def test_prepare_bolt11_payment_does_not_spend_user_liabilities() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_bolt11_payment_rounds_user_liability_up_to_whole_sats() -> None:
+async def test_prepare_bolt11_payment_floors_fractional_owner_surplus() -> None:
+    """A sub-sat surplus is not enough to fund a 1 sat invoice."""
     from routstr.core.settings import settings
+
+    @asynccontextmanager
+    async def session() -> AsyncIterator[MagicMock]:
+        yield MagicMock()
 
     wallet = MagicMock()
     wallet.proofs = [MagicMock(amount=100)]
@@ -1281,8 +1286,13 @@ async def test_prepare_bolt11_payment_rounds_user_liability_up_to_whole_sats() -
             "routstr.wallet.slow_filter_spend_proofs",
             side_effect=lambda proofs, wallet: proofs,
         ),
+        patch("routstr.wallet.db.create_session", session),
         patch(
             "routstr.wallet.db.total_user_liability",
+            AsyncMock(return_value=99_999),
+        ),
+        patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
             AsyncMock(return_value=99_999),
         ),
         pytest.raises(ValueError, match="user liabilities"),

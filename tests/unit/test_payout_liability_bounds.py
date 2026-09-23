@@ -102,24 +102,60 @@ async def test_unloadable_wallet_counts_as_empty() -> None:
 
 
 @pytest.mark.asyncio
-async def test_msat_wallet_surplus_is_not_rounded() -> None:
+async def test_duplicate_configured_mint_is_counted_once() -> None:
+    """A mint listed twice in CASHU_MINTS would otherwise raise the global bound."""
+    get_wallet, get_proofs = _wallets({MINT_A: 400, MINT_B: 270})
+    with (
+        _liabilities({}, total_sats=600),
+        patch.object(settings, "cashu_mints", [MINT_A, MINT_A, MINT_B]),
+        patch("routstr.wallet.get_wallet", get_wallet),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", get_proofs),
+    ):
+        assert await _owner_balance_for_mint_and_unit(MINT_B, "sat", 270) == 70
+
+
+@pytest.mark.asyncio
+async def test_other_wallets_are_read_from_fresh_local_proofs() -> None:
+    """A stale snapshot of another wallet would raise the global bound."""
+    get_wallet, get_proofs = _wallets({MINT_A: 400, MINT_B: 270})
+    with (
+        _liabilities({MINT_A: 216, MINT_B: 34}, total_sats=250),
+        patch("routstr.wallet.get_wallet", get_wallet),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", get_proofs),
+    ):
+        await _owner_balance_for_mint_and_unit(MINT_B, "sat", 270)
+    assert get_wallet.await_args_list
+    assert all(c.kwargs.get("force_reload_proofs") for c in get_wallet.await_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mint_liability,total_liability,expected",
+    [(1_500, 2_200, 1_800), (2_700, 1_500, 1_300)],
+)
+async def test_msat_wallet_surplus_is_not_rounded(
+    mint_liability: int, total_liability: int, expected: int
+) -> None:
+    """Either bound can bind, and neither is rounded to whole sats."""
     get_wallet, get_proofs = _wallets({MINT_A: 0, MINT_B: 0})
     with (
-        _liabilities({MINT_B: 0}, total_sats=0),
+        _liabilities({}, total_sats=0),
         patch("routstr.wallet.get_wallet", get_wallet),
         patch("routstr.wallet.get_proofs_per_mint_and_unit", get_proofs),
         patch(
             "routstr.wallet.db.user_liability_for_mint_and_unit",
-            AsyncMock(return_value=1_500),
+            AsyncMock(return_value=mint_liability),
         ),
-        patch("routstr.wallet.db.total_user_liability", AsyncMock(return_value=1_500)),
+        patch(
+            "routstr.wallet.db.total_user_liability",
+            AsyncMock(return_value=total_liability),
+        ),
     ):
-        assert await _owner_balance_for_mint_and_unit(MINT_B, "msat", 4_000) == 2_500
+        assert await _owner_balance_for_mint_and_unit(MINT_B, "msat", 4_000) == expected
 
 
 @pytest.mark.asyncio
 async def test_payout_sends_the_smaller_wallets_surplus() -> None:
-    """End to end: the wallet below the total liability still pays out."""
     get_wallet, get_proofs = _wallets({MINT_A: 400, MINT_B: 270})
     send = AsyncMock(return_value=236_000)
     with (

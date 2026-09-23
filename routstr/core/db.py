@@ -1103,8 +1103,7 @@ async def user_liability_for_mint_and_unit(
 ) -> int:
     """Return outstanding user funds that refund from one mint and unit, in msats.
 
-    Key balances and unresolved refund claims are summed in one statement for
-    the same reason as ``total_user_liability``.
+    Single statement, for the same atomicity reason as ``total_user_liability``.
     """
     key_balances = (
         select(func.coalesce(func.sum(ApiKey.balance), 0))
