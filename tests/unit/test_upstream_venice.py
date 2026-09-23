@@ -196,16 +196,18 @@ def test_image_models_are_listed() -> None:
     by_id = {m.id: m for m in models}
     assert "venice-sd35" in by_id
     assert by_id["venice-sd35"].architecture.output_modalities == ["image"]
-    assert by_id["venice-sd35"].pricing.image == pytest.approx(0.01)
+    assert by_id["venice-sd35"].pricing.image_output == pytest.approx(0.01)
 
 
 def test_image_pricing_uses_worst_case_resolution_not_upscale() -> None:
     models, _ = _fetch()
     by_id = {m.id: m for m in models}
     # 0.09 is the 2K generation price; 0.08 is a separate /image/upscale call.
-    assert by_id["grok-imagine-image-quality"].pricing.image == pytest.approx(0.09)
+    assert by_id["grok-imagine-image-quality"].pricing.image_output == pytest.approx(
+        0.09
+    )
     # inputImages is a per-extra-image surcharge, not the generation price.
-    assert by_id["flux-2-max-edit"].pricing.image == pytest.approx(0.12)
+    assert by_id["flux-2-max-edit"].pricing.image_output == pytest.approx(0.12)
 
 
 def test_text_pricing_is_per_token() -> None:
@@ -230,7 +232,7 @@ def test_worst_case_rate_covers_the_quality_table() -> None:
     models, _ = _fetch()
     by_id = {m.id: m for m in models}
     # 0.5 is the 2K/high quality tier, above every resolutions entry.
-    assert by_id["gpt-image-2"].pricing.image == pytest.approx(0.5)
+    assert by_id["gpt-image-2"].pricing.image_output == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize(

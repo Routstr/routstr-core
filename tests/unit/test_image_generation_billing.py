@@ -41,11 +41,11 @@ IMAGE_MODEL = Model(
         tokenizer="Unknown",
         instruct_type=None,
     ),
-    pricing=Pricing(prompt=0.0, completion=0.0, image=0.0005),
-    sats_pricing=Pricing(prompt=0.0, completion=0.0, image=SATS_PER_IMAGE),
+    pricing=Pricing(prompt=0.0, completion=0.0, image_output=0.0005),
+    sats_pricing=Pricing(prompt=0.0, completion=0.0, image_output=SATS_PER_IMAGE),
 )
 UNPRICED_MODEL = IMAGE_MODEL.copy(
-    update={"sats_pricing": Pricing(prompt=0.0, completion=0.0, image=0.0)}
+    update={"sats_pricing": Pricing(prompt=0.0, completion=0.0, image_output=0.0)}
 )
 
 # Ceiling $0.40, default tier 1K/medium at $0.10, cheapest 1K/low at $0.04.
@@ -259,7 +259,7 @@ async def test_charge_uses_the_tier_the_request_asked_for(
         body=body,
     )
 
-    # sats_pricing.image is the ceiling in sats; a tier scales against max_usd.
+    # sats_pricing.image_output is the ceiling in sats; a tier scales against max_usd.
     expected_msats = math.ceil(
         SATS_PER_IMAGE * (expected_usd / PRICE_BOOK.max_usd) * 1000
     )

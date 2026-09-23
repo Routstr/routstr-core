@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ..core.logging import get_logger
-from ..payment.image_pricing import ImagePriceTier, ImagePricing, produces_images
+from ..payment.image_pricing import ImagePriceTier, ImagePricing
 from ..payment.models import Architecture, Model, Pricing, TopProvider
 from .base import BaseUpstreamProvider
 
@@ -36,9 +36,6 @@ _ARCHITECTURES: dict[str, tuple[str, list[str], list[str]]] = {
     "upscale": ("image->image", ["image"], ["image"]),
     "embedding": ("text->embedding", ["text"], ["embedding"]),
 }
-
-# One call may ask for several images, so the ceiling covers a small batch.
-_IMAGES_PER_RESERVATION = 4
 
 
 def _usd(entry: Any) -> float | None:
@@ -239,7 +236,12 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
             per_image = self._per_image_usd(raw)
             if per_image is None:
                 return None
-            return Pricing(prompt=0.0, completion=0.0, image=per_image)
+            return Pricing(
+                prompt=0.0,
+                completion=0.0,
+                image=self._input_image_usd(raw),
+                image_output=per_image,
+            )
 
         # The ``extended`` tier some models charge past a context threshold is
         # ignored: billing it would overcharge every request staying under it.
@@ -280,6 +282,9 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
 
         constraints = spec.get("constraints")
         constraints = constraints if isinstance(constraints, dict) else {}
+        input_images = raw.get("inputImages")
+        input_images = input_images if isinstance(input_images, dict) else {}
+        included = input_images.get("included")
 
         return ImagePricing(
             max_usd=max_usd,
@@ -289,7 +294,19 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
             resolutions=_labels(constraints.get("resolutions"), str.upper),
             qualities=_labels(constraints.get("qualities"), str.lower),
             upscale=_prices(raw.get("upscale"), str.lower),
+            input_image_usd=self._input_image_usd(raw),
+            input_images_included=included
+            if isinstance(included, int) and not isinstance(included, bool)
+            else 0,
         )
+
+    @staticmethod
+    def _input_image_usd(raw: dict[str, Any]) -> float:
+        """Venice's per-extra-reference-image surcharge, ``inputImages.additional``."""
+        input_images = raw.get("inputImages")
+        if not isinstance(input_images, dict):
+            return 0.0
+        return _usd(input_images.get("additional")) or 0.0
 
     @staticmethod
     def _per_image_usd(raw: dict[str, Any]) -> float | None:
@@ -306,20 +323,3 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
         ]
         priced = [c for c in candidates if c is not None]
         return max(priced) if priced else None
-
-    def _apply_provider_fee_to_model(self, model: Model) -> Model:
-        """Reserve a batch of images for image models, tokens for the rest.
-
-        The inherited max-cost formula reads a per-image rate as a per-input-
-        image surcharge, reserving a hundred generations for one image.
-        """
-        if not produces_images(model):
-            return super()._apply_provider_fee_to_model(model)
-
-        adjusted = Pricing.parse_obj(
-            {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
-        )
-        adjusted.max_prompt_cost = 0.0
-        adjusted.max_completion_cost = adjusted.image * _IMAGES_PER_RESERVATION
-        adjusted.max_cost = adjusted.max_completion_cost
-        return model.copy(update={"pricing": adjusted})

@@ -41,7 +41,7 @@ from ..payment.cost_calculation import (
     calculate_flat_cost,
 )
 from ..payment.helpers import create_error_response
-from ..payment.image_pricing import per_image_sats
+from ..payment.image_pricing import produces_images, settle_image_sats
 from ..payment.models import (
     Model,
     Pricing,
@@ -65,9 +65,9 @@ from .cache_breakpoints import (
 )
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
 from .image_generation import (
-    count_generated_images,
     is_image_generation_path,
     parse_json_body,
+    read_image_response,
 )
 from .litellm_routing import detect_litellm_prefix
 from .model_paths import public_provider_url
@@ -78,6 +78,10 @@ if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
 
 logger = get_logger(__name__)
+
+# One image call may ask for several images, so an image model's max cost
+# covers a small batch at its ceiling price rather than a token window.
+IMAGES_PER_RESERVATION = 4
 
 
 async def _aclose_if_needed(resource: object | None) -> None:
@@ -2068,22 +2072,29 @@ class BaseUpstreamProvider:
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
     ) -> Response:
-        """Settle an image response: one flat charge per image returned."""
+        """Settle an image response on what it carried.
+
+        ``settle_image_sats`` picks the unit the model's price book names:
+        the upstream's own USD cost, reported image tokens, or a flat price
+        per image returned. A response with nothing to bill releases the
+        reservation.
+        """
         content = await response.aread()
         content_type = response.headers.get("content-type")
-        image_count = count_generated_images(
+        usage = read_image_response(
             content, _is_json_content_type(content_type) if content_type else True
         )
-        sats_per_image = per_image_sats(model_obj, parse_json_body(request_body))
+        body = parse_json_body(request_body)
+        total_sats = settle_image_sats(model_obj, body, usage)
         model_id = model_obj.id if model_obj else "unknown"
 
-        if image_count > 0 and sats_per_image <= 0:
+        if usage.image_count > 0 and total_sats <= 0:
             logger.warning(
                 "Image response carries no per-image price; releasing the "
                 "reservation instead of billing a rate we do not have",
                 extra={
                     "model": model_id,
-                    "image_count": image_count,
+                    "image_count": usage.image_count,
                     "key_hash": key.hashed_key[:8] + "...",
                 },
             )
@@ -2096,15 +2107,19 @@ class BaseUpstreamProvider:
             model_obj,
             self.provider_fee,
             reservation_snapshot,
-            precomputed_cost=calculate_flat_cost(image_count, sats_per_image),
+            precomputed_cost=calculate_flat_cost(
+                1 if usage.image_count > 0 else 0, total_sats
+            ),
         )
 
         logger.info(
             "Settled image generation request",
             extra={
                 "model": model_id,
-                "image_count": image_count,
-                "sats_per_image": sats_per_image,
+                "image_count": usage.image_count,
+                "output_image_tokens": usage.output_image_tokens,
+                "upstream_cost_usd": usage.upstream_cost_usd,
+                "total_sats": total_sats,
                 "key_hash": key.hashed_key[:8] + "...",
             },
         )
@@ -5538,6 +5553,9 @@ class BaseUpstreamProvider:
         Returns:
             Model with provider fee applied to pricing and max costs calculated
         """
+        if produces_images(model):
+            return self._apply_provider_fee_to_image_model(model)
+
         base_pricing = backfill_cache_pricing(model.id, model.pricing)
         adjusted_pricing = Pricing.parse_obj(
             {k: v * self.provider_fee for k, v in base_pricing.dict().items()}
@@ -5554,6 +5572,20 @@ class BaseUpstreamProvider:
         ) = _calculate_usd_max_costs(temp_model)
 
         return model.copy(update={"pricing": adjusted_pricing})
+
+    def _apply_provider_fee_to_image_model(self, model: Model) -> Model:
+        """Reserve a small batch of images instead of a token window.
+
+        The token max-cost formula reads a per-image rate as a per-input-image
+        surcharge, reserving a hundred generations for one image.
+        """
+        adjusted = Pricing.parse_obj(
+            {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
+        )
+        adjusted.max_prompt_cost = adjusted.image
+        adjusted.max_completion_cost = adjusted.image_output * IMAGES_PER_RESERVATION
+        adjusted.max_cost = adjusted.max_prompt_cost + adjusted.max_completion_cost
+        return model.copy(update={"pricing": adjusted})
 
     async def fetch_models(self) -> list[Model]:
         """Fetch available models from upstream API and update cache.

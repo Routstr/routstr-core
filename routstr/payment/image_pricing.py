@@ -4,16 +4,31 @@ The same model costs a different amount per resolution, and the newer ones per
 quality step within a resolution, so the price is only known once the request
 is read.
 
-``Pricing.image`` carries only the ceiling so it stays a flat numeric record
-the provider-fee and sats conversions can map over. Tier prices here are raw
-upstream USD and are applied as a ratio against that ceiling, which is why
-neither conversion is repeated below.
+``Pricing.image_output`` carries only the ceiling so it stays a flat numeric
+record the provider-fee and sats conversions can map over. Tier prices here
+are raw upstream USD and are applied as a ratio against that ceiling, which
+is why neither conversion is repeated below. ``Pricing.image`` keeps its
+OpenRouter meaning, USD per input image, which for generation is the
+surcharge on each reference image the request attaches.
+
+Upstreams bill images in three units. ``ImagePricing.unit`` names which one,
+and ``settle_image_sats`` turns what the response carried into sats:
+
+- ``image``: a flat price per image, tiered by resolution and quality.
+- ``token``: OpenAI-style image output tokens, read from the response's
+  ``usage``. Tiers then hold the per-image estimate used for the reservation.
+- ``megapixel``: price times the output area the request asked for.
+
+An upstream that reports its own USD cost in the response (OpenRouter) is
+settled on that number when ``trust_upstream_cost`` is set, which is exact
+regardless of unit.
 """
 
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 from pydantic.v1 import BaseModel
 
@@ -24,11 +39,20 @@ __all__ = [
     "MAX_RESERVED_IMAGES",
     "ImagePriceTier",
     "ImagePricing",
+    "ImageUsage",
+    "ImageBillingUnit",
     "image_reservation_msats",
+    "output_megapixels",
     "per_image_sats",
     "produces_images",
+    "reference_image_count",
+    "reference_images_sats",
+    "resolution_label",
     "select_image_price_usd",
+    "settle_image_sats",
 ]
+
+ImageBillingUnit = Literal["image", "token", "megapixel"]
 
 # 1K is nominally 1024x1024, 2K is 2048x2048. A pixel size maps onto a class by
 # area, bounded at twice the nominal area so a class's portrait and landscape
@@ -39,6 +63,16 @@ _RESOLUTION_AREAS: tuple[tuple[int, str], ...] = (
     (2 * 2048 * 2048, "2K"),
 )
 _LARGEST_RESOLUTION_LABEL = "4K"
+
+# Nominal output area per resolution class, for upstreams billing by area
+# when the request names a class instead of a pixel size.
+RESOLUTION_MEGAPIXELS: dict[str, float] = {
+    "512": 0.25,
+    "1K": 1.0,
+    "2K": 4.0,
+    "4K": 16.0,
+}
+_DEFAULT_MEGAPIXELS = 1.0
 
 # Bounds what a single reservation can hold. A larger batch is still billed per
 # image returned.
@@ -60,7 +94,13 @@ class ImagePriceTier(BaseModel):
 
 
 class ImagePricing(BaseModel):
-    """A model's per-image price book, in raw upstream USD."""
+    """A model's per-image price book, in raw upstream USD.
+
+    ``max_usd`` is the ceiling one image can cost and is what
+    ``Pricing.image_output`` mirrors. Every other USD figure here is converted
+    to sats by its ratio to that ceiling, so the book never needs the exchange
+    rate or provider fee.
+    """
 
     max_usd: float
     tiers: list[ImagePriceTier] = []
@@ -70,6 +110,23 @@ class ImagePricing(BaseModel):
     qualities: list[str] = []
     # Upscale factor to USD, for upstreams billing an upscale as its own call.
     upscale: dict[str, float] = {}
+
+    # How the upstream meters one generation. Tiers still describe the
+    # per-image estimate for token and megapixel books, since the reservation
+    # is taken before the response says how much was actually consumed.
+    unit: str = "image"
+    # ``token`` books: USD per image output token, and per input token by kind.
+    output_token_usd: float = 0.0
+    input_text_token_usd: float = 0.0
+    input_image_token_usd: float = 0.0
+    # ``megapixel`` books: USD per output megapixel.
+    megapixel_usd: float = 0.0
+    # USD per reference image the request attaches, past the first
+    # ``input_images_included``; charged once per request, not per output.
+    input_image_usd: float = 0.0
+    input_images_included: int = 0
+    # The upstream reports the USD it charged in ``usage.cost``; settle on it.
+    trust_upstream_cost: bool = False
 
     class Config:
         extra = "ignore"
@@ -103,9 +160,63 @@ class ImagePricing(BaseModel):
             return self.upscale[factor]
         return max(self.upscale.values()) if self.upscale else self.max_usd
 
+    def reference_usd(self, body: dict) -> float:
+        """Surcharge for the reference images ``body`` attaches."""
+        if self.input_image_usd <= 0:
+            return 0.0
+        billable = reference_image_count(body) - self.input_images_included
+        return max(billable, 0) * self.input_image_usd
 
-def _resolution_from_size(body: dict) -> str | None:
-    """Resolution label for an OpenAI-style ``size`` or explicit dimensions."""
+    def token_usd(self, usage: "ImageUsage") -> float:
+        """USD for the tokens a ``token`` book's response reports."""
+        return (
+            usage.output_image_tokens * self.output_token_usd
+            + usage.input_text_tokens * self.input_text_token_usd
+            + usage.input_image_tokens * self.input_image_token_usd
+        )
+
+
+@dataclass(frozen=True)
+class ImageUsage:
+    """What an image response carried, as far as billing is concerned.
+
+    ``upstream_cost_usd`` is the USD the upstream says it charged, when it
+    says so at all. Token counts are zero for upstreams that report none.
+    """
+
+    image_count: int = 0
+    input_text_tokens: int = 0
+    input_image_tokens: int = 0
+    output_image_tokens: int = 0
+    upstream_cost_usd: float = 0.0
+
+
+# Request fields that carry reference images, across the supported dialects:
+# OpenRouter ``input_references``, Together ``reference_images``/``image_url``,
+# Venice ``style_references``, OpenAI edits ``image``.
+_REFERENCE_FIELDS = (
+    "input_references",
+    "reference_images",
+    "style_references",
+    "image",
+    "image_url",
+)
+
+
+def reference_image_count(body: dict) -> int:
+    """How many reference images a request attaches."""
+    count = 0
+    for field in _REFERENCE_FIELDS:
+        value = body.get(field)
+        if isinstance(value, list):
+            count += len(value)
+        elif isinstance(value, (str, dict)) and value:
+            count += 1
+    return count
+
+
+def _edges(body: dict) -> list[int]:
+    """Pixel edges from an OpenAI-style ``size`` or explicit dimensions."""
     edges: list[int] = []
     size = body.get("size")
     if isinstance(size, str) and "x" in size.lower():
@@ -113,12 +224,18 @@ def _resolution_from_size(body: dict) -> str | None:
             try:
                 edges.append(int(part.strip()))
             except ValueError:
-                return None
-    else:
-        for dimension in ("width", "height"):
-            value = body.get(dimension)
-            if isinstance(value, int) and not isinstance(value, bool):
-                edges.append(value)
+                return []
+        return edges
+    for dimension in ("width", "height"):
+        value = body.get(dimension)
+        if isinstance(value, int) and not isinstance(value, bool):
+            edges.append(value)
+    return edges
+
+
+def _resolution_from_size(body: dict) -> str | None:
+    """Resolution label for an OpenAI-style ``size`` or explicit dimensions."""
+    edges = _edges(body)
     if not edges:
         return None
 
@@ -131,18 +248,38 @@ def _resolution_from_size(body: dict) -> str | None:
     return _LARGEST_RESOLUTION_LABEL
 
 
-def select_image_price_usd(image_pricing: ImagePricing, body: dict) -> float:
-    """USD for one image, priced at the tier this request asks for.
+def resolution_label(body: dict) -> str | None:
+    """The resolution class a request asks for, upper-cased, or ``None``.
 
-    Reads the upstream's own ``resolution``/``quality`` first, then falls back
-    to the OpenAI-compatible ``size`` (or explicit ``width``/``height``).
+    Reads the upstream's own ``resolution`` first, then falls back to the
+    OpenAI-compatible ``size`` (or explicit ``width``/``height``).
     """
     resolution = body.get("resolution")
-    label = (
-        resolution.upper()
-        if isinstance(resolution, str) and resolution
-        else _resolution_from_size(body)
-    )
+    if isinstance(resolution, str) and resolution:
+        return resolution.upper()
+    return _resolution_from_size(body)
+
+
+def output_megapixels(body: dict) -> float:
+    """Output area in megapixels a request asks for, defaulting to 1MP.
+
+    A pixel size wins over a resolution class; a request naming neither is
+    assumed to produce the 1K default most upstreams use.
+    """
+    edges = _edges(body)
+    if len(edges) == 2:
+        return edges[0] * edges[1] / 1_000_000
+    if len(edges) == 1:
+        return edges[0] * edges[0] / 1_000_000
+    label = resolution_label(body)
+    if label is not None and label in RESOLUTION_MEGAPIXELS:
+        return RESOLUTION_MEGAPIXELS[label]
+    return _DEFAULT_MEGAPIXELS
+
+
+def select_image_price_usd(image_pricing: ImagePricing, body: dict) -> float:
+    """USD for one image, priced at the tier this request asks for."""
+    label = resolution_label(body)
     quality = body.get("quality")
     quality_label = quality.lower() if isinstance(quality, str) and quality else None
 
@@ -163,22 +300,83 @@ def select_image_price_usd(image_pricing: ImagePricing, body: dict) -> float:
     return image_pricing.price_usd(label, quality_label)
 
 
+def _sats_per_usd(model: "Model") -> float:
+    """Sats one raw upstream dollar converts to for this model, or zero.
+
+    ``sats_pricing.image`` already carries the provider fee and the exchange
+    rate for ``image_pricing.max_usd``, so their ratio converts any USD
+    figure from the same book.
+    """
+    if model.sats_pricing is None or model.image_pricing is None:
+        return 0.0
+    ceiling_sats = model.sats_pricing.image_output
+    max_usd = model.image_pricing.max_usd
+    if ceiling_sats <= 0 or max_usd <= 0:
+        return 0.0
+    return ceiling_sats / max_usd
+
+
 def per_image_sats(model: "Model | None", body: dict) -> float:
     """Sats for one image from this model, at the tier ``body`` asks for.
 
-    ``sats_pricing.image`` is the ceiling, already carrying the provider fee
-    and sats conversion, so a price book only scales it by the ratio of the
-    selected tier to that ceiling.
+    ``sats_pricing.image_output`` is the ceiling, already carrying the
+    provider fee and sats conversion, so a price book only scales it by the
+    ratio of the selected tier to that ceiling. A megapixel book prices the
+    requested area directly, since its tiers are only estimates for nominal
+    sizes. Reference-image surcharges are per request; see
+    ``reference_images_sats``.
     """
     if model is None or model.sats_pricing is None:
         return 0.0
 
-    ceiling_sats = model.sats_pricing.image
+    ceiling_sats = model.sats_pricing.image_output
     book = model.image_pricing
     if book is None or book.max_usd <= 0 or ceiling_sats <= 0:
         return ceiling_sats
 
-    return ceiling_sats * select_image_price_usd(book, body) / book.max_usd
+    rate = ceiling_sats / book.max_usd
+    if book.unit == "megapixel" and book.megapixel_usd > 0:
+        return rate * output_megapixels(body) * book.megapixel_usd
+    return rate * select_image_price_usd(book, body)
+
+
+def reference_images_sats(model: "Model | None", body: dict) -> float:
+    """Sats for the reference images ``body`` attaches, once per request."""
+    if model is None or model.image_pricing is None:
+        return 0.0
+    return _sats_per_usd(model) * model.image_pricing.reference_usd(body)
+
+
+def settle_image_sats(model: "Model | None", body: dict, usage: ImageUsage) -> float:
+    """Sats to charge for what an image response actually carried.
+
+    Preference order, each falling through when it has nothing to bill on:
+
+    1. The upstream's own USD cost, when the book says to trust it.
+    2. Reported image output tokens times the book's token rates.
+    3. The per-image price at the requested tier, times images returned,
+       plus the reference-image surcharge.
+
+    A response with no images and no reported cost is free; the reservation
+    is released instead.
+    """
+    if model is None or usage.image_count <= 0:
+        return 0.0
+
+    book = model.image_pricing
+    rate = _sats_per_usd(model)
+
+    if book is not None and rate > 0:
+        if book.trust_upstream_cost and usage.upstream_cost_usd > 0:
+            return rate * usage.upstream_cost_usd
+        if book.unit == "token" and usage.output_image_tokens > 0:
+            token_usd = book.token_usd(usage)
+            if token_usd > 0:
+                return rate * token_usd
+
+    return usage.image_count * per_image_sats(model, body) + reference_images_sats(
+        model, body
+    )
 
 
 def produces_images(model: "Model | None") -> bool:
@@ -205,4 +403,5 @@ def image_reservation_msats(body: dict, model: "Model | None") -> int | None:
         count = 1
     count = min(max(count, 1), MAX_RESERVED_IMAGES)
 
-    return math.ceil(count * sats_per_image * 1000)
+    total = count * sats_per_image + reference_images_sats(model, body)
+    return math.ceil(total * 1000)
