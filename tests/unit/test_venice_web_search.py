@@ -206,16 +206,19 @@ def test_litellm_adapter_derives_no_web_search_options_from_the_adapted_body() -
     )
 
     provider = VeniceUpstreamProvider(api_key="sk-test")
-    adapter = LiteLLMAnthropicMessagesAdapter()
+    adapter = LiteLLMAnthropicMessagesAdapter()  # type: ignore[no-untyped-call]
     body = _body(tools=[WEB_SEARCH_TOOL, FUNCTION_TOOL])
 
+    def translate(request: dict[str, Any]) -> dict:
+        # litellm types the request as a TypedDict; these bodies are built
+        # from client JSON, so they are plain dicts at this seam.
+        translated, _ = adapter.translate_anthropic_to_openai(request)  # type: ignore[arg-type]
+        return dict(translated)
+
     # Unadapted, litellm derives the parameter Venice rejects.
-    before, _ = adapter.translate_anthropic_to_openai(
-        {"model": "m", **_body(tools=[WEB_SEARCH_TOOL])}
-    )
+    before = translate({"model": "m", **_body(tools=[WEB_SEARCH_TOOL])})
     assert "web_search_options" in before
 
     provider.adapt_messages_request(body, _model())
-    after, _ = adapter.translate_anthropic_to_openai({"model": "m", **body})
 
-    assert "web_search_options" not in after
+    assert "web_search_options" not in translate({"model": "m", **body})
