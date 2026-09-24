@@ -10,7 +10,7 @@ Covers two regressions from the auto-payout / primary-mint audit
    mint/units in the same cycle (the try/except is now per mint/unit).
 """
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,16 @@ from routstr.wallet import (
     _reconcile_stale_payout_history,
     periodic_payout,
 )
+
+
+@pytest.fixture(autouse=True)
+def empty_cross_wallet_proofs() -> Iterator[None]:
+    """No other wallet holds proofs, so only this wallet's own bound applies."""
+    with (
+        patch("routstr.wallet.get_cashu_keysets", AsyncMock(return_value=[])),
+        patch("routstr.wallet.get_cashu_proofs", AsyncMock(return_value=[])),
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -202,9 +212,7 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
     """A failing mint does not prevent payout for the other mints."""
     from routstr.core.settings import settings
 
-    async def _get_wallet(
-        mint_url: str, unit: str, force_reload_proofs: bool = False
-    ) -> MagicMock:
+    async def _get_wallet(mint_url: str, unit: str, **_: object) -> MagicMock:
         if mint_url == "http://bad:3338":
             raise RuntimeError("mint unreachable")
         return MagicMock()
@@ -253,8 +261,8 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
         for c in get_wallet.await_args_list
         if c.args[0] == "http://good:3338" and c.kwargs.get("force_reload_proofs")
     ]
-    # Two payout reads, plus two cross-wallet reads for the global payout bound.
-    assert len(good_reloads) == 4
+    # One proof read per unit, and no extra mint load for the bound.
+    assert len(good_reloads) == 2
     assert raw_send.await_count == 2  # good mint paid for both units
 
 

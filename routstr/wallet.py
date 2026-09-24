@@ -15,6 +15,7 @@ import httpx
 from cashu.core.base import MeltQuote, Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
 from cashu.wallet.crud import get_keysets as get_cashu_keysets
+from cashu.wallet.crud import get_proofs as get_cashu_proofs
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet as _CashuWallet
 from pydantic_core import PydanticUndefined
@@ -184,9 +185,12 @@ class Wallet(_CashuWallet):
                     pass
 
             await self.load_mint_keysets(force_old_keysets)
-            await self.activate_keyset(keyset_id)
             await self.load_mint_info(reload=True)
+            # Arm on the fetch, not the activation: a unit the mint does not
+            # serve makes ``activate_keyset`` raise, and arming after it would
+            # refetch keysets on every call.
             _mint_metadata_last_load[mint_url] = time.monotonic()
+            await self.activate_keyset(keyset_id)
 
 
 class MintConnectionError(Exception):
@@ -708,27 +712,30 @@ def _to_msats(amount: int, unit: str) -> int:
 async def _other_wallets_unreserved_msats(mint_url: str, unit: str) -> int:
     """Sum unreserved proofs of every other trusted wallet, in msats.
 
-    This total only ever raises the payout ceiling, so proofs are reloaded from
-    the local db: a cached snapshot up to 30s stale could still hide another
-    process's reservation. A wallet that cannot be loaded counts as empty,
-    which can only shrink the owner surplus.
+    Every wallet shares one db, so two queries answer for all of them. Loading
+    a wallet per mint and unit instead refetched keysets from each mint on
+    every call and rate-limited them.
+
+    Read fresh, not from a wallet's snapshot: this total only ever raises the
+    payout ceiling, and a snapshot up to 30s stale could hide another
+    process's reservation.
     """
+    wallet = await get_wallet(mint_url, unit, load=False)
+    trusted = set(_mints_to_inspect())
+    origins: dict[str, tuple[str, str]] = {}
+    for keyset in await get_cashu_keysets(db=wallet.db):
+        keyset_unit = keyset.unit if isinstance(keyset.unit, str) else keyset.unit.name
+        origin = (keyset.mint_url, keyset_unit)
+        if origin == (mint_url, unit):
+            continue
+        if keyset.mint_url in trusted and keyset_unit in ("sat", "msat"):
+            origins[keyset.id] = origin
     total = 0
-    for other_mint in _mints_to_inspect():
-        for other_unit in ("sat", "msat"):
-            if (other_mint, other_unit) == (mint_url, unit):
-                continue
-            try:
-                wallet = await get_wallet(
-                    other_mint, other_unit, force_reload_proofs=True
-                )
-            except Exception as e:
-                logger.debug(f"Wallet {other_mint} {other_unit} excluded: {e}")
-                continue
-            proofs = get_proofs_per_mint_and_unit(
-                wallet, other_mint, other_unit, not_reserved=True
-            )
-            total += _to_msats(sum(proof.amount for proof in proofs), other_unit)
+    for proof in await get_cashu_proofs(db=wallet.db):
+        proof_origin = origins.get(proof.id)
+        if proof_origin is None or proof.reserved:
+            continue
+        total += _to_msats(proof.amount, proof_origin[1])
     return total
 
 
@@ -1203,6 +1210,9 @@ _wallets: dict[str, Wallet] = {}
 # Proofs require a shorter refresh interval than remote mint metadata.
 _wallet_last_load: dict[str, float] = {}
 _wallet_last_mint_load: dict[str, float] = {}
+# Metadata loads the mint answered but that left the wallet unusable, replayed
+# for the reload interval so the failure costs one request, not one per call.
+_wallet_mint_load_errors: dict[str, tuple[float, Exception]] = {}
 _wallet_load_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -1230,16 +1240,34 @@ async def get_wallet(
                 or last_mint_load is None
                 or now - last_mint_load >= _WALLET_MINT_RELOAD_MIN_INTERVAL_SECONDS
             ):
-                await run_mint_operation(
-                    lambda: (
-                        _wallets[id].load_mint(force_refresh=True)
-                        if force_reload
-                        else _wallets[id].load_mint()
-                    ),
-                    op_name="load_mint",
-                    mint_url=mint_url,
-                    retry_on_rate_limit=retry_on_rate_limit,
-                )
+                cached_error = _wallet_mint_load_errors.get(id)
+                if (
+                    not force_reload
+                    and cached_error is not None
+                    and now - cached_error[0] < _WALLET_MINT_RELOAD_MIN_INTERVAL_SECONDS
+                ):
+                    raise cached_error[1]
+                try:
+                    await run_mint_operation(
+                        lambda: (
+                            _wallets[id].load_mint(force_refresh=True)
+                            if force_reload
+                            else _wallets[id].load_mint()
+                        ),
+                        op_name="load_mint",
+                        mint_url=mint_url,
+                        retry_on_rate_limit=retry_on_rate_limit,
+                    )
+                except Exception as error:
+                    # Transport failures and 429s stay retryable; the rate
+                    # guard owns those. Anything else means the mint answered
+                    # and still cannot serve this wallet.
+                    if not (
+                        is_mint_connection_error(error) or _is_mint_rate_limited(error)
+                    ):
+                        _wallet_mint_load_errors[id] = (time.monotonic(), error)
+                    raise
+                _wallet_mint_load_errors.pop(id, None)
                 _wallet_last_mint_load[id] = time.monotonic()
 
             if load_proofs:
