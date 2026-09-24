@@ -21,8 +21,6 @@ Delete this file and the single ``register_deepseek_v4_pricing()`` call in
 when absent, so a stale shim is harmless after upstream lands — but remove it.
 """
 
-import litellm
-
 from ..core import get_logger
 
 logger = get_logger(__name__)
@@ -56,6 +54,8 @@ def register_deepseek_v4_pricing() -> None:
     (``deepseek-v4-flash``) and prefixed (``deepseek/deepseek-v4-flash``)
     spellings since ``backfill_cache_pricing`` tries both.
     """
+    import litellm
+
     added = []
     for bare, rates in _DEEPSEEK_V4_RATES.items():
         for key in (bare, f"deepseek/{bare}"):

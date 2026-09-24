@@ -56,6 +56,34 @@ setup_logging()
 logger = get_logger(__name__)
 
 
+async def _bootstrap_providers_and_pricing() -> None:
+    """Fetch BTC price and load providers, then price their models in sats."""
+    from ..payment.models import _update_sats_pricing_once
+    from ..payment.price import _update_prices
+    from ..proxy import get_upstreams
+
+    await asyncio.gather(
+        _update_prices(), initialize_upstreams(), return_exceptions=True
+    )
+
+    # initialize_upstreams() warms from stored rows only. The models refresh
+    # loop normally does the first upstream fetch; when it is disabled nothing
+    # else would ever reach the upstream, so do that one pass here.
+    if global_settings.models_refresh_interval_seconds <= 0:
+        await asyncio.gather(
+            *(u.refresh_models_cache() for u in get_upstreams()),
+            return_exceptions=True,
+        )
+
+    try:
+        await _update_sats_pricing_once()
+    except Exception as e:
+        logger.warning(
+            "Initial sats pricing failed during startup bootstrap",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Application startup initiated", extra={"version": __version__})
@@ -76,6 +104,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     refund_reconcile_task = None
     routstr_fee_task = None
     invoice_watcher_task = None
+    bootstrap_task = None
 
     try:
         # cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28.
@@ -125,17 +154,13 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
         # await ensure_models_bootstrapped()
 
-        from ..payment.price import _update_prices
         from ..proxy import get_upstreams
         from ..upstream.helpers import refresh_upstreams_models_periodically
 
-        _update_prices_task = asyncio.create_task(_update_prices())
-        _initialize_upstreams_task = asyncio.create_task(initialize_upstreams())
-
-        # ensure both setup tasks complete
-        await asyncio.gather(
-            _update_prices_task, _initialize_upstreams_task, return_exceptions=True
-        )
+        # Provider discovery hits every upstream's /models (plus the OpenRouter
+        # catalog for unpriced models), so keep it off the readiness path: the
+        # app serves as soon as the DB is up and fills its model maps after.
+        bootstrap_task = asyncio.create_task(_bootstrap_providers_and_pricing())
 
         btc_price_task = asyncio.create_task(update_prices_periodically())
         pricing_task = asyncio.create_task(update_sats_pricing())
@@ -202,6 +227,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             model_maps_refresh_task.cancel()
         if model_paths_refresh_task is not None:
             model_paths_refresh_task.cancel()
+        if bootstrap_task is not None:
+            bootstrap_task.cancel()
         if stale_reservation_task is not None:
             stale_reservation_task.cancel()
         if dead_key_prune_task is not None:
@@ -237,6 +264,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(model_maps_refresh_task)
             if model_paths_refresh_task is not None:
                 tasks_to_wait.append(model_paths_refresh_task)
+            if bootstrap_task is not None:
+                tasks_to_wait.append(bootstrap_task)
             if stale_reservation_task is not None:
                 tasks_to_wait.append(stale_reservation_task)
             if dead_key_prune_task is not None:

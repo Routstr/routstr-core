@@ -13,6 +13,11 @@ RUN apt-get update \
         libtool \
     && rm -rf /var/lib/apt/lists/*
 
+# Ship .pyc in the image layer: without it every container start re-compiles
+# the dependency tree (litellm/openai alone cost tens of seconds).
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+
 COPY uv.lock pyproject.toml ./
 RUN mkdir -p /routstr
 
@@ -21,6 +26,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 WORKDIR /app
 
 COPY . .
+
+RUN /.venv/bin/python -m compileall -q routstr
 
 ARG GIT_COMMIT=""
 ARG GIT_TAG=""
