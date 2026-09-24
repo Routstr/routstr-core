@@ -348,6 +348,7 @@ async def _post_and_stream(
         raise UpstreamError(
             f"Upstream error via gemini compat: {body_text}",
             status_code=response.status_code,
+            from_upstream_response=True,
         )
 
     return client, response

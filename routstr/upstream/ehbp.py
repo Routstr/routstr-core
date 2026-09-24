@@ -879,6 +879,7 @@ async def forward_ehbp_request(
                 f"EHBP upstream {provider_type} returned {resp.status_code} "
                 f"for model {model_obj.id}: {body_preview[:200] or '<empty>'}",
                 status_code=resp.status_code,
+                from_upstream_response=True,
             )
 
         # Check for usage metrics in response headers (non-streaming) or

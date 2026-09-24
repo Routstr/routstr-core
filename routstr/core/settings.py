@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # Core
     upstream_base_url: str = Field(default="", env="UPSTREAM_BASE_URL")
     upstream_api_key: str = Field(default="", env="UPSTREAM_API_KEY")
+    # Extra attempts against the same upstream on a transient 5xx. 0 disables.
+    upstream_5xx_retry_attempts: int = Field(
+        default=1, ge=0, env="UPSTREAM_5XX_RETRY_ATTEMPTS"
+    )
 
     # Node info
     name: str = Field(default="ARoutstrNode", env="NAME")

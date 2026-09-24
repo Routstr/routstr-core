@@ -567,6 +567,7 @@ async def dispatch_anthropic_messages(
             status_code=status_for_classify,
             code=rate_limit.code if rate_limit else None,
             details=rate_limit.as_details() if rate_limit else None,
+            from_upstream_response=True,
         ) from exc
 
     if not client_stream and hasattr(result, "__aiter__"):

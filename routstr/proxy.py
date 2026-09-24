@@ -395,6 +395,12 @@ def _forwarding_allowed(path: str, method: str) -> bool:
     return method in _allowed_methods_for(_canonical_api_path(path))
 
 
+# Gateway conditions a retry usually clears. 500 is excluded: as likely to be a
+# deterministic rejection that fails identically on the next attempt.
+_RETRYABLE_UPSTREAM_5XX = frozenset({502, 503, 504})
+_UPSTREAM_5XX_RETRY_BACKOFF_SECONDS = 0.5
+
+
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
@@ -782,6 +788,8 @@ async def _proxy(
                 await _finish_read_transaction(session)
                 max_cost_for_model = candidate_max
 
+        retries_left = settings.upstream_5xx_retry_attempts
+        retry_index = 0
         headers = upstream.prepare_headers(dict(request.headers))
 
         try:
@@ -834,8 +842,39 @@ async def _proxy(
                             model_obj,
                             reservation_snapshot,
                         )
-                except UpstreamError:
-                    # Let the outer UpstreamError handler manage retry/revert
+                except UpstreamError as e:
+                    # Only a gateway status the upstream itself answered with:
+                    # re-sending the buffered body cannot double-bill. A 502 this
+                    # proxy invented for a transport error or timeout is not
+                    # retried — that request may already be running upstream.
+                    if (
+                        e.from_upstream_response
+                        and e.status_code in _RETRYABLE_UPSTREAM_5XX
+                        and retries_left > 0
+                    ):
+                        retries_left -= 1
+                        retry_index += 1
+                        logger.warning(
+                            "Upstream %s returned %s for model=%s; retrying same "
+                            "upstream (attempt %s, %s retries left)",
+                            upstream.provider_type,
+                            e.status_code,
+                            model_id,
+                            retry_index + 1,
+                            retries_left,
+                            extra={
+                                "provider": upstream.provider_type,
+                                "model": model_id,
+                                "status_code": e.status_code,
+                                "path": path,
+                                "retries_left": retries_left,
+                            },
+                        )
+                        await asyncio.sleep(
+                            _UPSTREAM_5XX_RETRY_BACKOFF_SECONDS * retry_index
+                        )
+                        continue
+                    # Let the outer UpstreamError handler manage failover/revert
                     raise
                 except Exception as e:
                     # Unexpected error (not an upstream failure) — revert and propagate
