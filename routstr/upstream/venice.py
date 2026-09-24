@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
 from ..payment.models import Architecture, Model, Pricing, TopProvider
 from .base import BaseUpstreamProvider
@@ -29,6 +30,37 @@ _ARCHITECTURES: dict[str, tuple[str, list[str], list[str]]] = {
     "text": ("text->text", ["text"], ["text"]),
     "embedding": ("text->embedding", ["text"], ["embedding"]),
 }
+
+# Venice runs search itself and reports it back through ``venice_parameters``;
+# it has no Anthropic-shaped server tool and rejects the ``web_search_options``
+# that litellm's Anthropic adapter derives from one. ``auto`` matches Anthropic
+# semantics, where declaring the tool leaves the decision to the model.
+# Citations are asked for because litellm's Anthropic response translation
+# carries no ``venice_parameters``, so inline ``[REF]n[/REF]`` markers in the
+# text are the only way a caller sees which sources were used.
+_WEB_SEARCH_SUFFIX = ":enable_web_search=auto&enable_web_citations=true"
+
+# Anthropic web-search constraints with no Venice equivalent. Honouring the
+# request means enforcing them, so a request that sets one is refused rather
+# than answered by a search that ignored it.
+_UNENFORCEABLE_WEB_SEARCH_KEYS = frozenset(
+    {"max_uses", "allowed_domains", "blocked_domains", "user_location"}
+)
+
+
+def _is_web_search_tool(tool: Any) -> bool:
+    """An Anthropic server-side web-search tool, by either of its markers.
+
+    Matches litellm's own detection (``litellm/llms/anthropic/
+    experimental_pass_through/adapters/transformation.py``), so every tool it
+    would turn into ``web_search_options`` is caught here first.
+    """
+    if not isinstance(tool, dict):
+        return False
+    tool_type = tool.get("type")
+    return (
+        isinstance(tool_type, str) and tool_type.startswith("web_search")
+    ) or tool.get("name") == "web_search"
 
 
 def _usd(entry: Any) -> float | None:
@@ -78,6 +110,63 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
 
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("venice/")
+
+    def adapt_messages_request(self, body: dict, model_obj: Model) -> str:
+        """Trade an Anthropic web-search tool for Venice's own search switch.
+
+        Left in the body, litellm's Anthropic adapter rewrites the tool into a
+        top-level ``web_search_options``, which Venice answers with a 400. The
+        tool is lifted out here and the same intent re-expressed as a model
+        feature suffix, the one form of ``venice_parameters`` that survives
+        that adapter.
+        """
+        tools = body.get("tools")
+        if not isinstance(tools, list):
+            return ""
+        search_tools = [tool for tool in tools if _is_web_search_tool(tool)]
+        if not search_tools:
+            return ""
+
+        # A key carrying null or an empty list states no constraint, so it is
+        # read as absent rather than refused.
+        unenforceable = sorted(
+            {
+                key
+                for tool in search_tools
+                for key, value in tool.items()
+                if key in _UNENFORCEABLE_WEB_SEARCH_KEYS
+                and value is not None
+                and value != []
+            }
+        )
+        if unenforceable:
+            raise UpstreamError(
+                "Venice web search cannot honour these Anthropic web_search "
+                f"options: {', '.join(unenforceable)}",
+                status_code=400,
+                code="UNSUPPORTED_WEB_SEARCH_OPTION",
+                details={"unsupported_options": unenforceable},
+            )
+
+        tool_choice = body.get("tool_choice")
+        if isinstance(tool_choice, dict) and tool_choice.get("name") == "web_search":
+            raise UpstreamError(
+                "Venice web search cannot be forced through tool_choice; it is "
+                "decided by the model",
+                status_code=400,
+                code="UNSUPPORTED_WEB_SEARCH_OPTION",
+                details={"unsupported_options": ["tool_choice"]},
+            )
+
+        remaining = [tool for tool in tools if not _is_web_search_tool(tool)]
+        if remaining:
+            body["tools"] = remaining
+        else:
+            body.pop("tools", None)
+            # tool_choice without tools is rejected by OpenAI-shaped upstreams.
+            body.pop("tool_choice", None)
+
+        return _WEB_SEARCH_SUFFIX
 
     async def _fetch_provider_models(self) -> dict:
         url = f"{self.base_url.rstrip('/')}/models"
