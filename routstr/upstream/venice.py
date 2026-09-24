@@ -36,8 +36,8 @@ _ARCHITECTURES: dict[str, tuple[str, list[str], list[str]]] = {
 # that litellm's Anthropic adapter derives from one. ``auto`` matches Anthropic
 # semantics, where declaring the tool leaves the decision to the model.
 # Citations are asked for because litellm's Anthropic response translation
-# carries no ``venice_parameters``, so inline ``[REF]n[/REF]`` markers in the
-# text are the only way a caller sees which sources were used.
+# carries no ``venice_parameters``, so the inline ``^n^`` markers Venice writes
+# into the text are the only way a caller sees that sources were used.
 _WEB_SEARCH_SUFFIX = ":enable_web_search=auto&enable_web_citations=true"
 
 # Anthropic web-search constraints with no Venice equivalent. Honouring the
