@@ -1098,6 +1098,34 @@ async def total_user_liability(db_session: AsyncSession) -> int:
     return int(result.one() or 0)
 
 
+async def user_liability_for_mint_and_unit(
+    db_session: AsyncSession, mint_url: str, unit: str
+) -> int:
+    """Return outstanding user funds that refund from one mint and unit, in msats.
+
+    Single statement, for the same atomicity reason as ``total_user_liability``.
+    """
+    key_balances = (
+        select(func.coalesce(func.sum(ApiKey.balance), 0))
+        .where(
+            col(ApiKey.refund_mint_url) == mint_url,
+            col(ApiKey.refund_currency) == unit,
+        )
+        .scalar_subquery()
+    )
+    unresolved_refunds = (
+        select(func.coalesce(func.sum(Refund.amount_msats), 0))
+        .where(
+            col(Refund.status).in_(REFUND_UNRESOLVED_STATUSES),
+            col(Refund.mint_url) == mint_url,
+            col(Refund.unit) == unit,
+        )
+        .scalar_subquery()
+    )
+    result = await db_session.exec(select(key_balances + unresolved_refunds))
+    return int(result.one() or 0)
+
+
 async def balance_for_mint_and_unit(
     db_session: AsyncSession, mint_url: str, unit: str
 ) -> int:

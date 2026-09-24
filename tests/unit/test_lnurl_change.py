@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -13,6 +13,16 @@ from cashu.wallet.wallet import Wallet as CashuWallet
 from routstr.core.settings import settings
 from routstr.mint import MintRateGuard
 from routstr.wallet import _payout_mint_and_unit
+
+
+@pytest.fixture(autouse=True)
+def empty_cross_wallet_proofs() -> Iterator[None]:
+    """No other wallet holds proofs, so only this wallet's own bound applies."""
+    with (
+        patch("routstr.wallet.get_cashu_keysets", AsyncMock(return_value=[])),
+        patch("routstr.wallet.get_cashu_proofs", AsyncMock(return_value=[])),
+    ):
+        yield
 
 
 @pytest.mark.asyncio
@@ -127,6 +137,10 @@ async def test_capped_payout_recovers_all_change_with_real_cashu_sdk(
         patch("routstr.wallet.db.create_session", session),
         patch(
             "routstr.wallet.db.total_user_liability",
+            AsyncMock(return_value=liability * 1000),
+        ),
+        patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
             AsyncMock(return_value=liability * 1000),
         ),
         patch(
