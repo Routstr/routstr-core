@@ -1426,6 +1426,14 @@ class BaseUpstreamProvider:
                 if done_seen:
                     yield b"data: [DONE]\n\n"
 
+            except httpx.RemoteProtocolError as stream_error:
+                logger.warning(
+                    "Upstream stream ended before the response was complete",
+                    extra={
+                        "error": str(stream_error),
+                        "key_hash": key.hashed_key[:8] + "...",
+                    },
+                )
             except Exception as stream_error:
                 logger.warning(
                     "Streaming interrupted; finalizing before closing upstream",
@@ -1869,6 +1877,14 @@ class BaseUpstreamProvider:
                 if done_seen:
                     yield b"data: [DONE]\n\n"
 
+            except httpx.RemoteProtocolError as stream_error:
+                logger.warning(
+                    "Upstream Responses API stream ended before the response was complete",
+                    extra={
+                        "error": str(stream_error),
+                        "key_hash": key.hashed_key[:8] + "...",
+                    },
+                )
             except Exception as stream_error:
                 logger.warning(
                     "Responses API streaming interrupted; finalizing before closing upstream",

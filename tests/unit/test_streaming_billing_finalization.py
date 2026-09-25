@@ -404,11 +404,8 @@ async def test_partial_remote_protocol_error_finalizes_and_closes_once(
                 client=client,
             )
         emitted = bytearray()
-        with pytest.raises(httpx.RemoteProtocolError):
-            async for chunk in response.body_iterator:
-                emitted.extend(
-                    chunk.encode() if isinstance(chunk, str) else bytes(chunk)
-                )
+        async for chunk in response.body_iterator:
+            emitted.extend(chunk.encode() if isinstance(chunk, str) else bytes(chunk))
 
     adjust.assert_awaited_once()
     if finalization_fails:
@@ -423,7 +420,7 @@ async def test_partial_remote_protocol_error_finalizes_and_closes_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("api", ["chat", "responses"])
-async def test_partial_stream_preserves_transport_error_when_billing_db_is_down(
+async def test_partial_stream_closes_when_billing_db_is_down(
     api: str,
 ) -> None:
     provider = BaseUpstreamProvider(
@@ -476,9 +473,8 @@ async def test_partial_stream_preserves_transport_error_when_billing_db_is_down(
                 reservation_snapshot=snapshot,
                 client=client,
             )
-        with pytest.raises(httpx.RemoteProtocolError, match="incomplete chunked read"):
-            async for _ in response.body_iterator:
-                pass
+        async for _ in response.body_iterator:
+            pass
 
     upstream_response.aclose.assert_awaited_once()
     client.aclose.assert_awaited_once()
