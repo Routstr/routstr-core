@@ -166,6 +166,11 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
 
         remaining = [tool for tool in tools if not _is_web_search_tool(tool)]
         if remaining:
+            # A caller's ``tool_choice: any`` is kept and litellm maps it to
+            # OpenAI ``required``, so one of the remaining function tools must
+            # now be called where Anthropic would have let a search satisfy it.
+            # Deliberate: OpenRouter never rewrites tool_choice for web search
+            # either, and guessing an alternative would change caller intent.
             body["tools"] = remaining
         else:
             body.pop("tools", None)
