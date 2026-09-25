@@ -191,6 +191,78 @@ def test_offline_and_unpriced_models_are_dropped() -> None:
     assert "unpriced-text" not in ids
 
 
+def _priced_entry(model_id: str, model_type: str, pricing: dict[str, Any]) -> dict:
+    return {
+        "id": model_id,
+        "type": model_type,
+        "created": 1727966436,
+        "model_spec": {"name": model_id, "pricing": pricing},
+    }
+
+
+@pytest.mark.parametrize(
+    "pricing",
+    [
+        pytest.param({"input": {"usd": 0.2, "diem": 0.2}}, id="missing-output"),
+        pytest.param(
+            {"input": {"usd": 0.0, "diem": 0.0}, "output": {"usd": 0.0, "diem": 0.0}},
+            id="both-zero",
+        ),
+        pytest.param(
+            {"input": {"usd": -0.2, "diem": 0.2}, "output": {"usd": 0.9, "diem": 0.9}},
+            id="negative-input",
+        ),
+        pytest.param(
+            {"input": {"usd": 0.2, "diem": 0.2}, "output": {"usd": -0.9, "diem": 0.9}},
+            id="negative-output",
+        ),
+    ],
+)
+def test_text_models_that_would_bill_free_or_negative_are_dropped(
+    pricing: dict[str, Any],
+) -> None:
+    models, _ = _fetch(
+        {"object": "list", "data": [_priced_entry("bad-text", "text", pricing)]}
+    )
+    assert models == []
+
+
+def test_embedding_with_only_an_input_price_is_listed() -> None:
+    models, _ = _fetch(
+        {
+            "object": "list",
+            "data": [
+                _priced_entry("emb", "embedding", {"input": {"usd": 0.05, "diem": 0}})
+            ],
+        }
+    )
+    assert [m.id for m in models] == ["emb"]
+    assert models[0].pricing.prompt == pytest.approx(0.05 / 1_000_000)
+    assert models[0].pricing.completion == 0.0
+
+
+def test_embedding_with_a_negative_price_is_dropped() -> None:
+    models, _ = _fetch(
+        {
+            "object": "list",
+            "data": [
+                _priced_entry("emb", "embedding", {"input": {"usd": -0.05, "diem": 0}})
+            ],
+        }
+    )
+    assert models == []
+
+
+def test_text_model_with_one_zero_price_is_listed() -> None:
+    """Only both-zero is free; a free prompt with a paid completion is priced."""
+    pricing = {"input": {"usd": 0.0, "diem": 0}, "output": {"usd": 0.9, "diem": 0}}
+    models, _ = _fetch(
+        {"object": "list", "data": [_priced_entry("t", "text", pricing)]}
+    )
+    assert [m.id for m in models] == ["t"]
+    assert models[0].pricing.completion == pytest.approx(0.9 / 1_000_000)
+
+
 def test_model_name_drops_the_venice_prefix() -> None:
     provider = VeniceUpstreamProvider(api_key="sk-test")
     assert provider.transform_model_name("venice/venice-uncensored-1-2") == (

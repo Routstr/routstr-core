@@ -226,7 +226,7 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
         if not isinstance(spec, dict) or spec.get("offline"):
             return None
 
-        pricing = self._parse_pricing(spec.get("pricing"))
+        pricing = self._parse_pricing(spec.get("pricing"), str(model_type))
         if pricing is None:
             return None
 
@@ -266,18 +266,27 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
             ),
         )
 
-    def _parse_pricing(self, raw: Any) -> Pricing | None:
+    def _parse_pricing(self, raw: Any, model_type: str) -> Pricing | None:
         if not isinstance(raw, dict):
             return None
 
         # The ``extended`` tier some models charge past a context threshold is
         # ignored: billing it would overcharge every request staying under it.
         input_usd = _usd(raw.get("input"))
-        if input_usd is None:
+        output_usd = _usd(raw.get("output"))
+        # Embeddings produce no completion tokens, so only they may omit an
+        # output price. Anywhere else a missing or all-zero price would serve
+        # completions free and a negative one would credit the caller, the
+        # same guards ``generic.py`` applies to this price book.
+        if output_usd is None and model_type == "embedding":
+            output_usd = 0.0
+        if input_usd is None or output_usd is None:
+            return None
+        if input_usd < 0 or output_usd < 0 or (input_usd == 0 and output_usd == 0):
             return None
         return Pricing(
             prompt=input_usd / _USD_PER_MILLION,
-            completion=(_usd(raw.get("output")) or 0.0) / _USD_PER_MILLION,
+            completion=output_usd / _USD_PER_MILLION,
             input_cache_read=(_usd(raw.get("cache_input")) or 0.0) / _USD_PER_MILLION,
             input_cache_write=(_usd(raw.get("cache_write")) or 0.0) / _USD_PER_MILLION,
         )
