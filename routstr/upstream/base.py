@@ -31,6 +31,14 @@ from ..core.db import (
 from ..core.db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
+from ..core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_NODE,
+    ERROR_SCOPE_UPSTREAM,
+    client_code_for_upstream_error,
+    client_status_for_upstream_error,
+    upstream_status_details,
+)
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..payment.cost_calculation import (
@@ -943,6 +951,10 @@ class BaseUpstreamProvider:
             error_code = UPSTREAM_RATE_LIMIT
             error_details = rate_limit.as_details()
 
+        client_status = client_status_for_upstream_error(status_code, error_code)
+        client_code = client_code_for_upstream_error(status_code, error_code)
+        headers[ERROR_SCOPE_HEADER] = ERROR_SCOPE_UPSTREAM
+
         logger.warning(
             "Upstream %s returned %s for model=%s path=%s: %s",
             self.provider_type,
@@ -1012,23 +1024,42 @@ class BaseUpstreamProvider:
             # ``org-*`` regex preserves the surrounding JSON structure.
             redacted_text = redact_org_ids(body_bytes.decode("utf-8", errors="ignore"))
             redacted_body = redacted_text.encode()
-            # Surface the stable rate-limit classification on the forwarded
-            # body so callers can switch on ``error.code`` without parsing the
-            # provider-specific message. Fall back to the redacted bytes if the
-            # body is not a JSON object with an ``error`` mapping.
-            if rate_limit is not None:
+            # Surface the stable classification on the forwarded body so callers
+            # can switch on ``error.code`` without parsing the provider-specific
+            # message. Fall back to the redacted bytes if the body is not a JSON
+            # object with an ``error`` mapping.
+            if rate_limit is not None or client_status != status_code:
                 try:
                     parsed = json.loads(redacted_text)
                     err = parsed.get("error") if isinstance(parsed, dict) else None
                     if isinstance(err, dict):
-                        err["code"] = UPSTREAM_RATE_LIMIT
-                        err["details"] = error_details
+                        if rate_limit is not None:
+                            err["code"] = UPSTREAM_RATE_LIMIT
+                            err["details"] = error_details
+                        if client_status != status_code:
+                            err["code"] = client_code
+                            err["upstream_status"] = status_code
+                        redacted_body = json.dumps(parsed).encode()
+                    elif (
+                        client_status != status_code
+                        and isinstance(parsed, dict)
+                        and "error" not in parsed
+                    ):
+                        # JSON body without an ``error`` mapping (e.g. FastAPI's
+                        # ``{"detail": ...}``). Add one so a rewritten status is
+                        # never served without its classification.
+                        parsed["error"] = {
+                            "message": message or "Upstream returned an error response",
+                            "type": "upstream_error",
+                            "code": client_code,
+                            "upstream_status": status_code,
+                        }
                         redacted_body = json.dumps(parsed).encode()
                 except (ValueError, AttributeError):
                     pass
             return Response(
                 content=redacted_body,
-                status_code=status_code,
+                status_code=client_status,
                 headers=headers,
                 media_type=media_type,
             )
@@ -1041,7 +1072,7 @@ class BaseUpstreamProvider:
         error_obj: dict[str, object] = {
             "message": message or "Upstream returned a non-JSON error response",
             "type": "upstream_error",
-            "code": error_code,
+            "code": client_code,
             "upstream_status": status_code,
             "upstream_content_type": content_type or None,
             "upstream_body_preview": body_preview or None,
@@ -1055,7 +1086,7 @@ class BaseUpstreamProvider:
 
         return Response(
             content=json.dumps(envelope).encode(),
-            status_code=status_code,
+            status_code=client_status,
             headers=headers,
             media_type="application/json",
         )
@@ -3401,7 +3432,11 @@ class BaseUpstreamProvider:
             )
 
             # Don't revert here — proxy.py owns payment revert to avoid double-revert
-            raise UpstreamError("An unexpected server error occurred", status_code=500)
+            raise UpstreamError(
+                "An unexpected server error occurred",
+                status_code=500,
+                scope=ERROR_SCOPE_NODE,
+            )
 
     supports_ehbp: bool = False
 
@@ -3680,7 +3715,11 @@ class BaseUpstreamProvider:
             )
 
             # Don't revert here — proxy.py owns payment revert to avoid double-revert
-            raise UpstreamError("An unexpected server error occurred", status_code=500)
+            raise UpstreamError(
+                "An unexpected server error occurred",
+                status_code=500,
+                scope=ERROR_SCOPE_NODE,
+            )
 
     async def forward_get_request(
         self,
@@ -4512,15 +4551,23 @@ class BaseUpstreamProvider:
                                 "error": {
                                     "message": "Error forwarding request to upstream",
                                     "type": "upstream_error",
-                                    "code": response.status_code,
+                                    # Pass the status as the code so a provider
+                                    # 4xx keeps the legacy numeric ``code``.
+                                    "code": client_code_for_upstream_error(
+                                        response.status_code, response.status_code
+                                    ),
+                                    "upstream_status": response.status_code,
                                     "refund_token": refund_token,
                                 }
                             }
                         ),
-                        status_code=response.status_code,
+                        status_code=client_status_for_upstream_error(
+                            response.status_code
+                        ),
                         media_type="application/json",
                     )
                     error_response.headers["X-Cashu"] = refund_token
+                    error_response.headers[ERROR_SCOPE_HEADER] = ERROR_SCOPE_UPSTREAM
                     return error_response
 
                 if _x_cashu_path_has_settlement_handler(path):
@@ -4670,12 +4717,16 @@ class BaseUpstreamProvider:
             # Post-redemption the token is spent; a forwarding failure must not
             # be reported as a retryable redemption error (see handle_x_cashu).
             if redeemed:
+                upstream_status = getattr(e, "status_code", None)
+                upstream_code = getattr(e, "code", None)
                 return create_error_response(
                     "upstream_error",
                     "Payment succeeded but the upstream request failed",
-                    502,
+                    client_status_for_upstream_error(upstream_status, upstream_code),
                     request=request,
-                    code="upstream_request_failed",
+                    code=client_code_for_upstream_error(upstream_status, upstream_code),
+                    details=upstream_status_details(None, upstream_status),
+                    error_scope=ERROR_SCOPE_UPSTREAM,
                 )
 
             classified = classify_redemption_error(e)
@@ -4809,15 +4860,23 @@ class BaseUpstreamProvider:
                                 "error": {
                                     "message": "Error forwarding Responses API request to upstream",
                                     "type": "upstream_error",
-                                    "code": response.status_code,
+                                    # Pass the status as the code so a provider
+                                    # 4xx keeps the legacy numeric ``code``.
+                                    "code": client_code_for_upstream_error(
+                                        response.status_code, response.status_code
+                                    ),
+                                    "upstream_status": response.status_code,
                                     "refund_token": refund_token,
                                 }
                             }
                         ),
-                        status_code=response.status_code,
+                        status_code=client_status_for_upstream_error(
+                            response.status_code
+                        ),
                         media_type="application/json",
                     )
                     error_response.headers["X-Cashu"] = refund_token
+                    error_response.headers[ERROR_SCOPE_HEADER] = ERROR_SCOPE_UPSTREAM
                     return error_response
 
                 if path.startswith("responses"):
@@ -5421,12 +5480,16 @@ class BaseUpstreamProvider:
             # must not surface as a retryable mint_unreachable (spent-token retry
             # bait). Redemption classification only applies while not redeemed.
             if redeemed:
+                upstream_status = getattr(e, "status_code", None)
+                upstream_code = getattr(e, "code", None)
                 return create_error_response(
                     "upstream_error",
                     "Payment succeeded but the upstream request failed",
-                    502,
+                    client_status_for_upstream_error(upstream_status, upstream_code),
                     request=request,
-                    code="upstream_request_failed",
+                    code=client_code_for_upstream_error(upstream_status, upstream_code),
+                    details=upstream_status_details(None, upstream_status),
+                    error_scope=ERROR_SCOPE_UPSTREAM,
                 )
 
             classified = classify_redemption_error(e)

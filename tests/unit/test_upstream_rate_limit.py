@@ -15,6 +15,11 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import httpx
 import pytest
 
+from routstr.core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_UNAVAILABLE,
+)
 from routstr.core.redaction import redact_org_ids
 from routstr.upstream.base import BaseUpstreamProvider
 from routstr.upstream.rate_limit import (
@@ -231,7 +236,8 @@ def test_create_upstream_error_response_preserves_structure() -> None:
     assert "org-[REDACTED]" in serialized
 
 
-def test_generic_upstream_error_still_defaults_to_502() -> None:
+def test_generic_upstream_error_reports_424() -> None:
+    """An upstream-attributable failure is reported as 424, not 502."""
     from routstr.core.exceptions import UpstreamError
     from routstr.payment.helpers import create_upstream_error_response
 
@@ -239,11 +245,12 @@ def test_generic_upstream_error_still_defaults_to_502() -> None:
 
     response = create_upstream_error_response(err, _make_request())
 
-    assert response.status_code == 502
+    assert response.status_code == 424
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
     payload: dict[str, Any] = json.loads(bytes(response.body))
     assert payload["error"]["type"] == "upstream_error"
-    assert payload["error"]["code"] == 502
-    assert "details" not in payload["error"]
+    assert payload["error"]["code"] == UPSTREAM_UNAVAILABLE
+    assert payload["error"]["details"]["upstream_status"] == 502
 
 
 # --------------------------------------------------------------------------- #
@@ -307,7 +314,8 @@ async def test_5xx_wrapped_rate_limit_is_classified(
     provider: BaseUpstreamProvider,
 ) -> None:
     # Some providers wrap a rate-limit in a 5xx envelope; classification must
-    # key off the message marker, not only the 429 status.
+    # key off the message marker, not only the 429 status. The retry hint wins
+    # over the 424 mapping: a caller must still see a retryable 429.
     body = json.dumps({"error": {"message": RATE_LIMIT_MESSAGE}}).encode()
     upstream = _make_upstream_response(body=body, status_code=500)
 
@@ -315,9 +323,11 @@ async def test_5xx_wrapped_rate_limit_is_classified(
         _make_request(), "v1/chat/completions", upstream
     )
 
-    assert response.status_code == 500
+    assert response.status_code == 429
     payload: dict[str, Any] = json.loads(bytes(response.body))
     assert payload["error"]["code"] == UPSTREAM_RATE_LIMIT
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+    assert payload["error"]["upstream_status"] == 500
     serialized = json.dumps(payload)
     assert RAW_ORG_ID not in serialized
     assert "org-[REDACTED]" in serialized

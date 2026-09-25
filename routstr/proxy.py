@@ -24,6 +24,11 @@ from .core.db import (
     create_session,
     get_session,
 )
+from .core.error_scope import (
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
+    UPSTREAM_UNAVAILABLE,
+)
 from .core.exceptions import UpstreamError
 from .core.not_found import build_not_found_response
 from .core.settings import settings
@@ -482,7 +487,7 @@ async def _proxy(
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
                 if (
-                    response.status_code in [502, 429]
+                    response.status_code in [424, 502, 429]
                     and i < len(selected_upstreams) - 1
                 ):
                     logger.warning(
@@ -504,7 +509,12 @@ async def _proxy(
                     last_error_response = create_upstream_error_response(e, request)
                 continue
         return last_error_response or create_error_response(
-            "upstream_error", "All upstreams failed", 502, request=request
+            "upstream_error",
+            "All upstreams failed",
+            UPSTREAM_ERROR_STATUS,
+            request=request,
+            code=UPSTREAM_UNAVAILABLE,
+            error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
     selector: ModelPathSelector | None = None
@@ -683,7 +693,12 @@ async def _proxy(
         if last_error is not None:
             return create_upstream_error_response(last_error, request)
         return create_error_response(
-            "upstream_error", "All upstreams failed", 502, request=request
+            "upstream_error",
+            "All upstreams failed",
+            UPSTREAM_ERROR_STATUS,
+            request=request,
+            code=UPSTREAM_UNAVAILABLE,
+            error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
     elif auth := headers.get("authorization", None):
@@ -708,7 +723,7 @@ async def _proxy(
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
 
-                if response.status_code in [502, 429] and i < len(candidates) - 1:
+                if response.status_code in [424, 502, 429] and i < len(candidates) - 1:
                     error_message = ""
                     try:
                         if hasattr(response, "body"):
@@ -742,7 +757,12 @@ async def _proxy(
                     last_error_response = create_upstream_error_response(e, request)
                 continue
         return last_error_response or create_error_response(
-            "upstream_error", "All upstreams failed", 502, request=request
+            "upstream_error",
+            "All upstreams failed",
+            UPSTREAM_ERROR_STATUS,
+            request=request,
+            code=UPSTREAM_UNAVAILABLE,
+            error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
     reservation_snapshot: ReservationSnapshot | None = None
@@ -927,8 +947,16 @@ async def _proxy(
                 break
 
             if response.status_code != 200:
-                # Check if we should retry (502 Upstream Error or 429 Rate Limit)
-                should_retry = response.status_code in [502, 429, 400, 401, 403, 404]
+                # 424 is an upstream failure re-reported by error_scope.
+                should_retry = response.status_code in [
+                    424,
+                    502,
+                    429,
+                    400,
+                    401,
+                    403,
+                    404,
+                ]
                 if should_retry and i < len(candidates) - 1:
                     error_message = ""
                     try:
@@ -1029,7 +1057,12 @@ async def _proxy(
 
     # Should not be reached given logic above
     return create_error_response(
-        "upstream_error", "All upstreams failed", 502, request=request
+        "upstream_error",
+        "All upstreams failed",
+        UPSTREAM_ERROR_STATUS,
+        request=request,
+        code=UPSTREAM_UNAVAILABLE,
+        error_scope=ERROR_SCOPE_UPSTREAM,
     )
 
 

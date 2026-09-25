@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from routstr.core.error_scope import ERROR_SCOPE_UPSTREAM, UPSTREAM_ERROR_STATUS
 from routstr.core.exceptions import EhbpTimeoutError, UpstreamError
 from routstr.upstream.tinfoil_trailer import forward_with_trailer
 
@@ -193,9 +194,10 @@ async def test_forward_with_trailer_read_timeout_raises_ehbp_timeout(
 
 def test_ehbp_timeout_error_metadata() -> None:
     exc = EhbpTimeoutError("boom")
-    assert exc.status_code == 504
+    assert exc.status_code == UPSTREAM_ERROR_STATUS
     assert exc.code == "UPSTREAM_TIMEOUT"
     assert exc.details is None
+    assert exc.scope == ERROR_SCOPE_UPSTREAM
     assert isinstance(exc, UpstreamError)
 
 
@@ -203,5 +205,5 @@ def test_ehbp_timeout_error_forwards_details() -> None:
     """``details`` must survive so the response builder can forward it."""
     exc = EhbpTimeoutError("boom", details={"phase": "connect"})
     assert exc.details == {"phase": "connect"}
-    assert exc.status_code == 504
+    assert exc.status_code == UPSTREAM_ERROR_STATUS
     assert exc.code == "UPSTREAM_TIMEOUT"
