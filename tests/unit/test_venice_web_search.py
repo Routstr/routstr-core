@@ -223,10 +223,20 @@ async def test_claude_code_web_search_tool_is_accepted() -> None:
     )
 
 
-def test_zero_max_uses_is_refused() -> None:
-    """``auto`` may still search, so a request for no search cannot be met."""
+@pytest.mark.parametrize("max_uses", [1, None])
+def test_max_uses_of_one_or_absent_is_accepted(max_uses: Any) -> None:
     provider = VeniceUpstreamProvider(api_key="sk-test")
-    tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": 0}
+    tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses}
+
+    assert provider.adapt_messages_request(_body(tools=[tool]), _model()) != ""
+
+
+@pytest.mark.parametrize("max_uses", [0, -1, 1.5, True, "0", "8"])
+def test_max_uses_other_than_a_positive_integer_is_refused(max_uses: Any) -> None:
+    """``auto`` may still search, so a cap below one cannot be met, and a
+    malformed cap cannot be shown to be met."""
+    provider = VeniceUpstreamProvider(api_key="sk-test")
+    tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses}
 
     with pytest.raises(UpstreamError) as excinfo:
         provider.adapt_messages_request(_body(tools=[tool]), _model())

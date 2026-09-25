@@ -131,7 +131,8 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
             return ""
 
         # A key carrying null or an empty list states no constraint, so it is
-        # read as absent rather than refused.
+        # read as absent rather than refused. ``auto`` runs at most one search,
+        # so only an integer ``max_uses`` of one or more is known to be met.
         unenforceable = sorted(
             {
                 key
@@ -142,7 +143,15 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
                     and value is not None
                     and value != []
                 )
-                or (key == "max_uses" and value == 0)
+                or (
+                    key == "max_uses"
+                    and value is not None
+                    and not (
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value >= 1
+                    )
+                )
             }
         )
         if unenforceable:
