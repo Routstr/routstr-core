@@ -136,7 +136,6 @@ async def test_other_providers_keep_their_existing_behaviour() -> None:
 @pytest.mark.parametrize(
     "tool",
     [
-        {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
         {
             "type": "web_search_20250305",
             "name": "web_search",
@@ -187,6 +186,41 @@ def test_forcing_web_search_through_tool_choice_is_refused() -> None:
         provider.adapt_messages_request(body, _model())
 
     assert excinfo.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_claude_code_web_search_tool_is_accepted() -> None:
+    """Claude Code always sends ``max_uses: 8``; Venice's single ``auto``
+    search already stays under any cap of one or more."""
+    provider = VeniceUpstreamProvider(api_key="sk-test")
+    tool = {
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "allowed_domains": None,
+        "blocked_domains": None,
+        "max_uses": 8,
+    }
+
+    kwargs = await _dispatch(provider, _body(tools=[tool]))
+
+    assert "web_search_options" not in kwargs
+    assert "tools" not in kwargs
+    assert kwargs["model"] == (
+        "openai/deepseek-v4-flash-0731:enable_web_search=auto&enable_web_citations=true"
+    )
+
+
+def test_zero_max_uses_is_refused() -> None:
+    """``auto`` may still search, so a request for no search cannot be met."""
+    provider = VeniceUpstreamProvider(api_key="sk-test")
+    tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": 0}
+
+    with pytest.raises(UpstreamError) as excinfo:
+        provider.adapt_messages_request(_body(tools=[tool]), _model())
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.code == "UNSUPPORTED_WEB_SEARCH_OPTION"
+    assert excinfo.value.details == {"unsupported_options": ["max_uses"]}
 
 
 def test_tool_named_web_search_without_the_type_marker_is_caught() -> None:

@@ -42,9 +42,12 @@ _WEB_SEARCH_SUFFIX = ":enable_web_search=auto&enable_web_citations=true"
 
 # Anthropic web-search constraints with no Venice equivalent. Honouring the
 # request means enforcing them, so a request that sets one is refused rather
-# than answered by a search that ignored it.
+# than answered by a search that ignored it. ``max_uses`` is absent on purpose:
+# ``auto`` runs at most one search per request, so any cap of 1 or more is
+# already met, while domain filters and location would be silently ignored.
+# Only ``max_uses: 0``, a request for no search at all, cannot be honoured.
 _UNENFORCEABLE_WEB_SEARCH_KEYS = frozenset(
-    {"max_uses", "allowed_domains", "blocked_domains", "user_location"}
+    {"allowed_domains", "blocked_domains", "user_location"}
 )
 
 
@@ -134,9 +137,12 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
                 key
                 for tool in search_tools
                 for key, value in tool.items()
-                if key in _UNENFORCEABLE_WEB_SEARCH_KEYS
-                and value is not None
-                and value != []
+                if (
+                    key in _UNENFORCEABLE_WEB_SEARCH_KEYS
+                    and value is not None
+                    and value != []
+                )
+                or (key == "max_uses" and value == 0)
             }
         )
         if unenforceable:
