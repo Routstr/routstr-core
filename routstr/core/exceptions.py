@@ -28,7 +28,10 @@ class UpstreamError(Exception):
     ``scope`` is ``"upstream"`` for provider failures, reported to the caller
     as ``424`` (see :mod:`routstr.core.error_scope`), or ``"node"`` for local
     faults, which keep their status. ``status_code`` stays the provider's own
-    status; the caller-visible mapping happens at response construction.
+    status whenever ``from_upstream_response`` is True; the caller-visible
+    mapping happens at response construction. Proxy-chosen statuses (transport
+    failure, timeout) may already be the caller-visible one — only read
+    ``status_code`` as a provider status behind ``from_upstream_response``.
     """
 
     def __init__(

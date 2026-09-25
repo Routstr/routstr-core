@@ -1040,6 +1040,21 @@ class BaseUpstreamProvider:
                             err["code"] = client_code
                             err["upstream_status"] = status_code
                         redacted_body = json.dumps(parsed).encode()
+                    elif (
+                        client_status != status_code
+                        and isinstance(parsed, dict)
+                        and "error" not in parsed
+                    ):
+                        # JSON body without an ``error`` mapping (e.g. FastAPI's
+                        # ``{"detail": ...}``). Add one so a rewritten status is
+                        # never served without its classification.
+                        parsed["error"] = {
+                            "message": message or "Upstream returned an error response",
+                            "type": "upstream_error",
+                            "code": client_code,
+                            "upstream_status": status_code,
+                        }
+                        redacted_body = json.dumps(parsed).encode()
                 except (ValueError, AttributeError):
                     pass
             return Response(
@@ -4536,8 +4551,10 @@ class BaseUpstreamProvider:
                                 "error": {
                                     "message": "Error forwarding request to upstream",
                                     "type": "upstream_error",
+                                    # Pass the status as the code so a provider
+                                    # 4xx keeps the legacy numeric ``code``.
                                     "code": client_code_for_upstream_error(
-                                        response.status_code, None
+                                        response.status_code, response.status_code
                                     ),
                                     "upstream_status": response.status_code,
                                     "refund_token": refund_token,
@@ -4701,14 +4718,13 @@ class BaseUpstreamProvider:
             # be reported as a retryable redemption error (see handle_x_cashu).
             if redeemed:
                 upstream_status = getattr(e, "status_code", None)
+                upstream_code = getattr(e, "code", None)
                 return create_error_response(
                     "upstream_error",
                     "Payment succeeded but the upstream request failed",
-                    client_status_for_upstream_error(upstream_status),
+                    client_status_for_upstream_error(upstream_status, upstream_code),
                     request=request,
-                    code=client_code_for_upstream_error(
-                        upstream_status, getattr(e, "code", None)
-                    ),
+                    code=client_code_for_upstream_error(upstream_status, upstream_code),
                     details=upstream_status_details(None, upstream_status),
                     error_scope=ERROR_SCOPE_UPSTREAM,
                 )
@@ -4844,8 +4860,10 @@ class BaseUpstreamProvider:
                                 "error": {
                                     "message": "Error forwarding Responses API request to upstream",
                                     "type": "upstream_error",
+                                    # Pass the status as the code so a provider
+                                    # 4xx keeps the legacy numeric ``code``.
                                     "code": client_code_for_upstream_error(
-                                        response.status_code, None
+                                        response.status_code, response.status_code
                                     ),
                                     "upstream_status": response.status_code,
                                     "refund_token": refund_token,
@@ -5463,14 +5481,13 @@ class BaseUpstreamProvider:
             # bait). Redemption classification only applies while not redeemed.
             if redeemed:
                 upstream_status = getattr(e, "status_code", None)
+                upstream_code = getattr(e, "code", None)
                 return create_error_response(
                     "upstream_error",
                     "Payment succeeded but the upstream request failed",
-                    client_status_for_upstream_error(upstream_status),
+                    client_status_for_upstream_error(upstream_status, upstream_code),
                     request=request,
-                    code=client_code_for_upstream_error(
-                        upstream_status, getattr(e, "code", None)
-                    ),
+                    code=client_code_for_upstream_error(upstream_status, upstream_code),
                     details=upstream_status_details(None, upstream_status),
                     error_scope=ERROR_SCOPE_UPSTREAM,
                 )

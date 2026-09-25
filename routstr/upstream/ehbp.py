@@ -1140,8 +1140,10 @@ async def forward_ehbp_x_cashu_request(
                             "error": {
                                 "message": "Error forwarding EHBP request to upstream",
                                 "type": "upstream_error",
+                                # Pass the status as the code so a provider 4xx
+                                # keeps the legacy numeric ``code``.
                                 "code": client_code_for_upstream_error(
-                                    resp.status_code, None
+                                    resp.status_code, resp.status_code
                                 ),
                                 "upstream_status": resp.status_code,
                                 "refund_token": refund_token,

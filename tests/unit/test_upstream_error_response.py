@@ -20,6 +20,8 @@ from routstr.core.error_scope import (
     ERROR_SCOPE_UPSTREAM,
     UPSTREAM_ERROR_STATUS,
     UPSTREAM_UNAVAILABLE,
+    client_code_for_upstream_error,
+    client_status_for_upstream_error,
 )
 from routstr.core.exceptions import UpstreamError
 from routstr.payment.helpers import create_upstream_error_response
@@ -309,3 +311,66 @@ def test_node_scoped_failure_stays_500_without_scope_header() -> None:
 
 def test_upstream_error_defaults_to_upstream_scope() -> None:
     assert UpstreamError("boom").scope == ERROR_SCOPE_UPSTREAM
+
+
+@pytest.mark.asyncio
+async def test_json_body_without_error_mapping_gets_classification(
+    provider: BaseUpstreamProvider,
+) -> None:
+    """A rewritten status is never served without a matching ``error.code``."""
+    body = json.dumps({"detail": "internal failure"}).encode()
+    upstream = _make_upstream_response(
+        body=body, status_code=503, content_type="application/json"
+    )
+
+    response = await provider.forward_upstream_error_response(
+        _make_request(), "v1/chat/completions", upstream
+    )
+
+    assert response.status_code == UPSTREAM_ERROR_STATUS
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+    payload: dict[str, Any] = json.loads(bytes(response.body))
+    assert payload["detail"] == "internal failure"
+    assert payload["error"]["code"] == UPSTREAM_UNAVAILABLE
+    assert payload["error"]["upstream_status"] == 503
+
+
+@pytest.mark.asyncio
+async def test_json_body_with_non_mapping_error_is_left_alone(
+    provider: BaseUpstreamProvider,
+) -> None:
+    """A provider's own ``error`` value is never clobbered by the mapping."""
+    body = json.dumps({"error": "boom"}).encode()
+    upstream = _make_upstream_response(
+        body=body, status_code=503, content_type="application/json"
+    )
+
+    response = await provider.forward_upstream_error_response(
+        _make_request(), "v1/chat/completions", upstream
+    )
+
+    assert response.status_code == UPSTREAM_ERROR_STATUS
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+    assert json.loads(bytes(response.body)) == {"error": "boom"}
+
+
+@pytest.mark.parametrize("upstream_status", [429, 500, 502, 503, 529])
+def test_rate_limit_status_and_code_never_disagree(upstream_status: int) -> None:
+    """429 and ``UPSTREAM_RATE_LIMIT`` are one classification, not two: a caller
+    must never see ``424`` carrying the rate-limit code."""
+    assert client_status_for_upstream_error(upstream_status, UPSTREAM_RATE_LIMIT) == 429
+    assert (
+        client_code_for_upstream_error(upstream_status, UPSTREAM_RATE_LIMIT)
+        == UPSTREAM_RATE_LIMIT
+    )
+
+
+@pytest.mark.parametrize("upstream_status", [400, 401, 403, 404, 422])
+def test_provider_4xx_keeps_its_numeric_code(upstream_status: int) -> None:
+    """The x-cashu envelopes pass the status as the code; a 4xx must keep the
+    legacy numeric ``error.code`` rather than degrade to ``null``."""
+    assert client_status_for_upstream_error(upstream_status) == upstream_status
+    assert (
+        client_code_for_upstream_error(upstream_status, upstream_status)
+        == upstream_status
+    )

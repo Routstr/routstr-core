@@ -24,6 +24,11 @@ from .core.db import (
     create_session,
     get_session,
 )
+from .core.error_scope import (
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
+    UPSTREAM_UNAVAILABLE,
+)
 from .core.exceptions import UpstreamError
 from .core.not_found import build_not_found_response
 from .core.settings import settings
@@ -504,7 +509,12 @@ async def _proxy(
                     last_error_response = create_upstream_error_response(e, request)
                 continue
         return last_error_response or create_error_response(
-            "upstream_error", "All upstreams failed", 502, request=request
+            "upstream_error",
+            "All upstreams failed",
+            UPSTREAM_ERROR_STATUS,
+            request=request,
+            code=UPSTREAM_UNAVAILABLE,
+            error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
     selector: ModelPathSelector | None = None
@@ -683,7 +693,12 @@ async def _proxy(
         if last_error is not None:
             return create_upstream_error_response(last_error, request)
         return create_error_response(
-            "upstream_error", "All upstreams failed", 502, request=request
+            "upstream_error",
+            "All upstreams failed",
+            UPSTREAM_ERROR_STATUS,
+            request=request,
+            code=UPSTREAM_UNAVAILABLE,
+            error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
     elif auth := headers.get("authorization", None):
@@ -742,7 +757,12 @@ async def _proxy(
                     last_error_response = create_upstream_error_response(e, request)
                 continue
         return last_error_response or create_error_response(
-            "upstream_error", "All upstreams failed", 502, request=request
+            "upstream_error",
+            "All upstreams failed",
+            UPSTREAM_ERROR_STATUS,
+            request=request,
+            code=UPSTREAM_UNAVAILABLE,
+            error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
     reservation_snapshot: ReservationSnapshot | None = None
@@ -1037,7 +1057,12 @@ async def _proxy(
 
     # Should not be reached given logic above
     return create_error_response(
-        "upstream_error", "All upstreams failed", 502, request=request
+        "upstream_error",
+        "All upstreams failed",
+        UPSTREAM_ERROR_STATUS,
+        request=request,
+        code=UPSTREAM_UNAVAILABLE,
+        error_scope=ERROR_SCOPE_UPSTREAM,
     )
 
 
