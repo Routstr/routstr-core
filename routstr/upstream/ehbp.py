@@ -31,6 +31,14 @@ from ..core.db import (
 from ..core.db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
+from ..core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_NODE,
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
+    client_code_for_upstream_error,
+    client_status_for_upstream_error,
+)
 from ..core.exceptions import EhbpTimeoutError, UpstreamError
 from ..core.settings import settings
 from ..payment.cost_calculation import (
@@ -1032,7 +1040,11 @@ async def forward_ehbp_request(
                 "traceback": tb,
             },
         )
-        raise UpstreamError("An unexpected server error occurred", status_code=500)
+        raise UpstreamError(
+            "An unexpected server error occurred",
+            status_code=500,
+            scope=ERROR_SCOPE_NODE,
+        )
 
 
 async def forward_ehbp_x_cashu_request(
@@ -1128,15 +1140,19 @@ async def forward_ehbp_x_cashu_request(
                             "error": {
                                 "message": "Error forwarding EHBP request to upstream",
                                 "type": "upstream_error",
-                                "code": resp.status_code,
+                                "code": client_code_for_upstream_error(
+                                    resp.status_code, None
+                                ),
+                                "upstream_status": resp.status_code,
                                 "refund_token": refund_token,
                             }
                         }
                     ),
-                    status_code=resp.status_code,
+                    status_code=client_status_for_upstream_error(resp.status_code),
                     media_type="application/json",
                 )
                 error_response.headers["X-Cashu"] = refund_token
+                error_response.headers[ERROR_SCOPE_HEADER] = ERROR_SCOPE_UPSTREAM
                 return error_response
 
             # Compute refund from actual usage when available — check both
@@ -1242,9 +1258,10 @@ async def forward_ehbp_x_cashu_request(
                 error_response = create_error_response(
                     "upstream_timeout",
                     str(e),
-                    504,
+                    UPSTREAM_ERROR_STATUS,
                     request=request,
                     code="UPSTREAM_TIMEOUT",
+                    error_scope=ERROR_SCOPE_UPSTREAM,
                 )
                 error_response.headers["X-Cashu"] = refund_token
                 return error_response
@@ -1260,9 +1277,10 @@ async def forward_ehbp_x_cashu_request(
         return create_error_response(
             "upstream_timeout",
             str(e),
-            504,
+            UPSTREAM_ERROR_STATUS,
             request=request,
             code="UPSTREAM_TIMEOUT",
+            error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
     except Exception as e:
@@ -1284,8 +1302,9 @@ async def forward_ehbp_x_cashu_request(
                 error_response = create_error_response(
                     "upstream_error",
                     "EHBP request failed after token redemption; refunded token",
-                    502,
+                    UPSTREAM_ERROR_STATUS,
                     request=request,
+                    error_scope=ERROR_SCOPE_UPSTREAM,
                 )
                 error_response.headers["X-Cashu"] = refund_token
                 return error_response
@@ -1352,7 +1371,8 @@ async def forward_ehbp_x_cashu_request(
         return create_error_response(
             "cashu_error" if not redeemed else "upstream_error",
             f"EHBP X-Cashu request failed: {error_message}",
-            400 if not redeemed else 502,
+            400 if not redeemed else UPSTREAM_ERROR_STATUS,
             request=request,
             token=x_cashu_token if not redeemed else None,
+            error_scope=None if not redeemed else ERROR_SCOPE_UPSTREAM,
         )

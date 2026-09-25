@@ -482,7 +482,7 @@ async def _proxy(
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
                 if (
-                    response.status_code in [502, 429]
+                    response.status_code in [424, 502, 429]
                     and i < len(selected_upstreams) - 1
                 ):
                     logger.warning(
@@ -708,7 +708,7 @@ async def _proxy(
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
 
-                if response.status_code in [502, 429] and i < len(candidates) - 1:
+                if response.status_code in [424, 502, 429] and i < len(candidates) - 1:
                     error_message = ""
                     try:
                         if hasattr(response, "body"):
@@ -927,8 +927,16 @@ async def _proxy(
                 break
 
             if response.status_code != 200:
-                # Check if we should retry (502 Upstream Error or 429 Rate Limit)
-                should_retry = response.status_code in [502, 429, 400, 401, 403, 404]
+                # 424 is an upstream failure re-reported by error_scope.
+                should_retry = response.status_code in [
+                    424,
+                    502,
+                    429,
+                    400,
+                    401,
+                    403,
+                    404,
+                ]
                 if should_retry and i < len(candidates) - 1:
                     error_message = ""
                     try:

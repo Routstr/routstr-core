@@ -289,6 +289,7 @@ app.add_middleware(
     expose_headers=[
         "x-routstr-request-id",
         "x-cashu",
+        "x-routstr-error-scope",
         "x-routstr-cost-msats",
         "x-routstr-cost-usd",
         "x-routstr-input-cost-msats",
