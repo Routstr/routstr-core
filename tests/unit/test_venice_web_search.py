@@ -186,6 +186,19 @@ def test_forcing_web_search_through_tool_choice_is_refused() -> None:
         provider.adapt_messages_request(body, _model())
 
     assert excinfo.value.status_code == 400
+    assert excinfo.value.code == "UNSUPPORTED_WEB_SEARCH_OPTION"
+    assert excinfo.value.details == {"unsupported_options": ["tool_choice"]}
+
+
+def test_web_search_only_request_drops_tool_choice() -> None:
+    """Without tools left, a surviving tool_choice is rejected upstream."""
+    provider = VeniceUpstreamProvider(api_key="sk-test")
+    body = _body(tools=[WEB_SEARCH_TOOL], tool_choice={"type": "auto"})
+
+    provider.adapt_messages_request(body, _model())
+
+    assert "tools" not in body
+    assert "tool_choice" not in body
 
 
 @pytest.mark.asyncio
