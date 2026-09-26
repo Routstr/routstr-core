@@ -2537,6 +2537,16 @@ class BaseUpstreamProvider:
     ) -> dict:
         return await messages_dispatch.aggregate_anthropic_events_to_message(iterator)
 
+    def adapt_messages_request(self, body: dict, model_obj: Model) -> str:
+        """Rewrite an allowlisted /v1/messages body for this upstream.
+
+        Returns a suffix appended to the upstream model name, empty when the
+        provider needs none. Subclasses override this to express an Anthropic
+        feature the upstream spells differently; the base forwards the body
+        untouched.
+        """
+        return ""
+
     async def _dispatch_anthropic_messages(
         self,
         request_body: bytes | None,
@@ -2551,6 +2561,7 @@ class BaseUpstreamProvider:
             api_key=self.api_key,
             provider_prefix=self.get_litellm_provider_prefix(),
             transform_model_name=self.transform_model_name,
+            adapt_request=lambda body: self.adapt_messages_request(body, model_obj),
             log_extra=log_extra,
         )
 
