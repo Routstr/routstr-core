@@ -63,7 +63,7 @@ from ..wallet import (
     send_token,
     token_mint_url,
 )
-from . import messages_dispatch
+from . import json_codec, messages_dispatch
 from .cache_breakpoints import (
     inject_anthropic_cache_breakpoints,
     is_explicit_cache_model,
@@ -1277,10 +1277,7 @@ class BaseUpstreamProvider:
                     done_seen = True
                     return
 
-                try:
-                    obj = json.loads(data)
-                except Exception:
-                    obj = None
+                obj = json_codec.loads(data)
 
                 if isinstance(obj, dict):
                     usage_estimator.observe(obj)
@@ -1322,15 +1319,12 @@ class BaseUpstreamProvider:
                             # usage is reported exactly once (in the trailer).
                             forward = {k: v for k, v in obj.items() if k != "usage"}
                             yield (
-                                prefix
-                                + b"data: "
-                                + json.dumps(forward).encode()
-                                + b"\n\n"
+                                prefix + b"data: " + json_codec.dumps(forward) + b"\n\n"
                             )
                             return
                         usage_chunk_data = obj
                         return
-                    yield prefix + b"data: " + json.dumps(obj).encode() + b"\n\n"
+                    yield prefix + b"data: " + json_codec.dumps(obj) + b"\n\n"
                 else:
                     if final:
                         # Final flush of a truncated tail: the upstream closed
@@ -1760,10 +1754,7 @@ class BaseUpstreamProvider:
                     done_seen = True
                     return
 
-                try:
-                    obj = json.loads(data)
-                except json.JSONDecodeError:
-                    obj = None
+                obj = json_codec.loads(data)
 
                 if isinstance(obj, dict):
                     self._apply_provider_field(obj)
@@ -1789,7 +1780,7 @@ class BaseUpstreamProvider:
                         return
 
                     usage_estimator.observe(obj)
-                    yield prefix + b"data: " + json.dumps(obj).encode() + b"\n\n"
+                    yield prefix + b"data: " + json_codec.dumps(obj) + b"\n\n"
                 else:
                     if final:
                         # Final flush of a truncated tail: upstream closed

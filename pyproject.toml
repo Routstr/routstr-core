@@ -22,6 +22,7 @@ dependencies = [
     "pillow>=10",
     "openai>=1.98.0",
     "litellm>=1.93.0,<1.94",  # 1.93 is the first line supporting Python 3.14
+    "orjson>=3.10",
 ]
 
 [dependency-groups]
