@@ -17,6 +17,7 @@ provider they named.
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
 import json
 import random
@@ -101,6 +102,8 @@ class ProviderPathSnapshot:
     preserve_model_ids: frozenset[str] = frozenset()
 
 
+# Streaming paths stamp this onto every chunk; the configured base URL set is small.
+@functools.lru_cache(maxsize=256)
 def public_provider_url(base_url: str) -> str:
     """Mask private IP addresses and URLs with explicit ports."""
     parsed = urlsplit(base_url)

@@ -68,11 +68,8 @@ async def _run_proxy(
         ),
         patch.object(proxy_module, "check_token_balance", MagicMock()),
         patch.object(proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)),
-        patch.object(proxy_module, "pay_for_request", AsyncMock(return_value=1_000)),
         patch.object(
-            proxy_module,
-            "get_reservation_snapshot",
-            AsyncMock(return_value=reservation),
+            proxy_module, "pay_for_request", AsyncMock(return_value=reservation)
         ),
         patch.object(proxy_module, "revert_pay_for_request", AsyncMock()),
     ):
