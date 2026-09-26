@@ -74,6 +74,7 @@ from .litellm_routing import detect_litellm_prefix
 from .model_paths import public_provider_url
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
 from .reasoning_effort import apply_reasoning_effort
+from .sse_splitter import SSEEventSplitter
 from .stream_ownership import (
     ClosingStreamingResponse,
     OwnedUpstreamStream,
@@ -1346,21 +1347,14 @@ class BaseUpstreamProvider:
                 # byte boundaries, so a single event's JSON can span chunks and
                 # multiple events can arrive together; buffering makes parsing
                 # boundary-independent for every provider.
-                buffer = b""
+                splitter = SSEEventSplitter()
                 async for chunk in response.aiter_bytes():
-                    # Normalize the *joined* buffer, not each chunk in
-                    # isolation: a CRLF event delimiter can straddle two
-                    # ``aiter_bytes`` chunks (``...\r`` then ``\n...``). A
-                    # per-chunk replace would leave a stray ``\r`` and the
-                    # ``\n\n`` split would miss the delimiter, merging two
-                    # events into one frame and breaking SSE clients.
-                    buffer = (buffer + chunk).replace(b"\r\n", b"\n")
-                    while b"\n\n" in buffer:
-                        raw_event, buffer = buffer.split(b"\n\n", 1)
+                    for raw_event in splitter.feed(chunk):
                         for out in _process_event(raw_event):
                             yield out
 
                 # Flush any trailing event that lacked a final blank line.
+                buffer = splitter.flush()
                 if buffer.strip():
                     for out in _process_event(buffer, final=True):
                         yield out
@@ -1795,20 +1789,13 @@ class BaseUpstreamProvider:
             try:
                 # Buffer across network chunks; dispatch only on the SSE event
                 # delimiter so parsing is independent of byte boundaries.
-                buffer = b""
+                splitter = SSEEventSplitter()
                 async for chunk in response.aiter_bytes():
-                    # Normalize the *joined* buffer, not each chunk in
-                    # isolation: a CRLF event delimiter can straddle two
-                    # ``aiter_bytes`` chunks (``...\r`` then ``\n...``). A
-                    # per-chunk replace would leave a stray ``\r`` and the
-                    # ``\n\n`` split would miss the delimiter, merging two
-                    # events into one frame and breaking SSE clients.
-                    buffer = (buffer + chunk).replace(b"\r\n", b"\n")
-                    while b"\n\n" in buffer:
-                        raw_event, buffer = buffer.split(b"\n\n", 1)
+                    for raw_event in splitter.feed(chunk):
                         for out in _process_event(raw_event):
                             yield out
 
+                buffer = splitter.flush()
                 if buffer.strip():
                     for out in _process_event(buffer, final=True):
                         yield out
