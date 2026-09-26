@@ -44,6 +44,7 @@ Pipeline
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -55,6 +56,7 @@ from ..core import get_logger
 from ..core.error_scope import ERROR_SCOPE_NODE
 from ..core.exceptions import UpstreamError
 from ..payment.models import Model
+from .http_client import acquire_upstream_http_client
 from .messages_dispatch import (
     ANTHROPIC_ONLY_FIELDS,
     aggregate_anthropic_events_to_message,
@@ -63,6 +65,46 @@ from .messages_dispatch import (
 logger = get_logger(__name__)
 
 DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+
+
+class _ResponseOwnedIterator:
+    """Close the upstream response even if iteration never starts."""
+
+    def __init__(
+        self, iterator: AsyncIterator[bytes], response: httpx.Response
+    ) -> None:
+        self._iterator = iterator
+        self._response = response
+        self._cleanup_task: asyncio.Task[None] | None = None
+
+    def __aiter__(self) -> _ResponseOwnedIterator:
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            return await self._iterator.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+        except BaseException:
+            try:
+                await self.aclose()
+            finally:
+                raise
+
+    async def _cleanup(self) -> None:
+        try:
+            close = getattr(self._iterator, "aclose", None)
+            if close is not None:
+                await close()
+        finally:
+            await self._response.aclose()
+
+    async def aclose(self) -> None:
+        if self._cleanup_task is None:
+            self._cleanup_task = asyncio.create_task(self._cleanup())
+        await asyncio.shield(self._cleanup_task)
+
 
 # Mapping: OpenAI finish_reason → Anthropic stop_reason
 _FINISH_TO_STOP = {
@@ -299,17 +341,21 @@ async def _openai_chunks_to_anthropic_events(
     yield _sse_event("message_stop", {"type": "message_stop"})
 
 
+GEMINI_STREAM_READ_TIMEOUT_SECONDS = 120.0
+
+
 async def _post_and_stream(
     base_url: str,
     api_key: str,
     payload: dict,
     log_extra: dict[str, Any] | None,
-) -> tuple[httpx.AsyncClient, httpx.Response]:
-    """POST to upstream chat-completions and return (client, response) for
-    streaming. Caller is responsible for closing both."""
+) -> httpx.Response:
+    """POST to upstream chat-completions and return a streaming response."""
     url = f"{base_url.rstrip('/')}/chat/completions"
-    client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, read=120.0))
     try:
+        client = acquire_upstream_http_client(url)
+        # HTTPX replaces rather than merges per-request timeout settings.
+        client_timeout = client.timeout
         request = client.build_request(
             "POST",
             url,
@@ -319,10 +365,25 @@ async def _post_and_stream(
                 "Content-Type": "application/json",
                 "Accept": "text/event-stream",
             },
+            timeout=httpx.Timeout(
+                connect=client_timeout.connect,
+                read=GEMINI_STREAM_READ_TIMEOUT_SECONDS,
+                write=client_timeout.write,
+                pool=client_timeout.pool,
+            ),
         )
         response = await client.send(request, stream=True)
+    except UpstreamError:
+        raise
+    except httpx.PoolTimeout as exc:
+        logger.error(
+            "Gemini messages dispatch pool exhausted",
+            extra={"error": str(exc), "url": url, **(log_extra or {})},
+        )
+        raise UpstreamError(
+            "Upstream connection pool is busy", status_code=503
+        ) from exc
     except Exception as exc:
-        await client.aclose()
         logger.error(
             "Gemini messages dispatch HTTP error",
             extra={"error": str(exc), "url": url, **(log_extra or {})},
@@ -336,7 +397,6 @@ async def _post_and_stream(
             body_bytes = await response.aread()
         finally:
             await response.aclose()
-            await client.aclose()
         body_text = body_bytes.decode("utf-8", errors="replace")
         logger.error(
             "Gemini messages dispatch upstream error",
@@ -353,7 +413,7 @@ async def _post_and_stream(
             from_upstream_response=True,
         )
 
-    return client, response
+    return response
 
 
 async def dispatch_gemini_messages(
@@ -374,9 +434,7 @@ async def dispatch_gemini_messages(
     aggregates).
     """
     if not request_body:
-        raise UpstreamError(
-            "Missing request body for /v1/messages", status_code=400
-        )
+        raise UpstreamError("Missing request body for /v1/messages", status_code=400)
 
     try:
         body: dict = json.loads(request_body)
@@ -444,9 +502,7 @@ async def dispatch_gemini_messages(
         },
     )
 
-    http_client, response = await _post_and_stream(
-        base_url, api_key, openai_kwargs, log_extra
-    )
+    response = await _post_and_stream(base_url, api_key, openai_kwargs, log_extra)
 
     async def line_iter() -> AsyncGenerator[str, None]:
         try:
@@ -454,10 +510,9 @@ async def dispatch_gemini_messages(
                 yield line
         finally:
             await response.aclose()
-            await http_client.aclose()
 
-    anthropic_event_iter = _openai_chunks_to_anthropic_events(
-        line_iter(), requested_model
+    anthropic_event_iter = _ResponseOwnedIterator(
+        _openai_chunks_to_anthropic_events(line_iter(), requested_model), response
     )
 
     if not client_stream:
@@ -478,6 +533,8 @@ async def dispatch_gemini_messages(
                 f"Failed to aggregate upstream stream: {exc}",
                 status_code=502,
             ) from exc
+        finally:
+            await anthropic_event_iter.aclose()
         return client_stream, aggregated, requested_model
 
     return client_stream, anthropic_event_iter, requested_model

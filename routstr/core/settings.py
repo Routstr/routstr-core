@@ -177,6 +177,15 @@ class Settings(BaseSettings):
         default=30.0, gt=0, env="DATABASE_BUSY_TIMEOUT"
     )
 
+    # Per-origin upstream connection pools. These fields are env-only below.
+    upstream_max_connections: int = Field(
+        default=200, ge=1, env="UPSTREAM_MAX_CONNECTIONS"
+    )
+    upstream_pool_timeout: float = Field(default=5.0, gt=0, env="UPSTREAM_POOL_TIMEOUT")
+    upstream_read_timeout: float = Field(
+        default=900.0, gt=0, env="UPSTREAM_READ_TIMEOUT"
+    )
+
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     enable_console_logging: bool = Field(default=True, env="ENABLE_CONSOLE_LOGGING")
@@ -238,6 +247,10 @@ ENV_ONLY_FIELDS = frozenset(
         "database_pool_pre_ping",
         "database_pool_hold_warn_seconds",
         "database_busy_timeout",
+        # Reconfiguring a live pool would disrupt in-flight streams.
+        "upstream_max_connections",
+        "upstream_pool_timeout",
+        "upstream_read_timeout",
     }
 )
 
