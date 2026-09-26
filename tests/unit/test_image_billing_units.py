@@ -352,10 +352,10 @@ async def _settle(
             await _drain(response)
 
     async with AsyncSession(engine, expire_on_commit=False) as session:
-        key = await session.get(ApiKey, snapshot.key_hash)
+        settled = await session.get(ApiKey, snapshot.key_hash)
         record = await session.get(ReservationRelease, snapshot.release_id)
-        assert key is not None
-        return key.balance, key.total_spent, record.status if record else None
+        assert settled is not None
+        return settled.balance, settled.total_spent, record.status if record else None
 
 
 @pytest.mark.asyncio

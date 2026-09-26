@@ -296,7 +296,7 @@ def test_openrouter_provider_prices_image_models_from_the_image_api() -> None:
 
 def test_openai_provider_prices_gpt_image_from_its_token_rate() -> None:
     catalog = [
-        dict(entry, id=entry["id"].removeprefix("openai/"))
+        dict(entry, id=str(entry["id"]).removeprefix("openai/"))
         for entry in OPENROUTER_CATALOG[:1]
     ]
     provider = OpenAIUpstreamProvider(api_key="k")
