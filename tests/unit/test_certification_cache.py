@@ -257,7 +257,7 @@ class TestCostMarginRow:
             cache_read=4e-9,
             sats_usd=sats_usd,
         )
-        payloads = [
+        payloads: list[dict[str, Any] | None] = [
             _payload(
                 {
                     "prompt_tokens": 31,
@@ -306,7 +306,7 @@ class TestCostMarginRow:
             cache_read=4e-9,
             sats_usd=sats_usd,
         )
-        payloads = [
+        payloads: list[dict[str, Any] | None] = [
             _payload(
                 {
                     "prompt_tokens": 31,

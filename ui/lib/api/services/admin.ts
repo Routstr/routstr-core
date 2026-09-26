@@ -135,10 +135,7 @@ export const ProviderModelsSchema = z.object({
   }),
   db_models: z.array(AdminModelSchema),
   remote_models: z.array(AdminModelSchema),
-  certification_paths: z.record(
-    z.string(),
-    z.array(CertificationPathSchema)
-  ),
+  certification_paths: z.record(z.string(), z.array(CertificationPathSchema)),
 });
 
 export type ProviderType = z.infer<typeof ProviderTypeSchema>;
