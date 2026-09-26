@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import math
 import traceback
 import typing
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from typing import Any, Mapping, Self, cast
 
 import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic.v1 import BaseModel
-from starlette.types import Receive, Scope, Send
 
 from ..auth import (
     ReservationSnapshot,
@@ -42,7 +40,6 @@ from ..core.error_scope import (
 )
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
-from ..core.settings import settings
 from ..payment.cost_calculation import (
     CostData,
     CostDataError,
@@ -72,228 +69,26 @@ from .cache_breakpoints import (
     is_explicit_cache_model,
 )
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
-from .http_client import (
-    UPSTREAM_CONNECT_RETRIES,
-    UPSTREAM_CONNECT_TIMEOUT,
-    UPSTREAM_WRITE_TIMEOUT,
-    acquire_upstream_http_client,
-)
+from .http_client import acquire_upstream_http_client, build_x_cashu_client
 from .litellm_routing import detect_litellm_prefix
 from .model_paths import public_provider_url
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
 from .reasoning_effort import apply_reasoning_effort
+from .stream_ownership import (
+    ClosingStreamingResponse,
+    OwnedUpstreamStream,
+    PersistentStreamFinalizer,
+    ResponseHandoff,
+    aclose_if_needed,
+    attach_upstream_stream_owner,
+    close_upstream_exchange,
+    finalize_and_close_stream,
+)
 
 if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
 
 logger = get_logger(__name__)
-
-
-async def _aclose_if_needed(resource: object | None) -> None:
-    if resource is None:
-        return
-    close = getattr(resource, "aclose", None)
-    if close is None:
-        return
-    result = close()
-    if inspect.isawaitable(result):
-        await result
-
-
-async def _shielded_aclose(resource: object | None) -> None:
-    await asyncio.shield(_aclose_if_needed(resource))
-
-
-class _ResponseHandoff:
-    """Close a response unless ownership is transferred to a stream."""
-
-    def __init__(self) -> None:
-        self._response: object | None = None
-
-    def acquire(self, response: object) -> None:
-        self._response = response
-
-    def handoff(self) -> None:
-        self._response = None
-
-    async def close(self, *, suppress_errors: bool = False) -> None:
-        response = self._response
-        self._response = None
-        if response is None:
-            return
-        try:
-            await _shielded_aclose(response)
-        except BaseException:
-            if not suppress_errors:
-                raise
-            logger.exception("Failed to close upstream response before handoff")
-
-
-async def _finalize_and_close_stream(
-    finalize: Callable[[], Awaitable[None]] | None,
-    response: object | None,
-) -> None:
-    """Settle billing, then return the response connection to its pool."""
-    try:
-        if finalize is not None:
-            await finalize()
-    finally:
-        await _aclose_if_needed(response)
-
-
-class _PersistentStreamFinalizer:
-    """Run one stream finalizer to completion across cancellation boundaries."""
-
-    def __init__(self, finalize: Callable[[], Awaitable[None]]) -> None:
-        self._finalize = finalize
-        self._task: asyncio.Future[None] | None = None
-        self._lock = asyncio.Lock()
-
-    async def run(self) -> None:
-        async with self._lock:
-            if self._task is None:
-                self._task = asyncio.ensure_future(self._finalize())
-            task = self._task
-        await asyncio.shield(task)
-
-
-class _FinalizingAsyncIterator:
-    """Tie iterator shutdown to a finalizer created before streaming starts."""
-
-    def __init__(
-        self,
-        iterator: AsyncIterator[bytes],
-        finalizer: _PersistentStreamFinalizer,
-    ) -> None:
-        self._iterator = iterator
-        self._finalizer = finalizer
-
-    def __aiter__(self) -> Self:
-        return self
-
-    async def __anext__(self) -> bytes:
-        try:
-            return await self._iterator.__anext__()
-        except BaseException:
-            await self._finalizer.run()
-            raise
-
-    async def aclose(self) -> None:
-        try:
-            await _aclose_if_needed(self._iterator)
-        finally:
-            await self._finalizer.run()
-
-
-class _ClosingStreamingResponse(StreamingResponse):
-    """Close the body iterator even when downstream ASGI sends fail."""
-
-    def __init__(
-        self,
-        content: AsyncIterator[bytes],
-        *,
-        finalizer: _PersistentStreamFinalizer | None = None,
-        **kwargs: Any,
-    ) -> None:
-        if finalizer is not None:
-            content = _FinalizingAsyncIterator(content, finalizer)
-        super().__init__(content, **kwargs)
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            await asyncio.shield(_aclose_if_needed(self.body_iterator))
-
-
-class _OwnedUpstreamStream:
-    """Keep a one-shot HTTP client alive for the lifetime of its response."""
-
-    def __init__(
-        self,
-        iterator: AsyncIterator[bytes],
-        response: httpx.Response,
-        client: httpx.AsyncClient,
-    ) -> None:
-        self._iterator = iterator
-        self._response = response
-        self._client = client
-        self._cleanup_complete = False
-        self._cleanup_task: asyncio.Task[None] | None = None
-        self._close_lock = asyncio.Lock()
-
-    def __aiter__(self) -> Self:
-        return self
-
-    async def __anext__(self) -> bytes:
-        try:
-            return await self._iterator.__anext__()
-        except StopAsyncIteration:
-            await self.aclose()
-            raise
-
-    async def _cleanup(self) -> None:
-        try:
-            await _aclose_if_needed(self._iterator)
-        finally:
-            try:
-                await self._response.aclose()
-            finally:
-                await self._client.aclose()
-        self._cleanup_complete = True
-
-    async def aclose(self) -> None:
-        async with self._close_lock:
-            if self._cleanup_complete:
-                return
-            if self._cleanup_task is None or self._cleanup_task.done():
-                self._cleanup_task = asyncio.create_task(self._cleanup())
-            cleanup_task = self._cleanup_task
-        await asyncio.shield(cleanup_task)
-
-
-def _attach_upstream_stream_owner(
-    result: StreamingResponse,
-    response: httpx.Response,
-    client: httpx.AsyncClient,
-) -> StreamingResponse:
-    result.body_iterator = _OwnedUpstreamStream(
-        cast(AsyncIterator[bytes], result.body_iterator), response, client
-    )
-    return result
-
-
-async def _close_upstream_exchange(
-    response: httpx.Response | None, client: httpx.AsyncClient
-) -> None:
-    try:
-        if response is not None:
-            await response.aclose()
-    finally:
-        await client.aclose()
-
-
-def _build_x_cashu_client() -> httpx.AsyncClient:
-    """Build a per-request client for x-cashu forwarding.
-
-    This path intentionally bypasses the shared per-origin pools from
-    ``http_client.py``: the response and client are handed off to
-    ``_OwnedUpstreamStream``/``_close_upstream_exchange``, which close the
-    client once the exchange finishes. Closing a pooled client would tear
-    down the shared pool for every caller, so ownership stays per-request
-    here at the cost of a fresh connection per call.
-    """
-    return httpx.AsyncClient(
-        transport=httpx.AsyncHTTPTransport(
-            retries=UPSTREAM_CONNECT_RETRIES,
-        ),
-        timeout=httpx.Timeout(
-            connect=UPSTREAM_CONNECT_TIMEOUT,
-            read=settings.upstream_read_timeout,
-            write=UPSTREAM_WRITE_TIMEOUT,
-            pool=settings.upstream_pool_timeout,
-        ),
-    )
 
 
 CostMetadata = CostData | MaxCostData | dict[str, Any]
@@ -1410,8 +1205,8 @@ class BaseUpstreamProvider:
                     extra={"key_hash": key.hashed_key[:8] + "..."},
                 )
 
-        stream_finalizer = _PersistentStreamFinalizer(
-            lambda: _finalize_and_close_stream(
+        stream_finalizer = PersistentStreamFinalizer(
+            lambda: finalize_and_close_stream(
                 None if usage_finalized else finalize_db_only,
                 response,
             )
@@ -1679,7 +1474,7 @@ class BaseUpstreamProvider:
         response_headers.pop("content-encoding", None)
         response_headers.pop("content-length", None)
 
-        return _ClosingStreamingResponse(
+        return ClosingStreamingResponse(
             stream_with_cost(max_cost_for_model),
             finalizer=stream_finalizer,
             status_code=response.status_code,
@@ -1906,8 +1701,8 @@ class BaseUpstreamProvider:
                     extra={"key_hash": key.hashed_key[:8] + "..."},
                 )
 
-        stream_finalizer = _PersistentStreamFinalizer(
-            lambda: _finalize_and_close_stream(
+        stream_finalizer = PersistentStreamFinalizer(
+            lambda: finalize_and_close_stream(
                 None if usage_finalized else finalize_db_only,
                 response,
             )
@@ -2131,7 +1926,7 @@ class BaseUpstreamProvider:
         response_headers.pop("content-encoding", None)
         response_headers.pop("content-length", None)
 
-        return _ClosingStreamingResponse(
+        return ClosingStreamingResponse(
             stream_with_responses_cost(max_cost_for_model),
             finalizer=stream_finalizer,
             status_code=response.status_code,
@@ -2346,12 +2141,12 @@ class BaseUpstreamProvider:
         model_obj: Model | None,
         provider_fee: float | None,
         reservation_snapshot: ReservationSnapshot,
-        finalizer: _PersistentStreamFinalizer | None = None,
+        finalizer: PersistentStreamFinalizer | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """Relay an opaque stream and settle it even if the caller disconnects."""
         if finalizer is None:
-            finalizer = _PersistentStreamFinalizer(
-                lambda: _finalize_and_close_stream(
+            finalizer = PersistentStreamFinalizer(
+                lambda: finalize_and_close_stream(
                     lambda: self._finalize_generic_streaming_payment(
                         key_hash,
                         max_cost,
@@ -2378,9 +2173,9 @@ class BaseUpstreamProvider:
         model_obj: Model | None,
         provider_fee: float | None,
         reservation_snapshot: ReservationSnapshot,
-    ) -> _ClosingStreamingResponse:
-        finalizer = _PersistentStreamFinalizer(
-            lambda: _finalize_and_close_stream(
+    ) -> ClosingStreamingResponse:
+        finalizer = PersistentStreamFinalizer(
+            lambda: finalize_and_close_stream(
                 lambda: self._finalize_generic_streaming_payment(
                     key_hash,
                     max_cost,
@@ -2402,7 +2197,7 @@ class BaseUpstreamProvider:
             reservation_snapshot,
             finalizer,
         )
-        return _ClosingStreamingResponse(
+        return ClosingStreamingResponse(
             stream,
             finalizer=finalizer,
             status_code=response.status_code,
@@ -2464,8 +2259,8 @@ class BaseUpstreamProvider:
             if not usage_finalized:
                 await finalize_without_usage()
 
-        stream_finalizer = _PersistentStreamFinalizer(
-            lambda: _finalize_and_close_stream(finalize_db_only, response)
+        stream_finalizer = PersistentStreamFinalizer(
+            lambda: finalize_and_close_stream(finalize_db_only, response)
         )
 
         async def stream_with_cost(
@@ -2703,7 +2498,7 @@ class BaseUpstreamProvider:
         response_headers.pop("content-encoding", None)
         response_headers.pop("content-length", None)
 
-        return _ClosingStreamingResponse(
+        return ClosingStreamingResponse(
             stream_with_cost(max_cost_for_model),
             finalizer=stream_finalizer,
             status_code=response.status_code,
@@ -3053,9 +2848,9 @@ class BaseUpstreamProvider:
                 if not usage_finalized:
                     await finalize_without_usage()
             finally:
-                await _aclose_if_needed(iterator)
+                await aclose_if_needed(iterator)
 
-        stream_finalizer = _PersistentStreamFinalizer(finalize_stream)
+        stream_finalizer = PersistentStreamFinalizer(finalize_stream)
 
         async def stream_with_cost() -> AsyncGenerator[bytes, None]:
             nonlocal usage_finalized, last_model_seen
@@ -3171,7 +2966,7 @@ class BaseUpstreamProvider:
             finally:
                 await stream_finalizer.run()
 
-        return _ClosingStreamingResponse(
+        return ClosingStreamingResponse(
             stream_with_cost(),
             finalizer=stream_finalizer,
             media_type="text/event-stream",
@@ -3336,7 +3131,7 @@ class BaseUpstreamProvider:
             for annotated in buffered:
                 yield annotated.sse_bytes
 
-        return _ClosingStreamingResponse(
+        return ClosingStreamingResponse(
             replay(),
             media_type="text/event-stream",
             headers=response_headers,
@@ -3416,7 +3211,7 @@ class BaseUpstreamProvider:
         )
 
         response: httpx.Response | None = None
-        response_handoff = _ResponseHandoff()
+        response_handoff = ResponseHandoff()
 
         try:
             client = acquire_upstream_http_client(url)
@@ -3792,7 +3587,7 @@ class BaseUpstreamProvider:
         )
 
         response: httpx.Response | None = None
-        response_handoff = _ResponseHandoff()
+        response_handoff = ResponseHandoff()
 
         try:
             client = acquire_upstream_http_client(url)
@@ -4119,7 +3914,7 @@ class BaseUpstreamProvider:
                 request=request,
             )
         finally:
-            await _aclose_if_needed(response)
+            await aclose_if_needed(response)
 
     async def get_x_cashu_cost(
         self,
@@ -4445,7 +4240,7 @@ class BaseUpstreamProvider:
             for line in lines:
                 yield (line + "\n").encode("utf-8")
 
-        return _ClosingStreamingResponse(
+        return ClosingStreamingResponse(
             generate(),
             status_code=response.status_code,
             headers=response_headers,
@@ -4701,7 +4496,7 @@ class BaseUpstreamProvider:
                     "unit": unit,
                 },
             )
-            return _ClosingStreamingResponse(
+            return ClosingStreamingResponse(
                 response.aiter_bytes(),
                 status_code=response.status_code,
                 headers=dict(response.headers),
@@ -4789,7 +4584,7 @@ class BaseUpstreamProvider:
             },
         )
 
-        client = _build_x_cashu_client()
+        client = build_x_cashu_client()
         response: httpx.Response | None = None
         try:
             response = await client.send(
@@ -4874,7 +4669,7 @@ class BaseUpstreamProvider:
                 )
                 error_response.headers["X-Cashu"] = refund_token
                 error_response.headers[ERROR_SCOPE_HEADER] = ERROR_SCOPE_UPSTREAM
-                await _close_upstream_exchange(response, client)
+                await close_upstream_exchange(response, client)
                 return error_response
 
             if _x_cashu_path_has_settlement_handler(path):
@@ -4894,8 +4689,8 @@ class BaseUpstreamProvider:
                     request_body=request_body,
                 )
                 if isinstance(result, StreamingResponse) and not response.is_closed:
-                    return _attach_upstream_stream_owner(result, response, client)
-                await _close_upstream_exchange(response, client)
+                    return attach_upstream_stream_owner(result, response, client)
+                await close_upstream_exchange(response, client)
                 return result
 
             logger.debug(
@@ -4903,16 +4698,16 @@ class BaseUpstreamProvider:
                 extra={"path": path, "status_code": response.status_code},
             )
 
-            return _ClosingStreamingResponse(
-                _OwnedUpstreamStream(response.aiter_bytes(), response, client),
+            return ClosingStreamingResponse(
+                OwnedUpstreamStream(response.aiter_bytes(), response, client),
                 status_code=response.status_code,
                 headers=dict(response.headers),
             )
         except asyncio.CancelledError:
-            await _close_upstream_exchange(response, client)
+            await close_upstream_exchange(response, client)
             raise
         except Exception as exc:
-            await _close_upstream_exchange(response, client)
+            await close_upstream_exchange(response, client)
             tb = traceback.format_exc()
             logger.error(
                 "Unexpected error in upstream forwarding",
@@ -5105,7 +4900,7 @@ class BaseUpstreamProvider:
             },
         )
 
-        client = _build_x_cashu_client()
+        client = build_x_cashu_client()
         response: httpx.Response | None = None
         try:
             response = await client.send(
@@ -5179,7 +4974,7 @@ class BaseUpstreamProvider:
                 )
                 error_response.headers["X-Cashu"] = refund_token
                 error_response.headers[ERROR_SCOPE_HEADER] = ERROR_SCOPE_UPSTREAM
-                await _close_upstream_exchange(response, client)
+                await close_upstream_exchange(response, client)
                 return error_response
 
             if path.startswith("responses"):
@@ -5199,8 +4994,8 @@ class BaseUpstreamProvider:
                     request_body=request_body,
                 )
                 if isinstance(result, StreamingResponse) and not response.is_closed:
-                    return _attach_upstream_stream_owner(result, response, client)
-                await _close_upstream_exchange(response, client)
+                    return attach_upstream_stream_owner(result, response, client)
+                await close_upstream_exchange(response, client)
                 return result
 
             logger.debug(
@@ -5208,16 +5003,16 @@ class BaseUpstreamProvider:
                 extra={"path": path, "status_code": response.status_code},
             )
 
-            return _ClosingStreamingResponse(
-                _OwnedUpstreamStream(response.aiter_bytes(), response, client),
+            return ClosingStreamingResponse(
+                OwnedUpstreamStream(response.aiter_bytes(), response, client),
                 status_code=response.status_code,
                 headers=dict(response.headers),
             )
         except asyncio.CancelledError:
-            await _close_upstream_exchange(response, client)
+            await close_upstream_exchange(response, client)
             raise
         except Exception as exc:
-            await _close_upstream_exchange(response, client)
+            await close_upstream_exchange(response, client)
             tb = traceback.format_exc()
             logger.error(
                 "Unexpected error in upstream Responses API forwarding",
@@ -5320,7 +5115,7 @@ class BaseUpstreamProvider:
                     "unit": unit,
                 },
             )
-            return _ClosingStreamingResponse(
+            return ClosingStreamingResponse(
                 response.aiter_bytes(),
                 status_code=response.status_code,
                 headers=dict(response.headers),
@@ -5515,7 +5310,7 @@ class BaseUpstreamProvider:
             for fields, data in events:
                 yield _render_sse_event(fields, data).encode("utf-8")
 
-        return _ClosingStreamingResponse(
+        return ClosingStreamingResponse(
             generate(),
             status_code=response.status_code,
             headers=response_headers,

@@ -485,3 +485,27 @@ async def close_upstream_http_client() -> None:
     finally:
         with _state_lock:
             _closing = False
+
+
+def build_x_cashu_client() -> httpx.AsyncClient:
+    """Build a per-request client for x-cashu forwarding.
+
+    This path intentionally bypasses the shared per-origin pools in this
+    module: the response and client are handed off to
+    ``OwnedUpstreamStream``/``close_upstream_exchange`` in
+    ``stream_ownership.py``, which close the client once the exchange
+    finishes. Closing a pooled client would tear down the shared pool for
+    every caller, so ownership stays per-request here at the cost of a fresh
+    connection per call.
+    """
+    return httpx.AsyncClient(
+        transport=httpx.AsyncHTTPTransport(
+            retries=UPSTREAM_CONNECT_RETRIES,
+        ),
+        timeout=httpx.Timeout(
+            connect=UPSTREAM_CONNECT_TIMEOUT,
+            read=settings.upstream_read_timeout,
+            write=UPSTREAM_WRITE_TIMEOUT,
+            pool=settings.upstream_pool_timeout,
+        ),
+    )

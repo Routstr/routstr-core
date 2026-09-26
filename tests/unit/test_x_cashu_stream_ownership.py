@@ -9,7 +9,8 @@ from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 from starlette.types import Message, Send
 
-from routstr.upstream.base import BaseUpstreamProvider, _OwnedUpstreamStream
+from routstr.upstream.base import BaseUpstreamProvider
+from routstr.upstream.stream_ownership import OwnedUpstreamStream
 
 
 class _CountingStream(httpx.AsyncByteStream):
@@ -264,7 +265,7 @@ async def test_owned_upstream_cleanup_survives_caller_cancellation() -> None:
         cleanup_finished.set()
 
     client.aclose = close_client
-    owned = _OwnedUpstreamStream(body(), response, client)
+    owned = OwnedUpstreamStream(body(), response, client)
 
     first_close = asyncio.create_task(owned.aclose())
     await cleanup_started.wait()
