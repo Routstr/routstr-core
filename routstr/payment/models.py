@@ -11,6 +11,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from ..core.db import ModelRow, UpstreamProviderRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
+from .image_pricing import ImagePricing
 from .price import sats_usd_price
 from .rates import BILLABLE_PRICING_FIELDS, coerce_rate, is_usable_rate
 
@@ -49,7 +50,11 @@ class Pricing(BaseModel):
     prompt: float
     completion: float
     request: float = 0.0
+    # USD per input image (a reference or vision attachment), as OpenRouter
+    # defines it. Image generation is priced on ``image_output``.
     image: float = 0.0
+    # USD ceiling for one generated image; ``image_pricing`` holds the tiers.
+    image_output: float = 0.0
     web_search: float = 0.0
     internal_reasoning: float = 0.0
     input_cache_read: float = 0.0
@@ -126,6 +131,7 @@ class Model(BaseModel):
     alias_ids: list[str] | None = None
     forwarded_model_id: str | None = None
     reasoning: Reasoning | None = None
+    image_pricing: ImagePricing | None = None
 
     class Config:
         extra = "ignore"
@@ -236,7 +242,9 @@ def _has_valid_pricing(model: dict) -> bool:
         return False
 
     if prompt == 0 and completion == 0:
-        return False
+        # Image models are metered on output images; many list no token rate.
+        image_output = coerce_rate(pricing.get("image_output", 0))
+        return image_output is not None and image_output > 0
 
     return True
 
@@ -272,19 +280,36 @@ async def _fetch_openrouter_models_once(source_filter: str | None) -> list[dict]
     timeout = OPENROUTER_MODELS_TIMEOUT_SECONDS
 
     async with httpx.AsyncClient() as client:
-        models_response, embeddings_response = await asyncio.gather(
+        models_response, embeddings_response, images_response = await asyncio.gather(
             client.get(f"{base_url}/models", timeout=timeout),
             client.get(f"{base_url}/embeddings/models", timeout=timeout),
+            # Image-only models are left out of the default listing.
+            client.get(f"{base_url}/models?output_modalities=image", timeout=timeout),
             return_exceptions=True,
         )
 
         # Losing /models is what empties the node, so it fails the attempt and
-        # the caller retries. A missing embeddings half must not do the same.
+        # the caller retries. A missing embeddings or image half must not do
+        # the same.
         models_data = _parse_models_response(models_response)
         try:
             models_data.extend(_parse_models_response(embeddings_response))
         except Exception as e:
             logger.warning(f"Skipping OpenRouter embeddings models: {e}")
+        try:
+            models_data.extend(_parse_models_response(images_response))
+        except Exception as e:
+            logger.warning(f"Skipping OpenRouter image models: {e}")
+
+        seen: set[str] = set()
+        unique: list[dict] = []
+        for model in models_data:
+            model_id = model.get("id", "")
+            if model_id in seen:
+                continue
+            seen.add(model_id)
+            unique.append(model)
+        models_data = unique
 
         # Apply source filter and exclusions
         filtered_models = []
@@ -345,9 +370,23 @@ def _build_model_from_row(
         json.loads(row.per_request_limits) if row.per_request_limits else None
     )
     top_provider_dict = json.loads(row.top_provider) if row.top_provider else None
+    raw_image_pricing = getattr(row, "image_pricing", None)
+    image_pricing_dict = json.loads(raw_image_pricing) if raw_image_pricing else None
 
     if isinstance(pricing, dict) and float(pricing.get("request", 0.0)) <= 0.0:
         pricing["request"] = max(pricing.get("request", 0.0), 0.0)
+
+    # Rows written before ``image_output`` existed carried the generation
+    # ceiling in ``image``; read them as such rather than as unpriced.
+    if (
+        isinstance(pricing, dict)
+        and isinstance(architecture, dict)
+        and architecture.get("output_modalities") == ["image"]
+        and float(pricing.get("image_output", 0.0) or 0.0) <= 0.0
+        and float(pricing.get("image", 0.0) or 0.0) > 0.0
+    ):
+        pricing["image_output"] = pricing["image"]
+        pricing["image"] = 0.0
 
     parsed_pricing = Pricing.parse_obj(pricing)
 
@@ -387,6 +426,9 @@ def _build_model_from_row(
         canonical_slug=getattr(row, "canonical_slug", None),
         alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
         forwarded_model_id=getattr(row, "forwarded_model_id", None),
+        image_pricing=ImagePricing.parse_obj(image_pricing_dict)
+        if image_pricing_dict
+        else None,
     )
 
     if apply_provider_fee:

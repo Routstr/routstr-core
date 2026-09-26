@@ -420,6 +420,9 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     architecture: str = Field()
     pricing: str = Field()
     sats_pricing: str | None = Field(default=None)
+    image_pricing: str | None = Field(
+        default=None, description="JSON per-image price book, for image models"
+    )
     per_request_limits: str | None = Field(default=None)
     top_provider: str | None = Field(default=None)
     canonical_slug: str | None = Field(default=None, description="Canonical model slug")

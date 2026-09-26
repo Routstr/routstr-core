@@ -89,6 +89,7 @@ nav:
       - Configuration: provider/configuration.md
       - Pricing: provider/pricing.md
       - Advanced Pricing: provider/advanced-pricing.md
+      - Image Generation: provider/image-generation.md
       - Discovery: provider/discovery.md
       - Tor Support: provider/tor.md
   - Teams (Remote):

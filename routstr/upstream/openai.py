@@ -2,6 +2,7 @@ from typing import TYPE_CHECKING
 
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
+from .image_catalog import attach_image_books, openai_image_book
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -43,6 +44,22 @@ class OpenAIUpstreamProvider(BaseUpstreamProvider):
         return model_id.removeprefix("openai/")
 
     async def fetch_models(self) -> list[Model]:
-        """Fetch OpenAI models from OpenRouter API filtered by openai source."""
+        """Fetch OpenAI models from OpenRouter API filtered by openai source.
+
+        GPT Image models are metered in image output tokens, which the
+        images API reports in ``usage``; their book carries that rate and
+        the documented per-image estimates for the reservation.
+        """
         models_data = await async_fetch_openrouter_models(source_filter="openai")
-        return [Model(**model) for model in models_data]  # type: ignore
+        books = {}
+        for entry in models_data:
+            pricing = entry.get("pricing")
+            book = (
+                openai_image_book(str(entry.get("id", "")), pricing)
+                if isinstance(pricing, dict)
+                else None
+            )
+            if book is not None:
+                books[str(entry["id"])] = book
+        models = [Model(**model) for model in models_data]  # type: ignore
+        return attach_image_books(models, books, source="OpenAI")

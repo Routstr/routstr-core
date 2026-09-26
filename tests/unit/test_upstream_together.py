@@ -1,0 +1,215 @@
+"""Unit tests for ``TogetherUpstreamProvider.fetch_models``.
+
+Together's ``/models`` prices text per million tokens and says nothing about
+images, so image models are priced from the published table or the
+operator's ``provider_settings.image_prices`` and dropped when neither has
+them.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+
+from routstr.payment.image_pricing import per_image_sats
+from routstr.upstream import upstream_provider_classes
+from routstr.upstream.together import TogetherUpstreamProvider
+
+
+class _FakeResponse:
+    def __init__(self, payload: Any) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class _FakeAsyncClient:
+    def __init__(self, payload: Any, calls: list[dict[str, Any]]) -> None:
+        self._payload = payload
+        self._calls = calls
+
+    async def __aenter__(self) -> "_FakeAsyncClient":
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def get(
+        self, url: str, headers: dict[str, str] | None = None
+    ) -> _FakeResponse:
+        self._calls.append({"url": url, "headers": headers})
+        return _FakeResponse(self._payload)
+
+
+CATALOG: list[dict[str, Any]] = [
+    {
+        "id": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "object": "model",
+        "created": 1,
+        "type": "chat",
+        "display_name": "Llama 3.3 70B",
+        "organization": "Meta",
+        "context_length": 131072,
+        "pricing": {
+            "hourly": 0,
+            "input": 0.88,
+            "output": 0.88,
+            "base": 0,
+            "finetune": 0,
+        },
+    },
+    {
+        "id": "black-forest-labs/FLUX.1-schnell",
+        "object": "model",
+        "created": 1,
+        "type": "image",
+        "display_name": "FLUX.1 [schnell]",
+        "organization": "Black Forest Labs",
+        "pricing": {"hourly": 0, "input": 0, "output": 0, "base": 0, "finetune": 0},
+    },
+    {
+        "id": "black-forest-labs/FLUX.1-kontext-pro",
+        "object": "model",
+        "created": 1,
+        "type": "image",
+        "display_name": "FLUX.1 Kontext [pro]",
+    },
+    {
+        "id": "someone/brand-new-image",
+        "object": "model",
+        "created": 1,
+        "type": "image",
+    },
+    {
+        "id": "togethercomputer/m2-bert-80M-8k-retrieval",
+        "object": "model",
+        "created": 1,
+        "type": "embedding",
+        "pricing": {"input": 0.008, "output": 0},
+    },
+    {"id": "some/audio", "object": "model", "created": 1, "type": "audio"},
+]
+
+
+def _fetch(
+    payload: Any = CATALOG, image_prices: dict[str, Any] | None = None
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    calls: list[dict[str, Any]] = []
+    provider = TogetherUpstreamProvider(api_key="sk-test", image_prices=image_prices)
+    with patch(
+        "routstr.upstream.together.httpx.AsyncClient",
+        lambda *a, **kw: _FakeAsyncClient(payload, calls),
+    ):
+        models = asyncio.run(provider.fetch_models())
+    return models, calls
+
+
+def test_provider_is_registered() -> None:
+    assert TogetherUpstreamProvider in upstream_provider_classes
+    assert TogetherUpstreamProvider.get_provider_metadata()["id"] == "together"
+
+
+def test_requests_the_catalog_with_the_key() -> None:
+    _, calls = _fetch()
+    assert calls[0]["url"] == "https://api.together.xyz/v1/models"
+    assert calls[0]["headers"] == {"Authorization": "Bearer sk-test"}
+
+
+def test_text_pricing_is_per_token() -> None:
+    models, _ = _fetch()
+    by_id = {m.id: m for m in models}
+    llama = by_id["meta-llama/Llama-3.3-70B-Instruct-Turbo"]
+    assert llama.pricing.prompt == pytest.approx(0.88 / 1_000_000)
+    assert llama.pricing.completion == pytest.approx(0.88 / 1_000_000)
+    assert llama.context_length == 131072
+    assert llama.architecture.output_modalities == ["text"]
+    assert llama.image_pricing is None
+
+
+def test_published_image_prices_become_books() -> None:
+    models, _ = _fetch()
+    by_id = {m.id: m for m in models}
+    schnell = by_id["black-forest-labs/FLUX.1-schnell"]
+    assert schnell.architecture.output_modalities == ["image"]
+    assert schnell.image_pricing is not None
+    assert schnell.image_pricing.unit == "megapixel"
+    assert schnell.image_pricing.megapixel_usd == pytest.approx(0.0027)
+    assert schnell.pricing.image_output == pytest.approx(schnell.image_pricing.max_usd)
+
+    kontext = by_id["black-forest-labs/FLUX.1-kontext-pro"]
+    assert kontext.image_pricing is not None
+    assert kontext.image_pricing.unit == "image"
+    assert kontext.pricing.image_output == pytest.approx(0.04)
+
+
+def test_unknown_image_models_and_other_families_are_dropped() -> None:
+    models, _ = _fetch()
+    ids = {m.id for m in models}
+    assert "someone/brand-new-image" not in ids
+    assert "some/audio" not in ids
+    assert "togethercomputer/m2-bert-80M-8k-retrieval" in ids
+
+
+def test_operator_prices_win_and_price_unknown_models() -> None:
+    models, _ = _fetch(
+        image_prices={
+            "someone/brand-new-image": {"usd": 0.05, "unit": "image"},
+            "black-forest-labs/flux.1-kontext-pro": 0.10,
+        }
+    )
+    by_id = {m.id: m for m in models}
+    assert by_id["someone/brand-new-image"].pricing.image_output == pytest.approx(0.05)
+    assert by_id[
+        "black-forest-labs/FLUX.1-kontext-pro"
+    ].pricing.image_output == pytest.approx(0.10)
+
+
+def test_operator_prices_are_read_from_provider_settings() -> None:
+    class Row:
+        api_key = "k"
+        provider_fee = 1.02
+        provider_settings = json.dumps(
+            {"image_prices": {"X/Y": {"usd": 0.2, "unit": "megapixel"}}}
+        )
+
+    provider = TogetherUpstreamProvider._build_from_row(Row())  # type: ignore[arg-type]
+    book = provider.image_book("x/y")
+    assert book is not None and book.unit == "megapixel"
+    assert book.megapixel_usd == pytest.approx(0.2)
+
+
+def test_megapixel_image_is_reserved_at_the_requested_size() -> None:
+    models, _ = _fetch()
+    provider = TogetherUpstreamProvider(api_key="k", provider_fee=1.0)
+    schnell = next(m for m in models if m.id == "black-forest-labs/FLUX.1-schnell")
+    priced = provider._apply_provider_fee_to_model(schnell)
+    # Treat the USD book as sats one-to-one for the ratio check.
+    priced = priced.copy(update={"sats_pricing": priced.pricing})
+    assert per_image_sats(priced, {"width": 1024, "height": 1024}) == pytest.approx(
+        0.0027 * 1.048576
+    )
+    assert per_image_sats(priced, {}) == pytest.approx(0.0027)
+
+
+def test_empty_catalog_on_error() -> None:
+    class Boom:
+        async def __aenter__(self) -> "Boom":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, *a: Any, **kw: Any) -> Any:
+            raise RuntimeError("down")
+
+    provider = TogetherUpstreamProvider(api_key="k")
+    with patch("routstr.upstream.together.httpx.AsyncClient", lambda *a, **kw: Boom()):
+        assert asyncio.run(provider.fetch_models()) == []

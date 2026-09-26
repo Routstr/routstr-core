@@ -4,6 +4,11 @@ import httpx
 
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
+from .image_catalog import (
+    attach_image_books,
+    fetch_openrouter_image_books,
+    openrouter_book_from_pricing,
+)
 from .model_paths import public_provider_url
 
 if TYPE_CHECKING:
@@ -79,7 +84,14 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
         }
 
     async def fetch_models(self) -> list[Model]:
-        """Fetch all OpenRouter models."""
+        """Fetch all OpenRouter models.
+
+        Image models are priced from the Image API's per-endpoint billable
+        lines, which name the unit (image, megapixel or token) and any
+        resolution variants. When that listing is unavailable the catalog's
+        ``image_output`` token rate stands in. Either way the response's
+        ``usage.cost`` settles the charge.
+        """
         models_data = await async_fetch_openrouter_models()
         models = [Model(**model) for model in models_data]  # type: ignore
         # manual alias for openai/text-embedding-ada-002 due to openrouter api bug
@@ -87,7 +99,26 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
             if model.id == "openai/text-embedding-ada-002":
                 model.alias_ids = ["text-embedding-ada-002-v2"]
                 break
-        return models
+
+        image_ids = [
+            m.id for m in models if m.architecture.output_modalities == ["image"]
+        ]
+        books = await fetch_openrouter_image_books(
+            image_ids, base_url=self.base_url, api_key=self.api_key
+        )
+        for entry in models_data:
+            model_id = str(entry.get("id", ""))
+            pricing = entry.get("pricing")
+            if model_id in books or model_id not in image_ids:
+                continue
+            fallback = (
+                openrouter_book_from_pricing(pricing, model_id)
+                if isinstance(pricing, dict)
+                else None
+            )
+            if fallback is not None:
+                books[model_id] = fallback
+        return attach_image_books(models, books, source="OpenRouter")
 
     async def get_balance(self) -> float | None:
         """Get the current account balance from OpenRouter.
