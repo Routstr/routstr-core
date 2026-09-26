@@ -72,7 +72,12 @@ from .cache_breakpoints import (
     is_explicit_cache_model,
 )
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
-from .http_client import acquire_upstream_http_client
+from .http_client import (
+    UPSTREAM_CONNECT_RETRIES,
+    UPSTREAM_CONNECT_TIMEOUT,
+    UPSTREAM_WRITE_TIMEOUT,
+    acquire_upstream_http_client,
+)
 from .litellm_routing import detect_litellm_prefix
 from .model_paths import public_provider_url
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
@@ -280,12 +285,12 @@ def _build_x_cashu_client() -> httpx.AsyncClient:
     """
     return httpx.AsyncClient(
         transport=httpx.AsyncHTTPTransport(
-            retries=settings.upstream_connect_retries,
+            retries=UPSTREAM_CONNECT_RETRIES,
         ),
         timeout=httpx.Timeout(
-            connect=settings.upstream_connect_timeout,
+            connect=UPSTREAM_CONNECT_TIMEOUT,
             read=settings.upstream_read_timeout,
-            write=settings.upstream_write_timeout,
+            write=UPSTREAM_WRITE_TIMEOUT,
             pool=settings.upstream_pool_timeout,
         ),
     )

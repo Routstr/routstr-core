@@ -181,24 +181,9 @@ class Settings(BaseSettings):
     upstream_max_connections: int = Field(
         default=200, ge=1, env="UPSTREAM_MAX_CONNECTIONS"
     )
-    upstream_max_keepalive_connections: int = Field(
-        default=50, ge=0, env="UPSTREAM_MAX_KEEPALIVE_CONNECTIONS"
-    )
-    upstream_keepalive_expiry: float = Field(
-        default=60.0, gt=0, env="UPSTREAM_KEEPALIVE_EXPIRY"
-    )
     upstream_pool_timeout: float = Field(default=5.0, gt=0, env="UPSTREAM_POOL_TIMEOUT")
     upstream_read_timeout: float = Field(
         default=900.0, gt=0, env="UPSTREAM_READ_TIMEOUT"
-    )
-    upstream_connect_timeout: float = Field(
-        default=30.0, gt=0, env="UPSTREAM_CONNECT_TIMEOUT"
-    )
-    upstream_write_timeout: float = Field(
-        default=30.0, gt=0, env="UPSTREAM_WRITE_TIMEOUT"
-    )
-    upstream_connect_retries: int = Field(
-        default=1, ge=0, env="UPSTREAM_CONNECT_RETRIES"
     )
 
     # Logging
@@ -264,13 +249,8 @@ ENV_ONLY_FIELDS = frozenset(
         "database_busy_timeout",
         # Reconfiguring a live pool would disrupt in-flight streams.
         "upstream_max_connections",
-        "upstream_max_keepalive_connections",
-        "upstream_keepalive_expiry",
         "upstream_pool_timeout",
         "upstream_read_timeout",
-        "upstream_connect_timeout",
-        "upstream_write_timeout",
-        "upstream_connect_retries",
     }
 )
 

@@ -31,6 +31,12 @@ _clients: dict[str, httpx.AsyncClient] = {}
 _client_loop: asyncio.AbstractEventLoop | None = None
 _closing = False
 
+UPSTREAM_MAX_KEEPALIVE_CONNECTIONS = 50
+UPSTREAM_KEEPALIVE_EXPIRY = 60.0
+UPSTREAM_CONNECT_TIMEOUT = 30.0
+UPSTREAM_WRITE_TIMEOUT = 30.0
+UPSTREAM_CONNECT_RETRIES = 1
+
 
 @dataclass
 class _CloseSubmission:
@@ -117,19 +123,19 @@ def _shared_ssl_context() -> ssl.SSLContext:
 def _build_client() -> httpx.AsyncClient:
     limits = httpx.Limits(
         max_connections=settings.upstream_max_connections,
-        max_keepalive_connections=settings.upstream_max_keepalive_connections,
-        keepalive_expiry=settings.upstream_keepalive_expiry,
+        max_keepalive_connections=UPSTREAM_MAX_KEEPALIVE_CONNECTIONS,
+        keepalive_expiry=UPSTREAM_KEEPALIVE_EXPIRY,
     )
     client = httpx.AsyncClient(
         transport=httpx.AsyncHTTPTransport(
             verify=_shared_ssl_context(),
             limits=limits,
-            retries=settings.upstream_connect_retries,
+            retries=UPSTREAM_CONNECT_RETRIES,
         ),
         timeout=httpx.Timeout(
-            connect=settings.upstream_connect_timeout,
+            connect=UPSTREAM_CONNECT_TIMEOUT,
             read=settings.upstream_read_timeout,
-            write=settings.upstream_write_timeout,
+            write=UPSTREAM_WRITE_TIMEOUT,
             pool=settings.upstream_pool_timeout,
         ),
     )
@@ -441,7 +447,7 @@ def get_upstream_http_client(url: str) -> httpx.AsyncClient:
             extra={
                 "origin": key,
                 "max_connections": settings.upstream_max_connections,
-                "max_keepalive_connections": settings.upstream_max_keepalive_connections,
+                "max_keepalive_connections": UPSTREAM_MAX_KEEPALIVE_CONNECTIONS,
                 "pool_timeout": settings.upstream_pool_timeout,
                 "read_timeout": settings.upstream_read_timeout,
             },

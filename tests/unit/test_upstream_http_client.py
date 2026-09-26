@@ -158,17 +158,17 @@ async def test_upstream_http_client_applies_configured_pool_bounds() -> None:
     try:
         assert client.timeout.pool == settings.upstream_pool_timeout
         assert client.timeout.read == settings.upstream_read_timeout
-        assert client.timeout.connect == settings.upstream_connect_timeout
-        assert client.timeout.write == settings.upstream_write_timeout
+        assert client.timeout.connect == http_client_module.UPSTREAM_CONNECT_TIMEOUT
+        assert client.timeout.write == http_client_module.UPSTREAM_WRITE_TIMEOUT
         build_limits.assert_called_once_with(
             max_connections=settings.upstream_max_connections,
-            max_keepalive_connections=settings.upstream_max_keepalive_connections,
-            keepalive_expiry=settings.upstream_keepalive_expiry,
+            max_keepalive_connections=http_client_module.UPSTREAM_MAX_KEEPALIVE_CONNECTIONS,
+            keepalive_expiry=http_client_module.UPSTREAM_KEEPALIVE_EXPIRY,
         )
         build_transport.assert_called_once()
         assert (
             build_transport.call_args.kwargs["retries"]
-            == settings.upstream_connect_retries
+            == http_client_module.UPSTREAM_CONNECT_RETRIES
         )
     finally:
         await close_upstream_http_client()
