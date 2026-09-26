@@ -155,6 +155,7 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
         self._kwargs = kwargs
         self._stopped = True
         self._next_open_attempt = 0.0
+        self._dropped_warned_at = -1.0
         self._open()
 
     def _open(self) -> None:
@@ -175,7 +176,6 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
         self._target = target
         self._listener = listener
         self._stopped = False
-        self._closed = False
         with getattr(logging, "_lock"):
             handler_list = getattr(logging, "_handlerList")
             # This wrapper owns the target's shutdown and lock ordering.
@@ -231,10 +231,26 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
             try:
                 # Do not acquire the module lock while holding the handler lock.
                 if not self._reopen_locked():
+                    self._warn_records_dropped()
                     return False
             except Exception:
                 self.handleError(record)
                 return False
+
+    def _warn_records_dropped(self) -> None:
+        """Report once per backoff window instead of dropping records silently."""
+        self.acquire()
+        try:
+            if self._dropped_warned_at >= self._next_open_attempt:
+                return
+            self._dropped_warned_at = self._next_open_attempt
+        finally:
+            self.release()
+        sys.stderr.write(
+            f"Logging listener for {self._filename} is unavailable; dropping "
+            f"records until the next reopen attempt in "
+            f"{self._reopen_backoff_seconds}s\n"
+        )
 
     def _emit_synchronously(self, record: logging.LogRecord) -> None:
         try:

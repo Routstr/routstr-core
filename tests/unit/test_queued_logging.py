@@ -98,6 +98,27 @@ def test_queued_file_handler_contains_reopen_failures(
     handler.close()
 
 
+def test_queued_file_handler_reports_records_dropped_during_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    logger, handler = _make_handler(tmp_path, "queued-file-drop-report-test")
+    handler.close()
+
+    def fail_to_open(*args: object, **kwargs: object) -> None:
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(routstr_logging, "DailyRotatingFileHandler", fail_to_open)
+    monkeypatch.setattr(type(handler), "handleError", lambda _self, _r: None)
+
+    for _ in range(50):
+        logger.info("must not vanish without a trace")
+
+    stderr = capsys.readouterr().err
+    assert stderr.count("dropping records") == 1
+    assert "is unavailable" in stderr
+    handler.close()
+
+
 def test_queued_file_handler_emit_does_not_raise_into_caller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

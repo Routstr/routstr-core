@@ -500,6 +500,7 @@ def build_x_cashu_client() -> httpx.AsyncClient:
     """
     return httpx.AsyncClient(
         transport=httpx.AsyncHTTPTransport(
+            verify=_shared_ssl_context(),
             retries=UPSTREAM_CONNECT_RETRIES,
         ),
         timeout=httpx.Timeout(

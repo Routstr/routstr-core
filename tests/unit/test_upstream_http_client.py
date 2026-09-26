@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures
 import threading
 from collections.abc import Callable
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -12,10 +13,25 @@ from routstr.core.exceptions import UpstreamError
 from routstr.core.settings import settings
 from routstr.upstream.http_client import (
     acquire_upstream_http_client,
+    build_x_cashu_client,
     close_upstream_http_client,
     get_upstream_http_client,
     upstream_origin_key,
 )
+
+
+@pytest.mark.asyncio
+async def test_x_cashu_client_reuses_the_process_ssl_context() -> None:
+    """A per-request client must not reload the CA bundle on every call."""
+    pooled = get_upstream_http_client("https://api.example.com/v1/chat")
+    owned = build_x_cashu_client()
+    try:
+        pooled_transport = cast(Any, pooled)._transport
+        owned_transport = cast(Any, owned)._transport
+        assert owned_transport._pool._ssl_context is pooled_transport._pool._ssl_context
+    finally:
+        await owned.aclose()
+        await close_upstream_http_client()
 
 
 @pytest.mark.asyncio
