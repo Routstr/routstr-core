@@ -13,6 +13,7 @@ from .ppqai import PPQAIUpstreamProvider
 from .routstr import RoutstrUpstreamProvider
 from .tinfoil import TinfoilUpstreamProvider
 from .typesafe import TypeSafeUpstreamProvider
+from .venice import VeniceUpstreamProvider
 from .xai import XAIUpstreamProvider
 
 upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
@@ -30,6 +31,7 @@ upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
     RoutstrUpstreamProvider,
     TinfoilUpstreamProvider,
     TypeSafeUpstreamProvider,
+    VeniceUpstreamProvider,
     XAIUpstreamProvider,
 ]
 """List of all upstream classes"""

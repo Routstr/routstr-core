@@ -458,6 +458,7 @@ async def dispatch_anthropic_messages(
     api_key: str,
     provider_prefix: str,
     transform_model_name: Callable[[str], str],
+    adapt_request: Callable[[dict], str] | None = None,
     log_extra: dict[str, Any] | None = None,
 ) -> tuple[bool, Any, str | None]:
     """Call ``litellm.anthropic.messages.acreate`` and return
@@ -465,6 +466,11 @@ async def dispatch_anthropic_messages(
 
     Shared by the bearer-key and x-cashu paths. Raises :class:`UpstreamError`
     on bad input or upstream failure.
+
+    ``adapt_request`` is the provider's last word on the allowlisted body: it
+    may rewrite it in place and returns a suffix for the upstream model name,
+    which is how a provider expresses a feature litellm would otherwise
+    translate into a parameter the upstream rejects.
     """
     if not request_body:
         raise UpstreamError("Missing request body for /v1/messages", status_code=400)
@@ -499,13 +505,15 @@ async def dispatch_anthropic_messages(
         )
     body = {k: v for k, v in body.items() if k in ALLOWED_MESSAGES_REQUEST_FIELDS}
 
+    model_suffix = adapt_request(body) if adapt_request else ""
+
     # Convention: `model.id` is the canonical upstream model name;
     # `forwarded_model_id` is the public alias the internal API exposes
     # and echoes back to the client.
     requested_model = (
         (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
     )
-    upstream_model = transform_model_name(model_obj.id)
+    upstream_model = f"{transform_model_name(model_obj.id)}{model_suffix}"
     litellm_model = f"{provider_prefix}{upstream_model}"
 
     kwargs: dict = {

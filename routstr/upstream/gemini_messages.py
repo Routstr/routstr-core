@@ -52,6 +52,7 @@ from typing import Any, Callable
 import httpx
 
 from ..core import get_logger
+from ..core.error_scope import ERROR_SCOPE_NODE
 from ..core.exceptions import UpstreamError
 from ..payment.models import Model
 from .messages_dispatch import (
@@ -112,6 +113,7 @@ def _translate_anthropic_to_openai(body: dict, model: str) -> dict:
         raise UpstreamError(
             "Failed to translate Anthropic body to OpenAI format",
             status_code=500,
+            scope=ERROR_SCOPE_NODE,
         )
     return dict(translated)
 
