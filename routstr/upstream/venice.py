@@ -14,16 +14,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# ``GET /models`` defaults to ``type=text``, which is why a Venice account
-# configured as a generic upstream never sees the rest of its catalog.
+# Venice's ``/models`` returns only text models unless asked for all.
 _MODELS_TYPE_PARAM = "all"
 
-# Families this proxy can both route and price. Image, audio, music and video
-# are billed per clip or per second and return no usage object to settle
-# against, so exposing them would hand out unpriced inference.
+# Other families bill per clip or second and return no usage to settle.
 _SUPPORTED_TYPES = frozenset({"text", "embedding"})
 
-# Venice prices text in USD per million tokens; Routstr prices per token.
 _USD_PER_MILLION = 1_000_000.0
 
 _ARCHITECTURES: dict[str, tuple[str, list[str], list[str]]] = {
@@ -31,33 +27,19 @@ _ARCHITECTURES: dict[str, tuple[str, list[str], list[str]]] = {
     "embedding": ("text->embedding", ["text"], ["embedding"]),
 }
 
-# Venice runs search itself and reports it back through ``venice_parameters``;
-# it has no Anthropic-shaped server tool and rejects the ``web_search_options``
-# that litellm's Anthropic adapter derives from one. ``auto`` matches Anthropic
-# semantics, where declaring the tool leaves the decision to the model.
-# Citations are asked for because litellm's Anthropic response translation
-# carries no ``venice_parameters``, so the inline ``^n^`` markers Venice writes
-# into the text are the only way a caller sees that sources were used.
+# ``auto`` leaves the search decision to the model, as Anthropic does.
+# Citations are the caller's only sign of a search: litellm drops
+# ``venice_parameters`` from the response, leaving the inline ``^n^`` markers.
 _WEB_SEARCH_SUFFIX = ":enable_web_search=auto&enable_web_citations=true"
 
-# Anthropic web-search constraints with no Venice equivalent. Honouring the
-# request means enforcing them, so a request that sets one is refused rather
-# than answered by a search that ignored it. ``max_uses`` is absent on purpose:
-# ``auto`` runs at most one search per request, so any cap of 1 or more is
-# already met, while domain filters and location would be silently ignored.
-# Only ``max_uses: 0``, a request for no search at all, cannot be honoured.
+# Refused rather than silently ignored, since Venice cannot enforce them.
 _UNENFORCEABLE_WEB_SEARCH_KEYS = frozenset(
     {"allowed_domains", "blocked_domains", "user_location"}
 )
 
 
 def _is_web_search_tool(tool: Any) -> bool:
-    """An Anthropic server-side web-search tool, by either of its markers.
-
-    Matches litellm's own detection (``litellm/llms/anthropic/
-    experimental_pass_through/adapters/transformation.py``), so every tool it
-    would turn into ``web_search_options`` is caught here first.
-    """
+    """Mirror litellm's detection, so every tool it would rewrite is caught."""
     if not isinstance(tool, dict):
         return False
     tool_type = tool.get("type")
@@ -75,13 +57,19 @@ def _usd(entry: Any) -> float | None:
     return None
 
 
-class VeniceUpstreamProvider(BaseUpstreamProvider):
-    """Upstream provider for the Venice.ai API.
+def _is_unenforceable(key: str, value: Any) -> bool:
+    if key in _UNENFORCEABLE_WEB_SEARCH_KEYS:
+        return value is not None and value != []
+    if key == "max_uses":
+        # ``auto`` searches at most once, so only an integer cap of 1+ is met.
+        is_count = isinstance(value, int) and not isinstance(value, bool)
+        return value is not None and not (is_count and value >= 1)
+    return False
 
-    Venice publishes a complete price book on its own catalog, so models are
-    built from that rather than matched against OpenRouter, which has never
-    heard of most of Venice's catalog.
-    """
+
+class VeniceUpstreamProvider(BaseUpstreamProvider):
+    """Venice.ai upstream, priced from Venice's own catalog since OpenRouter
+    lists little of it."""
 
     provider_type = "venice"
     default_base_url = "https://api.venice.ai/api/v1"
@@ -115,13 +103,10 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
         return model_id.removeprefix("venice/")
 
     def adapt_messages_request(self, body: dict, model_obj: Model) -> str:
-        """Trade an Anthropic web-search tool for Venice's own search switch.
+        """Swap an Anthropic web-search tool for Venice's model-name suffix.
 
-        Left in the body, litellm's Anthropic adapter rewrites the tool into a
-        top-level ``web_search_options``, which Venice answers with a 400. The
-        tool is lifted out here and the same intent re-expressed as a model
-        feature suffix, the one form of ``venice_parameters`` that survives
-        that adapter.
+        litellm would turn the tool into ``web_search_options``, which Venice
+        rejects with a 400.
         """
         tools = body.get("tools")
         if not isinstance(tools, list):
@@ -130,28 +115,12 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
         if not search_tools:
             return ""
 
-        # A key carrying null or an empty list states no constraint, so it is
-        # read as absent rather than refused. ``auto`` runs at most one search,
-        # so only an integer ``max_uses`` of one or more is known to be met.
         unenforceable = sorted(
             {
                 key
                 for tool in search_tools
                 for key, value in tool.items()
-                if (
-                    key in _UNENFORCEABLE_WEB_SEARCH_KEYS
-                    and value is not None
-                    and value != []
-                )
-                or (
-                    key == "max_uses"
-                    and value is not None
-                    and not (
-                        isinstance(value, int)
-                        and not isinstance(value, bool)
-                        and value >= 1
-                    )
-                )
+                if _is_unenforceable(key, value)
             }
         )
         if unenforceable:
@@ -175,15 +144,12 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
 
         remaining = [tool for tool in tools if not _is_web_search_tool(tool)]
         if remaining:
-            # A caller's ``tool_choice: any`` is kept and litellm maps it to
-            # OpenAI ``required``, so one of the remaining function tools must
-            # now be called where Anthropic would have let a search satisfy it.
-            # Deliberate: OpenRouter never rewrites tool_choice for web search
-            # either, and guessing an alternative would change caller intent.
+            # ``tool_choice: any`` now requires a function tool; kept as is,
+            # like OpenRouter, rather than guessing the caller's intent.
             body["tools"] = remaining
         else:
             body.pop("tools", None)
-            # tool_choice without tools is rejected by OpenAI-shaped upstreams.
+            # OpenAI-shaped upstreams reject tool_choice without tools.
             body.pop("tool_choice", None)
 
         return _WEB_SEARCH_SUFFIX
@@ -290,14 +256,12 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
         if not isinstance(raw, dict):
             return None
 
-        # The ``extended`` tier some models charge past a context threshold is
-        # ignored: billing it would overcharge every request staying under it.
+        # The long-context ``extended`` tier is ignored; billing it would
+        # overcharge every shorter request.
         input_usd = _usd(raw.get("input"))
         output_usd = _usd(raw.get("output"))
-        # Embeddings produce no completion tokens, so only they may omit an
-        # output price. Anywhere else a missing or all-zero price would serve
-        # completions free and a negative one would credit the caller, the
-        # same guards ``generic.py`` applies to this price book.
+        # Only embeddings may omit an output price. Free or negative prices
+        # are dropped, as in ``generic.py``.
         if output_usd is None and model_type == "embedding":
             output_usd = 0.0
         if input_usd is None or output_usd is None:

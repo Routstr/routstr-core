@@ -1,10 +1,4 @@
-"""Unit tests for ``VeniceUpstreamProvider.fetch_models``.
-
-Venice answers ``/models`` with only its text catalog unless ``type`` is
-passed, which is why the same account configured as a generic upstream sees a
-different catalog. These tests pin that query parameter, the per-token pricing
-shape, and the families dropped as unpriceable.
-"""
+"""Unit tests for ``VeniceUpstreamProvider.fetch_models``."""
 
 from __future__ import annotations
 
@@ -174,8 +168,7 @@ def test_embedding_models_are_listed() -> None:
 
 
 def test_families_billed_per_clip_are_dropped() -> None:
-    """Image, audio and video return no usage to settle against, so listing
-    them here would hand out inference this provider cannot price."""
+    """Image, audio and video return no usage to settle against."""
     models, _ = _fetch()
     ids = {m.id for m in models}
     assert "venice-sd35" not in ids

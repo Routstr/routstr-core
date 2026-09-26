@@ -1,10 +1,7 @@
 """Venice web search over ``/v1/messages``.
 
-litellm's Anthropic adapter rewrites an Anthropic server-side web-search tool
-into a top-level ``web_search_options``, which Venice rejects with
-``400 Unrecognized key(s) in object: 'web_search_options'``. These tests pin
-the trade: the tool is lifted out of the body and the same intent re-expressed
-as a Venice model feature suffix.
+Venice rejects the ``web_search_options`` litellm derives from an Anthropic
+web-search tool, so the tool is swapped for a model-name suffix.
 """
 
 from __future__ import annotations
@@ -203,8 +200,7 @@ def test_web_search_only_request_drops_tool_choice() -> None:
 
 @pytest.mark.asyncio
 async def test_claude_code_web_search_tool_is_accepted() -> None:
-    """Claude Code always sends ``max_uses: 8``; Venice's single ``auto``
-    search already stays under any cap of one or more."""
+    """Claude Code always sends ``max_uses: 8``."""
     provider = VeniceUpstreamProvider(api_key="sk-test")
     tool = {
         "type": "web_search_20250305",
@@ -233,8 +229,6 @@ def test_max_uses_of_one_or_absent_is_accepted(max_uses: Any) -> None:
 
 @pytest.mark.parametrize("max_uses", [0, -1, 1.5, True, "0", "8"])
 def test_max_uses_other_than_a_positive_integer_is_refused(max_uses: Any) -> None:
-    """``auto`` may still search, so a cap below one cannot be met, and a
-    malformed cap cannot be shown to be met."""
     provider = VeniceUpstreamProvider(api_key="sk-test")
     tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses}
 
@@ -256,8 +250,6 @@ def test_tool_named_web_search_without_the_type_marker_is_caught() -> None:
 
 
 def test_litellm_adapter_derives_no_web_search_options_from_the_adapted_body() -> None:
-    """The fix at its cause: run the real litellm translation over the body
-    this provider produces and assert the rejected key is never derived."""
     from litellm.llms.anthropic.experimental_pass_through.adapters.transformation import (  # noqa: E501
         LiteLLMAnthropicMessagesAdapter,
     )
@@ -267,8 +259,6 @@ def test_litellm_adapter_derives_no_web_search_options_from_the_adapted_body() -
     body = _body(tools=[WEB_SEARCH_TOOL, FUNCTION_TOOL])
 
     def translate(request: dict[str, Any]) -> dict:
-        # litellm types the request as a TypedDict; these bodies are built
-        # from client JSON, so they are plain dicts at this seam.
         translated, _ = adapter.translate_anthropic_to_openai(request)  # type: ignore[arg-type]
         return dict(translated)
 

@@ -1,11 +1,5 @@
-"""What Routstr actually puts on the wire for a Venice web-search request.
-
-The unit tests stop at the kwargs handed to litellm. Everything that produced
-the reported ``400 Unrecognized key(s) in object: 'web_search_options'``
-happened *after* that point, inside litellm's Anthropic adapter, so this test
-runs the whole dispatch against a loopback OpenAI-compatible server and reads
-the bytes Venice would have received.
-"""
+"""The bytes Routstr sends Venice for a web-search request, captured past
+litellm's Anthropic adapter where the ``web_search_options`` 400 arose."""
 
 from __future__ import annotations
 
@@ -122,10 +116,8 @@ async def test_web_search_request_reaches_venice_in_its_own_shape(
 
     body = captured["body"]
     assert captured["path"] == "/v1/chat/completions"
-    # The reported 400, at the only place it could be observed.
     assert "web_search_options" not in body
     assert body["model"] == (
         "deepseek-v4-flash-0731:enable_web_search=auto&enable_web_citations=true"
     )
-    # The function tool still travels, in OpenAI's shape.
     assert [tool["function"]["name"] for tool in body["tools"]] == ["lookup"]

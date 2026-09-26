@@ -2507,13 +2507,8 @@ class BaseUpstreamProvider:
         return await messages_dispatch.aggregate_anthropic_events_to_message(iterator)
 
     def adapt_messages_request(self, body: dict, model_obj: Model) -> str:
-        """Rewrite an allowlisted /v1/messages body for this upstream.
-
-        Returns a suffix appended to the upstream model name, empty when the
-        provider needs none. Subclasses override this to express an Anthropic
-        feature the upstream spells differently; the base forwards the body
-        untouched.
-        """
+        """Rewrite a /v1/messages body in place for this upstream and return a
+        suffix for the upstream model name."""
         return ""
 
     async def _dispatch_anthropic_messages(
