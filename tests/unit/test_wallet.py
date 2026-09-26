@@ -48,6 +48,7 @@ def isolate_wallet_runtime_state(
     wallet_module._wallets.clear()
     wallet_module._wallet_last_load.clear()
     wallet_module._wallet_last_mint_load.clear()
+    wallet_module._wallet_mint_load_errors.clear()
     wallet_module._wallet_load_locks.clear()
     wallet_module._mint_metadata_last_load.clear()
     wallet_module._mint_metadata_load_locks.clear()
@@ -57,6 +58,7 @@ def isolate_wallet_runtime_state(
     wallet_module._wallets.clear()
     wallet_module._wallet_last_load.clear()
     wallet_module._wallet_last_mint_load.clear()
+    wallet_module._wallet_mint_load_errors.clear()
     wallet_module._wallet_load_locks.clear()
     wallet_module._mint_metadata_last_load.clear()
     wallet_module._mint_metadata_load_locks.clear()
@@ -147,6 +149,57 @@ async def test_get_wallet_force_reload_bypasses_reload_interval() -> None:
 
     assert mock_wallet.load_mint.await_count == 2
     assert mock_wallet.load_proofs.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unservable_mint_load_is_not_retried_every_call() -> None:
+    """Retrying it per call refetched keysets and got the node rate-limited."""
+    from routstr.wallet import get_wallet
+
+    failure = Exception("No active keyset found for unit msat.")
+    mock_wallet = Mock(
+        load_mint=AsyncMock(side_effect=failure), load_proofs=AsyncMock()
+    )
+    with patch("routstr.wallet.Wallet.with_db", AsyncMock(return_value=mock_wallet)):
+        for _ in range(3):
+            with pytest.raises(Exception, match="No active keyset"):
+                await get_wallet("http://mint:3338", "msat")
+
+    assert mock_wallet.load_mint.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unreachable_mint_load_stays_retryable() -> None:
+    """Transport failures are the rate guard's job, not the metadata throttle's."""
+    from routstr.wallet import get_wallet
+
+    failure = httpx.ConnectError("mint unreachable")
+    mock_wallet = Mock(
+        load_mint=AsyncMock(side_effect=failure), load_proofs=AsyncMock()
+    )
+    with patch("routstr.wallet.Wallet.with_db", AsyncMock(return_value=mock_wallet)):
+        for _ in range(2):
+            with pytest.raises(Exception):
+                await get_wallet("http://mint:3338", "sat")
+
+    assert mock_wallet.load_mint.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_force_reload_retries_an_unservable_mint_load() -> None:
+    from routstr.wallet import get_wallet
+
+    failure = Exception("No active keyset found for unit msat.")
+    mock_wallet = Mock(
+        load_mint=AsyncMock(side_effect=failure), load_proofs=AsyncMock()
+    )
+    with patch("routstr.wallet.Wallet.with_db", AsyncMock(return_value=mock_wallet)):
+        with pytest.raises(Exception, match="No active keyset"):
+            await get_wallet("http://mint:3338", "msat")
+        with pytest.raises(Exception, match="No active keyset"):
+            await get_wallet("http://mint:3338", "msat", force_reload=True)
+
+    assert mock_wallet.load_mint.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -1254,8 +1307,13 @@ async def test_prepare_bolt11_payment_does_not_spend_user_liabilities() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_bolt11_payment_rounds_user_liability_up_to_whole_sats() -> None:
+async def test_prepare_bolt11_payment_floors_fractional_owner_surplus() -> None:
+    """A sub-sat surplus is not enough to fund a 1 sat invoice."""
     from routstr.core.settings import settings
+
+    @asynccontextmanager
+    async def session() -> AsyncIterator[MagicMock]:
+        yield MagicMock()
 
     wallet = MagicMock()
     wallet.proofs = [MagicMock(amount=100)]
@@ -1281,8 +1339,13 @@ async def test_prepare_bolt11_payment_rounds_user_liability_up_to_whole_sats() -
             "routstr.wallet.slow_filter_spend_proofs",
             side_effect=lambda proofs, wallet: proofs,
         ),
+        patch("routstr.wallet.db.create_session", session),
         patch(
             "routstr.wallet.db.total_user_liability",
+            AsyncMock(return_value=99_999),
+        ),
+        patch(
+            "routstr.wallet.db.user_liability_for_mint_and_unit",
             AsyncMock(return_value=99_999),
         ),
         pytest.raises(ValueError, match="user liabilities"),

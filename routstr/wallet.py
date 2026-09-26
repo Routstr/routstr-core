@@ -15,6 +15,7 @@ import httpx
 from cashu.core.base import MeltQuote, Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
 from cashu.wallet.crud import get_keysets as get_cashu_keysets
+from cashu.wallet.crud import get_proofs as get_cashu_proofs
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet as _CashuWallet
 from pydantic_core import PydanticUndefined
@@ -121,7 +122,7 @@ def _msats_to_sats_ceil(amount: int) -> int:
 
 def _mints_to_inspect() -> list[str]:
     """Return configured mints plus the primary mint, without duplicates."""
-    mint_urls = list(settings.cashu_mints)
+    mint_urls = list(dict.fromkeys(settings.cashu_mints))
     if settings.primary_mint and settings.primary_mint not in mint_urls:
         mint_urls.append(settings.primary_mint)
     return mint_urls
@@ -184,9 +185,12 @@ class Wallet(_CashuWallet):
                     pass
 
             await self.load_mint_keysets(force_old_keysets)
-            await self.activate_keyset(keyset_id)
             await self.load_mint_info(reload=True)
+            # Arm on the fetch, not the activation: a unit the mint does not
+            # serve makes ``activate_keyset`` raise, and arming after it would
+            # refetch keysets on every call.
             _mint_metadata_last_load[mint_url] = time.monotonic()
+            await self.activate_keyset(keyset_id)
 
 
 class MintConnectionError(Exception):
@@ -701,18 +705,64 @@ class Bolt11PaymentPlan:
         return maximum if self.unit == "sat" else (maximum + 999) // 1000
 
 
+def _to_msats(amount: int, unit: str) -> int:
+    return _sats_to_msats(amount) if unit == "sat" else amount
+
+
+async def _other_wallets_unreserved_msats(mint_url: str, unit: str) -> int:
+    """Sum unreserved proofs of every other trusted wallet, in msats.
+
+    Every wallet shares one db, so two queries answer for all of them. Loading
+    a wallet per mint and unit instead refetched keysets from each mint on
+    every call and rate-limited them.
+
+    Read fresh, not from a wallet's snapshot: this total only ever raises the
+    payout ceiling, and a snapshot up to 30s stale could hide another
+    process's reservation.
+    """
+    wallet = await get_wallet(mint_url, unit, load=False)
+    trusted = set(_mints_to_inspect())
+    origins: dict[str, tuple[str, str]] = {}
+    for keyset in await get_cashu_keysets(db=wallet.db):
+        keyset_unit = keyset.unit if isinstance(keyset.unit, str) else keyset.unit.name
+        origin = (keyset.mint_url, keyset_unit)
+        if origin == (mint_url, unit):
+            continue
+        if keyset.mint_url in trusted and keyset_unit in ("sat", "msat"):
+            origins[keyset.id] = origin
+    total = 0
+    for proof in await get_cashu_proofs(db=wallet.db):
+        proof_origin = origins.get(proof.id)
+        if proof_origin is None or proof.reserved:
+            continue
+        total += _to_msats(proof.amount, proof_origin[1])
+    return total
+
+
 async def _owner_balance_for_mint_and_unit(
     mint_url: str, unit: str, proofs_balance: int
 ) -> int:
-    """Return spendable node-owned funds without crossing user liabilities."""
+    """Return owner funds in one wallet, in that wallet's unit.
+
+    A key's refund mint is a preference, not funding provenance: a key topped
+    up from a second mint keeps its original refund mint. Hence two bounds —
+    the per-mint one keeps refunds serviceable from the mint they name, the
+    global one stops misattributed customer funds being paid out as profit.
+    """
+    others_msats = await _other_wallets_unreserved_msats(mint_url, unit)
     async with db.create_session() as session:
-        # Refund mint is a preference, not funding provenance. Mirror payout's
-        # conservative rule and protect the full liability at every mint.
-        user_liability = await db.total_user_liability(session)
-    # API-key balances are stored in msats. Cashu ``sat`` proofs are not.
-    if unit == "sat":
-        user_liability = _msats_to_sats_ceil(user_liability)
-    return max(0, proofs_balance - user_liability)
+        mint_liability = await db.user_liability_for_mint_and_unit(
+            session, mint_url, unit
+        )
+        total_liability = await db.total_user_liability(session)
+    proofs_msats = _to_msats(proofs_balance, unit)
+    surplus_msats = min(
+        proofs_msats - mint_liability,
+        proofs_msats + others_msats - total_liability,
+    )
+    # Cashu ``sat`` proofs are whole sats.
+    surplus = _msats_to_sats(surplus_msats) if unit == "sat" else surplus_msats
+    return max(0, surplus)
 
 
 async def maximum_owner_cashu_balance_sats() -> int:
@@ -787,9 +837,7 @@ async def _prepare_bolt11_payment(invoice: str) -> Bolt11PaymentPlan:
                 )
                 if owner_balance < required:
                     continue
-                owner_balance_msats = (
-                    owner_balance * 1000 if unit == "sat" else owner_balance
-                )
+                owner_balance_msats = _to_msats(owner_balance, unit)
                 candidates.append(
                     (owner_balance_msats, wallet, proofs, quote, mint_url, unit)
                 )
@@ -1162,6 +1210,9 @@ _wallets: dict[str, Wallet] = {}
 # Proofs require a shorter refresh interval than remote mint metadata.
 _wallet_last_load: dict[str, float] = {}
 _wallet_last_mint_load: dict[str, float] = {}
+# Metadata loads the mint answered but that left the wallet unusable, replayed
+# for the reload interval so the failure costs one request, not one per call.
+_wallet_mint_load_errors: dict[str, tuple[float, Exception]] = {}
 _wallet_load_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -1189,16 +1240,34 @@ async def get_wallet(
                 or last_mint_load is None
                 or now - last_mint_load >= _WALLET_MINT_RELOAD_MIN_INTERVAL_SECONDS
             ):
-                await run_mint_operation(
-                    lambda: (
-                        _wallets[id].load_mint(force_refresh=True)
-                        if force_reload
-                        else _wallets[id].load_mint()
-                    ),
-                    op_name="load_mint",
-                    mint_url=mint_url,
-                    retry_on_rate_limit=retry_on_rate_limit,
-                )
+                cached_error = _wallet_mint_load_errors.get(id)
+                if (
+                    not force_reload
+                    and cached_error is not None
+                    and now - cached_error[0] < _WALLET_MINT_RELOAD_MIN_INTERVAL_SECONDS
+                ):
+                    raise cached_error[1]
+                try:
+                    await run_mint_operation(
+                        lambda: (
+                            _wallets[id].load_mint(force_refresh=True)
+                            if force_reload
+                            else _wallets[id].load_mint()
+                        ),
+                        op_name="load_mint",
+                        mint_url=mint_url,
+                        retry_on_rate_limit=retry_on_rate_limit,
+                    )
+                except Exception as error:
+                    # Transport failures and 429s stay retryable; the rate
+                    # guard owns those. Anything else means the mint answered
+                    # and still cannot serve this wallet.
+                    if not (
+                        is_mint_connection_error(error) or _is_mint_rate_limited(error)
+                    ):
+                        _wallet_mint_load_errors[id] = (time.monotonic(), error)
+                    raise
+                _wallet_mint_load_errors.pop(id, None)
                 _wallet_last_mint_load[id] = time.monotonic()
 
             if load_proofs:
@@ -1650,15 +1719,13 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
         )
         return
 
-    # Fetch liability after the proofs snapshot and settle delay while the
-    # wallet operation guard excludes concurrent proof mutation and crediting.
+    # Read liabilities and the other wallets' proofs after this wallet's proofs
+    # snapshot and settle delay, while the wallet operation guard excludes
+    # concurrent proof mutation and crediting.
     try:
-        async with db.create_session() as session:
-            # ApiKey stores a refund preference, not funding provenance. Until
-            # liabilities have a durable per-credit ledger, subtract the total
-            # liability from every wallet rather than risk calling customer
-            # funds owner profit on the wrong mint.
-            user_balance = await db.total_user_liability(session)
+        available_balance = await _owner_balance_for_mint_and_unit(
+            mint_url, unit, sum(proof.amount for proof in proofs)
+        )
     except Exception as e:
         logger.error(
             f"Error in periodic payout cycle: {type(e).__name__}",
@@ -1667,10 +1734,6 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
         return
 
     try:
-        if unit == "sat":
-            user_balance = _msats_to_sats_ceil(user_balance)
-        proofs_balance = sum(proof.amount for proof in proofs)
-        available_balance = proofs_balance - user_balance
         max_amount = (
             settings.max_payout_sat
             if unit == "sat"
