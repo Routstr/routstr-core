@@ -239,7 +239,7 @@ async def test_cancelled_refund_marks_continuity_loss() -> None:
             new=AsyncMock(side_effect=asyncio.CancelledError()),
         ),
         patch("routstr.upstream.base.mark_terminal_outcome_loss", mark_loss),
-        patch("routstr.upstream.base.record_terminal_outcome", record_outcome),
+        patch("routstr.upstream.terminal_outcome_tracking.record_terminal_outcome", record_outcome),
     ):
         with pytest.raises(asyncio.CancelledError):
             await provider.handle_x_cashu_responses_completion(

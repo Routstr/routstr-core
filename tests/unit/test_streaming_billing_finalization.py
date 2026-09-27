@@ -25,11 +25,11 @@ from routstr.core.db import ApiKey, ReservationRelease
 from routstr.core.terminal_outcomes import TerminalOutcomeContext
 from routstr.payment.cost_calculation import MaxCostData
 from routstr.payment.models import Architecture, Model, Pricing
-from routstr.upstream.base import (
-    BaseUpstreamProvider,
-    _observe_terminal_sse_bytes,
-    _TerminalOutcomeState,
-    _track_generic_terminal_stream,
+from routstr.upstream.base import BaseUpstreamProvider
+from routstr.upstream.terminal_outcome_tracking import (
+    TerminalOutcomeState,
+    observe_terminal_sse_bytes,
+    track_generic_terminal_stream,
 )
 
 
@@ -46,7 +46,7 @@ async def test_generic_terminal_outcome_requires_consumed_clean_eof() -> None:
         outcome_id="generic-terminal",
         model_identifier="test-model",
     )
-    state = _TerminalOutcomeState(context)
+    state = TerminalOutcomeState(context)
 
     assert state.settlement_context(require_success=True) is None
 
@@ -54,7 +54,7 @@ async def test_generic_terminal_outcome_requires_consumed_clean_eof() -> None:
         yield b"complete"
 
     assert [
-        chunk async for chunk in _track_generic_terminal_stream(chunks(), state)
+        chunk async for chunk in track_generic_terminal_stream(chunks(), state)
     ] == [b"complete"]
     assert state.settlement_context(require_success=True) is context
 
@@ -1292,7 +1292,7 @@ def test_anthropic_stop_reason_is_terminal_before_transport_failure() -> None:
         outcome_id="messages-stop-reason",
         model_identifier="test-model",
     )
-    state = _TerminalOutcomeState(terminal_outcome)
+    state = TerminalOutcomeState(terminal_outcome)
 
     state.observe(
         {
@@ -1311,7 +1311,7 @@ def test_responses_output_limit_is_terminal_before_transport_failure() -> None:
         outcome_id="responses-incomplete",
         model_identifier="test-model",
     )
-    state = _TerminalOutcomeState(terminal_outcome)
+    state = TerminalOutcomeState(terminal_outcome)
 
     state.observe({"type": "response.incomplete", "response": {"status": "incomplete"}})
     state.mark_transport_failure()
@@ -1320,12 +1320,12 @@ def test_responses_output_limit_is_terminal_before_transport_failure() -> None:
 
 
 def test_stream_cut_inside_a_character_does_not_raise() -> None:
-    state = _TerminalOutcomeState(
+    state = TerminalOutcomeState(
         TerminalOutcomeContext(outcome_id="cut", model_identifier="test-model")
     )
     tail = 'data: {"delta":{"text":"日本'.encode()[:-1]
 
-    assert _observe_terminal_sse_bytes(state, b"", tail, final=True) == b""
+    assert observe_terminal_sse_bytes(state, b"", tail, final=True) == b""
     assert state.settlement_context() is None
 
 

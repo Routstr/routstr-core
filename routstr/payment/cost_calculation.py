@@ -1,5 +1,5 @@
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic.v1 import BaseModel, Field
 
@@ -20,8 +20,10 @@ if TYPE_CHECKING:
 __all__ = [
     "CostData",
     "CostDataError",
+    "CostMetadata",
     "MaxCostData",
     "calculate_cost",
+    "cost_field",
     "parse_token_count",
 ]
 
@@ -58,6 +60,19 @@ class MaxCostData(CostData):
 class CostDataError(BaseModel):
     message: str
     code: str
+
+
+CostMetadata = CostData | MaxCostData | dict[str, Any]
+
+
+def cost_field(
+    cost_data: CostMetadata, field: str, default: int | float = 0
+) -> int | float:
+    if isinstance(cost_data, dict):
+        value = cost_data.get(field, default)
+    else:
+        value = getattr(cost_data, field, default)
+    return value if isinstance(value, (int, float)) else default
 
 
 def _empty_cost(

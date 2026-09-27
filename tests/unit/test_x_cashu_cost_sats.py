@@ -10,9 +10,9 @@ os.environ.setdefault("UPSTREAM_API_KEY", "test")
 
 from routstr.core.terminal_outcomes import TerminalOutcomeContext  # noqa: E402
 from routstr.payment.cost_calculation import CostData  # noqa: E402
-from routstr.upstream.base import (  # noqa: E402
-    BaseUpstreamProvider,
-    _record_x_cashu_terminal_outcome,
+from routstr.upstream.base import BaseUpstreamProvider  # noqa: E402
+from routstr.upstream.terminal_outcome_tracking import (  # noqa: E402
+    record_x_cashu_terminal_outcome,
 )
 
 
@@ -49,8 +49,8 @@ def test_zero_usage_x_cashu_preserves_captured_presence() -> None:
         cache_creation_source="missing",
     )
 
-    with patch("routstr.upstream.base.record_terminal_outcome", record):
-        _record_x_cashu_terminal_outcome(
+    with patch("routstr.upstream.terminal_outcome_tracking.record_terminal_outcome", record):
+        record_x_cashu_terminal_outcome(
             context,
             None,
             amount=10,
@@ -128,7 +128,7 @@ async def test_non_streaming_cost_sats_value_rounds_down() -> None:
     with (
         patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)),
         patch.object(provider, "send_refund", new=send_refund),
-        patch("routstr.upstream.base.record_terminal_outcome", record),
+        patch("routstr.upstream.terminal_outcome_tracking.record_terminal_outcome", record),
     ):
         response = await provider.handle_x_cashu_non_streaming_response(
             content_str=content_str,
@@ -278,7 +278,7 @@ async def test_streaming_no_space_error_event_is_not_recorded() -> None:
     provider = _make_provider()
     record = MagicMock()
 
-    with patch("routstr.upstream.base.record_terminal_outcome", record):
+    with patch("routstr.upstream.terminal_outcome_tracking.record_terminal_outcome", record):
         await provider.handle_x_cashu_streaming_response(
             content_str='data:{"type":"error","error":{"message":"failed"}}\n\n',
             response=_make_httpx_response(),
@@ -319,7 +319,7 @@ async def test_streaming_no_space_usage_is_still_recorded_as_reported() -> None:
     body = 'data:{"usage":{"prompt_tokens":100,"completion_tokens":5}}\n\ndata:[DONE]\n\n'
 
     with (
-        patch("routstr.upstream.base.record_terminal_outcome", record),
+        patch("routstr.upstream.terminal_outcome_tracking.record_terminal_outcome", record),
         patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=None)),
     ):
         await provider.handle_x_cashu_streaming_response(
