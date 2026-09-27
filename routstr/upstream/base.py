@@ -85,6 +85,7 @@ from .stream_ownership import (
     close_upstream_exchange,
     finalize_and_close_stream,
 )
+from .stream_timeout import open_guarded_stream
 
 if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
@@ -1147,6 +1148,8 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse with cost data injected at the end
         """
+        guarded_chunks = await open_guarded_stream(response, self.provider_type)
+
         if reservation_snapshot is None:
             async with create_session() as snapshot_session:
                 snapshot_key = await snapshot_session.get(key.__class__, key.hashed_key)
@@ -1348,7 +1351,7 @@ class BaseUpstreamProvider:
                 # multiple events can arrive together; buffering makes parsing
                 # boundary-independent for every provider.
                 splitter = SSEEventSplitter()
-                async for chunk in response.aiter_bytes():
+                async for chunk in guarded_chunks:
                     for raw_event in splitter.feed(chunk):
                         for out in _process_event(raw_event):
                             yield out
@@ -1639,6 +1642,8 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse with cost data injected at the end
         """
+        guarded_chunks = await open_guarded_stream(response, self.provider_type)
+
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
 
         logger.debug(
@@ -1790,7 +1795,7 @@ class BaseUpstreamProvider:
                 # Buffer across network chunks; dispatch only on the SSE event
                 # delimiter so parsing is independent of byte boundaries.
                 splitter = SSEEventSplitter()
-                async for chunk in response.aiter_bytes():
+                async for chunk in guarded_chunks:
                     for raw_event in splitter.feed(chunk):
                         for out in _process_event(raw_event):
                             yield out
@@ -2137,7 +2142,9 @@ class BaseUpstreamProvider:
                 )
             )
         try:
-            async for chunk in response.aiter_bytes():
+            # This generator is already the response body, so a first-chunk
+            # timeout here can only abort the stream, never fail over.
+            async for chunk in await open_guarded_stream(response, self.provider_type):
                 yield chunk
         finally:
             await finalizer.run()
@@ -2192,6 +2199,8 @@ class BaseUpstreamProvider:
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
     ) -> StreamingResponse:
+        guarded_chunks = await open_guarded_stream(response, self.provider_type)
+
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
         usage_finalized = False
         last_model_seen: str | None = None
@@ -2284,7 +2293,7 @@ class BaseUpstreamProvider:
                     total_cost = max(total_cost, _coerce_usd(usage_or_root.get(field)))
 
             try:
-                async for chunk in response.aiter_bytes():
+                async for chunk in guarded_chunks:
                     stored_chunks.append(chunk)
                     try:
                         decoded_chunk = chunk.decode("utf-8", errors="ignore")

@@ -40,6 +40,7 @@ from .payment.helpers import (
 )
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
+from .upstream.cooldown import is_cooling_down, record_failure
 from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
 from .upstream.model_paths import (
@@ -405,6 +406,11 @@ _RETRYABLE_UPSTREAM_5XX = frozenset({502, 503, 504})
 _UPSTREAM_5XX_RETRY_BACKOFF_SECONDS = 0.5
 
 
+def _counts_toward_cooldown(status_code: int) -> bool:
+    """Provider faults and timeouts only — not client errors or rate limits."""
+    return status_code >= 500 or status_code == UPSTREAM_ERROR_STATUS
+
+
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
@@ -620,6 +626,17 @@ async def _proxy(
                 400,
                 request=request,
             )
+
+    # A provider that just failed this model repeatedly is skipped while some
+    # other candidate can serve it. An explicit route is never rerouted.
+    if selector is None:
+        healthy = [
+            candidate
+            for candidate in candidates
+            if not is_cooling_down(candidate[1].base_url, model_id)
+        ]
+        if healthy:
+            candidates = healthy
 
     # Reserve/max-cost checks use the best-ranked candidate; the failover loop
     # below rebinds (model_obj, upstream) per candidate so forwarding and
@@ -950,6 +967,8 @@ async def _proxy(
                 break
 
             if response.status_code != 200:
+                if _counts_toward_cooldown(response.status_code):
+                    record_failure(upstream.base_url, model_id)
                 # 424 is an upstream failure re-reported by error_scope.
                 # 502/503 are upstream errors, 429 rate limits.
                 should_retry = response.status_code in [
@@ -1037,6 +1056,8 @@ async def _proxy(
             raise
 
         except UpstreamError as e:
+            if _counts_toward_cooldown(e.status_code):
+                record_failure(upstream.base_url, model_id)
             logger.warning(
                 "Upstream %s failed for model=%s: %s",
                 upstream.provider_type,
