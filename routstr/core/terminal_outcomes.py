@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import secrets
 import time
 from dataclasses import dataclass
 
@@ -13,6 +16,10 @@ from .terminal_outcome_writer import (
 )
 
 logger = get_logger(__name__)
+
+# Rows must not share an id with request logs or the x-routstr-request-id
+# header. The key never leaves this process, so ids cannot be recomputed.
+_OUTCOME_ID_KEY = secrets.token_bytes(32)
 
 # Far above any real request, and low enough that a day's sums stay JSON-safe.
 _MAX_TOKENS = 2**31 - 1
@@ -88,7 +95,7 @@ def record_terminal_outcome(
             return
         terminal_outcome_writer.submit(
             _QueuedOutcome(
-                outcome_id=context.outcome_id,
+                outcome_id=_outcome_id(context.outcome_id),
                 terminal_at_ms=timestamp,
                 terminal_day=terminal_day,
                 model_identifier=context.model_identifier,
@@ -108,6 +115,10 @@ def record_terminal_outcome(
             logger.critical("Terminal outcome submission failed", exc_info=True)
         except BaseException:
             pass
+
+
+def _outcome_id(request_id: str) -> str:
+    return hmac.new(_OUTCOME_ID_KEY, request_id.encode(), hashlib.sha256).hexdigest()
 
 
 def mark_terminal_outcome_loss(reason: str) -> None:

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -470,7 +471,9 @@ def test_record_wrapper_never_raises_on_invalid_or_failed_submission(
 
         def submit(self, outcome: _QueuedOutcome) -> bool:
             self.submissions.append(outcome)
-            if outcome.outcome_id == "request-submit-error":
+            if outcome.outcome_id == outcomes_module._outcome_id(
+                "request-submit-error"
+            ):
                 raise RuntimeError("submission failed")
             return True
 
@@ -524,6 +527,27 @@ def test_record_wrapper_never_raises_on_invalid_or_failed_submission(
         "terminal outcome submission raised",
     ]
     assert writer.submissions[0].model_identifier is None
+
+
+def test_outcome_rows_do_not_carry_the_request_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = MagicMock()
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+    for _ in range(2):
+        record_terminal_outcome(
+            TerminalOutcomeContext("request-a", "author/model"),
+            input_tokens=1,
+            output_tokens=1,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+            revenue_msats=1,
+        )
+
+    first, second = (call.args[0] for call in writer.submit.call_args_list)
+    assert "request-a" not in first.outcome_id
+    # A second record of one request still collides instead of double counting.
+    assert first.outcome_id == second.outcome_id
 
 
 def test_cashu_retained_msats_uses_exact_persisted_units(
