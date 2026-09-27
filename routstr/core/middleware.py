@@ -9,6 +9,7 @@ from starlette.datastructures import Headers
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .logging import get_logger
+from .settings import settings
 
 logger = get_logger(__name__)
 
@@ -86,9 +87,13 @@ _SKIP_LOG_EXACT: frozenset[str] = frozenset(
 )
 
 
-def _should_log(method: str, path: str) -> bool:
+def _should_log(method: str, path: str, status_code: int | None = None) -> bool:
     if method in _SKIP_LOG_METHODS:
         return False
+    # A 4xx/5xx storm on a suppressed path is exactly what we need to see, so
+    # the path filters below only ever hide successful responses.
+    if status_code is not None and status_code >= 400:
+        return True
     if path in _SKIP_LOG_EXACT:
         return False
     return not any(path.startswith(prefix) for prefix in _SKIP_LOG_PREFIXES)
@@ -101,6 +106,13 @@ def _attribution(request: Request) -> dict[str, object]:
         for field in ("model", "provider")
         if (value := getattr(request.state, field, None))
     }
+
+
+def mark(request: Request, name: str) -> None:
+    """Record that stage ``name`` finished, for the completion log's timings."""
+    marks = getattr(request.state, "stage_marks", None)
+    if marks is not None:
+        marks[name] = time.monotonic()
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
@@ -126,6 +138,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
         # Start timing
         start_time = time.time()
+        stage_start = time.monotonic()
+        stage_marks: dict[str, float] = {}
+        request.state.stage_marks = stage_marks
 
         if should_log:
             logger.info(
@@ -144,28 +159,40 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
 
-            if should_log:
-                duration = time.time() - start_time
+            duration = time.time() - start_time
+
+            if _should_log(request.method, path, response.status_code):
                 extra: dict[str, object] = {
                     "request_id": request_id,
                     "method": request.method,
                     "path": path,
                     "status_code": response.status_code,
                     "duration_ms": round(duration * 1000, 2),
+                    "content_length": request.headers.get("content-length"),
                     **_attribution(request),
                 }
+                for name, marked_at in stage_marks.items():
+                    extra[f"{name}_ms"] = round((marked_at - stage_start) * 1000, 2)
                 if response.status_code >= 400:
                     error_detail = getattr(request.state, "error_detail", None)
                     if isinstance(error_detail, dict):
                         extra["error_type"] = error_detail.get("error_type")
                         extra["error_code"] = error_detail.get("error_code")
                         extra["error_message"] = error_detail.get("error_message")
-                logger.info(
+                log = (
+                    logger.warning
+                    if duration > settings.slow_request_warn_seconds
+                    else logger.info
+                )
+                log(
                     "Request completed",
                     extra=extra,
                 )
             if hasattr(response, "headers"):
                 response.headers["x-routstr-request-id"] = request_id
+                response.headers["x-routstr-duration-ms"] = str(
+                    round(duration * 1000, 2)
+                )
 
             return response
 
@@ -196,5 +223,6 @@ __all__ = [
     "LoggingMiddleware",
     "UNKNOWN_CLIENT_APP",
     "client_app_context",
+    "mark",
     "request_id_context",
 ]
