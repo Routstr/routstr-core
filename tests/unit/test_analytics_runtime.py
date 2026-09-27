@@ -137,6 +137,35 @@ async def test_opt_out_saved_by_another_worker_is_not_undone(
 
 
 @pytest.mark.asyncio
+async def test_relays_saved_by_another_worker_move_publication(
+    node: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
+    await node.coordinator.prepare_startup()
+    await node.coordinator.sync_once()
+    assert node.coordinator._relays == ("wss://relay.example.com",)
+
+    # Another worker saved new relays; this one still holds the old list.
+    async with node.sessions() as session:
+        await session.exec(  # type: ignore[call-overload]
+            text("INSERT INTO settings (id, data) VALUES (1, :data)").bindparams(
+                data=json.dumps(
+                    {
+                        "enable_analytics_sharing": True,
+                        "relays": ["wss://relay.example.org"],
+                    }
+                )
+            )
+        )
+        await session.commit()
+
+    await node.coordinator.sync_once()
+    await asyncio.sleep(0)
+    assert node.coordinator._relays == ("wss://relay.example.org",)
+    assert node.events == ["start:daily", "stop:daily", "start:daily"]
+
+
+@pytest.mark.asyncio
 async def test_missing_identity_does_not_stop_private_collection(
     node: Any, monkeypatch: Any
 ) -> None:
@@ -338,9 +367,7 @@ async def test_upgrade_preserves_existing_sharing_choice_across_restart(
                     )
                 )
             ).one()
-        assert epoch.coverage_start_day == datetime.now(UTC).date() + timedelta(
-            days=1
-        )
+        assert epoch.coverage_start_day == datetime.now(UTC).date() + timedelta(days=1)
     await node.coordinator.close()
 
     async with node.sessions() as session:

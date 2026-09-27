@@ -34,7 +34,9 @@ async def _read_state() -> DeliveryStateSnapshot:
     # Read the fence before the setting so a later opt-out refuses activation.
     state = await get_analytics_v2_delivery_state(create_session)
     async with create_session() as session:
-        await SettingsService.refresh(session, ("enable_analytics_sharing",))
+        await SettingsService.refresh(
+            session, ("enable_analytics_sharing", "relays", "provider_id")
+        )
         secret = await session.get(Secret, 1)
         if secret is not None and secret.nsec_state != NsecState.legacy:
             if secret.nsec_state == NsecState.encrypted:
