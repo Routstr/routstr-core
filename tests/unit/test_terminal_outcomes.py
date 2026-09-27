@@ -537,7 +537,7 @@ def test_cashu_retained_msats_uses_exact_persisted_units(
     assert losses == ["invalid Cashu retained value"]
 
 
-async def test_collection_pause_excludes_disabled_days_after_restart(
+async def test_clean_stop_then_downtime_excludes_unattended_days(
     ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
@@ -546,7 +546,7 @@ async def test_collection_pause_excludes_disabled_days_after_restart(
     writer = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
     assert await writer.start()
     clock.value = _timestamp(day + timedelta(days=3))
-    assert await writer.stop(timeout=1, close_coverage=True)
+    assert await writer.stop(timeout=1)
     clock.value = _timestamp(day + timedelta(days=6))
     assert await writer.start()
     async with sessions() as session:
@@ -744,23 +744,6 @@ async def test_failed_writer_start_cannot_backfill_missed_days_as_zero(
     )
     assert epochs[1].coverage_start_day == day + timedelta(days=4)
     assert await writer.stop(timeout=1)
-
-
-async def test_disable_closes_coverage_after_background_rotation_is_stopped(
-    ledger: tuple[AsyncEngine, SessionFactory],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, sessions = ledger
-    writer = TerminalOutcomeWriter(session_factory=sessions)
-    assert await writer.start()
-    original = writer._close_coverage
-
-    async def close_without_racing_writer(day: date) -> None:
-        assert not writer.running
-        await original(day)
-
-    monkeypatch.setattr(writer, "_close_coverage", close_without_racing_writer)
-    assert await writer.stop(timeout=1, close_coverage=True)
 
 
 async def test_restart_alongside_live_writer_preserves_continuous_coverage(

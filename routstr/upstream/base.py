@@ -254,31 +254,6 @@ async def _track_generic_terminal_stream(
         raise
 
 
-async def _track_x_cashu_generic_stream(
-    stream: AsyncIterator[bytes],
-    state: _TerminalOutcomeState,
-    *,
-    amount: int,
-    unit: str,
-) -> AsyncGenerator[bytes, None]:
-    try:
-        async for chunk in stream:
-            yield chunk
-        state.mark_success()
-    except BaseException:
-        state.mark_transport_failure()
-        raise
-    finally:
-        terminal_context = state.settlement_context(require_success=True)
-        if terminal_context is not None:
-            _record_x_cashu_terminal_outcome(
-                terminal_context,
-                None,
-                amount=amount,
-                unit=unit,
-            )
-
-
 def _observe_terminal_sse_bytes(
     state: _TerminalOutcomeState,
     buffered: bytes,
@@ -5169,22 +5144,8 @@ class BaseUpstreamProvider:
                 extra={"path": path, "status_code": response.status_code},
             )
 
-            outcome_state = _TerminalOutcomeState(
-                _terminal_outcome_context(
-                    getattr(request.state, "request_id", None), model_obj
-                )
-            )
             return ClosingStreamingResponse(
-                OwnedUpstreamStream(
-                    _track_x_cashu_generic_stream(
-                        response.aiter_bytes(),
-                        outcome_state,
-                        amount=amount,
-                        unit=unit,
-                    ),
-                    response,
-                    client,
-                ),
+                OwnedUpstreamStream(response.aiter_bytes(), response, client),
                 status_code=response.status_code,
                 headers=dict(response.headers),
             )
@@ -5488,22 +5449,8 @@ class BaseUpstreamProvider:
                 extra={"path": path, "status_code": response.status_code},
             )
 
-            outcome_state = _TerminalOutcomeState(
-                _terminal_outcome_context(
-                    getattr(request.state, "request_id", None), model_obj
-                )
-            )
             return ClosingStreamingResponse(
-                OwnedUpstreamStream(
-                    _track_x_cashu_generic_stream(
-                        response.aiter_bytes(),
-                        outcome_state,
-                        amount=amount,
-                        unit=unit,
-                    ),
-                    response,
-                    client,
-                ),
+                OwnedUpstreamStream(response.aiter_bytes(), response, client),
                 status_code=response.status_code,
                 headers=dict(response.headers),
             )

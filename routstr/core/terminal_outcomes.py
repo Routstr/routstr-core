@@ -142,9 +142,5 @@ async def start_terminal_outcome_writer(*, serving: bool = False) -> bool:
     return await terminal_outcome_writer.start(serving=serving)
 
 
-async def stop_terminal_outcome_writer(
-    *, timeout: float = 5.0, close_coverage: bool = False
-) -> bool:
-    return await terminal_outcome_writer.stop(
-        timeout=timeout, close_coverage=close_coverage
-    )
+async def stop_terminal_outcome_writer(*, timeout: float = 5.0) -> bool:
+    return await terminal_outcome_writer.stop(timeout=timeout)

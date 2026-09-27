@@ -167,18 +167,8 @@ class TerminalOutcomeWriter:
         self._task = self._new_task()
         return True
 
-    async def stop(self, *, timeout: float = 5.0, close_coverage: bool = False) -> bool:
-        closed_day = _utc_day_from_ms(self._now_ms()) - timedelta(days=1)
+    async def stop(self, *, timeout: float = 5.0) -> bool:
         if not self._enabled:
-            if close_coverage:
-                try:
-                    await self._recover_unattended_coverage(self._now_ms())
-                    await self._close_coverage(closed_day)
-                except Exception:
-                    logger.critical(
-                        "Terminal outcome coverage closure failed", exc_info=True
-                    )
-                    return False
             return True
         self._stopping = True
         self._accepting = False
@@ -204,8 +194,6 @@ class TerminalOutcomeWriter:
             except asyncio.CancelledError:
                 pass
         try:
-            if close_coverage:
-                await self._close_coverage(closed_day)
             clean = drained and not self._loss_pending and await self._close_run()
         except (TimeoutError, asyncio.CancelledError):
             pass
@@ -348,15 +336,6 @@ class TerminalOutcomeWriter:
             )
             await session.commit()
         return bool(result.rowcount == 1)
-
-    async def _close_coverage(self, closed_day: date) -> None:
-        async with self._session_factory() as session:
-            await session.exec(  # type: ignore[call-overload]
-                update(TerminalOutcomeEpoch)
-                .where(col(TerminalOutcomeEpoch.current_slot) == 1)
-                .values(coverage_end_day=closed_day, current_slot=None)
-            )
-            await session.commit()
 
     async def _close_run(self) -> bool:
         now = self._now_ms()
