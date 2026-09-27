@@ -33,8 +33,9 @@ class TerminalOutcomeState:
         nested_response = event.get("response")
         if isinstance(nested_response, dict):
             status = str(nested_response.get("status") or status).lower()
-        # Messages report input and output usage in separate events.
-        for payload in (event.get("message"), event):
+        # Messages report input and output usage in separate events, and a
+        # completed Responses event nests its usage under "response".
+        for payload in (event.get("message"), nested_response, event):
             if isinstance(payload, dict) and isinstance(payload.get("usage"), dict):
                 self.usage = {**(self.usage or {}), **payload["usage"]}
         if (

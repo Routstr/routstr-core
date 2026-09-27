@@ -1222,6 +1222,7 @@ class BaseUpstreamProvider:
                             terminal_outcome=outcome_state.settlement_context(
                                 require_success=True
                             ),
+                            terminal_usage=outcome_state.usage,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1723,6 +1724,7 @@ class BaseUpstreamProvider:
                             terminal_outcome=outcome_state.settlement_context(
                                 require_success=True
                             ),
+                            terminal_usage=outcome_state.usage,
                         )
                         usage_finalized = True
                     except Exception:
