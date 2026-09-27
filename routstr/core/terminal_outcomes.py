@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
+from ..payment.usage import NormalizedUsage, normalize_usage
 from .logging import get_logger
 from .terminal_outcome_writer import (
     TerminalOutcomeWriter,
@@ -52,8 +53,6 @@ def record_terminal_outcome(
     """
     try:
         if usage is not None:
-            from ..payment.usage import NormalizedUsage, normalize_usage
-
             counted = normalize_usage(usage) or NormalizedUsage()
             input_tokens = counted.input_tokens
             output_tokens = counted.output_tokens

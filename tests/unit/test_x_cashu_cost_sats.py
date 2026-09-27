@@ -137,6 +137,7 @@ async def test_non_streaming_cost_sats_value_rounds_down() -> None:
             unit="sat",
             max_cost_for_model=10000,
             request_id="sat-rounding-request",
+            terminal_outcome=TerminalOutcomeContext("sat-rounding-request", None),
         )
 
     body = json.loads(response.body)
@@ -286,6 +287,7 @@ async def test_streaming_no_space_error_event_is_not_recorded() -> None:
             unit="sat",
             max_cost_for_model=10_000,
             request_id="no-space-error",
+            terminal_outcome=TerminalOutcomeContext("no-space-error", None),
         )
 
     record.assert_not_called()
@@ -329,6 +331,7 @@ async def test_streaming_no_space_usage_is_still_recorded_as_reported() -> None:
             unit="sat",
             max_cost_for_model=10_000,
             request_id="no-space-recorded",
+            terminal_outcome=TerminalOutcomeContext("no-space-recorded", None),
         )
 
     context = record.call_args.args[0]
@@ -365,6 +368,7 @@ async def test_native_messages_stream_keeps_input_usage_in_stats() -> None:
             unit="msat",
             max_cost_for_model=100,
             request_id="messages-request",
+            terminal_outcome=TerminalOutcomeContext("messages-request", None),
         )
         await _collect_streaming(response)
 

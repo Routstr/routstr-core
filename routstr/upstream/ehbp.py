@@ -43,7 +43,6 @@ from ..core.exceptions import EhbpTimeoutError, UpstreamError
 from ..core.settings import settings
 from ..core.terminal_outcomes import (
     TerminalOutcomeContext,
-    cashu_retained_msats,
     mark_terminal_outcome_loss,
     record_terminal_outcome,
 )
@@ -61,6 +60,10 @@ from ..wallet import (
     classify_redemption_error,
     recieve_token,
     send_token,
+)
+from .terminal_outcome_tracking import (
+    record_x_cashu_terminal_outcome,
+    terminal_outcome_context,
 )
 from .tinfoil_trailer import TrailerResponse, forward_with_trailer
 
@@ -1002,10 +1005,8 @@ async def forward_ehbp_request(
     trailer (streaming). Usage is captured from both response headers and HTTP
     trailers via an h11-based client (httpx silently discards trailers).
     """
-    terminal_outcome = TerminalOutcomeContext(
-        outcome_id=getattr(request.state, "request_id", None),
-        model_identifier=model_obj.canonical_slug or model_obj.id,
-        served_model_identifier=model_obj.forwarded_model_id or model_obj.id,
+    terminal_outcome = terminal_outcome_context(
+        getattr(request.state, "request_id", None), model_obj
     )
     target = upstream.get_ehbp_forwarding_target(path, model_obj)  # type: ignore[attr-defined]
 
@@ -1281,11 +1282,7 @@ async def forward_ehbp_x_cashu_request(
     client because httpx silently discards them.
     """
     request_id = getattr(request.state, "request_id", None)
-    terminal_outcome = TerminalOutcomeContext(
-        outcome_id=request_id,
-        model_identifier=model_obj.canonical_slug or model_obj.id,
-        served_model_identifier=model_obj.forwarded_model_id or model_obj.id,
-    )
+    terminal_outcome = terminal_outcome_context(request_id, model_obj)
     amount = 0
     unit = "msat"
     mint: str | None = None
@@ -1465,22 +1462,13 @@ async def forward_ehbp_x_cashu_request(
                     raise
                 persisted_refund_amount = refund_amount
 
-            revenue_msats = cashu_retained_msats(
-                amount,
-                unit,
+            record_x_cashu_terminal_outcome(
+                terminal_outcome,
+                cost_info,
+                amount=amount,
+                unit=unit,
                 refund_amount=persisted_refund_amount,
             )
-            if revenue_msats is not None:
-                record_terminal_outcome(
-                    terminal_outcome,
-                    input_tokens=cost_info.get("input_tokens", 0),
-                    output_tokens=cost_info.get("output_tokens", 0),
-                    cache_read_input_tokens=cost_info.get("cache_read_input_tokens", 0),
-                    cache_creation_input_tokens=cost_info.get(
-                        "cache_creation_input_tokens", 0
-                    ),
-                    revenue_msats=revenue_msats,
-                )
 
             async def _stream_body_xcashu() -> AsyncIterator[bytes]:
                 yield resp.body

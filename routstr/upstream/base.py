@@ -4249,7 +4249,7 @@ class BaseUpstreamProvider:
         request_id: str | None = None,
         model_obj: Model | None = None,
         request_body: bytes | None = None,
-        record_outcome: bool = True,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -4284,9 +4284,7 @@ class BaseUpstreamProvider:
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
         refund_amount_sent = 0
         settlement_failed = False
-        outcome_state = TerminalOutcomeState(
-            terminal_outcome_context(request_id, model_obj) if record_outcome else None
-        )
+        outcome_state = TerminalOutcomeState(terminal_outcome)
 
         # Stats observe both SSE prefix forms; billing keeps its existing parse.
         observe_terminal_sse_bytes(outcome_state, b"", content_str.encode(), final=True)
@@ -4480,7 +4478,7 @@ class BaseUpstreamProvider:
         request_id: str | None = None,
         model_obj: Model | None = None,
         request_body: bytes | None = None,
-        record_outcome: bool = True,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -4501,11 +4499,7 @@ class BaseUpstreamProvider:
 
         try:
             response_json = json.loads(content_str)
-            outcome_state = TerminalOutcomeState(
-                terminal_outcome_context(request_id, model_obj)
-                if record_outcome
-                else None
-            )
+            outcome_state = TerminalOutcomeState(terminal_outcome)
             outcome_state.observe(response_json)
             self._apply_provider_field(response_json)
             _apply_estimated_usage(
@@ -4669,7 +4663,7 @@ class BaseUpstreamProvider:
         request_id: str | None = None,
         model_obj: Model | None = None,
         request_body: bytes | None = None,
-        record_outcome: bool = True,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
 
@@ -4717,7 +4711,7 @@ class BaseUpstreamProvider:
                     request_id=request_id,
                     model_obj=model_obj,
                     request_body=request_body,
-                    record_outcome=record_outcome,
+                    terminal_outcome=terminal_outcome,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_response(
@@ -4730,7 +4724,7 @@ class BaseUpstreamProvider:
                     request_id=request_id,
                     model_obj=model_obj,
                     request_body=request_body,
-                    record_outcome=record_outcome,
+                    terminal_outcome=terminal_outcome,
                 )
 
         except Exception as e:
@@ -4934,7 +4928,11 @@ class BaseUpstreamProvider:
                     request_id=getattr(request.state, "request_id", None),
                     model_obj=model_obj,
                     request_body=request_body,
-                    record_outcome=not path.endswith("messages/count_tokens"),
+                    terminal_outcome=None
+                    if path.endswith("messages/count_tokens")
+                    else terminal_outcome_context(
+                        getattr(request.state, "request_id", None), model_obj
+                    ),
                 )
                 if isinstance(result, StreamingResponse) and not response.is_closed:
                     return attach_upstream_stream_owner(result, response, client)
