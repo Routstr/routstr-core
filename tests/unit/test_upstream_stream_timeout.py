@@ -11,7 +11,7 @@ import pytest
 
 from routstr.core.exceptions import UpstreamError
 from routstr.core.settings import settings
-from routstr.upstream.cooldown import is_cooling_down, record_failure, reset_cooldowns
+from routstr.upstream.cooldown import is_cooling_down, record_failure
 from routstr.upstream.stream_timeout import open_guarded_stream
 
 
@@ -31,13 +31,6 @@ async def _stalls_after_first() -> AsyncIterator[bytes]:
     yield b"first"
     await asyncio.sleep(10)
     yield b"never delivered"
-
-
-@pytest.fixture(autouse=True)
-def _clean_cooldowns() -> Any:
-    reset_cooldowns()
-    yield
-    reset_cooldowns()
 
 
 @pytest.fixture
