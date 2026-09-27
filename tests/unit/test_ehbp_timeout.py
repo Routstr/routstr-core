@@ -10,7 +10,11 @@ from routstr.core.error_scope import (
     ERROR_SCOPE_UPSTREAM,
     UPSTREAM_ERROR_STATUS,
 )
-from routstr.core.exceptions import EhbpTimeoutError, UpstreamError
+from routstr.core.exceptions import (
+    EhbpConnectionError,
+    EhbpTimeoutError,
+    UpstreamError,
+)
 from routstr.upstream import ehbp as ehbp_module
 
 # ---------------------------------------------------------------------------
@@ -139,5 +143,49 @@ async def test_bearer_timeout_propagates_424(
 
     assert exc_info.value.status_code == UPSTREAM_ERROR_STATUS
     assert exc_info.value.code == "UPSTREAM_TIMEOUT"
+    assert exc_info.value.scope == ERROR_SCOPE_UPSTREAM
+    assert isinstance(exc_info.value, UpstreamError)
+
+
+@pytest.mark.asyncio
+async def test_bearer_connection_error_propagates_upstream_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connect failure must stay upstream-scoped instead of becoming a 500.
+
+    ``forward_with_trailer`` classifies TLS/connection failures as
+    :class:`EhbpConnectionError`; ``forward_ehbp_request``'s ``except
+    UpstreamError: raise`` must let it through so ``proxy.py`` answers 424 with
+    the upstream scope header rather than a node-scoped 500.
+    """
+    monkeypatch.setattr(
+        ehbp_module,
+        "forward_with_trailer",
+        AsyncMock(
+            side_effect=EhbpConnectionError(
+                "Unable to connect to EHBP upstream inference.tinfoil.sh: "
+                "ConnectionAbortedError"
+            )
+        ),
+    )
+    upstream, model_obj = _ehbp_upstream_mocks()
+    key = MagicMock()
+    key.hashed_key = "abcdef1234567890"
+
+    with pytest.raises(EhbpConnectionError) as exc_info:
+        await ehbp_module.forward_ehbp_request(
+            request=await _request(),
+            path="v1/chat/completions",
+            headers={},
+            request_body=b"opaque",
+            upstream=upstream,
+            key=key,
+            max_cost_for_model=5000,
+            session=MagicMock(),
+            model_obj=model_obj,
+        )
+
+    assert exc_info.value.status_code == UPSTREAM_ERROR_STATUS
+    assert exc_info.value.code == "UPSTREAM_UNAVAILABLE"
     assert exc_info.value.scope == ERROR_SCOPE_UPSTREAM
     assert isinstance(exc_info.value, UpstreamError)
