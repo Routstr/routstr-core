@@ -405,6 +405,19 @@ _RETRYABLE_UPSTREAM_5XX = frozenset({502, 503, 504})
 _UPSTREAM_5XX_RETRY_BACKOFF_SECONDS = 0.5
 
 
+def _attribute_request(
+    request: Request, model_obj: Model, upstream: BaseUpstreamProvider
+) -> None:
+    """Attribute the completion log line to the candidate being tried.
+
+    Uses the provider's model id rather than the requested alias, so aliases
+    and cross-provider spellings resolve to the model that was forwarded.
+    """
+    if model_obj.id:
+        request.state.model = model_obj.id
+    request.state.provider = upstream.provider_type
+
+
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
@@ -460,6 +473,12 @@ async def _proxy(
         else:
             model_id = request_body_dict.get("model", "unknown")
 
+    # Set before routing so the completion log is attributed even when the
+    # request fails before an upstream is chosen (400/401/402). "unknown" is
+    # the no-model sentinel, not a model.
+    if isinstance(model_id, str) and model_id and model_id != "unknown":
+        request.state.model = model_id
+
     # Exact Tinfoil attestation GET routes don't map to models — forward
     # without model/cost/auth lookups. Do not prefix-match here: paths such as
     # /attestationjunk must continue through normal authentication.
@@ -482,6 +501,7 @@ async def _proxy(
 
         last_error_response = None
         for i, upstream in enumerate(selected_upstreams):
+            request.state.provider = upstream.provider_type
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
@@ -638,6 +658,7 @@ async def _proxy(
     if x_cashu := headers.get("x-cashu", None):
         last_error = None
         for i, (model_obj, upstream) in enumerate(candidates):
+            _attribute_request(request, model_obj, upstream)
             try:
                 if is_ehbp:
                     if not upstream.supports_ehbp:
@@ -717,7 +738,8 @@ async def _proxy(
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
 
         last_error_response = None
-        for i, (_, upstream) in enumerate(candidates):
+        for i, (model_obj, upstream) in enumerate(candidates):
+            _attribute_request(request, model_obj, upstream)
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
@@ -811,6 +833,9 @@ async def _proxy(
                 await _finish_read_transaction(session)
                 max_cost_for_model = candidate_max
 
+        # Only once the candidate is actually tried: a fallback skipped for its
+        # reservation must not take over the last attempted upstream's line.
+        _attribute_request(request, model_obj, upstream)
         retries_left = settings.upstream_5xx_retry_attempts
         retry_index = 0
         headers = upstream.prepare_headers(dict(request.headers))
