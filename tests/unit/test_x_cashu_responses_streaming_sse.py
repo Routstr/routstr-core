@@ -5,10 +5,11 @@ multi-line ``data:`` payloads and a ``[DONE]`` sentinel. Canonical Responses API
 usage arrives nested under ``response`` on ``response.completed``.
 """
 
+import asyncio
 import json
 import os
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -219,3 +220,35 @@ async def test_malformed_events_do_not_retain_whole_token() -> None:
     body = await _collect(response)
     assert b"\\n" not in body
     assert body.endswith(b"\n\n")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_refund_marks_continuity_loss() -> None:
+    provider = _make_provider()
+    mark_loss = MagicMock()
+    record_outcome = MagicMock()
+    with (
+        patch.object(
+            provider,
+            "get_x_cashu_cost",
+            new=AsyncMock(return_value=_make_cost_data(4000)),
+        ),
+        patch.object(
+            provider,
+            "send_refund",
+            new=AsyncMock(side_effect=asyncio.CancelledError()),
+        ),
+        patch("routstr.upstream.base.mark_terminal_outcome_loss", mark_loss),
+        patch("routstr.upstream.base.record_terminal_outcome", record_outcome),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await provider.handle_x_cashu_responses_completion(
+                response=_sse_response(_canonical_chunks()),
+                amount=10_000,
+                unit="msat",
+                max_cost_for_model=9_000,
+                request_id="cancelled-refund",
+            )
+
+    mark_loss.assert_called_once_with("X-Cashu Responses stream settlement cancelled")
+    record_outcome.assert_not_called()

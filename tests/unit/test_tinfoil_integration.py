@@ -273,6 +273,8 @@ class TestComputeEhbpActualCost:
         assert result["total_msats"] == 0
         assert result["input_tokens"] == 0
         assert result["output_tokens"] == 0
+        assert result["input_source"] == "missing"
+        assert result["output_source"] == "missing"
 
     @pytest.mark.asyncio
     async def test_usage_parsed_and_clamped(self) -> None:
@@ -308,6 +310,10 @@ class TestComputeEhbpActualCost:
             assert result["total_tokens"] == 109
             assert result["input_msats"] == 10
             assert result["output_msats"] == 20
+            assert result["input_source"] == "reported"
+            assert result["output_source"] == "reported"
+            assert result["cache_read_source"] == "missing"
+            assert result["cache_creation_source"] == "missing"
 
     @pytest.mark.asyncio
     async def test_cache_fields_propagated(self) -> None:
@@ -350,8 +356,11 @@ class TestComputeEhbpActualCost:
             assert result["total_usd"] == 0.0003
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("input_count,output_count", [(0, 0), (10, 5)])
     async def test_unpriceable_usage_does_not_charge_authorization_ceiling(
         self,
+        input_count: int,
+        output_count: int,
     ) -> None:
         model_obj = MagicMock()
         model_obj.id = "llama3-3-70b"
@@ -372,13 +381,35 @@ class TestComputeEhbpActualCost:
                 output_tokens=0,
             )
             result = await _compute_ehbp_actual_cost(
-                "prompt=0,completion=0",
+                f"prompt={input_count},completion={output_count}",
                 model_obj,
                 50_000,
             )
             assert result["total_msats"] == 0
-            assert result["input_tokens"] == 0
-            assert result["output_tokens"] == 0
+            assert result["input_tokens"] == input_count
+            assert result["output_tokens"] == output_count
+            assert result["input_source"] == "reported"
+            assert result["output_source"] == "reported"
+
+    @pytest.mark.asyncio
+    async def test_partially_malformed_usage_preserves_independent_presence(
+        self,
+    ) -> None:
+        model_obj = MagicMock()
+        model_obj.id = "llama3-3-70b"
+        model_obj.forwarded_model_id = "llama3-3-70b"
+
+        result = await _compute_ehbp_actual_cost(
+            "prompt=7,completion=not-a-number",
+            model_obj,
+            50_000,
+        )
+
+        assert result["total_msats"] == 0
+        assert result["input_tokens"] == 7
+        assert result["output_tokens"] == 0
+        assert result["input_source"] == "reported"
+        assert result["output_source"] == "missing"
 
     @pytest.mark.asyncio
     async def test_model_match_no_actual_model_key(self) -> None:
@@ -456,6 +487,7 @@ class TestComputeEhbpActualCost:
         actual_model_obj = MagicMock()
         actual_model_obj.id = "tinfoil-llama3-3-70b"  # client-facing of actual
         actual_model_obj.forwarded_model_id = "llama3-3-70b"
+        actual_model_obj.canonical_slug = "meta/llama-3.3-70b"
 
         with (
             patch(
@@ -485,6 +517,7 @@ class TestComputeEhbpActualCost:
                 100_000,
             )
             assert result["actual_model"] == "llama3-3-70b"
+            assert result["actual_model_identifier"] == "meta/llama-3.3-70b"
             assert result["total_msats"] == 60
             # calculate_cost called with the actual model's client-facing ID
             call_args = mock_calc.call_args
@@ -748,6 +781,7 @@ class TestComputeEhbpActualCost:
                 100_000,
             )
             assert "actual_model" not in result
+            assert result["actual_model_unresolved"] is True
             # calculate_cost called with the requested model (fallback)
             call_args = mock_calc.call_args
             assert call_args[0][0]["model"] == "gpt-oss-120b"
