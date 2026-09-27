@@ -134,7 +134,7 @@ def test_terminal_outcome_migration_round_trips(tmp_path: Path) -> None:
         run_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'terminal_outcome_writer_runs'"
         ).fetchone()
-        assert outcome_sql is not None and outcome_sql[0].count("CHECK") == 1
+        assert outcome_sql is not None and outcome_sql[0].count("CHECK") == 2
         assert epoch_sql is not None and epoch_sql[0].count("CHECK") == 3
         assert run_sql is not None and run_sql[0].count("CHECK") == 4
 
@@ -163,6 +163,14 @@ def test_terminal_outcome_migration_round_trips(tmp_path: Path) -> None:
                 "input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, revenue_msats) VALUES "
                 "('request-invalid', 2, '2026-08-31', 'author/model', "
                 "-1, 0, 0, 0, 0)"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO terminal_outcomes "
+                "(outcome_id, terminal_at_ms, terminal_day, model_identifier, "
+                "input_source, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, revenue_msats) VALUES "
+                "('request-bad-label', 3, '2026-08-31', 'author/model', "
+                "'guessed', 0, 0, 0, 0, 0)"
             )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(

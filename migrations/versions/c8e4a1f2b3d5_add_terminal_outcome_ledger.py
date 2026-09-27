@@ -109,6 +109,13 @@ def upgrade() -> None:
             "AND cache_creation_input_tokens >= 0 AND revenue_msats >= 0",
             name="ck_terminal_outcomes_nonnegative",
         ),
+        sa.CheckConstraint(
+            "input_source IN ('reported', 'estimated', 'missing') "
+            "AND output_source IN ('reported', 'estimated', 'missing') "
+            "AND cache_read_source IN ('reported', 'estimated', 'missing') "
+            "AND cache_creation_source IN ('reported', 'estimated', 'missing')",
+            name="ck_terminal_outcomes_sources",
+        ),
         sa.PrimaryKeyConstraint("outcome_id"),
     )
     op.create_index(

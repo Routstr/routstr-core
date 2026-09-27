@@ -809,6 +809,9 @@ class ReservationRelease(SQLModel, table=True):  # type: ignore
 
 
 class TerminalOutcome(SQLModel, table=True):  # type: ignore
+    """One settled request. Ledger times are UTC epoch milliseconds, and
+    terminal_day is the UTC day of terminal_at_ms, kept for indexed day reads."""
+
     __tablename__ = "terminal_outcomes"
     __table_args__ = (
         Index(
@@ -821,6 +824,13 @@ class TerminalOutcome(SQLModel, table=True):  # type: ignore
             "AND output_tokens >= 0 AND cache_read_input_tokens >= 0 "
             "AND cache_creation_input_tokens >= 0 AND revenue_msats >= 0",
             name="ck_terminal_outcomes_nonnegative",
+        ),
+        CheckConstraint(
+            "input_source IN ('reported', 'estimated', 'missing') "
+            "AND output_source IN ('reported', 'estimated', 'missing') "
+            "AND cache_read_source IN ('reported', 'estimated', 'missing') "
+            "AND cache_creation_source IN ('reported', 'estimated', 'missing')",
+            name="ck_terminal_outcomes_sources",
         ),
     )
 
