@@ -94,6 +94,15 @@ def _should_log(method: str, path: str) -> bool:
     return not any(path.startswith(prefix) for prefix in _SKIP_LOG_PREFIXES)
 
 
+def _attribution(request: Request) -> dict[str, object]:
+    """Model/provider fields, omitted rather than null on routes that resolve none."""
+    return {
+        field: value
+        for field in ("model", "provider")
+        if (value := getattr(request.state, field, None))
+    }
+
+
 class LoggingMiddleware(BaseHTTPMiddleware):
     """Middleware to log proxy interactions and page navigation.
 
@@ -143,14 +152,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     "path": path,
                     "status_code": response.status_code,
                     "duration_ms": round(duration * 1000, 2),
+                    **_attribution(request),
                 }
-                # Omitted rather than null on routes that resolve no model.
-                model = getattr(request.state, "model", None)
-                if model:
-                    extra["model"] = model
-                provider = getattr(request.state, "provider", None)
-                if provider:
-                    extra["provider"] = provider
                 if response.status_code >= 400:
                     error_detail = getattr(request.state, "error_detail", None)
                     if isinstance(error_detail, dict):
@@ -169,23 +172,17 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         except Exception as e:
             # Always log failures, even for skipped paths, so we don't lose errors.
             duration = time.time() - start_time
-            failure_extra: dict[str, object] = {
-                "request_id": request_id,
-                "method": request.method,
-                "path": path,
-                "duration_ms": round(duration * 1000, 2),
-                "error": str(e),
-                "error_type": type(e).__name__,
-            }
-            model = getattr(request.state, "model", None)
-            if model:
-                failure_extra["model"] = model
-            provider = getattr(request.state, "provider", None)
-            if provider:
-                failure_extra["provider"] = provider
             logger.error(
                 "Request failed",
-                extra=failure_extra,
+                extra={
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": path,
+                    "duration_ms": round(duration * 1000, 2),
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    **_attribution(request),
+                },
                 exc_info=True,
             )
             raise
