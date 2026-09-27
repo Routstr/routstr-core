@@ -1383,9 +1383,10 @@ async def test_cross_key_reservation_snapshot_is_rejected_without_mutation() -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reported_output", [50, 0])
 @pytest.mark.parametrize("api", ["chat", "responses"])
 async def test_completed_stream_keeps_reported_usage_after_transport_error(
-    api: str,
+    api: str, reported_output: int
 ) -> None:
     engine = await _engine()
     async with AsyncSession(engine, expire_on_commit=False) as session:
@@ -1399,13 +1400,13 @@ async def test_completed_stream_keeps_reported_usage_after_transport_error(
         [
             b'data: {"model":"m","choices":[{"delta":{"content":"hi"},'
             b'"finish_reason":"stop"}],"usage":{"prompt_tokens":100,'
-            b'"completion_tokens":50}}\n\n'
+            b'"completion_tokens":%d}}\n\n' % reported_output
         ]
         if api == "chat"
         else [
             b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
             b'data: {"type":"response.completed","response":{"status":"completed",'
-            b'"usage":{"input_tokens":100,"output_tokens":50}}}\n\n',
+            b'"usage":{"input_tokens":100,"output_tokens":%d}}}\n\n' % reported_output,
         ]
     )
 
@@ -1483,7 +1484,7 @@ async def test_completed_stream_keeps_reported_usage_after_transport_error(
     context = record_outcome.call_args.args[0]
     counted = normalize_usage(record_outcome.call_args.kwargs["usage"])
     assert counted is not None
-    assert (counted.input_tokens, counted.output_tokens) == (100, 50)
+    assert (counted.input_tokens, counted.output_tokens) == (100, reported_output)
     assert (context.input_source, context.output_source) == ("reported", "reported")
     await engine.dispose()
 

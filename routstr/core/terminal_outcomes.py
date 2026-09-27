@@ -6,7 +6,7 @@ import secrets
 import time
 from dataclasses import dataclass
 
-from ..payment.usage import NormalizedUsage, normalize_usage
+from ..payment.usage import NormalizedUsage, normalize_usage, usage_field_presence
 from .logging import get_logger
 from .terminal_outcome_writer import (
     TerminalOutcomeWriter,
@@ -55,16 +55,22 @@ def record_terminal_outcome(
 ) -> None:
     """Submit a settled outcome without awaiting storage or raising.
 
-    ``usage`` is the raw upstream usage. It replaces the token counts and is
-    parsed here, so a malformed value can only mark a gap.
+    ``usage`` is the raw upstream usage. Each count it reports, zero included,
+    replaces the matching argument and the rest are kept. It is parsed here, so
+    a malformed value can only mark a gap.
     """
     try:
         if usage is not None:
             counted = normalize_usage(usage) or NormalizedUsage()
-            input_tokens = counted.input_tokens
-            output_tokens = counted.output_tokens
-            cache_read_input_tokens = counted.cache_read_tokens
-            cache_creation_input_tokens = counted.cache_write_tokens
+            reported = usage_field_presence(usage)
+            if reported.input_source != "missing":
+                input_tokens = counted.input_tokens
+            if reported.output_source != "missing":
+                output_tokens = counted.output_tokens
+            if reported.cache_read_source != "missing":
+                cache_read_input_tokens = counted.cache_read_tokens
+            if reported.cache_creation_source != "missing":
+                cache_creation_input_tokens = counted.cache_write_tokens
         sources = {
             name + "_source": getattr(context, name + "_source") or "missing"
             for name in ("input", "output", "cache_read", "cache_creation")

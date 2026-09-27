@@ -62,6 +62,27 @@ def test_zero_usage_x_cashu_preserves_captured_presence() -> None:
     assert record.call_args.kwargs["revenue_msats"] == 10_000
 
 
+def test_x_cashu_outcome_keeps_billing_labels_for_counts_upstream_left_out() -> None:
+    writer = MagicMock()
+    with patch("routstr.core.terminal_outcomes.terminal_outcome_writer", writer):
+        record_x_cashu_terminal_outcome(
+            TerminalOutcomeContext("partial-usage", "author/model"),
+            {
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "input_source": "estimated",
+                "output_source": "estimated",
+            },
+            amount=100,
+            unit="msat",
+            usage={"input_tokens": 100},
+        )
+
+    queued = writer.submit.call_args.args[0]
+    assert (queued.input_tokens, queued.input_source) == (100, "reported")
+    assert (queued.output_tokens, queued.output_source) == (2, "estimated")
+
+
 # ---------------------------------------------------------------------------
 # Non-streaming (chat completions)
 # ---------------------------------------------------------------------------

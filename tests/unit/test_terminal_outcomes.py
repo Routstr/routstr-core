@@ -530,6 +530,31 @@ def test_record_wrapper_never_raises_on_invalid_or_failed_submission(
     assert writer.submissions[0].model_identifier is None
 
 
+def test_reported_usage_replaces_only_the_counts_it_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = MagicMock()
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+    for usage in (
+        {"prompt_tokens": 100, "completion_tokens": 0},
+        {"input_tokens": 100},
+    ):
+        record_terminal_outcome(
+            TerminalOutcomeContext("request-c", "author/model"),
+            input_tokens=3,
+            output_tokens=2,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+            revenue_msats=70,
+            usage=usage,
+        )
+
+    zero_output, input_only = (call.args[0] for call in writer.submit.call_args_list)
+    # A reported zero stands; a count upstream left out keeps billing's figure.
+    assert (zero_output.input_tokens, zero_output.output_tokens) == (100, 0)
+    assert (input_only.input_tokens, input_only.output_tokens) == (100, 2)
+
+
 def test_outcome_rows_do_not_carry_the_request_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

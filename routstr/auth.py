@@ -1296,7 +1296,7 @@ async def _adjust_payment_for_tokens(
                 cache_creation_source=cost.cache_creation_source,
             )
             if terminal_usage is not None:
-                recorded_usage = {**(recorded_usage or {}), **terminal_usage}
+                recorded_usage = terminal_usage
                 presence = UsageFieldPresence(
                     input_source=cost.input_source,
                     output_source=cost.output_source,

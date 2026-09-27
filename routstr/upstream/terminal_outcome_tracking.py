@@ -141,8 +141,15 @@ def record_x_cashu_terminal_outcome(
                 metadata[name] = value
     context = replace(context, **metadata)
     if usage is not None:
-        # Stats keep what upstream reported, even where billing did not parse it.
-        presence = usage_field_presence(usage)
+        # Stats keep what upstream reported, even where billing did not parse it,
+        # and billing's labels stay on the counts upstream left out.
+        billed = UsageFieldPresence(
+            input_source=context.input_source or "missing",
+            output_source=context.output_source or "missing",
+            cache_read_source=context.cache_read_source or "missing",
+            cache_creation_source=context.cache_creation_source or "missing",
+        )
+        presence = billed.merged(usage_field_presence(usage))
         context = replace(context, **presence.sources_dict())
     counted: CostMetadata = cost_data if cost_data is not None else {}
     record_terminal_outcome(
