@@ -1329,6 +1329,29 @@ def test_stream_cut_inside_a_character_does_not_raise() -> None:
     assert state.settlement_context() is None
 
 
+def test_routstr_upstream_cost_event_is_not_provider_usage() -> None:
+    state = TerminalOutcomeState(
+        TerminalOutcomeContext(outcome_id="routstr-upstream", model_identifier="m")
+    )
+    stream = (
+        b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
+        b'{"input_tokens":100,"cache_read_input_tokens":1000,"output_tokens":1}}}\n\n'
+        b'event: message_delta\ndata: {"type":"message_delta",'
+        b'"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":50}}\n\n'
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+        # A Routstr upstream ends with its own cost summary, cache folded into input.
+        b'event: cost\ndata: {"model":"m","usage":{"input_tokens":1100,'
+        b'"cache_read_input_tokens":1000,"output_tokens":50}}\n\n'
+    )
+
+    assert observe_terminal_sse_bytes(state, b"", stream, final=True) == b""
+    assert state.usage == {
+        "input_tokens": 100,
+        "cache_read_input_tokens": 1000,
+        "output_tokens": 50,
+    }
+
+
 @pytest.mark.asyncio
 async def test_cross_key_reservation_snapshot_is_rejected_without_mutation() -> None:
     engine = await _engine()

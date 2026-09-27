@@ -187,9 +187,17 @@ def observe_terminal_sse_bytes(
         pending = b""
 
     for event in events:
+        lines = event.split(b"\n")
+        # A Routstr upstream appends its own cost summary, with cached tokens
+        # folded into input_tokens; it is not provider usage.
+        if any(
+            line.startswith(b"event:") and line[len(b"event:") :].strip() == b"cost"
+            for line in lines
+        ):
+            continue
         data_lines = [
             line[len(b"data:") :].lstrip(b" ")
-            for line in event.split(b"\n")
+            for line in lines
             if line.startswith(b"data:")
         ]
         if not data_lines:
