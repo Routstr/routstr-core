@@ -144,6 +144,13 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     "status_code": response.status_code,
                     "duration_ms": round(duration * 1000, 2),
                 }
+                # Omitted rather than null on routes that resolve no model.
+                model = getattr(request.state, "model", None)
+                if model:
+                    extra["model"] = model
+                provider = getattr(request.state, "provider", None)
+                if provider:
+                    extra["provider"] = provider
                 if response.status_code >= 400:
                     error_detail = getattr(request.state, "error_detail", None)
                     if isinstance(error_detail, dict):
@@ -162,16 +169,23 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         except Exception as e:
             # Always log failures, even for skipped paths, so we don't lose errors.
             duration = time.time() - start_time
+            failure_extra: dict[str, object] = {
+                "request_id": request_id,
+                "method": request.method,
+                "path": path,
+                "duration_ms": round(duration * 1000, 2),
+                "error": str(e),
+                "error_type": type(e).__name__,
+            }
+            model = getattr(request.state, "model", None)
+            if model:
+                failure_extra["model"] = model
+            provider = getattr(request.state, "provider", None)
+            if provider:
+                failure_extra["provider"] = provider
             logger.error(
                 "Request failed",
-                extra={
-                    "request_id": request_id,
-                    "method": request.method,
-                    "path": path,
-                    "duration_ms": round(duration * 1000, 2),
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                },
+                extra=failure_extra,
                 exc_info=True,
             )
             raise

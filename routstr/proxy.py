@@ -460,6 +460,10 @@ async def _proxy(
         else:
             model_id = request_body_dict.get("model", "unknown")
 
+    # Set before routing so the completion log is attributed even when the
+    # request fails before an upstream is chosen (400/401/402).
+    request.state.model = model_id
+
     # Exact Tinfoil attestation GET routes don't map to models — forward
     # without model/cost/auth lookups. Do not prefix-match here: paths such as
     # /attestationjunk must continue through normal authentication.
@@ -482,6 +486,7 @@ async def _proxy(
 
         last_error_response = None
         for i, upstream in enumerate(selected_upstreams):
+            request.state.provider = upstream.provider_type
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
@@ -780,6 +785,10 @@ async def _proxy(
     already_stripped: set[str] = set()
 
     for i, (model_obj, upstream) in enumerate(candidates):
+        # Served model id, not the requested alias, so the completion log
+        # matches the billing lines for this request.
+        request.state.model = getattr(model_obj, "id", None) or model_id
+        request.state.provider = upstream.provider_type
         if i > 0 and request_body_dict:
             # The reservation was sized to the previous candidate's envelope;
             # settlement bills the serving candidate, so a pricier fallback
