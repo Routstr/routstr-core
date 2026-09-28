@@ -5,7 +5,11 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from .error_scope import ERROR_SCOPE_UPSTREAM, UPSTREAM_ERROR_STATUS
+from .error_scope import (
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
+    UPSTREAM_UNAVAILABLE,
+)
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -69,6 +73,28 @@ class EhbpTimeoutError(UpstreamError):
             message,
             status_code=UPSTREAM_ERROR_STATUS,
             code="UPSTREAM_TIMEOUT",
+            details=details,
+        )
+
+
+class EhbpConnectionError(UpstreamError):
+    """Raised when an EHBP upstream cannot be reached.
+
+    Covers transport failures while establishing the provider connection: DNS
+    resolution, TCP refused/reset, or a TLS error that is not a handshake
+    timeout. Distinct from a generic :class:`UpstreamError` so the failure is
+    attributed to the provider hop (``UPSTREAM_UNAVAILABLE``, reported as
+    ``424``) instead of being flattened into a misleading node-scoped ``500``.
+
+    ``details`` carries optional structured, redaction-safe context and is
+    forwarded to the client by ``create_upstream_error_response``.
+    """
+
+    def __init__(self, message: str, details: dict[str, object] | None = None):
+        super().__init__(
+            message,
+            status_code=UPSTREAM_ERROR_STATUS,
+            code=UPSTREAM_UNAVAILABLE,
             details=details,
         )
 
