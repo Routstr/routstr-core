@@ -129,7 +129,7 @@ by key pruning. This is *not* a formatting problem.
 {
   "error": {
     "type": "invalid_request_error",
-    "message": "API key not found. Deposit first via /v1/wallet/create to get a key on this node.",
+    "message": "Key not found. Deposit first via /v1/wallet/create to get a key on this node.",
     "code": "key_not_found"
   }
 }

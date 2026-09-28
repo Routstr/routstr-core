@@ -350,6 +350,10 @@ async def test_unknown_sk_key_reports_key_not_found(session: AsyncSession) -> No
     assert detail["error"]["type"] == "invalid_request_error"
     assert detail["error"]["code"] == "key_not_found"
     assert "format" not in detail["error"]["message"].lower()
+    # @routstr/sdk (<=0.4.6) purges a dead key on a case-sensitive
+    # `body.includes("Key not found")` probe, so the prefix is part of the
+    # wire contract, not cosmetic.
+    assert detail["error"]["message"].startswith("Key not found.")
 
 
 @pytest.mark.asyncio
