@@ -444,7 +444,7 @@ async def _read_bounded_body(request: Request) -> bytes | Response:
         return bytes(body)
 
     try:
-        return await asyncio.wait_for(read(), timeout)
+        body = await asyncio.wait_for(read(), timeout)
     except _BodyLimitExceeded:
         error_type, message, status = (
             "invalid_request",
@@ -457,6 +457,12 @@ async def _read_bounded_body(request: Request) -> bytes | Response:
             f"Request body not received within {timeout} seconds",
             408,
         )
+    else:
+        # Draining the stream leaves Starlette unable to serve a second read.
+        # Cache the body so later readers (EHBP forwarding, upstream stream
+        # passthrough) get it instead of "Stream consumed".
+        request._body = body
+        return body
     return create_error_response(error_type, message, status, request=request)
 
 
