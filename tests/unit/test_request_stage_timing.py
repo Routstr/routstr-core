@@ -1,10 +1,12 @@
 """Tests for stage timings, the duration header and skipped-path error logging."""
 
+import asyncio
 import logging
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 
 from routstr.core.middleware import LoggingMiddleware, mark
@@ -57,13 +59,26 @@ def client() -> Iterator[TestClient]:
         mark(request, "auth")
         return {"status": "ok"}
 
+    @app.post("/v1/chat/completions/stream")
+    async def streamed(request: Request) -> StreamingResponse:
+        mark(request, "body_read")
+
+        async def body() -> AsyncIterator[bytes]:
+            yield b"data: one\n\n"
+            await asyncio.sleep(0.05)
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(body(), media_type="text/event-stream")
+
+    @app.get("/admin/api/boom")
+    async def boom() -> dict[str, str]:
+        raise HTTPException(status_code=500, detail="boom")
+
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 
 
-def test_skipped_path_logs_4xx(
-    client: TestClient, records: _RecordingHandler
-) -> None:
+def test_skipped_path_logs_4xx(client: TestClient, records: _RecordingHandler) -> None:
     assert client.get("/v1/wallet/info", params={"fail": True}).status_code == 400
 
     completions = records.completions()
@@ -100,10 +115,68 @@ def test_stage_fields_on_completion_log(
     record = completions[0]
     assert record.body_read_ms >= 0  # type: ignore[attr-defined]
     assert record.auth_ms >= record.body_read_ms  # type: ignore[attr-defined]
-    assert (
-        record.content_length  # type: ignore[attr-defined]
-        == response.request.headers["content-length"]
+    assert record.content_length == int(  # type: ignore[attr-defined]
+        response.request.headers["content-length"]
     )
+
+
+def test_bogus_content_length_is_dropped(
+    client: TestClient, records: _RecordingHandler
+) -> None:
+    assert (
+        client.get(
+            "/v1/wallet/info",
+            params={"fail": True},
+            headers={"content-length": "not-a-number"},
+        ).status_code
+        == 400
+    )
+
+    assert records.completions()[0].content_length is None  # type: ignore[attr-defined]
+
+
+def test_streamed_duration_covers_the_body(
+    client: TestClient, records: _RecordingHandler
+) -> None:
+    response = client.post("/v1/chat/completions/stream", json={"model": "m"})
+    assert response.status_code == 200
+    assert response.text.endswith("data: [DONE]\n\n")
+
+    completions = records.completions()
+    assert len(completions) == 1
+    record = completions[0]
+    # The body sleeps 50ms, so a duration that stopped at the headers would be
+    # well under it.
+    assert record.duration_ms >= 50  # type: ignore[attr-defined]
+    assert record.time_to_headers_ms < record.duration_ms  # type: ignore[attr-defined]
+    logged_request_id = record.request_id  # type: ignore[attr-defined]
+    assert logged_request_id == response.headers["x-routstr-request-id"]
+    assert record.body_read_ms >= 0  # type: ignore[attr-defined]
+
+
+def test_slow_streamed_request_logs_warning(
+    client: TestClient, records: _RecordingHandler, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "slow_request_warn_seconds", 0.02)
+
+    assert (
+        client.post("/v1/chat/completions/stream", json={"model": "m"}).status_code
+        == 200
+    )
+
+    assert records.completions()[0].levelno == logging.WARNING
+
+
+def test_prefix_skipped_path_still_hides_client_errors(
+    client: TestClient, records: _RecordingHandler
+) -> None:
+    # /admin/api/* is polled on a timer, so an expired session must not turn
+    # into one log line per poll; a 500 on the same prefix must still be logged.
+    assert client.get("/admin/api/balances").status_code == 404
+    assert records.completions() == []
+
+    assert client.get("/admin/api/boom").status_code == 500
+    assert len(records.completions()) == 1
 
 
 def test_slow_request_logs_warning(
