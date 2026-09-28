@@ -293,6 +293,21 @@ async def _validate_bearer_key_locked(
                 "sk- API key not found in database",
                 extra={"key_preview": bearer_key[:10] + "..."},
             )
+            # The credential is a well-formed 'sk-...' API key: the format is
+            # valid and the failure is that the key does not exist on this node.
+            # Falling through to the generic handler below would report it as
+            # "Invalid API key format", sending callers after a formatting bug
+            # that does not exist. Report the real cause instead.
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "message": "API key not found. Deposit first via /v1/wallet/create to get a key on this node.",
+                        "type": "invalid_request_error",
+                        "code": "key_not_found",
+                    }
+                },
+            )
 
     if bearer_key.startswith("cashu"):
         logger.debug(

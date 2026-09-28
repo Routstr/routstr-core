@@ -208,8 +208,8 @@ withdraw_balance(old_key)
 ```json
 {
   "error": {
-    "type": "authentication_failed",
-    "message": "Invalid API key",
+    "type": "invalid_request_error",
+    "message": "Invalid API key format. Expected an 'sk-...' API key or a 'cashu...' token.",
     "code": "invalid_api_key"
   }
 }
@@ -220,8 +220,31 @@ withdraw_balance(old_key)
 **Common Causes:**
 
 - Typo in API key
-- Key doesn't exist
-- Key has been deleted
+- The credential is neither an `sk-...` key nor a `cashu...` token
+
+A well-formed `sk-...` key that this node has no record of is reported
+separately as `key_not_found` (also 401) — see
+[Error Handling → Authentication Errors](errors.md#authentication-errors).
+
+### API Key Not Found
+
+```json
+{
+  "error": {
+    "type": "invalid_request_error",
+    "message": "API key not found. Deposit first via /v1/wallet/create to get a key on this node.",
+    "code": "key_not_found"
+  }
+}
+```
+
+**Status Code:** 401
+
+**Common Causes:**
+
+- Key doesn't exist *on this node*
+- Key was minted by a different node — keys are node-local
+- Key has been deleted or pruned
 
 ### Expired API Key
 
