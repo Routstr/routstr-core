@@ -17,6 +17,8 @@ from routstr.core.error_scope import (
 )
 from routstr.upstream.model_paths import decode_model_path, encode_model_path
 
+from .proxy_test_utils import mock_request_stream, patch_proxy_session
+
 MODEL_ID = "test-model"
 
 
@@ -38,7 +40,7 @@ def _make_request(headers: dict[str, str], body: bytes) -> MagicMock:
     request = MagicMock()
     request.method = "POST"
     request.headers = headers
-    request.body = AsyncMock(return_value=body)
+    mock_request_stream(request, body)
     request.state = MagicMock()
     request.state.request_id = "req-model-path"
     return request
@@ -72,8 +74,9 @@ async def _run_proxy(
             proxy_module, "pay_for_request", AsyncMock(return_value=reservation)
         ),
         patch.object(proxy_module, "revert_pay_for_request", AsyncMock()),
+        patch_proxy_session(MagicMock()),
     ):
-        return await proxy_module.proxy(request, path, session=MagicMock())
+        return await proxy_module.proxy(request, path)
 
 
 def test_decode_model_path_round_trips_encode() -> None:
@@ -529,8 +532,9 @@ async def test_unsupported_endpoint_pins_fail_before_payment(
         patch.object(
             proxy_module, "get_candidates", return_value=[(MagicMock(), upstream)]
         ),
+        patch_proxy_session(MagicMock()),
     ):
-        response = await proxy_module.proxy(request, path, MagicMock())
+        response = await proxy_module.proxy(request, path)
     assert response.status_code == 400
     assert json.loads(response.body)["error"]["type"] == "unsupported_request"
     payment.assert_not_called()
