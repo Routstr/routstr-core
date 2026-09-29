@@ -280,6 +280,28 @@ Billing is input-token based (output tokens are free on Jev); the response's
    published rate ($0.042 per million input tokens, output free). Override the
    model row if TypeSafe changes pricing.
 
+## Decisions (OpenAI)
+
+### Create Decision
+
+Ask OpenAI's Decisions API (powered by `gpt-6-luna`) to pick from a finite set
+of answers for text or image context. The API is in limited preview: accounts
+that are not enrolled get `403 Decision API is not enabled for this user`.
+
+```http
+POST /v1/decisions
+```
+
+The request body is forwarded to `https://api.openai.com/v1/decisions`
+unchanged; Routstr only reads the top-level `model` to route and price the
+request, and settles from the response's `usage` like embeddings.
+
+**Notes:**
+
+- Only the `openai` provider serves this endpoint. A model that no OpenAI
+  provider on the node offers returns `400 unsupported_request`.
+- Pricing uses the node's catalog rate for the requested model.
+
 ## Images (Coming Soon)
 
 ### Create Image
