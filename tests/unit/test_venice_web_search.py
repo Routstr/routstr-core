@@ -123,13 +123,35 @@ async def test_requests_without_web_search_are_untouched() -> None:
 
 
 @pytest.mark.asyncio
-async def test_other_providers_keep_their_existing_behaviour() -> None:
-    """The base hook is a no-op, so no non-Venice upstream changes shape."""
+async def test_generic_openai_upstream_rejects_untranslatable_web_search() -> None:
+    """Do not let LiteLLM send unsupported web_search_options to a generic API."""
     provider = BaseUpstreamProvider(base_url="http://test", api_key="k")
+
+    with pytest.raises(UpstreamError) as excinfo:
+        await _dispatch(provider, _body(tools=[WEB_SEARCH_TOOL, FUNCTION_TOOL]))
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.code == "UNSUPPORTED_WEB_SEARCH"
+
+
+@pytest.mark.asyncio
+async def test_generic_openai_upstream_still_accepts_function_tools() -> None:
+    provider = BaseUpstreamProvider(base_url="http://test", api_key="k")
+
+    kwargs = await _dispatch(provider, _body(tools=[FUNCTION_TOOL]))
+
+    assert kwargs["model"] == "openai/deepseek-v4-flash-0731"
+    assert kwargs["tools"] == [FUNCTION_TOOL]
+
+
+@pytest.mark.asyncio
+async def test_non_openai_adapter_can_still_handle_search_tool() -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://openrouter.ai/api/v1", api_key="k"
+    )
 
     kwargs = await _dispatch(provider, _body(tools=[WEB_SEARCH_TOOL]))
 
-    assert kwargs["model"] == "openai/deepseek-v4-flash-0731"
     assert kwargs["tools"] == [WEB_SEARCH_TOOL]
 
 

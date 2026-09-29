@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from routstr.upstream.anthropic import AnthropicUpstreamProvider
 from routstr.upstream.base import BaseUpstreamProvider
 from routstr.upstream.generic import GenericUpstreamProvider
@@ -33,12 +35,12 @@ def test_apply_provider_field_openrouter_passthrough() -> None:
 
 
 def test_apply_provider_field_openrouter_no_upstream_provider() -> None:
-    """If OpenRouter omits the provider field, the real serving provider is
-    unknown — a bare ``openrouter`` value carries no information."""
+    """If OpenRouter omits the provider field, the serving provider is
+    unknown but the router is not."""
     p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
     data: dict = {"id": "gen-abc"}
     p._apply_provider_field(data)
-    assert data["provider"] == "unknown"
+    assert data["provider"] == "openrouter:unknown"
 
 
 def test_apply_provider_field_openrouter_echoes_router_name() -> None:
@@ -46,7 +48,35 @@ def test_apply_provider_field_openrouter_echoes_router_name() -> None:
     p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
     data: dict = {"provider": "openrouter"}
     p._apply_provider_field(data)
-    assert data["provider"] == "unknown"
+    assert data["provider"] == "openrouter:unknown"
+
+
+def test_apply_provider_field_openrouter_unknown_is_idempotent() -> None:
+    """Re-stamping an unknown payload (e.g. in inject_cost_metadata) keeps
+    ``openrouter:unknown`` instead of reading ``unknown`` as a sub-provider."""
+    p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
+    data: dict = {"id": "gen-abc"}
+    p._apply_provider_field(data)
+    p._apply_provider_field(data)
+    assert data["provider"] == "openrouter:unknown"
+
+
+def test_apply_provider_field_openrouter_warns_once_on_billed_payload() -> None:
+    """A missing provider is logged on the payload carrying usage, not on
+    every stream chunk or on a re-stamp."""
+    p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
+    chunk: dict = {"type": "response.output_text.delta", "delta": "hi"}
+    completed: dict = {
+        "type": "response.completed",
+        "response": {"id": "gen-abc", "usage": {"input_tokens": 1}},
+    }
+    with patch("routstr.upstream.openrouter.logger.warning") as warning:
+        p._apply_provider_field(chunk)
+        p._apply_provider_field(completed)
+        p._apply_provider_field(completed)
+
+    warning.assert_called_once()
+    assert chunk["provider"] == completed["provider"] == "openrouter:unknown"
 
 
 def test_apply_provider_field_openrouter_idempotent_no_double_prefix() -> None:
@@ -79,14 +109,41 @@ def test_apply_provider_field_blank_upstream_treated_as_missing() -> None:
     p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
     data: dict = {"provider": "   "}
     p._apply_provider_field(data)
-    assert data["provider"] == "unknown"
+    assert data["provider"] == "openrouter:unknown"
 
 
 def test_apply_provider_field_non_string_upstream_treated_as_missing() -> None:
     p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
     data: dict = {"provider": 42}
     p._apply_provider_field(data)
-    assert data["provider"] == "unknown"
+    assert data["provider"] == "openrouter:unknown"
+
+
+def test_apply_provider_field_openrouter_reads_nested_envelopes() -> None:
+    """Anthropic ``message`` and Responses ``response`` envelopes nest the
+    upstream provider; it must not be reported as unknown."""
+    p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
+    message_start: dict = {
+        "type": "message_start",
+        "message": {"provider": "Anthropic"},
+    }
+    p._apply_provider_field(message_start)
+    assert message_start["provider"] == "openrouter:Anthropic"
+
+    created: dict = {"type": "response.created", "response": {"provider": "OpenAI"}}
+    p._apply_provider_field(created)
+    assert created["provider"] == "openrouter:OpenAI"
+
+
+def test_stamp_streamed_provider_carries_earlier_provider() -> None:
+    """Events without their own provider inherit the one reported earlier in
+    the stream instead of becoming ``unknown``."""
+    p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
+    first: dict = {"provider": "Fireworks"}
+    carried = p._stamp_streamed_provider(first, None)
+    delta: dict = {"type": "content_block_delta"}
+    assert p._stamp_streamed_provider(delta, carried) == "Fireworks"
+    assert first["provider"] == delta["provider"] == "openrouter:Fireworks"
 
 
 def test_apply_provider_field_idempotent_for_direct_upstream() -> None:

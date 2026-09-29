@@ -36,6 +36,12 @@ from .reasoning_effort import adapt_messages_body_for_litellm
 
 logger = get_logger(__name__)
 
+# Sent in place of a blank upstream key. LiteLLM treats ``""`` as missing and
+# falls back to the provider's env var (e.g. ``OPENAI_API_KEY``), failing with
+# an AuthenticationError for keyless upstreams such as self-hosted
+# OpenAI-compatible servers, which the chat path reaches without auth.
+KEYLESS_UPSTREAM_API_KEY = "no-key"
+
 # Anthropic-Messages-only fields that don't translate to OpenAI
 # Chat Completions. ``litellm.drop_params`` only filters *known*
 # unsupported params; these newer/extension fields get passed through
@@ -507,6 +513,32 @@ async def dispatch_anthropic_messages(
 
     model_suffix = adapt_request(body) if adapt_request else ""
 
+    # LiteLLM turns Anthropic's server-side web_search tool into the OpenAI
+    # `web_search_options` parameter. Generic OpenAI-compatible chat endpoints
+    # (including those serving Claude through a proxy) may reject that field.
+    # Only a provider with an explicit adaptation (e.g. Venice's model suffix)
+    # can preserve search semantics; do not silently remove the tool and return
+    # an answer that never searched. Native /v1/messages providers bypass this
+    # dispatcher and receive the original tool unchanged.
+    tools = body.get("tools")
+    if provider_prefix == "openai/" and isinstance(tools, list) and any(
+        isinstance(tool, dict)
+        and (
+            (
+                isinstance(tool.get("type"), str)
+                and tool["type"].startswith("web_search")
+            )
+            or tool.get("name") == "web_search"
+        )
+        for tool in tools
+    ):
+        raise UpstreamError(
+            "This upstream does not support Anthropic web search through "
+            "OpenAI-compatible /v1/messages translation",
+            status_code=400,
+            code="UNSUPPORTED_WEB_SEARCH",
+        )
+
     # Convention: `model.id` is the canonical upstream model name;
     # `forwarded_model_id` is the public alias the internal API exposes
     # and echoes back to the client.
@@ -519,7 +551,7 @@ async def dispatch_anthropic_messages(
     kwargs: dict = {
         "model": litellm_model,
         "api_base": base_url,
-        "api_key": api_key,
+        "api_key": api_key or KEYLESS_UPSTREAM_API_KEY,
         "stream": upstream_stream,
         **body,
     }

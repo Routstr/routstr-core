@@ -217,6 +217,20 @@ def _responses_usage_payload(data_json: dict) -> dict:
     return nested if isinstance(nested, dict) else data_json
 
 
+def _reported_provider(payload: dict) -> str | None:
+    """Provider named by an upstream payload, if any.
+
+    Checked at top level first, then inside the Anthropic ``message`` and
+    Responses ``response`` envelopes, which is where those dialects nest it.
+    """
+    for obj in (payload, payload.get("message"), payload.get("response")):
+        if isinstance(obj, dict):
+            value = obj.get("provider")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
 def _render_sse_event(field_lines: list[str], data: str) -> str:
     """Re-frame one parsed event, re-prefixing every line of a multi-line data."""
     body = "".join(f"{line}\n" for line in field_lines)
@@ -488,8 +502,7 @@ class BaseUpstreamProvider:
             return
         response_json["provider_url"] = public_provider_url(self.base_url)
         provider_type = (self.provider_type or "").strip()
-        existing = response_json.get("provider")
-        existing_str = existing.strip() if isinstance(existing, str) else ""
+        existing_str = _reported_provider(response_json) or ""
         if not existing_str:
             response_json["provider"] = provider_type
             return
@@ -500,6 +513,17 @@ class BaseUpstreamProvider:
             response_json["provider"] = existing_str
             return
         response_json["provider"] = f"{provider_type}:{existing_str}"
+
+    def _stamp_streamed_provider(
+        self, payload: dict, carried: str | None
+    ) -> str | None:
+        """Stamp a streamed payload, falling back to a provider an earlier event
+        reported. Returns the provider to carry forward to later payloads."""
+        reported = _reported_provider(payload)
+        if reported is None and carried is not None:
+            payload["provider"] = carried
+        self._apply_provider_field(payload)
+        return reported or carried
 
     def _log_full_refund(
         self,
@@ -1185,6 +1209,7 @@ class BaseUpstreamProvider:
 
         usage_finalized = False
         last_model_seen: str | None = None
+        provider_seen: str | None = None
 
         async def finalize_db_only() -> None:
             nonlocal usage_finalized
@@ -1259,6 +1284,7 @@ class BaseUpstreamProvider:
                   end of stream.
                 """
                 nonlocal last_model_seen, usage_chunk_data, done_seen, stream_id
+                nonlocal provider_seen
 
                 event = raw_event.strip(b"\r\n")
                 if not event:
@@ -1298,7 +1324,7 @@ class BaseUpstreamProvider:
 
                 if isinstance(obj, dict):
                     usage_estimator.observe(obj)
-                    self._apply_provider_field(obj)
+                    provider_seen = self._stamp_streamed_provider(obj, provider_seen)
                     if obj.get("model"):
                         last_model_seen = str(obj.get("model"))
                     if requested_model:
@@ -1424,6 +1450,7 @@ class BaseUpstreamProvider:
                                 if legacy_completion
                                 else "chat.completion.chunk",
                                 "model": last_model_seen or "unknown",
+                                "provider": provider_seen,
                                 "choices": [],
                                 "usage": {
                                     "prompt_tokens": cost_data.get("input_tokens", 0),
@@ -1672,6 +1699,7 @@ class BaseUpstreamProvider:
 
         usage_finalized = False
         last_model_seen: str | None = None
+        provider_seen: str | None = None
 
         async def finalize_db_only() -> None:
             nonlocal usage_finalized
@@ -1735,7 +1763,7 @@ class BaseUpstreamProvider:
                 and preserves ``event:``/``id:`` fields attached to their data
                 line so Responses API event framing stays intact.
                 """
-                nonlocal last_model_seen, usage_chunk_data, done_seen
+                nonlocal last_model_seen, usage_chunk_data, done_seen, provider_seen
                 nonlocal reasoning_tokens
 
                 event = raw_event.strip(b"\r\n")
@@ -1771,7 +1799,7 @@ class BaseUpstreamProvider:
                 obj = json_codec.loads(data)
 
                 if isinstance(obj, dict):
-                    self._apply_provider_field(obj)
+                    provider_seen = self._stamp_streamed_provider(obj, provider_seen)
                     if obj.get("model"):
                         last_model_seen = str(obj.get("model"))
                     if requested_model:
@@ -1862,6 +1890,7 @@ class BaseUpstreamProvider:
                                 "type": "response.failed"
                                 if guarded_chunks.timed_out
                                 else "response.completed",
+                                "provider": provider_seen,
                                 "response": {
                                     "model": last_model_seen or "unknown",
                                     "usage": {
@@ -2245,6 +2274,7 @@ class BaseUpstreamProvider:
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
         usage_finalized = False
         last_model_seen: str | None = None
+        provider_seen: str | None = None
 
         async def finalize_without_usage() -> bytes | None:
             nonlocal usage_finalized
@@ -2294,7 +2324,7 @@ class BaseUpstreamProvider:
         async def stream_with_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
-            nonlocal usage_finalized, last_model_seen
+            nonlocal usage_finalized, last_model_seen, provider_seen
             stored_chunks: list[bytes] = []
             input_tokens: int = 0
             output_tokens: int = 0
@@ -2351,7 +2381,9 @@ class BaseUpstreamProvider:
                                             last_model_seen = str(msg.get("model"))
 
                                         provider_added = "provider" not in data
-                                        self._apply_provider_field(data)
+                                        provider_seen = self._stamp_streamed_provider(
+                                            data, provider_seen
+                                        )
 
                                         if requested_model:
                                             # Apply requested_model override
@@ -2469,6 +2501,7 @@ class BaseUpstreamProvider:
                             try:
                                 combined_data = {
                                     "model": last_model_seen or "unknown",
+                                    "provider": provider_seen,
                                     "usage": usage_data,
                                 }
                                 cost_data = await adjust_payment_for_tokens(
@@ -4249,6 +4282,7 @@ class BaseUpstreamProvider:
                 },
             )
 
+        provider_seen: str | None = None
         for i, line in enumerate(lines):
             if line.startswith("data: "):
                 try:
@@ -4256,7 +4290,9 @@ class BaseUpstreamProvider:
                     if not isinstance(data_json, dict):
                         continue
                     provider_before = data_json.get("provider")
-                    self._apply_provider_field(data_json)
+                    provider_seen = self._stamp_streamed_provider(
+                        data_json, provider_seen
+                    )
                     changed = data_json.get("provider") != provider_before
                     if cost_data and "usage" in data_json and data_json["usage"]:
                         _inject_cost_into_usage(data_json, cost_data)
@@ -5317,6 +5353,7 @@ class BaseUpstreamProvider:
                 },
             )
 
+        provider_seen: str | None = None
         for i, (fields, data) in enumerate(events):
             if data.strip() == "[DONE]":
                 continue
@@ -5327,7 +5364,7 @@ class BaseUpstreamProvider:
             if not isinstance(data_json, dict):
                 continue
             provider_before = data_json.get("provider")
-            self._apply_provider_field(data_json)
+            provider_seen = self._stamp_streamed_provider(data_json, provider_seen)
             changed = data_json.get("provider") != provider_before
             payload = _responses_usage_payload(data_json)
             if cost_data and isinstance(payload.get("usage"), dict):
