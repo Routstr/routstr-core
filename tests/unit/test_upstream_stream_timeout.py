@@ -213,7 +213,12 @@ async def test_responses_idle_timeout_does_not_emit_completed(
         result = await provider.handle_streaming_responses_completion(
             response, key, 100, reservation_snapshot=MagicMock()
         )
-        emitted = b"".join([chunk async for chunk in result.body_iterator])
+        emitted = b"".join(
+            [
+                chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+                async for chunk in result.body_iterator
+            ]
+        )
 
     assert b'"type": "response.failed"' in emitted
     assert b'"code": "UPSTREAM_TIMEOUT"' in emitted
