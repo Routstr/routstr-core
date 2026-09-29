@@ -23,6 +23,9 @@ from routstr.core.db import ApiKey  # noqa: E402
 from routstr.payment.cost_calculation import CostData  # noqa: E402
 from routstr.payment.models import Architecture, Model, Pricing  # noqa: E402
 from routstr.upstream.base import BaseUpstreamProvider  # noqa: E402
+from routstr.upstream.messages_dispatch import (  # noqa: E402
+    prune_blank_system_blocks,
+)
 from routstr.wallet import MintConnectionError, TokenConsumedError  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -111,6 +114,39 @@ def _make_request(request_id: str | None = "req-test") -> Any:
 # ---------------------------------------------------------------------------
 # Helper / coercion
 # ---------------------------------------------------------------------------
+
+
+def test_prune_blank_system_blocks_drops_blank_blocks() -> None:
+    body = {
+        "system": [
+            {"type": "text", "text": "  \n"},
+            {"type": "text", "text": "real prompt"},
+        ]
+    }
+    prune_blank_system_blocks(body)
+    assert body["system"] == [{"type": "text", "text": "real prompt"}]
+
+
+def test_prune_blank_system_blocks_drops_key_when_all_blank() -> None:
+    body = {"system": [{"type": "text", "text": "\n"}], "max_tokens": 8}
+    prune_blank_system_blocks(body)
+    assert body == {"max_tokens": 8}
+
+
+def test_prune_blank_system_blocks_handles_string_system() -> None:
+    blank = {"system": "   "}
+    prune_blank_system_blocks(blank)
+    assert blank == {}
+
+    kept = {"system": "be brief"}
+    prune_blank_system_blocks(kept)
+    assert kept == {"system": "be brief"}
+
+
+def test_prune_blank_system_blocks_keeps_non_text_blocks() -> None:
+    body = {"system": [{"type": "image", "source": {}}]}
+    prune_blank_system_blocks(body)
+    assert body["system"] == [{"type": "image", "source": {}}]
 
 
 def test_coerce_litellm_payload_handles_dict() -> None:
