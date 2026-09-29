@@ -2,12 +2,26 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from ..core.logging import get_logger
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider, _reported_provider
 from .model_paths import public_provider_url
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
+
+logger = get_logger(__name__)
+
+_UNKNOWN_SUB_PROVIDER = "unknown"
+
+
+def _carries_usage(payload: dict) -> bool:
+    """Whether a payload holds usage, at top level or in the Anthropic
+    ``message`` / Responses ``response`` envelope."""
+    return any(
+        isinstance(obj, dict) and isinstance(obj.get("usage"), dict)
+        for obj in (payload, payload.get("message"), payload.get("response"))
+    )
 
 
 class OpenRouterUpstreamProvider(BaseUpstreamProvider):
@@ -27,7 +41,8 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
 
         - Real upstream sub-provider (e.g. ``"GMICloud"``) -> ``"openrouter:GMICloud"``.
         - Missing sub-provider, or one that merely echoes ``"openrouter"`` ->
-          ``"unknown"``.
+          ``"openrouter:unknown"``: the router is still known even when the
+          serving provider is not (e.g. the Responses API never reports it).
         - Idempotent: re-stamping never produces ``"openrouter:openrouter:..."``;
           the ``openrouter:`` prefix appears at most once.
         """
@@ -40,9 +55,23 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
         prefix = f"{provider_type}:"
         while sub.lower().startswith(prefix.lower()):
             sub = sub[len(prefix) :].strip()
+        # Already stamped as unknown on an earlier pass; keep it without
+        # warning again.
+        if sub.lower() == _UNKNOWN_SUB_PROVIDER:
+            response_json["provider"] = f"{provider_type}:{_UNKNOWN_SUB_PROVIDER}"
+            return
         # No real sub-provider, or it just echoes our own router name.
         if not sub or sub.lower() == provider_type.lower():
-            response_json["provider"] = "unknown"
+            # Warn only on the billed payload, not on every stream chunk.
+            if _carries_usage(response_json):
+                logger.warning(
+                    "OpenRouter did not report the serving provider",
+                    extra={
+                        "model": response_json.get("model"),
+                        "response_id": response_json.get("id"),
+                    },
+                )
+            response_json["provider"] = f"{provider_type}:{_UNKNOWN_SUB_PROVIDER}"
             return
         response_json["provider"] = f"{provider_type}:{sub}"
 
