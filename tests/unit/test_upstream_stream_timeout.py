@@ -173,8 +173,9 @@ async def _run_proxy(
         ),
         patch.object(proxy_module, "revert_pay_for_request", revert_mock),
     ):
-        return await proxy_module.proxy(
-            _proxy_request(), "v1/chat/completions", session=MagicMock()
+        request = _proxy_request()
+        return await proxy_module._proxy(
+            request, "v1/chat/completions", MagicMock(), await request.body()
         )
 
 

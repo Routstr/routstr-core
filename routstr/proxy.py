@@ -3,7 +3,7 @@ import inspect
 import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlmodel import select
 
@@ -21,7 +21,6 @@ from .core.db import (
     ModelRow,
     UpstreamProviderRow,
     create_session,
-    get_session,
 )
 from .core.error_scope import (
     ERROR_SCOPE_UPSTREAM,
@@ -411,23 +410,90 @@ def _counts_toward_cooldown(status_code: int) -> bool:
     return status_code >= 500 or status_code == UPSTREAM_ERROR_STATUS
 
 
-@proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
-async def proxy(
-    request: Request, path: str, session: AsyncSession = Depends(get_session)
-) -> Response | StreamingResponse:
-    """Run proxy setup in a short request session, never across response streaming."""
+def _attribute_request(
+    request: Request, model_obj: Model, upstream: BaseUpstreamProvider
+) -> None:
+    """Attribute the completion log line to the candidate being tried.
+
+    Uses the provider's model id rather than the requested alias, so aliases
+    and cross-provider spellings resolve to the model that was forwarded.
+    """
+    if model_obj.id:
+        request.state.model = model_obj.id
+    request.state.provider = upstream.provider_type
+
+
+class _BodyLimitExceeded(Exception):
+    """The client body is larger than ``max_request_body_bytes``."""
+
+
+async def _read_bounded_body(request: Request) -> bytes | Response:
+    """Read the request body under a size and time bound.
+
+    Returns the body, or the error response to send instead. Both bounds run
+    before any authentication or DB work, so an oversized or slowly uploaded
+    body cannot occupy the request for longer than the timeout.
+    """
+    max_bytes = settings.max_request_body_bytes
+    timeout = settings.request_body_timeout_seconds
+
+    async def read() -> bytes:
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > max_bytes:
+            raise _BodyLimitExceeded
+        body = bytearray()
+        async for chunk in request.stream():
+            body += chunk
+            # Chunked uploads declare no length, so the cap is enforced here.
+            if len(body) > max_bytes:
+                raise _BodyLimitExceeded
+        return bytes(body)
+
     try:
-        return await _proxy(request, path, session)
-    finally:
-        # FastAPI yield dependencies normally close after the response body is
-        # sent. Close explicitly so a long stream cannot retain DB resources.
-        close_result = session.close()
-        if inspect.isawaitable(close_result):
-            await close_result
+        body = await asyncio.wait_for(read(), timeout)
+    except _BodyLimitExceeded:
+        error_type, message, status = (
+            "invalid_request",
+            f"Request body exceeds the {max_bytes} byte limit",
+            413,
+        )
+    except asyncio.TimeoutError:
+        error_type, message, status = (
+            "timeout",
+            f"Request body not received within {timeout} seconds",
+            408,
+        )
+    else:
+        # Draining the stream leaves Starlette unable to serve a second read.
+        # Cache the body so later readers (EHBP forwarding, upstream stream
+        # passthrough) get it instead of "Stream consumed".
+        request._body = body
+        return body
+    return create_error_response(error_type, message, status, request=request)
+
+
+@proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
+async def proxy(request: Request, path: str) -> Response | StreamingResponse:
+    """Run proxy setup in a short request session, never across response streaming."""
+    # Read the body before opening a session: a slow uploader must not hold a
+    # DB connection while its request trickles in.
+    request_body = await _read_bounded_body(request)
+    if isinstance(request_body, Response):
+        return request_body
+
+    async with create_session() as session:
+        try:
+            return await _proxy(request, path, session, request_body)
+        finally:
+            # Close explicitly so a long stream cannot retain DB resources
+            # while its response body is being sent.
+            close_result = session.close()
+            if inspect.isawaitable(close_result):
+                await close_result
 
 
 async def _proxy(
-    request: Request, path: str, session: AsyncSession
+    request: Request, path: str, session: AsyncSession, request_body: bytes
 ) -> Response | StreamingResponse:
     # Screen the path before any routing decision: reject ambiguous spellings,
     # then require a known API prefix so nothing unknown is forwarded with the
@@ -442,7 +508,6 @@ async def _proxy(
         return build_not_found_response(request, path)
 
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
-    request_body = await request.body()
 
     # EHBP (Encrypted HTTP Body Protocol) requests carry an Ehbp-Encapsulated-Key
     # header and a binary HPKE-sealed body. The proxy cannot parse the body to
@@ -466,6 +531,12 @@ async def _proxy(
         else:
             model_id = request_body_dict.get("model", "unknown")
 
+    # Set before routing so the completion log is attributed even when the
+    # request fails before an upstream is chosen (400/401/402). "unknown" is
+    # the no-model sentinel, not a model.
+    if isinstance(model_id, str) and model_id and model_id != "unknown":
+        request.state.model = model_id
+
     # Exact Tinfoil attestation GET routes don't map to models — forward
     # without model/cost/auth lookups. Do not prefix-match here: paths such as
     # /attestationjunk must continue through normal authentication.
@@ -488,6 +559,7 @@ async def _proxy(
 
         last_error_response = None
         for i, upstream in enumerate(selected_upstreams):
+            request.state.provider = upstream.provider_type
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
@@ -655,6 +727,7 @@ async def _proxy(
     if x_cashu := headers.get("x-cashu", None):
         last_error = None
         for i, (model_obj, upstream) in enumerate(candidates):
+            _attribute_request(request, model_obj, upstream)
             try:
                 if is_ehbp:
                     if not upstream.supports_ehbp:
@@ -734,7 +807,8 @@ async def _proxy(
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
 
         last_error_response = None
-        for i, (_, upstream) in enumerate(candidates):
+        for i, (model_obj, upstream) in enumerate(candidates):
+            _attribute_request(request, model_obj, upstream)
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
@@ -828,6 +902,9 @@ async def _proxy(
                 await _finish_read_transaction(session)
                 max_cost_for_model = candidate_max
 
+        # Only once the candidate is actually tried: a fallback skipped for its
+        # reservation must not take over the last attempted upstream's line.
+        _attribute_request(request, model_obj, upstream)
         retries_left = settings.upstream_5xx_retry_attempts
         retry_index = 0
         headers = upstream.prepare_headers(dict(request.headers))

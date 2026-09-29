@@ -29,6 +29,8 @@ from routstr.core.db import (
     reset_all_reserved_balances,
 )
 
+from .proxy_test_utils import mock_request_stream, patch_proxy_session
+
 
 def _make_engine() -> AsyncEngine:
     return create_async_engine(
@@ -387,7 +389,7 @@ async def test_proxy_reverts_reservation_on_client_disconnect() -> None:
     request = MagicMock()
     request.method = "POST"
     request.headers = {"authorization": "Bearer sk-cancelkey"}
-    request.body = AsyncMock(return_value=b'{"model": "test-model"}')
+    mock_request_stream(request, b'{"model": "test-model"}')
 
     upstream = MagicMock()
     upstream.provider_type = "test"
@@ -420,8 +422,9 @@ async def test_proxy_reverts_reservation_on_client_disconnect() -> None:
             AsyncMock(return_value=reservation_snapshot),
         ),
         patch.object(proxy_module, "revert_pay_for_request", revert_mock),
+        patch_proxy_session(session),
     ):
         with pytest.raises(asyncio.CancelledError):
-            await proxy_module.proxy(request, "v1/chat/completions", session=session)
+            await proxy_module.proxy(request, "v1/chat/completions")
 
     revert_mock.assert_awaited_once_with(key, session, 1000, reservation_snapshot)

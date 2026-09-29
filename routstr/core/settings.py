@@ -140,6 +140,14 @@ class Settings(BaseSettings):
     # widens what the provider credential can be spent against, so wildcards
     # and prefixes are not supported.
     proxy_extra_allowed_paths: str = Field(default="", env="PROXY_EXTRA_ALLOWED_PATHS")
+    # Bound the client request body: a slow or oversized upload otherwise blocks
+    # the proxy before authentication and holds server resources for its duration.
+    request_body_timeout_seconds: float = Field(
+        default=30.0, gt=0, env="REQUEST_BODY_TIMEOUT_SECONDS"
+    )
+    max_request_body_bytes: int = Field(
+        default=20 * 1024 * 1024, gt=0, env="MAX_REQUEST_BODY_BYTES"
+    )
     tor_proxy_url: str = Field(default="socks5://127.0.0.1:9050", env="TOR_PROXY_URL")
     providers_refresh_interval_seconds: int = Field(
         default=0, env="PROVIDERS_REFRESH_INTERVAL_SECONDS"
