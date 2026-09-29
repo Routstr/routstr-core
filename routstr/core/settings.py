@@ -212,6 +212,9 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     enable_console_logging: bool = Field(default=True, env="ENABLE_CONSOLE_LOGGING")
+    slow_request_warn_seconds: float = Field(
+        default=60.0, gt=0, env="SLOW_REQUEST_WARN_SECONDS"
+    )
 
     # Other
     chat_completions_api_version: str = Field(
