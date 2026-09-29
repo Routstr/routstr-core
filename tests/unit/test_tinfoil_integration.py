@@ -31,6 +31,8 @@ from routstr.upstream.tinfoil import (
 )
 from routstr.upstream.tinfoil_trailer import TrailerResponse
 
+from .proxy_test_utils import patch_proxy_session
+
 # ---------------------------------------------------------------------------
 # parse_tinfoil_usage_metrics
 # ---------------------------------------------------------------------------
@@ -1303,10 +1305,9 @@ async def test_bearer_key_config_422_releases_reservation_and_passes_through() -
             "routstr.upstream.ehbp.forward_with_trailer",
             AsyncMock(return_value=upstream_resp),
         ),
+        patch_proxy_session(session),
     ):
-        response = await proxy_module.proxy(
-            request, "v1/chat/completions", session=session
-        )
+        response = await proxy_module.proxy(request, "v1/chat/completions")
 
     # The reservation was released despite the early passthrough return.
     revert_mock.assert_awaited_once_with(key, session, 1_000, reservation_snapshot)
