@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from ..payment.models import Model, async_fetch_openrouter_models
-from .base import BaseUpstreamProvider
+from .base import BaseUpstreamProvider, _reported_provider
 from .model_paths import public_provider_url
 
 if TYPE_CHECKING:
@@ -35,8 +35,7 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
             return
         response_json["provider_url"] = public_provider_url(self.base_url)
         provider_type = (self.provider_type or "").strip()
-        existing = response_json.get("provider")
-        sub = existing.strip() if isinstance(existing, str) else ""
+        sub = _reported_provider(response_json) or ""
         # Strip any already-applied "openrouter:" prefixes (idempotency).
         prefix = f"{provider_type}:"
         while sub.lower().startswith(prefix.lower()):
