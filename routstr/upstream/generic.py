@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .base import BaseUpstreamProvider
+from .base import BaseUpstreamProvider, _reported_provider
 from .model_paths import public_provider_url
 from .pricing_resolver import (
     FallbackPricingResolver,
@@ -60,8 +60,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
         """
         if not isinstance(response_json, dict):
             return
-        existing = response_json.get("provider")
-        if not (isinstance(existing, str) and existing.strip()):
+        if _reported_provider(response_json) is None:
             response_json["provider"] = (
                 urlparse(public_provider_url(self.base_url)).hostname
                 or self.upstream_name
