@@ -36,6 +36,12 @@ from .reasoning_effort import adapt_messages_body_for_litellm
 
 logger = get_logger(__name__)
 
+# Sent in place of a blank upstream key. LiteLLM treats ``""`` as missing and
+# falls back to the provider's env var (e.g. ``OPENAI_API_KEY``), failing with
+# an AuthenticationError for keyless upstreams such as self-hosted
+# OpenAI-compatible servers, which the chat path reaches without auth.
+KEYLESS_UPSTREAM_API_KEY = "no-key"
+
 # Anthropic-Messages-only fields that don't translate to OpenAI
 # Chat Completions. ``litellm.drop_params`` only filters *known*
 # unsupported params; these newer/extension fields get passed through
@@ -519,7 +525,7 @@ async def dispatch_anthropic_messages(
     kwargs: dict = {
         "model": litellm_model,
         "api_base": base_url,
-        "api_key": api_key,
+        "api_key": api_key or KEYLESS_UPSTREAM_API_KEY,
         "stream": upstream_stream,
         **body,
     }
