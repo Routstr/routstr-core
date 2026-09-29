@@ -84,6 +84,34 @@ ALLOWED_MESSAGES_REQUEST_FIELDS: frozenset[str] = frozenset(
 )
 
 
+def prune_blank_system_blocks(body: dict) -> None:
+    """Drop whitespace-only ``system`` text.
+
+    Anthropic accepts a blank system prompt; OpenAI-compatible upstreams
+    reject it with ``text content blocks must contain non-whitespace text``.
+    """
+    system = body.get("system")
+    if isinstance(system, str):
+        if not system.strip():
+            body.pop("system", None)
+        return
+    if not isinstance(system, list):
+        return
+    kept = [
+        block
+        for block in system
+        if not (
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and not str(block.get("text") or "").strip()
+        )
+    ]
+    if kept:
+        body["system"] = kept
+    else:
+        body.pop("system", None)
+
+
 def coerce_litellm_payload(payload: object) -> dict:
     """Convert a litellm event into a plain dict.
 
@@ -510,6 +538,8 @@ async def dispatch_anthropic_messages(
             extra={"dropped_keys": dropped},
         )
     body = {k: v for k, v in body.items() if k in ALLOWED_MESSAGES_REQUEST_FIELDS}
+
+    prune_blank_system_blocks(body)
 
     model_suffix = adapt_request(body) if adapt_request else ""
 
