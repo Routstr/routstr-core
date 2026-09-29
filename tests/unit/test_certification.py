@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from routstr.upstream.certification import (
     STATUS_FAIL,
     STATUS_OK,
@@ -606,3 +608,122 @@ class TestBuildChecklist:
         goals = {item["goal"]: item["status"] for item in checklist}
         assert goals["heartbeat"] == STATUS_FAIL
         assert goals["usage_data"] == STATUS_WARN
+
+
+# --- engine-consistent pricing ----------------------------------------------
+
+
+class TestStandaloneCostRow:
+    """The standalone runner prices a real completion through the engine."""
+
+    @staticmethod
+    def _client() -> Any:
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/models"):
+                return httpx.Response(200, json={"data": [{"id": "cert-model"}]})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion",
+                    "model": "cert-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                },
+            )
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    @staticmethod
+    def _cost_row(result: dict[str, Any]) -> dict[str, Any]:
+        return next(r for r in result["rows"] if r["id"] == "cost.prompt_completion")
+
+    async def test_override_price_reaches_the_engine(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from routstr.payment import price as price_module
+        from routstr.upstream.certification import certify_upstream_url
+
+        monkeypatch.setattr(price_module, "SATS_USD_PRICE", None)
+        monkeypatch.setattr(price_module, "BTC_USD_PRICE", None)
+
+        async with self._client() as client:
+            result = await certify_upstream_url(
+                "https://upstream.example/v1",
+                model_id="cert-model",
+                sats_usd_price=5e-7,
+                prompt_price=1e-6,
+                completion_price=2e-6,
+                client=client,
+                check_cache=False,
+            )
+
+        row = self._cost_row(result)
+        assert row["status"] == STATUS_OK, row["detail"]
+
+    async def test_no_price_available_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from routstr.payment import price as price_module
+        from routstr.upstream.certification import certify_upstream_url
+
+        async def offline() -> None:
+            raise RuntimeError("exchange feed unreachable")
+
+        monkeypatch.setattr(price_module, "SATS_USD_PRICE", None)
+        monkeypatch.setattr(price_module, "BTC_USD_PRICE", None)
+        monkeypatch.setattr(price_module, "_update_prices", offline)
+
+        async with self._client() as client:
+            result = await certify_upstream_url(
+                "https://upstream.example/v1",
+                model_id="cert-model",
+                prompt_price=1e-6,
+                completion_price=2e-6,
+                client=client,
+                check_cache=False,
+            )
+
+        row = self._cost_row(result)
+        assert row["status"] == STATUS_WARN, row["detail"]
+
+
+class TestFixedPricingCostRow:
+    async def test_fixed_pricing_node_certifies_ok(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from routstr.core.settings import settings
+        from routstr.payment import price as price_module
+        from routstr.payment.cost_calculation import calculate_cost
+
+        monkeypatch.setattr(settings, "fixed_pricing", True)
+        monkeypatch.setattr(settings, "fixed_per_1k_input_tokens", 3)
+        monkeypatch.setattr(settings, "fixed_per_1k_output_tokens", 7)
+        monkeypatch.setattr(price_module, "SATS_USD_PRICE", 0.0005)
+
+        model = TestCostPromptCompletion()._model()
+        payload = {
+            "model": "test-model",
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 500},
+        }
+        cost_data = await calculate_cost(
+            payload, 1_000_000, model_obj=model, provider_fee=1.0
+        )
+
+        row = cost_prompt_completion_row(
+            model=model,
+            probe=_probe(chat_status=200, chat_payload=payload),
+            cost_data=cost_data,
+            provider_fee=1.0,
+            sats_to_usd=0.0005,
+        )
+        assert row["status"] == STATUS_OK, row["detail"]
+        assert row["evidence"]["expected_total_msats"] == 3000 + 3500

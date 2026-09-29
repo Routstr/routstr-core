@@ -515,6 +515,42 @@ def _reported_usd_cost(payload: dict[str, Any]) -> float:
     return 0.0
 
 
+def _fixed_token_pricing_active() -> bool:
+    """Whether node-wide fixed per-1k pricing overrides the model's rates."""
+    from ..core.settings import settings
+
+    return bool(
+        settings.fixed_pricing
+        and (settings.fixed_per_1k_input_tokens or settings.fixed_per_1k_output_tokens)
+    )
+
+
+def _token_rates(sats_pricing: Any) -> tuple[float, float, float, float]:
+    """The msats-per-1k rates the engine bills tokens at.
+
+    Mirrors ``_get_pricing_rates``'s selection: node-wide fixed pricing
+    overrides the model's own rates, with cache tokens at the input rate.
+
+    Returns ``(input, output, cache_read, cache_write)``.
+    """
+    from ..core.settings import settings
+
+    if _fixed_token_pricing_active():
+        fixed_input = float(settings.fixed_per_1k_input_tokens) * 1000.0
+        fixed_output = float(settings.fixed_per_1k_output_tokens) * 1000.0
+        return fixed_input, fixed_output, fixed_input, fixed_input
+
+    input_rate = float(sats_pricing.prompt) * 1_000_000.0
+    output_rate = float(sats_pricing.completion) * 1_000_000.0
+    cache_read_rate = (
+        float(sats_pricing.input_cache_read or 0.0) * 1_000_000.0 or input_rate
+    )
+    cache_write_rate = (
+        float(sats_pricing.input_cache_write or 0.0) * 1_000_000.0 or input_rate
+    )
+    return input_rate, output_rate, cache_read_rate, cache_write_rate
+
+
 def _expected_token_msats(sats_pricing: Any, usage: Any) -> tuple[int, int, int]:
     """Re-derive the token-priced charge independently of the engine.
 
@@ -525,18 +561,10 @@ def _expected_token_msats(sats_pricing: Any, usage: Any) -> tuple[int, int, int]
     Returns ``(total_msats, input_msats, output_msats)``. Raises ``ValueError``
     on a non-finite rate, which would otherwise crash ``math.ceil`` downstream.
     """
-    input_rate = float(sats_pricing.prompt) * 1_000_000.0
-    output_rate = float(sats_pricing.completion) * 1_000_000.0
-    cache_read_rate = (
-        float(sats_pricing.input_cache_read or 0.0) * 1_000_000.0 or input_rate
-    )
-    cache_write_rate = (
-        float(sats_pricing.input_cache_write or 0.0) * 1_000_000.0 or input_rate
-    )
-
-    rates = (input_rate, output_rate, cache_read_rate, cache_write_rate)
+    rates = _token_rates(sats_pricing)
     if not all(math.isfinite(rate) for rate in rates):
         raise ValueError(f"non-finite pricing rate in {rates!r}")
+    input_rate, output_rate, cache_read_rate, cache_write_rate = rates
 
     calc_input = round(usage.input_tokens / 1000 * input_rate, 3)
     calc_output = round(usage.output_tokens / 1000 * output_rate, 3)
@@ -587,6 +615,18 @@ def cost_prompt_completion_row(
         "sats_usd_price": sats_to_usd,
     }
 
+    # Checked before the engine's error: with no price the engine cannot
+    # succeed, and that is a gap in the run's inputs, not a node fault.
+    if not pricing_known:
+        return certification_row(
+            "cost.prompt_completion",
+            STATUS_WARN,
+            "Prompt and completion cost calculated",
+            "No pricing is known for this model, so the charge cannot be "
+            "verified. Configure the model on the node, or pass explicit "
+            "prices, to certify this row.",
+            evidence,
+        )
     if isinstance(cost_data, CostDataError):
         evidence["error"] = cost_data.message
         return certification_row(
@@ -611,16 +651,6 @@ def cost_prompt_completion_row(
             "Prompt and completion cost calculated",
             "This model has no computed sats pricing, so there is nothing to "
             "verify the charge against.",
-            evidence,
-        )
-    if not pricing_known:
-        return certification_row(
-            "cost.prompt_completion",
-            STATUS_WARN,
-            "Prompt and completion cost calculated",
-            "No pricing is known for this model, so the charge cannot be "
-            "verified. Configure the model on the node, or pass explicit "
-            "prices, to certify this row.",
             evidence,
         )
 
@@ -865,15 +895,24 @@ async def _resolve_sats_usd_price(override: float | None) -> float | None:
     feed once, and return ``None`` rather than raising so the cost row can
     degrade to a ``warn`` and the rest of the report still prints.
     """
-    if override is not None:
-        return override if math.isfinite(override) and override > 0 else None
-
     from ..payment import price as price_module
+
+    # The cost engine reads the module globals rather than this return value,
+    # so a resolved price is published there too or every token-priced cost
+    # row fails on "SATS price not initialized".
+    if override is not None:
+        if not (math.isfinite(override) and override > 0):
+            return None
+        price_module.SATS_USD_PRICE = override
+        price_module.BTC_USD_PRICE = override * price_module.SATS_PER_BTC
+        return override
 
     if price_module.SATS_USD_PRICE:
         return float(price_module.SATS_USD_PRICE)
     if price_module.BTC_USD_PRICE:
-        return float(price_module.BTC_USD_PRICE) / price_module.SATS_PER_BTC
+        sats_price = float(price_module.BTC_USD_PRICE) / price_module.SATS_PER_BTC
+        price_module.SATS_USD_PRICE = sats_price
+        return sats_price
 
     try:
         await price_module._update_prices()

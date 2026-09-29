@@ -32,7 +32,9 @@ from .certification import (
     STATUS_WARN,
     _expected_token_msats,
     _expected_usd_msats,
+    _fixed_token_pricing_active,
     _reported_usd_cost,
+    _token_rates,
     certification_row,
     safe_row,
 )
@@ -341,8 +343,7 @@ def cache_billing_row(
         )
 
     pricing = model.sats_pricing
-    cache_read_rate = float(pricing.input_cache_read or 0.0)
-    input_rate = float(pricing.prompt)
+    input_rate, _, cache_read_rate, _ = _token_rates(pricing)
     full_usage = NormalizedUsage(
         input_tokens=usage.input_tokens
         + usage.cache_read_tokens
@@ -367,8 +368,8 @@ def cache_billing_row(
     evidence.update(
         {
             "usage": usage.dict(),
-            "cache_read_rate_sats": cache_read_rate,
-            "input_rate_sats": input_rate,
+            "cache_read_rate_msats_per_1k": cache_read_rate,
+            "input_rate_msats_per_1k": input_rate,
             "actual_total_msats": actual_total,
             "expected_total_msats": expected_total,
             "full_price_total_msats": full_total,
@@ -396,13 +397,18 @@ def cache_billing_row(
             evidence,
         )
     if cache_read_rate <= 0.0 or cache_read_rate >= input_rate:
+        reason = (
+            "the node uses fixed per-1k pricing"
+            if _fixed_token_pricing_active()
+            else "no discounted cache-read rate is configured"
+        )
         return certification_row(
             ROW_BILLING,
             STATUS_WARN,
             TITLE_BILLING,
             f"Cached reads are billed at the full input rate ({actual_total} "
-            "msats) because no discounted cache-read rate is configured; "
-            "clients pay more than the upstream charges.",
+            f"msats) because {reason}; clients pay more than the upstream "
+            "charges.",
             evidence,
         )
     return certification_row(

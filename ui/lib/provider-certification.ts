@@ -1,3 +1,4 @@
+import { getApiErrorMessage } from '@/lib/api/errors';
 import type {
   CertificationPath,
   CertificationStatus,
@@ -113,4 +114,4 @@ export const getCertificationResultStatus = (
 };
 
 export const getErrorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : 'Certification request failed';
+  getApiErrorMessage(error, 'Certification request failed');

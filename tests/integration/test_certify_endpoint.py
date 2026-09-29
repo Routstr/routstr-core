@@ -399,7 +399,7 @@ async def test_certify_uses_selected_path_pricing_for_margin(
 
     respx.post(f"{base_url}/chat/completions").mock(side_effect=_respond)
     sats_usd = 0.0008616302499999999
-    with patch("routstr.payment.price.sats_usd_price", return_value=sats_usd):
+    with patch("routstr.payment.price.SATS_USD_PRICE", sats_usd):
         resp = await integration_client.post(
             f"/admin/api/upstream-providers/{provider_id}/certify",
             headers=_admin_headers(),
@@ -414,6 +414,24 @@ async def test_certify_uses_selected_path_pricing_for_margin(
     ] == [(3, 3), (269, 289), (26, 15)]
     assert "289 < 269" not in margin["detail"]
     assert "15 < 26" in margin["detail"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_certify_returns_503_when_price_uninitialized(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    provider_id = await _seed_and_init(integration_session, integration_client)
+
+    with patch("routstr.payment.price.SATS_USD_PRICE", None):
+        resp = await integration_client.post(
+            f"/admin/api/upstream-providers/{provider_id}/certify",
+            headers=_admin_headers(),
+            json={},
+        )
+
+    assert resp.status_code == 503, resp.text
+    assert "sats/USD price is not initialized" in resp.json()["detail"]
 
 
 @pytest.mark.integration

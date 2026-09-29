@@ -34,33 +34,34 @@ export async function runProviderCertification({
       modelTotal: modelRuns.length,
       pathCount: run.targets.length,
     });
-    const batch = await Promise.all(
-      run.targets.map(async (target): Promise<ModelCertificationResult> => {
-        const resultKey = `${providerId}::${run.modelId}::${target.path ?? 'default'}`;
-        try {
-          const report = await AdminService.certifyProvider(providerId, {
-            model_id: run.modelId,
-            model_path: target.path,
-            check_cache: includeCache,
-          });
-          return {
-            resultKey,
-            providerId,
-            modelId: run.modelId,
-            pathLabel: target.label,
-            report,
-          };
-        } catch (error) {
-          return {
-            resultKey,
-            providerId,
-            modelId: run.modelId,
-            pathLabel: target.label,
-            error: getErrorMessage(error),
-          };
-        }
-      })
-    );
+    // Sequential on purpose: each run spends real upstream credits, and
+    // parallel paths multiply that spend and the admin request load.
+    const batch: ModelCertificationResult[] = [];
+    for (const target of run.targets) {
+      const resultKey = `${providerId}::${run.modelId}::${target.path ?? 'default'}`;
+      try {
+        const report = await AdminService.certifyProvider(providerId, {
+          model_id: run.modelId,
+          model_path: target.path,
+          check_cache: includeCache,
+        });
+        batch.push({
+          resultKey,
+          providerId,
+          modelId: run.modelId,
+          pathLabel: target.label,
+          report,
+        });
+      } catch (error) {
+        batch.push({
+          resultKey,
+          providerId,
+          modelId: run.modelId,
+          pathLabel: target.label,
+          error: getErrorMessage(error),
+        });
+      }
+    }
     completed.push(...batch);
     onResults?.([...completed]);
   }

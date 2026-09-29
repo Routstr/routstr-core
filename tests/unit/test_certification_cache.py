@@ -463,6 +463,32 @@ class TestErrorBranches:
         assert row["status"] == STATUS_FAIL
         assert "error" in row["evidence"]
 
+    @pytest.mark.asyncio
+    async def test_billing_warns_under_fixed_pricing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from routstr.core.settings import settings
+        from routstr.payment.cost_calculation import calculate_cost
+
+        fixed_in, fixed_out = 2.0, 3.0
+        monkeypatch.setattr(settings, "fixed_pricing", True)
+        monkeypatch.setattr(settings, "fixed_per_1k_input_tokens", fixed_in)
+        monkeypatch.setattr(settings, "fixed_per_1k_output_tokens", fixed_out)
+        monkeypatch.setattr("routstr.payment.price.SATS_USD_PRICE", SATS_USD)
+
+        model = _model(cache_read=1.4e-8)
+        payload = _payload(CACHED)
+        cost = await calculate_cost(payload, 10**9, model_obj=model, provider_fee=1.0)
+        row = cache_billing_row(
+            model=model,
+            probe=_probe([_payload(UNCACHED), payload]),
+            cost_data=cost,
+        )
+        assert row["status"] == STATUS_WARN, row
+        assert "fixed per-1k pricing" in row["detail"]
+        assert row["evidence"]["input_rate_msats_per_1k"] == fixed_in * 1000
+        assert row["evidence"]["cache_read_rate_msats_per_1k"] == fixed_in * 1000
+
     def test_margin_fails_on_zero_sats_price(self) -> None:
         payload = _payload({"prompt_tokens": 5, "completion_tokens": 1, "cost": 9e-7})
         row = cost_margin_row(

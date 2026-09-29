@@ -1549,7 +1549,6 @@ async def certify_upstream_provider(
     :mod:`routstr.upstream.certification`, and a ``checklist`` of the
     operator-facing goals.
     """
-    from ..payment.price import sats_usd_price
     from ..upstream.certification import (
         MAX_PROBE_TIMEOUT_SECONDS,
         PROBE_TIMEOUT_SECONDS,
@@ -1707,7 +1706,16 @@ async def certify_upstream_provider(
             *skipped_cache_rows("Skipped — no model to probe."),
         ]
     else:
-        sats_to_usd = sats_usd_price()
+        from ..payment import price as price_module
+
+        # Never fetch the price inline: the lifespan task owns it, and a fetch
+        # here could block the request for the exchange timeout.
+        sats_to_usd = price_module.SATS_USD_PRICE
+        if not sats_to_usd:
+            raise HTTPException(
+                status_code=503,
+                detail="sats/USD price is not initialized yet; retry shortly",
+            )
         if selected_path is not None:
             from ..upstream.model_paths import apply_model_path_pricing
 
@@ -1717,8 +1725,8 @@ async def certify_upstream_provider(
                 provider.provider_fee,
                 sats_to_usd,
             )
-        # Clamp the admin-supplied timeout so a probe cannot hold the request
-        # open indefinitely.
+        # Clamp the admin-supplied timeout per upstream call. The run makes up
+        # to five calls, so the request can stay open for up to five times it.
         requested = (
             payload.timeout_seconds
             if payload.timeout_seconds is not None
