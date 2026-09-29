@@ -2612,6 +2612,11 @@ class BaseUpstreamProvider:
     ) -> dict:
         return await messages_dispatch.aggregate_anthropic_events_to_message(iterator)
 
+    def transform_messages_stream(
+        self, stream: AsyncIterator[Any]
+    ) -> AsyncIterator[Any]:
+        return stream
+
     def adapt_messages_request(self, body: dict, model_obj: Model) -> str:
         """Rewrite an allowlisted /v1/messages body for this upstream.
 
@@ -2637,6 +2642,7 @@ class BaseUpstreamProvider:
             provider_prefix=self.get_litellm_provider_prefix(),
             transform_model_name=self.transform_model_name,
             adapt_request=lambda body: self.adapt_messages_request(body, model_obj),
+            transform_stream=self.transform_messages_stream,
             log_extra=log_extra,
         )
 
