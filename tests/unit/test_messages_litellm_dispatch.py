@@ -1755,3 +1755,31 @@ async def test_x_cashu_zero_value_rejected_not_forwarded(
     assert body["error"]["code"] == "cashu_token_zero_value"
     # Spent-to-zero token must not be echoed back for retry.
     assert "X-Cashu" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_dispatch_passes_placeholder_key_for_keyless_upstream() -> None:
+    """A blank upstream key must not reach litellm, which would fall back to
+    OPENAI_API_KEY and fail with an AuthenticationError."""
+    provider = BaseUpstreamProvider(base_url="http://localhost:8000/v1", api_key="")
+    captured_kwargs: dict[str, Any] = {}
+
+    async def fake_acreate(**kwargs: Any) -> AsyncIterator[dict]:
+        captured_kwargs.update(kwargs)
+
+        async def no_events() -> AsyncIterator[dict]:
+            return
+            yield
+
+        return no_events()
+
+    with patch(
+        "litellm.anthropic.messages.acreate",
+        new=AsyncMock(side_effect=fake_acreate),
+    ):
+        await provider._dispatch_anthropic_messages(
+            request_body=_anthropic_request_body(stream=True),
+            model_obj=_make_model(),
+        )
+
+    assert captured_kwargs["api_key"] == "no-key"
