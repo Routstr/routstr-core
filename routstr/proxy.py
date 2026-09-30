@@ -1015,7 +1015,7 @@ async def _proxy(
                         already_stripped.add(bad_param)
                         logger.warning(
                             "Upstream %s rejected param '%s' for model=%s; "
-                            "stripping and retrying same upstream",
+                            "correcting and retrying same upstream",
                             upstream.provider_type,
                             bad_param,
                             model_id,
