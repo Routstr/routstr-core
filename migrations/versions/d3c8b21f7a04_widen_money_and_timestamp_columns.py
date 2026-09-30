@@ -1,7 +1,7 @@
 """widen money and timestamp columns to 64-bit
 
 Revision ID: d3c8b21f7a04
-Revises: e4c7a1b9d520
+Revises: a73d19b6c204
 Create Date: 2026-09-29 00:00:00.000000
 
 Balances are millisatoshis and every clock column is a unix timestamp, so both
@@ -24,7 +24,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "d3c8b21f7a04"
-down_revision = "e4c7a1b9d520"
+down_revision = "a73d19b6c204"
 branch_labels = None
 depends_on = None
 
@@ -60,6 +60,8 @@ WIDENED_COLUMNS: tuple[tuple[str, str, bool], ...] = (
     ("refunds", "updated_at", False),
     ("reservation_releases", "reserved_msats", False),
     ("reservation_releases", "created_at", False),
+    ("reservation_releases", "started_at", True),
+    ("reservation_releases", "expires_at", True),
     ("routstr_fees", "accumulated_msats", False),
     ("routstr_fees", "total_paid_msats", False),
     ("routstr_fees", "payout_in_progress_msats", False),

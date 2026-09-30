@@ -203,7 +203,10 @@ async def _transition_stale_reservation(
         update(ReservationRelease)
         .where(col(ReservationRelease.id) == reservation_id)
         .where(col(ReservationRelease.status) == "active")
-        .where(col(ReservationRelease.created_at) < cutoff)
+        .where(
+            (col(ReservationRelease.created_at) < cutoff)
+            | (col(ReservationRelease.expires_at) <= int(time.time()))
+        )
         .values(status="released")
     )
     return bool(transition.rowcount == 1)
@@ -250,7 +253,10 @@ async def release_stale_reservations(
     query = (
         select(ReservationRelease)
         .where(col(ReservationRelease.status) == "active")
-        .where(col(ReservationRelease.created_at) < cutoff)
+        .where(
+            (col(ReservationRelease.created_at) < cutoff)
+            | (col(ReservationRelease.expires_at) <= int(time.time()))
+        )
     )
     if key_hash is not None:
         query = query.where(
@@ -829,6 +835,8 @@ class ReservationRelease(SQLModel, table=True):  # type: ignore
     key_hash: str = Field(index=True)
     billing_key_hash: str = Field(index=True)
     reserved_msats: int = Field(sa_type=Msats)
+    started_at: int | None = Field(default=None, sa_type=UnixTimestamp)
+    expires_at: int | None = Field(default=None, index=True, sa_type=UnixTimestamp)
     status: str = Field(default="active")
     created_at: int = Field(
         default_factory=lambda: int(time.time()), sa_type=UnixTimestamp

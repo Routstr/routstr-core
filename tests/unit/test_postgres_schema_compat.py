@@ -133,6 +133,8 @@ def test_money_columns_are_64_bit_on_postgresql(
         ("lightning_invoices", "paid_at"),
         ("refunds", "claimed_at"),
         ("reservation_releases", "created_at"),
+        ("reservation_releases", "expires_at"),
+        ("reservation_releases", "started_at"),
         ("routstr_fees", "payout_started_at"),
     ],
 )
