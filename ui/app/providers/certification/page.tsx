@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import {
@@ -58,6 +58,7 @@ import {
   countCertificationTargets,
   emptyCertificationSetup,
   getModelsNeedingPath,
+  getSelectedCertificationResults,
 } from '@/lib/provider-certification';
 import type {
   CertificationProgress,
@@ -86,6 +87,14 @@ export default function MultiProviderCertificationPage() {
     Record<number, CertificationProgress | null>
   >({});
   const [runningProviderIds, setRunningProviderIds] = useState<number[]>([]);
+  const activeRuns = useRef(new Set<number>());
+  const generation = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      generation.current += 1;
+    };
+  }, []);
 
   const providersQuery = useQuery({
     queryKey: ['upstream-providers'],
@@ -180,6 +189,10 @@ export default function MultiProviderCertificationPage() {
   };
 
   const runOneProvider = async (providerId: number) => {
+    if (activeRuns.current.has(providerId)) return;
+    activeRuns.current.add(providerId);
+    const runGeneration = generation.current;
+    const shouldContinue = () => generation.current === runGeneration;
     const setup = setups[providerId] ?? emptyCertificationSetup();
     const modelRuns = providerRuns(providerId);
     setResultsByProvider((current) => ({ ...current, [providerId]: [] }));
@@ -192,25 +205,35 @@ export default function MultiProviderCertificationPage() {
         providerId,
         modelRuns,
         includeCache: setup.checkCache,
-        onProgress: (progress) =>
-          setProgressByProvider((current) => ({
-            ...current,
-            [providerId]: progress,
-          })),
-        onResults: (results) =>
-          setResultsByProvider((current) => ({
-            ...current,
-            [providerId]: results,
-          })),
+        shouldContinue,
+        onProgress: (progress) => {
+          if (shouldContinue()) {
+            setProgressByProvider((current) => ({
+              ...current,
+              [providerId]: progress,
+            }));
+          }
+        },
+        onResults: (results) => {
+          if (shouldContinue()) {
+            setResultsByProvider((current) => ({
+              ...current,
+              [providerId]: results,
+            }));
+          }
+        },
       });
     } finally {
-      setProgressByProvider((current) => ({
-        ...current,
-        [providerId]: null,
-      }));
-      setRunningProviderIds((current) =>
-        current.filter((id) => id !== providerId)
-      );
+      activeRuns.current.delete(providerId);
+      if (shouldContinue()) {
+        setProgressByProvider((current) => ({
+          ...current,
+          [providerId]: null,
+        }));
+        setRunningProviderIds((current) =>
+          current.filter((id) => id !== providerId)
+        );
+      }
     }
   };
 
@@ -241,7 +264,10 @@ export default function MultiProviderCertificationPage() {
   );
   const allReady =
     selectedProviderIds.length > 0 && incompleteProviders.length === 0;
-  const allResults = Object.values(resultsByProvider).flat();
+  const allResults = getSelectedCertificationResults(
+    selectedProviderIds,
+    resultsByProvider
+  );
   const aggregateSummary = summarizeCertificationResults(allResults);
   const pendingRoutes = Math.max(totalRoutes - allResults.length, 0);
 

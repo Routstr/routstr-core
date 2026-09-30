@@ -13,6 +13,7 @@ with ``httpx`` and never enter the billing path.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -130,10 +131,12 @@ async def _post_completion(
     url: str,
     body: dict[str, Any],
     headers: dict[str, str],
+    timeout: float,
 ) -> tuple[int | None, dict[str, Any] | None, str | None, float]:
     started = time.monotonic()
     try:
-        response = await client.post(url, json=body, headers=headers)
+        async with asyncio.timeout(timeout):
+            response = await client.post(url, json=body, headers=headers)
     except Exception as exc:  # noqa: BLE001 - transport failure is a row status
         latency = round((time.monotonic() - started) * 1000, 2)
         return None, None, f"{type(exc).__name__}: {exc}", latency
@@ -180,7 +183,8 @@ async def probe_cache(
 
     The first attempt marks the prefix with an Anthropic-style
     ``cache_control`` part. Upstreams that reject the part get a plain string
-    retry, and the second call mirrors whichever format succeeded.
+    retry on HTTP 400/422, and the second call mirrors whichever format
+    succeeded. Each call's elapsed deadline includes the response body.
     """
     base = base_url.rstrip("/")
     result = CacheProbeResult(
@@ -200,14 +204,16 @@ async def probe_cache(
             result.chat_url,
             _request_body(model_id, prefix, "cache_control", endpoint_tag),
             headers,
+            timeout,
         )
-        if not _is_2xx(first[0]) and first[0] is not None:
+        if first[0] in (400, 422):
             result.request_format = "plain"
             first = await _post_completion(
                 client,
                 result.chat_url,
                 _request_body(model_id, prefix, "plain", endpoint_tag),
                 headers,
+                timeout,
             )
         _record(result, first)
         if not _is_2xx(first[0]):
@@ -217,6 +223,7 @@ async def probe_cache(
             result.chat_url,
             _request_body(model_id, prefix, result.request_format, endpoint_tag),
             headers,
+            timeout,
         )
         _record(result, second)
     finally:
@@ -282,7 +289,17 @@ def cache_reported_row(probe: CacheProbeResult) -> dict[str, Any]:
             evidence,
         )
 
-    raw_keys = _raw_cache_keys(payload.get("usage"))
+    known_write_fields = {
+        "cache_creation_input_tokens",
+        "prompt_tokens_details.cache_creation_tokens",
+        "prompt_tokens_details.cache_write_tokens",
+        "input_tokens_details.cache_write_tokens",
+    }
+    raw_keys = [
+        key
+        for key in _raw_cache_keys(payload.get("usage"))
+        if key not in known_write_fields
+    ]
     if raw_keys:
         evidence["unrecognised_cache_fields"] = raw_keys
         return certification_row(

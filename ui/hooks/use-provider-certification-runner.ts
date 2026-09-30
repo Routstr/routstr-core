@@ -14,6 +14,7 @@ interface RunProviderCertificationOptions {
   providerId: number;
   modelRuns: ModelRun[];
   includeCache: boolean;
+  shouldContinue?: () => boolean;
   onProgress?: (progress: CertificationProgress | null) => void;
   onResults?: (results: ModelCertificationResult[]) => void;
 }
@@ -22,12 +23,14 @@ export async function runProviderCertification({
   providerId,
   modelRuns,
   includeCache,
+  shouldContinue = () => true,
   onProgress,
   onResults,
 }: RunProviderCertificationOptions): Promise<ModelCertificationResult[]> {
   const completed: ModelCertificationResult[] = [];
 
   for (const [index, run] of modelRuns.entries()) {
+    if (!shouldContinue()) break;
     onProgress?.({
       modelId: run.modelId,
       modelIndex: index + 1,
@@ -38,6 +41,7 @@ export async function runProviderCertification({
     // parallel paths multiply that spend and the admin request load.
     const batch: ModelCertificationResult[] = [];
     for (const target of run.targets) {
+      if (!shouldContinue()) break;
       const resultKey = `${providerId}::${run.modelId}::${target.path ?? 'default'}`;
       try {
         const report = await AdminService.certifyProvider(providerId, {
@@ -62,11 +66,12 @@ export async function runProviderCertification({
         });
       }
     }
+    if (!shouldContinue()) break;
     completed.push(...batch);
     onResults?.([...completed]);
   }
 
-  onProgress?.(null);
+  if (shouldContinue()) onProgress?.(null);
   return completed;
 }
 
@@ -76,6 +81,7 @@ export function useProviderCertificationRunner(providerId: number) {
   const [isPending, setIsPending] = useState(false);
   const generation = useRef(0);
   const mounted = useRef(true);
+  const active = useRef(false);
 
   useEffect(() => {
     mounted.current = true;
@@ -89,11 +95,14 @@ export function useProviderCertificationRunner(providerId: number) {
     generation.current += 1;
     setResults([]);
     setProgress(null);
-    setIsPending(false);
+    // Already dispatched probes may still spend credit; keep them pending.
+    setIsPending(active.current);
   }, []);
 
   const run = useCallback(
     async (modelRuns: ModelRun[], includeCache: boolean) => {
+      if (active.current || !mounted.current) return [];
+      active.current = true;
       const runGeneration = generation.current + 1;
       generation.current = runGeneration;
       setResults([]);
@@ -104,6 +113,8 @@ export function useProviderCertificationRunner(providerId: number) {
           providerId,
           modelRuns,
           includeCache,
+          shouldContinue: () =>
+            mounted.current && generation.current === runGeneration,
           onProgress: (nextProgress) => {
             if (mounted.current && generation.current === runGeneration) {
               setProgress(nextProgress);
@@ -116,7 +127,8 @@ export function useProviderCertificationRunner(providerId: number) {
           },
         });
       } finally {
-        if (mounted.current && generation.current === runGeneration) {
+        active.current = false;
+        if (mounted.current) {
           setProgress(null);
           setIsPending(false);
         }

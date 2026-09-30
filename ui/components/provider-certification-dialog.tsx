@@ -80,7 +80,13 @@ export function ProviderCertificationDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) reset();
+        onOpenChange(nextOpen);
+      }}
+    >
       <DialogContent className='flex h-[90dvh] max-h-[90dvh] flex-col overflow-hidden sm:max-w-[780px]'>
         <DialogHeader className='shrink-0'>
           <DialogTitle>Certify upstream models</DialogTitle>
@@ -147,7 +153,9 @@ export function ProviderCertificationDialog({
                   <RotateCcw className='h-4 w-4' />
                 )}
                 {isPending
-                  ? `Running ${progress?.modelIndex ?? 1} of ${progress?.modelTotal ?? setup.selectedModelIds.length}`
+                  ? progress
+                    ? `Running ${progress.modelIndex} of ${progress.modelTotal}`
+                    : 'Finishing in-flight probe'
                   : results.length > 0
                     ? `Run ${targetCount} route${targetCount === 1 ? '' : 's'} again`
                     : `Certify ${targetCount || ''} route${targetCount === 1 ? '' : 's'}`}

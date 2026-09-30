@@ -104,6 +104,12 @@ export const buildModelRuns = (
 export const countCertificationTargets = (runs: ModelRun[]): number =>
   runs.reduce((total, run) => total + run.targets.length, 0);
 
+export const getSelectedCertificationResults = (
+  providerIds: number[],
+  resultsByProvider: Record<number, ModelCertificationResult[]>
+): ModelCertificationResult[] =>
+  providerIds.flatMap((providerId) => resultsByProvider[providerId] ?? []);
+
 export const getCertificationResultStatus = (
   result: ModelCertificationResult
 ): CertificationStatus | 'error' => {

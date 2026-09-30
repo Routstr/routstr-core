@@ -1236,9 +1236,7 @@ async def get_provider_models(provider_id: str) -> dict[str, object]:
         ]
 
         path_result = await session.exec(
-            select(ModelPathRow).where(
-                ModelPathRow.upstream_provider_id == provider_pk
-            )
+            select(ModelPathRow).where(ModelPathRow.upstream_provider_id == provider_pk)
         )
         path_rows = list(path_result.all())
         paths_by_public_id: dict[str, list[dict[str, object]]] = {}
@@ -1251,12 +1249,11 @@ async def get_provider_models(provider_id: str) -> dict[str, object]:
                 }
             )
 
-        from ..upstream.model_paths import public_model_id
+        from ..upstream.model_paths import exposed_model_id
 
         certification_paths: dict[str, list[dict[str, object]]] = {}
         for model in [*db_models, *filtered_remote_models]:
-            forwarded_id = model.forwarded_model_id or model.id
-            paths = paths_by_public_id.get(public_model_id(forwarded_id).lower(), [])
+            paths = paths_by_public_id.get(exposed_model_id(model).lower(), [])
             certification_paths[model.id] = paths
 
         return {
@@ -1570,19 +1567,11 @@ async def certify_upstream_provider(
         endpoint_tag: str | None = None
         selected_path: ModelPathRow | None = None
         if payload.model_path is not None:
-            from ..proxy import _model_ids_match
             from ..upstream.model_paths import decode_model_path
 
             selector = decode_model_path(payload.model_path)
             if selector is None:
                 raise HTTPException(status_code=400, detail="Malformed model path")
-            if payload.model_id is None or not _model_ids_match(
-                payload.model_id, selector.model_id
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Model path does not match the selected model",
-                )
             path_result = await session.exec(
                 select(ModelPathRow).where(
                     ModelPathRow.upstream_provider_id == provider_pk,
@@ -1652,13 +1641,25 @@ async def certify_upstream_provider(
                     (
                         model
                         for model in upstream.get_cached_models()
-                        if model.id == model_id
-                        or model.forwarded_model_id == model_id
+                        if model.id == model_id or model.forwarded_model_id == model_id
                     ),
                     None,
                 )
                 if model_obj is not None:
                     break
+    if selected_path is not None:
+        from ..upstream.model_paths import exposed_model_id
+
+        selected_id = exposed_model_id(model_obj) if model_obj else model_id
+        if (
+            payload.model_id is None
+            or selected_id is None
+            or selected_id.lower() != selector.model_id.lower()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Model path does not match the selected model",
+            )
     if model_obj is None:
         from ..upstream.certification import (
             STATUS_WARN,

@@ -192,8 +192,8 @@ async def probe_upstream(
 ) -> ProbeResult:
     """Call the upstream's ``/models`` and a one-token completion.
 
-    A transport failure on either call is recorded on the result rather
-    than raised: a dead upstream is a ``fail`` row, not a failed request.
+    Each HTTP call, including its body read, has an elapsed-time deadline.
+    A transport failure is a ``fail`` row, not a failed admin request.
     """
     base = base_url.rstrip("/")
     result = ProbeResult(
@@ -213,7 +213,8 @@ async def probe_upstream(
     try:
         started = time.monotonic()
         try:
-            response = await client.get(result.models_url, headers=headers)
+            async with asyncio.timeout(timeout):
+                response = await client.get(result.models_url, headers=headers)
             result.models_status = response.status_code
             result.models_latency_ms = round((time.monotonic() - started) * 1000, 2)
             try:
@@ -246,9 +247,10 @@ async def probe_upstream(
                 "allow_fallbacks": False,
             }
         try:
-            response = await client.post(
-                result.chat_url, json=request_body, headers=headers
-            )
+            async with asyncio.timeout(timeout):
+                response = await client.post(
+                    result.chat_url, json=request_body, headers=headers
+                )
             result.chat_status = response.status_code
             result.chat_latency_ms = round((time.monotonic() - started) * 1000, 2)
             try:
@@ -507,6 +509,9 @@ def _reported_usd_cost(payload: dict[str, Any]) -> float:
         total = coerce_rate(cost_details.get("total_cost"))
         if total is not None and total > 0:
             return total
+        inference = coerce_rate(cost_details.get("upstream_inference_cost"))
+        if inference is not None and inference > 0 and usage.get("is_byok"):
+            return inference + (coerce_rate(usage.get("cost")) or 0.0)
     for source in (usage, payload):
         for field in ("total_cost", "cost"):
             value = coerce_rate(source.get(field))
@@ -830,7 +835,11 @@ async def run_live_checks(
 
     if not check_cache:
         rows.extend(skipped_cache_rows("Skipped — cache checks disabled."))
-    elif probe.chat_payload is None:
+    elif (
+        probe.chat_payload is None
+        or probe.chat_status is None
+        or not 200 <= probe.chat_status < 300
+    ):
         rows.extend(
             skipped_cache_rows("Skipped — the completion probe did not succeed.")
         )
@@ -928,7 +937,14 @@ async def _resolve_sats_usd_price(override: float | None) -> float | None:
 
 
 def _model_from_usd_pricing(
-    model_id: str, prompt_usd: float, completion_usd: float, sats_to_usd: float
+    model_id: str,
+    prompt_usd: float,
+    completion_usd: float,
+    sats_to_usd: float,
+    *,
+    provider_fee: float = 1.0,
+    cache_read_usd: float | None = None,
+    cache_write_usd: float | None = None,
 ) -> "Model":
     """A throwaway ``Model`` carrying just enough to exercise the cost engine."""
     from ..payment.models import (
@@ -951,7 +967,12 @@ def _model_from_usd_pricing(
             tokenizer="unknown",
             instruct_type=None,
         ),
-        pricing=Pricing(prompt=prompt_usd, completion=completion_usd),
+        pricing=Pricing(
+            prompt=prompt_usd * provider_fee,
+            completion=completion_usd * provider_fee,
+            input_cache_read=(cache_read_usd or 0.0) * provider_fee,
+            input_cache_write=(cache_write_usd or 0.0) * provider_fee,
+        ),
         sats_pricing=None,
         per_request_limits=None,
         top_provider=None,
@@ -1042,6 +1063,9 @@ async def certify_upstream_url(
         resolved_prompt or 0.0,
         resolved_completion or 0.0,
         sats_to_usd or 1.0,
+        provider_fee=provider_fee,
+        cache_read_usd=_as_price(entry.get("cache_read_input_token_cost")),
+        cache_write_usd=_as_price(entry.get("cache_creation_input_token_cost")),
     )
     rows = await run_live_checks(
         base_url,
