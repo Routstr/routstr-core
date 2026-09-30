@@ -1,0 +1,125 @@
+    async def send(self, message: ASGISendEvent) -> None:
+        message_type = message["type"]
+
+        if self.flow.write_paused and not self.disconnected:
+            await self.flow.drain()  # pragma: full coverage
+
+        if self.disconnected:
+            return  # pragma: full coverage
+
+        if not self.response_started:
+            # Sending response status line and headers
+            if message_type != "http.response.start":
+                msg = "Expected ASGI message 'http.response.start', but got '%s'."
+                raise RuntimeError(msg % message_type)
+            message = cast("HTTPResponseStartEvent", message)
+
+            self.response_started = True
+            self.waiting_for_100_continue = False
+
+            status_code = message["status"]
+            headers = self.default_headers + list(message.get("headers", []))
+
+            if CLOSE_HEADER in self.scope["headers"] and CLOSE_HEADER not in headers:
+                headers = headers + [CLOSE_HEADER]
+
+            if self.access_log:
+                self.access_logger.info(
+                    '%s - "%s %s HTTP/%s" %d',
+                    get_client_addr(self.scope),
+                    self.scope["method"],
+                    get_path_with_query_string(self.scope),
+                    self.scope["http_version"],
+                    status_code,
+                )
+
+            # Write response status line and headers
+            content = [STATUS_LINE[status_code]]
+
+            for name, value in headers:
+                if HEADER_RE.search(name):
+                    raise RuntimeError("Invalid HTTP header name.")  # pragma: full coverage
+                if HEADER_VALUE_RE.search(value):
+                    raise RuntimeError("Invalid HTTP header value.")
+
+                name = name.lower()
+                if name == b"content-length" and self.chunked_encoding is None:
+                    self.expected_content_length = int(value.decode())
+                    self.chunked_encoding = False
+                elif name == b"transfer-encoding" and value.lower() == b"chunked":
+                    self.expected_content_length = 0
+                    self.chunked_encoding = True
+                elif name == b"connection" and value.lower() == b"close":
+                    self.keep_alive = False
+                content.extend([name, b": ", value, b"\r\n"])
+
+            if self.chunked_encoding is None and self.scope["method"] != "HEAD" and status_code not in (204, 304):
+                # Neither content-length nor transfer-encoding specified
+                self.chunked_encoding = True
+                content.append(b"transfer-encoding: chunked\r\n")
+
+            content.append(b"\r\n")
+            self.transport.write(b"".join(content))
+
+        elif not self.response_complete:
+            # Sending response body
+            if message_type != "http.response.body":
+                msg = "Expected ASGI message 'http.response.body', but got '%s'."
+                raise RuntimeError(msg % message_type)
+
+            body = cast(bytes, message.get("body", b""))
+            more_body = message.get("more_body", False)
+
+            # Write response body
+            if self.scope["method"] == "HEAD":
+                self.expected_content_length = 0
+            elif self.chunked_encoding:
+                if body:
+                    content = [b"%x\r\n" % len(body), body, b"\r\n"]
+                else:
+                    content = []
+                if not more_body:
+                    content.append(b"0\r\n\r\n")
+                self.transport.write(b"".join(content))
+            else:
+                num_bytes = len(body)
+                if num_bytes > self.expected_content_length:
+                    raise RuntimeError("Response content longer than Content-Length")
+                else:
+                    self.expected_content_length -= num_bytes
+                self.transport.write(body)
+
+            # Handle response completion
+            if not more_body:
+                if self.expected_content_length != 0:
+                    raise RuntimeError("Response content shorter than Content-Length")
+                self.response_complete = True
+                self.message_event.set()
+                if not self.keep_alive:
+                    self.transport.close()
+                self.on_response()
+
+        else:
+            # Response already sent
+            msg = "Unexpected ASGI message '%s' sent, after response already completed."
+            raise RuntimeError(msg % message_type)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self.connections.discard(self)
+
+        if self.logger.level <= TRACE_LOG_LEVEL:
+            prefix = "%s:%d - " % self.client if self.client else ""
+            self.logger.log(TRACE_LOG_LEVEL, "%sHTTP connection lost", prefix)
+
+        if self.cycle and not self.cycle.response_complete:
+            self.cycle.disconnected = True
+        if self.cycle is not None:
+            self.cycle.message_event.set()
+        if self.flow is not None:
+            self.flow.resume_writing()
+        if exc is None:
+            self.transport.close()
+            self._unset_keepalive_if_required()
+
+        self.parser = None
+

@@ -1,0 +1,23 @@
+/.venv/lib/python3.14/site-packages/anyio/from_thread.py:119: SyntaxWarning: 'return' in a 'finally' block
+  return result
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:18091 (Press CTRL+C to quit)
+INFO:     127.0.0.1:59686 - "GET /v1/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36380 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36394 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36402 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36418 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36434 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36456 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+{"event": "close", "mode": "finite", "chunks": 3, "time": 1790766367.5249321}
+INFO:     127.0.0.1:54322 - "GET /events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51770 - "GET /events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42140 - "GET /events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50608 - "GET /v1/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46164 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46178 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39728 - "GET /events HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for connections to close. (CTRL+C to force quit)

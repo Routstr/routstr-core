@@ -1,0 +1,114 @@
+/.venv/lib/python3.14/site-packages/anyio/from_thread.py:119: SyntaxWarning: 'return' in a 'finally' block
+  return result
+2026-09-30 11:05:28 WARNING routstr.core.main UI dist directory not found at /app/ui_out; serving API only. Run `make ui-build` to build the static UI served from here, or `make ui-dev` for the Next.js dev server with hot reload on :3000 (it targets this backend on :8000).
+2026-09-30 11:05:28 INFO    uvicorn.error Started server process [1]
+2026-09-30 11:05:28 INFO    uvicorn.error Waiting for application startup.
+2026-09-30 11:05:28 INFO    routstr.core.main Application startup initiated
+2026-09-30 11:05:30 INFO    routstr.core.db Database migrations completed successfully
+2026-09-30 11:05:30 INFO    routstr.core.db Reset reserved balances on startup
+2026-09-30 11:05:30 INFO    routstr.upstream.helpers Seeding custom provider
+2026-09-30 11:05:30 INFO    routstr.upstream.helpers Seeded 1 upstream providers from settings
+2026-09-30 11:05:31 INFO    routstr.proxy Initialized 1 upstream providers
+2026-09-30 11:05:31 INFO    routstr.nostr.listing Nostr private key not configured (NSEC); waiting for one to be set before announcing this provider
+2026-09-30 11:05:31 INFO    routstr.nostr.analytics Usage analytics sharing task started
+2026-09-30 11:05:31 INFO    routstr.nostr.analytics NSEC is not configured; skipping analytics sharing to Nostr
+2026-09-30 11:05:31 INFO    routstr.auth Dead-key pruning disabled (interval <= 0)
+2026-09-30 11:05:31 INFO    uvicorn.error Application startup complete.
+2026-09-30 11:05:31 INFO    uvicorn.error Uvicorn running on http://127.0.0.1:18090 (Press CTRL+C to quit)
+2026-09-30 11:06:01 INFO    routstr.upstream.auto_topup Auto top-up worker started
+2026-09-30 11:06:06 INFO    routstr.auth Existing sk- API key found
+2026-09-30 11:06:06 INFO    routstr.proxy Bearer token validated successfully
+2026-09-30 11:06:06 INFO    routstr.auth Processing payment for request
+2026-09-30 11:06:06 INFO    routstr.auth Existing sk- API key found
+2026-09-30 11:06:06 INFO    routstr.proxy Bearer token validated successfully
+2026-09-30 11:06:06 INFO    routstr.auth Processing payment for request
+2026-09-30 11:06:06 INFO    routstr.auth Existing sk- API key found
+2026-09-30 11:06:06 INFO    routstr.proxy Bearer token validated successfully
+2026-09-30 11:06:06 INFO    routstr.auth Processing payment for request
+2026-09-30 11:06:06 INFO    routstr.auth Existing sk- API key found
+2026-09-30 11:06:06 INFO    routstr.proxy Bearer token validated successfully
+2026-09-30 11:06:06 INFO    routstr.auth Processing payment for request
+2026-09-30 11:06:06 INFO    routstr.auth Existing sk- API key found
+2026-09-30 11:06:06 INFO    routstr.proxy Bearer token validated successfully
+2026-09-30 11:06:06 INFO    routstr.auth Processing payment for request
+2026-09-30 11:06:06 INFO    routstr.auth Existing sk- API key found
+2026-09-30 11:06:06 INFO    routstr.proxy Bearer token validated successfully
+2026-09-30 11:06:06 INFO    routstr.auth Processing payment for request
+2026-09-30 11:06:06 INFO    routstr.auth Existing sk- API key found
+2026-09-30 11:06:06 INFO    routstr.proxy Bearer token validated successfully
+2026-09-30 11:06:06 INFO    routstr.auth Processing payment for request
+2026-09-30 11:06:06 INFO    routstr.auth Payment processed successfully
+2026-09-30 11:06:06 INFO    routstr.payments RESERVE
+2026-09-30 11:06:06 INFO    routstr.auth Payment processed successfully
+2026-09-30 11:06:06 INFO    routstr.payments RESERVE
+2026-09-30 11:06:06 INFO    routstr.auth Payment processed successfully
+2026-09-30 11:06:06 INFO    routstr.payments RESERVE
+2026-09-30 11:06:06 INFO    routstr.auth Payment processed successfully
+2026-09-30 11:06:06 INFO    routstr.payments RESERVE
+2026-09-30 11:06:06 INFO    routstr.auth Payment processed successfully
+2026-09-30 11:06:06 INFO    routstr.payments RESERVE
+2026-09-30 11:06:06 INFO    routstr.auth Payment processed successfully
+2026-09-30 11:06:06 INFO    routstr.payments RESERVE
+2026-09-30 11:06:06 INFO    routstr.auth Payment processed successfully
+2026-09-30 11:06:06 INFO    routstr.payments RESERVE
+2026-09-30 11:06:07 INFO    routstr.payment.cost_calculation Applied model-specific pricing
+2026-09-30 11:06:07 INFO    routstr.payment.cost_calculation Calculated token-based cost
+2026-09-30 11:06:07 INFO    routstr.auth Calculated token-based cost
+2026-09-30 11:06:07 INFO    routstr.auth Refunding excess payment
+2026-09-30 11:06:07 INFO    routstr.auth Refund processed successfully
+2026-09-30 11:06:07 INFO    routstr.payments FINALIZE
+2026-09-30 11:06:07 INFO    routstr.auth Payment settlement finished
+2026-09-30 11:06:09 WARNING routstr.upstream.base Streaming interrupted; finalizing before closing upstream
+2026-09-30 11:06:09 INFO    routstr.payment.cost_calculation Applied model-specific pricing
+2026-09-30 11:06:09 INFO    routstr.payment.cost_calculation Calculated token-based cost
+2026-09-30 11:06:09 INFO    routstr.auth Calculated token-based cost
+2026-09-30 11:06:09 INFO    routstr.auth Refunding excess payment
+2026-09-30 11:06:09 WARNING routstr.upstream.base Streaming interrupted; finalizing before closing upstream
+2026-09-30 11:06:09 INFO    routstr.auth Refund processed successfully
+2026-09-30 11:06:09 INFO    routstr.payment.cost_calculation Applied model-specific pricing
+2026-09-30 11:06:09 INFO    routstr.payment.cost_calculation Calculated token-based cost
+2026-09-30 11:06:09 INFO    routstr.auth Calculated token-based cost
+2026-09-30 11:06:09 INFO    routstr.auth Refunding excess payment
+2026-09-30 11:06:09 ERROR   routstr.upstream.base HTTP request error to upstream
+2026-09-30 11:06:09 WARNING routstr.proxy Upstream base failed for model=gpt-4o-mini: Upstream service request timed out
+2026-09-30 11:06:09 INFO    routstr.auth Refund processed successfully
+2026-09-30 11:06:09 INFO    routstr.payments FINALIZE
+2026-09-30 11:06:09 INFO    routstr.auth Payment settlement finished
+2026-09-30 11:06:09 ERROR   routstr.core.exceptions Unhandled exception
+httpcore.ReadTimeout
+
+The above exception was the direct cause of the following exception:
+
+httpx.ReadTimeout
+2026-09-30 11:06:09 ERROR   uvicorn.error Exception in ASGI application
+httpcore.ReadTimeout
+
+The above exception was the direct cause of the following exception:
+
+httpx.ReadTimeout
+2026-09-30 11:06:09 INFO    routstr.payments FINALIZE
+2026-09-30 11:06:09 INFO    routstr.auth Payment settlement finished
+2026-09-30 11:06:09 ERROR   routstr.core.exceptions Unhandled exception
+httpcore.ReadTimeout
+
+The above exception was the direct cause of the following exception:
+
+httpx.ReadTimeout
+2026-09-30 11:06:09 ERROR   uvicorn.error Exception in ASGI application
+httpcore.ReadTimeout
+
+The above exception was the direct cause of the following exception:
+
+httpx.ReadTimeout
+2026-09-30 11:06:16 INFO    routstr.core.exceptions HTTP 400 on /v1/wallet/refund: Cannot refund key. There are ongoing requests for this api key.
+2026-09-30 11:06:17 INFO    routstr.core.exceptions HTTP 400 on /v1/wallet/refund: Cannot refund key. There are ongoing requests for this api key.
+2026-09-30 11:06:17 INFO    routstr.core.exceptions HTTP 400 on /v1/wallet/refund: Cannot refund key. There are ongoing requests for this api key.
+2026-09-30 11:07:18 INFO    routstr.core.exceptions HTTP 400 on /v1/wallet/refund: Cannot refund key. There are ongoing requests for this api key.
+2026-09-30 11:07:18 INFO    routstr.core.exceptions HTTP 400 on /v1/wallet/refund: Cannot refund key. There are ongoing requests for this api key.
+2026-09-30 11:07:19 INFO    routstr.core.exceptions HTTP 400 on /v1/wallet/refund: Cannot refund key. There are ongoing requests for this api key.
+2026-09-30 11:07:28 INFO    routstr.core.exceptions HTTP 400 on /v1/wallet/refund: Cannot refund key. There are ongoing requests for this api key.
+2026-09-30 11:07:28 INFO    routstr.core.exceptions HTTP 400 on /v1/wallet/refund: Cannot refund key. There are ongoing requests for this api key.
+2026-09-30 11:07:28 INFO    routstr.core.exceptions HTTP 400 on /v1/wallet/refund: Cannot refund key. There are ongoing requests for this api key.
+2026-09-30 11:10:38 WARNING routstr.upstream.base Upstream stream ended before the response was complete
+2026-09-30 11:10:38 WARNING routstr.upstream.base Upstream stream ended before the response was complete
+2026-09-30 11:10:38 WARNING routstr.upstream.base Upstream stream ended before the response was complete
