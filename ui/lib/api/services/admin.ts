@@ -317,14 +317,9 @@ export class AdminService {
     );
   }
 
-  static async getProviderModels(
-    providerId: number,
-    options: { includeRemote?: boolean } = {}
-  ): Promise<ProviderModels> {
-    const query =
-      options.includeRemote === false ? '?include_remote=false' : '';
+  static async getProviderModels(providerId: number): Promise<ProviderModels> {
     const data = await apiClient.get<ProviderModels>(
-      `/admin/api/upstream-providers/${providerId}/models${query}`
+      `/admin/api/upstream-providers/${providerId}/models`
     );
 
     // Convert pricing for all models in the list so the UI receives "per 1M tokens" values
@@ -433,9 +428,7 @@ export class AdminService {
     );
   }
 
-  static async getModelsWithProviders(
-    options: { includeRemote?: boolean } = {}
-  ): Promise<{
+  static async getModelsWithProviders(): Promise<{
     models: AdminModelAsModel[];
     groups: AdminModelGroup[];
   }> {
@@ -460,7 +453,7 @@ export class AdminService {
         try {
           return {
             provider,
-            models: await this.getProviderModels(provider.id, options),
+            models: await this.getProviderModels(provider.id),
           };
         } catch (error) {
           console.error(

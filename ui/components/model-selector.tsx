@@ -28,7 +28,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { Trash2, Ban, CheckCircle, Loader2, Plus } from 'lucide-react';
+import { Trash2, Ban, CheckCircle, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   sortModels,
@@ -137,7 +137,6 @@ export function ModelSelector({
     models,
     groups,
     isLoading: isLoadingModels,
-    isFetchingRemote,
     error: modelsError,
     refetch: refetchModels,
   } = useModelsWithProviders();
@@ -865,19 +864,11 @@ export function ModelSelector({
       </div>
 
       {Object.keys(groupedModels).length === 0 ? (
-        isFetchingRemote ? (
-          <div className='grid gap-3 sm:gap-4'>
-            <Skeleton className='h-[200px]' />
-            <Skeleton className='h-[200px]' />
-          </div>
-        ) : (
-          <div className='border-border/40 rounded-lg border border-dashed p-4 text-center sm:p-5'>
-            <p className='text-muted-foreground text-sm'>
-              Try broadening your search or switch to a different provider
-              scope.
-            </p>
-          </div>
-        )
+        <div className='border-border/40 rounded-lg border border-dashed p-4 text-center sm:p-5'>
+          <p className='text-muted-foreground text-sm'>
+            Try broadening your search or switch to a different provider scope.
+          </p>
+        </div>
       ) : null}
 
       {/* Provider Groups or Filtered Models */}
@@ -926,15 +917,6 @@ export function ModelSelector({
           />
         );
       })}
-
-      {/* The stored rows render first; provider catalogs arrive after their
-          upstream calls return, so the list says more is still on the way. */}
-      {isFetchingRemote && Object.keys(groupedModels).length > 0 ? (
-        <div className='border-border/40 text-muted-foreground flex items-center justify-center gap-2 rounded-lg border border-dashed p-3 text-sm sm:p-4'>
-          <Loader2 className='h-4 w-4 animate-spin' />
-          Loading provider catalogs…
-        </div>
-      ) : null}
 
       {/* Forms and Dialogs */}
       {modelDialogState.providerId && (

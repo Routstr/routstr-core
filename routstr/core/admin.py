@@ -1,8 +1,6 @@
-import asyncio
 import json
 import re
 import secrets
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,9 +54,6 @@ async def _refresh_provider_model_paths(upstream_provider_id: int) -> None:
     """Queue discovery sync without blocking the committed admin mutation."""
     from ..upstream.model_paths import schedule_model_paths_refresh_for_provider
 
-    # Every provider/model mutation funnels through here, so it is also the one
-    # place that can keep the cached admin catalog from serving a stale listing.
-    invalidate_remote_models_cache(upstream_provider_id)
     await schedule_model_paths_refresh_for_provider(upstream_provider_id)
 
 
@@ -1188,7 +1183,6 @@ async def delete_upstream_provider(provider_id: str) -> dict[str, object]:
 
         await session.delete(provider)
         await session.commit()
-    invalidate_remote_models_cache(deleted_id)
     await reinitialize_upstreams()
     await refresh_model_maps()
     return {"ok": True, "deleted_id": deleted_id}
@@ -1202,78 +1196,13 @@ async def get_provider_types() -> list[dict[str, object]]:
     return [cls.get_provider_metadata() for cls in upstream_provider_classes]
 
 
-# The admin catalog view is opened repeatedly and by several panels at once,
-# while every miss costs a live upstream round trip. Keep the raw listing for a
-# short window and let concurrent readers share one in-flight fetch.
-_REMOTE_MODELS_TTL_SECONDS = 120.0
-_REMOTE_MODELS_FETCH_TIMEOUT_SECONDS = 20.0
-_remote_models_cache: dict[int, tuple[float, list]] = {}
-_remote_models_locks: dict[int, asyncio.Lock] = {}
-# Bumped on every invalidation so a fetch that started against the old provider
-# config cannot write its result back after the cache was cleared.
-_remote_models_generation = 0
-
-
-def invalidate_remote_models_cache(provider_pk: int | None = None) -> None:
-    global _remote_models_generation
-    _remote_models_generation += 1
-    if provider_pk is None:
-        _remote_models_cache.clear()
-        _remote_models_locks.clear()
-    else:
-        _remote_models_cache.pop(provider_pk, None)
-
-
-async def _get_remote_models(
-    provider: UpstreamProviderRow, provider_pk: int, force_refresh: bool = False
-) -> list:
-    from ..upstream.helpers import _instantiate_provider
-
-    now = time.monotonic()
-    cached = _remote_models_cache.get(provider_pk)
-    if not force_refresh and cached and now - cached[0] < _REMOTE_MODELS_TTL_SECONDS:
-        return cached[1]
-
-    lock = _remote_models_locks.setdefault(provider_pk, asyncio.Lock())
-    async with lock:
-        cached = _remote_models_cache.get(provider_pk)
-        now = time.monotonic()
-        if (
-            not force_refresh
-            and cached
-            and now - cached[0] < _REMOTE_MODELS_TTL_SECONDS
-        ):
-            return cached[1]
-
-        upstream_instance = _instantiate_provider(provider)
-        if not upstream_instance:
-            return []
-
-        generation = _remote_models_generation
-        try:
-            models = await asyncio.wait_for(
-                upstream_instance.fetch_models(),
-                timeout=_REMOTE_MODELS_FETCH_TIMEOUT_SECONDS,
-            )
-        except Exception as e:
-            logger.error(f"Failed to fetch models from {provider.provider_type}: {e}")
-            # A stale listing beats an empty one for an operator view.
-            return cached[1] if cached else []
-
-        if generation == _remote_models_generation:
-            _remote_models_cache[provider_pk] = (time.monotonic(), models)
-        return models
-
-
 @admin_router.get(
     "/api/upstream-providers/{provider_id}/models",
     dependencies=[Depends(require_admin_api)],
 )
-async def get_provider_models(
-    provider_id: str,
-    include_remote: bool = Query(True),
-    refresh_remote: bool = Query(False),
-) -> dict[str, object]:
+async def get_provider_models(provider_id: str) -> dict[str, object]:
+    from ..upstream.helpers import _instantiate_provider
+
     async with create_session() as session:
         provider = await _get_upstream_provider_by_ref(session, provider_id)
         provider_pk = _provider_pk(provider)
@@ -1285,11 +1214,16 @@ async def get_provider_models(
             apply_fees=False,
         )
 
-        upstream_models: list = []
-        if include_remote:
-            upstream_models = await _get_remote_models(
-                provider, provider_pk, force_refresh=refresh_remote
-            )
+        upstream_models = []
+        upstream_instance = _instantiate_provider(provider)
+        if upstream_instance:
+            try:
+                raw_models = await upstream_instance.fetch_models()
+                upstream_models = raw_models
+            except Exception as e:
+                logger.error(
+                    f"Failed to fetch models from {provider.provider_type}: {e}"
+                )
 
         db_model_ids = {model.id for model in db_models}
         filtered_remote_models = [
