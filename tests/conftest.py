@@ -31,3 +31,18 @@ def _isolate_redemption_negative_cache() -> Iterator[None]:
     redemption_negative_cache.clear()
     yield
     redemption_negative_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_admin_remote_models_cache() -> Iterator[None]:
+    """Clear the admin catalog cache between tests.
+
+    Provider primary keys restart at 1 for every fresh test database, so a
+    cached listing from an earlier test would otherwise answer for a different
+    provider that happens to reuse the same key.
+    """
+    from routstr.core.admin import invalidate_remote_models_cache
+
+    invalidate_remote_models_cache()
+    yield
+    invalidate_remote_models_cache()

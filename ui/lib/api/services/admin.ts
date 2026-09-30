@@ -317,9 +317,14 @@ export class AdminService {
     );
   }
 
-  static async getProviderModels(providerId: number): Promise<ProviderModels> {
+  static async getProviderModels(
+    providerId: number,
+    options: { includeRemote?: boolean } = {}
+  ): Promise<ProviderModels> {
+    const query =
+      options.includeRemote === false ? '?include_remote=false' : '';
     const data = await apiClient.get<ProviderModels>(
-      `/admin/api/upstream-providers/${providerId}/models`
+      `/admin/api/upstream-providers/${providerId}/models${query}`
     );
 
     // Convert pricing for all models in the list so the UI receives "per 1M tokens" values
@@ -428,7 +433,9 @@ export class AdminService {
     );
   }
 
-  static async getModelsWithProviders(): Promise<{
+  static async getModelsWithProviders(
+    options: { includeRemote?: boolean } = {}
+  ): Promise<{
     models: AdminModelAsModel[];
     groups: AdminModelGroup[];
   }> {
@@ -446,14 +453,50 @@ export class AdminService {
     const allModels: AdminModelAsModel[] = [];
     const seenModelIds = new Set<string>();
 
-    for (const provider of providers) {
-      try {
-        const providerModels = await this.getProviderModels(provider.id);
+    // One provider's catalog never depends on another's, and each miss costs an
+    // upstream round trip, so the whole fan-out happens in a single wave.
+    const providerResults = await Promise.all(
+      providers.map(async (provider) => {
+        try {
+          return {
+            provider,
+            models: await this.getProviderModels(provider.id, options),
+          };
+        } catch (error) {
+          console.error(
+            `Failed to fetch models for provider ${provider.id}:`,
+            error
+          );
+          return null;
+        }
+      })
+    );
 
-        providerModels.db_models.forEach((dbModel) => {
-          seenModelIds.add(dbModel.id);
+    for (const result of providerResults) {
+      if (!result) {
+        continue;
+      }
+      const { provider, models: providerModels } = result;
+      providerModels.db_models.forEach((dbModel) => {
+        seenModelIds.add(dbModel.id);
+        const modelWithProvider = {
+          ...dbModel,
+          upstream_provider_id: provider.id,
+        };
+        allModels.push({
+          ...this.transformAdminModelToModel(
+            modelWithProvider,
+            provider.provider_type
+          ),
+          has_own_api_key: false,
+          api_key_type: 'group',
+        });
+      });
+
+      providerModels.remote_models.forEach((remoteModel) => {
+        if (!seenModelIds.has(remoteModel.id)) {
           const modelWithProvider = {
-            ...dbModel,
+            ...remoteModel,
             upstream_provider_id: provider.id,
           };
           allModels.push({
@@ -462,33 +505,11 @@ export class AdminService {
               provider.provider_type
             ),
             has_own_api_key: false,
-            api_key_type: 'group',
+            api_key_type: 'remote',
+            soft_deleted: false,
           });
-        });
-
-        providerModels.remote_models.forEach((remoteModel) => {
-          if (!seenModelIds.has(remoteModel.id)) {
-            const modelWithProvider = {
-              ...remoteModel,
-              upstream_provider_id: provider.id,
-            };
-            allModels.push({
-              ...this.transformAdminModelToModel(
-                modelWithProvider,
-                provider.provider_type
-              ),
-              has_own_api_key: false,
-              api_key_type: 'remote',
-              soft_deleted: false,
-            });
-          }
-        });
-      } catch (error) {
-        console.error(
-          `Failed to fetch models for provider ${provider.id}:`,
-          error
-        );
-      }
+        }
+      });
     }
 
     return { models: allModels, groups };
