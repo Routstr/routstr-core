@@ -82,7 +82,9 @@ class RequestLifecycleMiddleware:
                 response_started = True
 
         receiver = asyncio.create_task(pump())
-        work = asyncio.create_task(self.app(scope, downstream_receive, downstream_send))
+        work: asyncio.Future[None] = asyncio.ensure_future(
+            self.app(scope, downstream_receive, downstream_send)
+        )
         gone = asyncio.create_task(disconnected.wait())
         try:
             done, _ = await asyncio.wait(
