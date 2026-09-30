@@ -72,10 +72,12 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["routstr"]
 
+[tool.ruff]
+extend-exclude = ["examples"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E501"]
-exclude = ["examples"]
 
 [tool.mypy]
 python_version = "3.11"
