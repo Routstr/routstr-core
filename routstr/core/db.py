@@ -1,18 +1,31 @@
 import asyncio
+import concurrent.futures
 import hashlib
 import os
 import pathlib
 import sqlite3
 import time
 import uuid
+from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from enum import Enum
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, TypeVar
 
 from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
-from sqlalchemy import Index, UniqueConstraint, case, delete, event, or_, text
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    Index,
+    UniqueConstraint,
+    case,
+    delete,
+    event,
+    or_,
+    text,
+)
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -25,7 +38,36 @@ from .settings import settings
 
 logger = get_logger(__name__)
 
+T = TypeVar("T")
+
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
+
+# Money (millisatoshis), lifetime counters and unix timestamps are all 64-bit
+# quantities. SQLite stores every INTEGER as 64-bit so plain ``int`` fields were
+# safe there, but SQLAlchemy's ``Integer`` maps to PostgreSQL ``INT4``: a balance
+# would cap at 2_147_483_647 msats (~0.0215 BTC) and unix timestamps would break
+# in 2038. Every such column is pinned to BIGINT so both backends agree.
+Msats = BigInteger
+Sats = BigInteger
+UnixTimestamp = BigInteger
+Counter = BigInteger
+
+
+def _run_async_from_sync(factory: "Callable[[], Coroutine[Any, Any, T]]") -> T:
+    """Run one coroutine from sync code, in or out of a running event loop.
+
+    Migrations are driven synchronously by Alembic but may be triggered from
+    inside FastAPI's loop, where ``asyncio.run`` would raise. Same shape as
+    ``migrations/env.py``: borrow a worker thread when a loop is already
+    running. The coroutine is built inside the target loop — an engine created
+    on one loop cannot be awaited on another.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(factory())
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        return executor.submit(lambda: asyncio.run(factory())).result()
 
 
 def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
@@ -97,12 +139,17 @@ class ApiKey(SQLModel, table=True):  # type: ignore
     __tablename__ = "api_keys"
 
     hashed_key: str = Field(primary_key=True)
-    balance: int = Field(default=0, description="Balance in millisatoshis (msats)")
+    balance: int = Field(
+        default=0, sa_type=Msats, description="Balance in millisatoshis (msats)"
+    )
     reserved_balance: int = Field(
-        default=0, description="Reserved balance in millisatoshis (msats)"
+        default=0,
+        sa_type=Msats,
+        description="Reserved balance in millisatoshis (msats)",
     )
     reserved_at: int | None = Field(
         default=None,
+        sa_type=UnixTimestamp,
         description=(
             "Unix timestamp of the most recent balance reservation. Used to "
             "detect and release stale reservations (e.g. after client "
@@ -115,15 +162,17 @@ class ApiKey(SQLModel, table=True):  # type: ignore
     )
     key_expiry_time: int | None = Field(
         default=None,
+        sa_type=UnixTimestamp,
         description="Unix-timestamp after which the cashu-token's balance gets refunded to the refund_address",
     )
     total_spent: int = Field(
-        default=0, description="Total spent in millisatoshis (msats)"
+        default=0, sa_type=Msats, description="Total spent in millisatoshis (msats)"
     )
-    total_requests: int = Field(default=0)
+    total_requests: int = Field(default=0, sa_type=Counter)
     created_at: int | None = Field(
         default_factory=lambda: int(time.time()),
         nullable=True,
+        sa_type=UnixTimestamp,
         description=(
             "Unix timestamp when the key was created. Nullable: keys created "
             "before this column existed have no value and sort last."
@@ -139,6 +188,7 @@ class ApiKey(SQLModel, table=True):  # type: ignore
     )
     validity_date: int | None = Field(
         default=None,
+        sa_type=UnixTimestamp,
         description="Unix timestamp after which the key is no longer valid",
     )
 
@@ -414,7 +464,7 @@ class ModelRow(SQLModel, table=True):  # type: ignore
         primary_key=True, foreign_key="upstream_providers.id", ondelete="CASCADE"
     )
     name: str = Field()
-    created: int = Field()
+    created: int = Field(sa_type=UnixTimestamp)
     description: str = Field()
     context_length: int = Field()
     architecture: str = Field()
@@ -489,6 +539,7 @@ class ModelPathRow(SQLModel, table=True):  # type: ignore
     )
     updated_at: int = Field(
         default=0,
+        sa_type=UnixTimestamp,
         description="Unix timestamp of the refresh cycle that wrote this row",
     )
 
@@ -503,7 +554,7 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
 
     id: str = Field(primary_key=True, description="Unique invoice identifier")
     bolt11: str = Field(description="BOLT11 invoice string", unique=True)
-    amount_sats: int = Field(description="Amount in satoshis")
+    amount_sats: int = Field(sa_type=Sats, description="Amount in satoshis")
     description: str = Field(description="Invoice description")
     payment_hash: str = Field(description="Payment hash for tracking", unique=True)
     status: str = Field(
@@ -525,12 +576,19 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
         description="Mint URL where the quote was created (fallback tracking)",
     )
     created_at: int = Field(
-        default_factory=lambda: int(time.time()), description="Unix timestamp"
+        default_factory=lambda: int(time.time()),
+        sa_type=UnixTimestamp,
+        description="Unix timestamp",
     )
-    expires_at: int = Field(description="Unix timestamp when invoice expires")
-    paid_at: int | None = Field(default=None, description="Unix timestamp when paid")
+    expires_at: int = Field(
+        sa_type=UnixTimestamp, description="Unix timestamp when invoice expires"
+    )
+    paid_at: int | None = Field(
+        default=None, sa_type=UnixTimestamp, description="Unix timestamp when paid"
+    )
     validity_date: int | None = Field(
         default=None,
+        sa_type=UnixTimestamp,
         description="Unix timestamp after which the created key expires",
     )
 
@@ -544,19 +602,21 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
         description="Unique transaction identifier",
     )
     token: str = Field(description="Serialized Cashu token")
-    amount: int = Field(description="Amount in the token's unit")
+    amount: int = Field(sa_type=Msats, description="Amount in the token's unit")
     unit: str = Field(description="Token unit (sat or msat)")
     mint_url: str | None = Field(default=None, description="Mint URL for the token")
     type: str = Field(default="out", description="Transaction type: in or out")
     request_id: str | None = Field(default=None, description="Associated request ID")
     created_at: int = Field(
         default_factory=lambda: int(time.time()),
+        sa_type=UnixTimestamp,
         description="Unix timestamp",
     )
     collected: bool = Field(default=False)
     swept: bool = Field(default=False)
     sweep_started_at: int | None = Field(
         default=None,
+        sa_type=UnixTimestamp,
         description="Unix timestamp for a recoverable refund-sweep claim",
     )
     source: str = Field(
@@ -599,7 +659,9 @@ class Refund(SQLModel, table=True):  # type: ignore
     destination: str | None = Field(
         default=None, description="Lightning address or LNURL, NULL for cashu"
     )
-    amount_msats: int = Field(description="Balance debited when the claim opened")
+    amount_msats: int = Field(
+        sa_type=Msats, description="Balance debited when the claim opened"
+    )
     unit: str = Field(description="Mint unit the payout is denominated in")
     mint_url: str = Field(description="Mint the payout is drawn from")
     status: str = Field(
@@ -612,10 +674,14 @@ class Refund(SQLModel, table=True):  # type: ignore
     )
     token: str | None = Field(default=None, description="Issued cashu token")
     claimed_at: int | None = Field(
-        default=None, description="Reconciler lease timestamp"
+        default=None, sa_type=UnixTimestamp, description="Reconciler lease timestamp"
     )
-    created_at: int = Field(default_factory=lambda: int(time.time()))
-    updated_at: int = Field(default_factory=lambda: int(time.time()))
+    created_at: int = Field(
+        default_factory=lambda: int(time.time()), sa_type=UnixTimestamp
+    )
+    updated_at: int = Field(
+        default_factory=lambda: int(time.time()), sa_type=UnixTimestamp
+    )
 
 
 async def store_cashu_transaction(
@@ -783,19 +849,21 @@ class ReservationRelease(SQLModel, table=True):  # type: ignore
     id: str = Field(primary_key=True)
     key_hash: str = Field(index=True)
     billing_key_hash: str = Field(index=True)
-    reserved_msats: int
+    reserved_msats: int = Field(sa_type=Msats)
     status: str = Field(default="active")
-    created_at: int = Field(default_factory=lambda: int(time.time()))
+    created_at: int = Field(
+        default_factory=lambda: int(time.time()), sa_type=UnixTimestamp
+    )
 
 
 class RoutstrFee(SQLModel, table=True):  # type: ignore
     __tablename__ = "routstr_fees"
     id: int = Field(default=1, primary_key=True)
-    accumulated_msats: int = Field(default=0)
-    total_paid_msats: int = Field(default=0)
-    last_paid_at: int | None = Field(default=None)
-    payout_in_progress_msats: int = Field(default=0)
-    payout_started_at: int | None = Field(default=None)
+    accumulated_msats: int = Field(default=0, sa_type=Msats)
+    total_paid_msats: int = Field(default=0, sa_type=Msats)
+    last_paid_at: int | None = Field(default=None, sa_type=UnixTimestamp)
+    payout_in_progress_msats: int = Field(default=0, sa_type=Msats)
+    payout_started_at: int | None = Field(default=None, sa_type=UnixTimestamp)
     payout_quote_id: str | None = Field(default=None)
     payout_mint_url: str | None = Field(default=None)
     payout_unit: str | None = Field(default=None)
@@ -821,6 +889,11 @@ class NsecState(str, Enum):
     cleared = "cleared"
 
 
+def _enum_values(enum_cls: type[Enum]) -> list[str]:
+    """Persist an enum by ``value``, matching rows written before it was typed."""
+    return [str(member.value) for member in enum_cls]
+
+
 class Secret(SQLModel, table=True):  # type: ignore
     """Node-level secrets, stored encrypted/hashed at rest (singleton, id=1).
 
@@ -833,8 +906,21 @@ class Secret(SQLModel, table=True):  # type: ignore
     id: int = Field(default=1, primary_key=True)
     admin_password_hash: str | None = Field(default=None)
     encrypted_nsec: str | None = Field(default=None)
-    nsec_state: NsecState = Field(default=NsecState.legacy)
-    updated_at: int | None = Field(default=None)
+    # ``native_enum=False`` keeps this a VARCHAR on every backend.
+    # A bare Python Enum makes SQLAlchemy reach for a native PostgreSQL ENUM
+    # type named ``nsecstate``, which the migration never creates — so reading
+    # or writing the secrets singleton died with `type "nsecstate" does not
+    # exist`, taking node bootstrap with it. SQLite renders Enum as VARCHAR
+    # either way, which is why this stayed invisible until PostgreSQL.
+    nsec_state: NsecState = Field(
+        default=NsecState.legacy,
+        sa_column=Column(
+            "nsec_state",
+            SAEnum(NsecState, native_enum=False, values_callable=_enum_values),
+            nullable=False,
+        ),
+    )
+    updated_at: int | None = Field(default=None, sa_type=UnixTimestamp)
 
 
 class CliToken(SQLModel, table=True):  # type: ignore
@@ -844,10 +930,14 @@ class CliToken(SQLModel, table=True):  # type: ignore
     id: str = Field(primary_key=True, default_factory=lambda: uuid.uuid4().hex)
     token: str = Field(unique=True, index=True, description="Bearer token value")
     name: str = Field(description="Human-readable label for this token")
-    created_at: int = Field(default_factory=lambda: int(time.time()))
-    last_used_at: int | None = Field(default=None)
+    created_at: int = Field(
+        default_factory=lambda: int(time.time()), sa_type=UnixTimestamp
+    )
+    last_used_at: int | None = Field(default=None, sa_type=UnixTimestamp)
     expires_at: int | None = Field(
-        default=None, description="Optional expiry unix timestamp; null = never expires"
+        default=None,
+        sa_type=UnixTimestamp,
+        description="Optional expiry unix timestamp; null = never expires",
     )
 
 
@@ -1168,7 +1258,9 @@ async def balances_by_mint_and_unit(
 async def init_db() -> None:
     """Initializes the database and creates tables if they don't exist."""
     async with engine.begin() as conn:
-        if DATABASE_URL.startswith("sqlite"):
+        # WAL is a SQLite-only knob; ask the bound dialect rather than pattern
+        # matching DATABASE_URL, which a caller may have swapped under us.
+        if conn.dialect.name == "sqlite":
             await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
         await conn.run_sync(SQLModel.metadata.create_all)
 
@@ -1226,14 +1318,24 @@ def fix_cashu_migrations() -> None:
 
 
 def _clear_alembic_version() -> None:
-    """Clear the alembic_version table so stamp/upgrade can proceed."""
-    sync_url = DATABASE_URL.replace("+aiosqlite", "")
-    from sqlalchemy import create_engine, text
+    """Clear the alembic_version table so stamp/upgrade can proceed.
 
-    eng = create_engine(sync_url)
-    with eng.begin() as conn:
-        conn.execute(text("DELETE FROM alembic_version"))
-    eng.dispose()
+    Driven through the configured async driver rather than a second sync engine.
+    The old code built one by stripping ``+aiosqlite`` from the URL, which left
+    ``postgresql+asyncpg`` intact and raised ``MissingGreenlet``; naming the
+    sync backend instead only moves the problem, since it then demands a
+    separate sync driver (psycopg2) that a PostgreSQL deployment need not have.
+    """
+
+    async def clear() -> None:
+        eng = create_async_engine(DATABASE_URL)
+        try:
+            async with eng.begin() as conn:
+                await conn.execute(text("DELETE FROM alembic_version"))
+        finally:
+            await eng.dispose()
+
+    _run_async_from_sync(clear)
 
 
 def run_migrations() -> None:
@@ -1260,7 +1362,13 @@ def run_migrations() -> None:
         try:
             command.upgrade(alembic_cfg, "head")
         except CommandError as e:
-            if "Can't locate revision" in str(e):
+            # Preserve legacy SQLite recovery only. PostgreSQL rolls back DDL
+            # transactionally: stamping head after an error can hide migrations
+            # that never committed. Unknown PostgreSQL revisions need operator
+            # reconciliation, not an automatic stamp.
+            if make_url(
+                DATABASE_URL
+            ).get_backend_name() == "sqlite" and "Can't locate revision" in str(e):
                 logger.warning(
                     "Database stamped with unknown revision (likely from another branch). "
                     "Re-stamping to current head.",
@@ -1271,7 +1379,10 @@ def run_migrations() -> None:
             else:
                 raise
         except OperationalError as e:
-            if "duplicate column name" in str(e).lower():
+            if (
+                make_url(DATABASE_URL).get_backend_name() == "sqlite"
+                and "duplicate column name" in str(e).lower()
+            ):
                 logger.warning(
                     "Migration hit a column that already exists (likely added via "
                     "create_all on another branch). Stamping to current head.",

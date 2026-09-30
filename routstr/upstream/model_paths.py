@@ -28,7 +28,8 @@ from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
-from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import selectinload
 from sqlmodel import col, delete, select
 
@@ -569,6 +570,21 @@ async def _collect_provider_paths(
     )
 
 
+def _upsert(session: "AsyncSession") -> Any:
+    """``INSERT .. ON CONFLICT DO UPDATE`` built for the session's own dialect.
+
+    ``ON CONFLICT`` is spelled per-dialect in SQLAlchemy, and the SQLite
+    construct does not compile against PostgreSQL — it fails at statement
+    compilation with ``'OnConflictDoUpdate' object has no attribute
+    'constraint_target'``, which would silently kill every model-path refresh
+    (each provider's failure is caught and logged per-provider upstream).
+    """
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        return postgresql_insert(ModelPathRow)
+    return sqlite_insert(ModelPathRow)
+
+
 async def _persist_provider_paths(
     upstream_provider_id: int, snapshot: ProviderPathSnapshot
 ) -> None:
@@ -602,7 +618,7 @@ async def _persist_provider_paths(
                 }
                 for discovered in chunk
             ]
-            insert_stmt = insert(ModelPathRow).values(values)
+            insert_stmt = _upsert(session).values(values)
             await session.execute(
                 insert_stmt.on_conflict_do_update(
                     index_elements=["model_id", "path", "upstream_provider_id"],
