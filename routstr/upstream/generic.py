@@ -28,7 +28,11 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
 
     provider_type = "generic"
     default_base_url = "http://localhost:8888"
-    platform_url = None
+    platform_url: str | None = None
+    # Subclasses that own an authoritative price table set this False so a model
+    # the table misses imports disabled instead of taking a litellm/OpenRouter
+    # price that may undercut the upstream's own rate.
+    use_fallback_pricing = True
 
     def __init__(
         self,
@@ -162,7 +166,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                     model_spec = model_data.get("model_spec", {})
 
                     resolved = self._native_pricing(model_id, model_spec)
-                    if resolved is None:
+                    if resolved is None and self.use_fallback_pricing:
                         resolved = await resolver.resolve(model_id)
 
                     if resolved is None:

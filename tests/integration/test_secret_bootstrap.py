@@ -470,7 +470,6 @@ async def test_startup_runs_bootstrap_before_settings_initialize(
         return None
 
     monkeypatch.setattr(main, "configure_litellm", lambda: None)
-    monkeypatch.setattr(main, "register_deepseek_v4_pricing", lambda: None)
     monkeypatch.setattr(main, "run_migrations", lambda: None)
     monkeypatch.setattr(main, "init_db", noop_init_db)
     monkeypatch.setattr(main, "create_session", fake_create_session)
