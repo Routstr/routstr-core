@@ -1,5 +1,0 @@
-endless-control 200
-keepalive-control 200
-[('endless-control', 12), ('keepalive-control', 12)]
-[('endless-control', 'active'), ('keepalive-control', 'active')]
-

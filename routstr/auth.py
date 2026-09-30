@@ -695,8 +695,12 @@ async def pay_for_request(
             reserved_msats=reservation.reserved_msats,
             status="active",
             started_at=reserved_at_now,
+            # reserved_at_now floors to the second; add 1s margin so a
+            # finalizer finishing right at the nominal deadline isn't fenced
+            # out by truncation.
             expires_at=reserved_at_now
-            + math.ceil(remaining_lifetime + settings.request_cleanup_timeout_seconds),
+            + math.ceil(remaining_lifetime + settings.request_cleanup_timeout_seconds)
+            + 1,
         )
     )
     # Publish the identity before commit. If the commit succeeds but its
@@ -737,11 +741,6 @@ async def pay_for_request(
 
     # The reservation is durable; keep its lease fresh for the whole request
     # lifetime (upstream header waits, non-streaming and streaming alike).
-    from .core.lifecycle import request_lifetime
-
-    lifetime = request_lifetime.get()
-    if lifetime is not None:
-        lifetime.reservations.append(reservation)
     _start_reservation_heartbeat(reservation)
 
     try:

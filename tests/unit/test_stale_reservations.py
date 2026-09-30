@@ -9,6 +9,7 @@ Covers:
 """
 
 import asyncio
+import math
 import time
 from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -69,7 +70,6 @@ async def test_pay_for_request_sets_reserved_at(
     payments_info = MagicMock()
     monkeypatch.setattr(auth_module.logger, "info", logger_info)
     monkeypatch.setattr(auth_module.payments_logger, "info", payments_info)
-
     before = int(time.time())
     await pay_for_request(key, 1_000, session)
 
@@ -85,6 +85,34 @@ async def test_pay_for_request_sets_reserved_at(
     assert len(success_logs) == 1
     payments_info.assert_called_once()
     assert payments_info.call_args.args == ("RESERVE",)
+
+
+@pytest.mark.asyncio
+async def test_pay_for_request_expires_at_has_floor_margin(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reserved_at_now floors to the second; expires_at must add 1s so a
+    finalizer finishing exactly at the nominal deadline isn't fenced out."""
+    key = ApiKey(hashed_key="floorkey", balance=10_000)
+    session.add(key)
+    await session.commit()
+
+    fixed_time = 1_700_000_000.9  # fractional second, floors when int()'d
+    monkeypatch.setattr(auth_module.time, "time", lambda: fixed_time)
+
+    snapshot = await pay_for_request(key, 1_000, session)
+
+    row = await session.get(ReservationRelease, snapshot.release_id)
+    assert row is not None
+    expected = (
+        int(fixed_time)
+        + math.ceil(
+            auth_module.settings.max_request_lifetime_seconds
+            + auth_module.settings.request_cleanup_timeout_seconds
+        )
+        + 1
+    )
+    assert row.expires_at == expected
 
 
 @pytest.mark.asyncio
