@@ -1,15 +1,13 @@
 import asyncio
-import concurrent.futures
 import hashlib
 import os
 import pathlib
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from enum import Enum
-from typing import Any, AsyncGenerator, TypeVar
+from typing import AsyncGenerator
 
 from alembic import command
 from alembic.config import Config
@@ -38,8 +36,6 @@ from .settings import settings
 
 logger = get_logger(__name__)
 
-T = TypeVar("T")
-
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
 
 # Money (millisatoshis), lifetime counters and unix timestamps are all 64-bit
@@ -51,23 +47,6 @@ Msats = BigInteger
 Sats = BigInteger
 UnixTimestamp = BigInteger
 Counter = BigInteger
-
-
-def _run_async_from_sync(factory: "Callable[[], Coroutine[Any, Any, T]]") -> T:
-    """Run one coroutine from sync code, in or out of a running event loop.
-
-    Migrations are driven synchronously by Alembic but may be triggered from
-    inside FastAPI's loop, where ``asyncio.run`` would raise. Same shape as
-    ``migrations/env.py``: borrow a worker thread when a loop is already
-    running. The coroutine is built inside the target loop — an engine created
-    on one loop cannot be awaited on another.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(factory())
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        return executor.submit(lambda: asyncio.run(factory())).result()
 
 
 def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
@@ -602,7 +581,7 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
         description="Unique transaction identifier",
     )
     token: str = Field(description="Serialized Cashu token")
-    amount: int = Field(sa_type=Msats, description="Amount in the token's unit")
+    amount: int = Field(sa_type=BigInteger, description="Amount in the token's unit")
     unit: str = Field(description="Token unit (sat or msat)")
     mint_url: str | None = Field(default=None, description="Mint URL for the token")
     type: str = Field(default="out", description="Transaction type: in or out")
@@ -889,11 +868,6 @@ class NsecState(str, Enum):
     cleared = "cleared"
 
 
-def _enum_values(enum_cls: type[Enum]) -> list[str]:
-    """Persist an enum by ``value``, matching rows written before it was typed."""
-    return [str(member.value) for member in enum_cls]
-
-
 class Secret(SQLModel, table=True):  # type: ignore
     """Node-level secrets, stored encrypted/hashed at rest (singleton, id=1).
 
@@ -906,17 +880,20 @@ class Secret(SQLModel, table=True):  # type: ignore
     id: int = Field(default=1, primary_key=True)
     admin_password_hash: str | None = Field(default=None)
     encrypted_nsec: str | None = Field(default=None)
-    # ``native_enum=False`` keeps this a VARCHAR on every backend.
-    # A bare Python Enum makes SQLAlchemy reach for a native PostgreSQL ENUM
-    # type named ``nsecstate``, which the migration never creates — so reading
-    # or writing the secrets singleton died with `type "nsecstate" does not
-    # exist`, taking node bootstrap with it. SQLite renders Enum as VARCHAR
-    # either way, which is why this stayed invisible until PostgreSQL.
+    # ``native_enum=False`` keeps this a VARCHAR on every backend, matching the
+    # column the migration actually creates. A bare Python Enum makes SQLAlchemy
+    # reach for a native PostgreSQL ENUM type named ``nsecstate``, which no
+    # migration creates: on a schema built by Alembic alone, reading or writing
+    # the secrets singleton fails with `type "nsecstate" does not exist`. A
+    # fresh node survived it only because ``init_db`` runs ``create_all`` right
+    # after the migrations and creates the type as a side effect. SQLite renders
+    # Enum as VARCHAR either way, which is why this stayed invisible until
+    # PostgreSQL.
     nsec_state: NsecState = Field(
         default=NsecState.legacy,
         sa_column=Column(
             "nsec_state",
-            SAEnum(NsecState, native_enum=False, values_callable=_enum_values),
+            SAEnum(NsecState, native_enum=False),
             nullable=False,
         ),
     )
@@ -1320,22 +1297,16 @@ def fix_cashu_migrations() -> None:
 def _clear_alembic_version() -> None:
     """Clear the alembic_version table so stamp/upgrade can proceed.
 
-    Driven through the configured async driver rather than a second sync engine.
-    The old code built one by stripping ``+aiosqlite`` from the URL, which left
-    ``postgresql+asyncpg`` intact and raised ``MissingGreenlet``; naming the
-    sync backend instead only moves the problem, since it then demands a
-    separate sync driver (psycopg2) that a PostgreSQL deployment need not have.
+    Callers are gated to SQLite, so stripping ``+aiosqlite`` is enough to get a
+    sync engine here.
     """
+    sync_url = DATABASE_URL.replace("+aiosqlite", "")
+    from sqlalchemy import create_engine
 
-    async def clear() -> None:
-        eng = create_async_engine(DATABASE_URL)
-        try:
-            async with eng.begin() as conn:
-                await conn.execute(text("DELETE FROM alembic_version"))
-        finally:
-            await eng.dispose()
-
-    _run_async_from_sync(clear)
+    eng = create_engine(sync_url)
+    with eng.begin() as conn:
+        conn.execute(text("DELETE FROM alembic_version"))
+    eng.dispose()
 
 
 def run_migrations() -> None:
@@ -1362,10 +1333,9 @@ def run_migrations() -> None:
         try:
             command.upgrade(alembic_cfg, "head")
         except CommandError as e:
-            # Preserve legacy SQLite recovery only. PostgreSQL rolls back DDL
-            # transactionally: stamping head after an error can hide migrations
-            # that never committed. Unknown PostgreSQL revisions need operator
-            # reconciliation, not an automatic stamp.
+            # Preserve legacy SQLite recovery only. Blindly stamping head hides
+            # whatever the real failure was, so an unknown revision on any other
+            # backend needs operator reconciliation, not an automatic stamp.
             if make_url(
                 DATABASE_URL
             ).get_backend_name() == "sqlite" and "Can't locate revision" in str(e):

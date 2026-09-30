@@ -1,4 +1,4 @@
-"""End-to-end PostgreSQL coverage for the main application DB (issue #45).
+"""End-to-end PostgreSQL coverage for the main application DB.
 
 Runs against a real server so the things SQLite cannot express are actually
 exercised: native enum types, INT4 column widths, per-dialect ``ON CONFLICT``,
@@ -186,8 +186,7 @@ def test_migrated_schema_matches_the_orm(migrated_postgres: str) -> None:
             _touches(diff, "settings")
             or _touches(diff, "cashu_transactions", "api_key_hashed_key")
             or _touches(diff, "cli_tokens", "token")
-            or "modify_type" in str(diff)
-            and "TEXT()" in str(diff)
+            or ("modify_type" in str(diff) and "TEXT()" in str(diff))
         )
     ]
     assert unexplained == [], unexplained
@@ -847,24 +846,6 @@ async def test_dead_keys_are_pruned(pg_session: AsyncSession) -> None:
     assert await prune_dead_api_keys(pg_session, min_age_seconds=60) == 1
     assert await pg_session.get(ApiKey, "dead") is None
     assert await pg_session.get(ApiKey, "alive") is not None
-
-
-@pytest.mark.asyncio
-async def test_version_clear_uses_async_driver(db_bound_to_postgres: Any) -> None:
-    db_module = db_bound_to_postgres
-    # Direct invocation really exercises the running-loop branch.
-    db_module._clear_alembic_version()
-    async with db_module.engine.connect() as conn:
-        assert (
-            await conn.execute(text("SELECT count(*) FROM alembic_version"))
-        ).scalar_one() == 0
-    # Explicit stamp is justified only here: this fixture is known to be at head.
-    await asyncio.to_thread(_alembic, "stamp", "head")
-    await asyncio.to_thread(db_module._clear_alembic_version)
-    async with db_module.engine.connect() as conn:
-        assert (
-            await conn.execute(text("SELECT count(*) FROM alembic_version"))
-        ).scalar_one() == 0
 
 
 @pytest.mark.asyncio

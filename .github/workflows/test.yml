@@ -52,6 +52,46 @@ jobs:
             .coverage
           retention-days: 30
 
+  postgres-compat:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: routstr
+          POSTGRES_PASSWORD: routstr
+          POSTGRES_DB: routstr
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --python 3.12 --dev
+
+      - name: Run PostgreSQL compatibility tests
+        env:
+          UPSTREAM_BASE_URL: "http://test"
+          UPSTREAM_API_KEY: "test"
+          ROUTSTR_TEST_POSTGRES_URL: "postgresql+asyncpg://routstr:routstr@127.0.0.1:5432/routstr"
+        run: |
+          uv run --python 3.12 pytest tests/integration/test_postgres_compatibility.py \
+            --verbose --tb=short
+
   ui-build:
     runs-on: ubuntu-latest
 

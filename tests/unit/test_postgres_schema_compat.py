@@ -3,7 +3,7 @@
 These run without a PostgreSQL server: they compile the real SQLModel metadata
 against the PostgreSQL dialect and assert the properties that SQLite silently
 papered over. Each test here corresponds to a defect that was live on
-PostgreSQL while every SQLite test stayed green (issue #45).
+PostgreSQL while every SQLite test stayed green.
 
 The end-to-end proof against a real server lives in
 ``tests/integration/test_postgres_compatibility.py``.
@@ -223,19 +223,6 @@ def test_model_path_upsert_is_built_for_the_bound_dialect() -> None:
         ),
         SQLITE_DIALECT,
     )
-
-
-def test_clear_alembic_version_uses_the_configured_async_driver() -> None:
-    """The recovery path must not need a second, sync-only driver.
-
-    It used to build a sync engine from ``DATABASE_URL.replace("+aiosqlite", "")``,
-    which left ``postgresql+asyncpg`` intact and raised ``MissingGreenlet``.
-    """
-    import inspect
-
-    source = inspect.getsource(db_module._clear_alembic_version)
-    assert "create_engine(" not in source.replace("create_async_engine(", "")
-    assert 'replace("+aiosqlite"' not in source
 
 
 def test_sqlite_only_maintenance_stays_scoped_to_the_wallet_directory() -> None:

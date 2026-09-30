@@ -200,7 +200,7 @@ Use environment variables for:
 | `ADMIN_PASSWORD`     | Legacy seed for the dashboard password (otherwise generated + logged on first start) | (auto-generated) |
 | `ROUTSTR_SECRET_KEY` | Master key encrypting node secrets at rest. Auto-generated to a key file if unset | (auto-generated) |
 | `ROUTSTR_SECRET_KEY_FILE` | Path to the generated key file (used when `ROUTSTR_SECRET_KEY` is unset) | `routstr_secret.key` beside the database |
-| `DATABASE_URL`       | Database connection string        | `sqlite+aiosqlite:///keys.db`        |
+| `DATABASE_URL`       | Database connection string. SQLite or PostgreSQL, e.g. `postgresql+asyncpg://user:pass@host:5432/routstr` | `sqlite+aiosqlite:///keys.db` |
 | `NAME`               | Node display name                 | `ARoutstrNode`                       |
 | `DESCRIPTION`        | Node description                  | `A Routstr Node`                     |
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
@@ -263,6 +263,12 @@ in your backups. If it is lost or changed, previously encrypted secrets can't be
 decrypted and must be re-entered — there is no rotation. To keep the key off the
 data volume, set `ROUTSTR_SECRET_KEY` explicitly (an env value always takes
 precedence over the file). See also [Deployment](deployment.md).
+
+**On PostgreSQL, set the key explicitly.** There is no local database file to sit
+beside, so the generated key lands in the working directory. If that directory
+isn't persisted, the key is gone on the next start and a node with a stored nsec
+refuses to boot with `ROUTSTR_SECRET_KEY is not set`. Set `ROUTSTR_SECRET_KEY`, or
+point `ROUTSTR_SECRET_KEY_FILE` at a persistent path.
 
 ---
 
