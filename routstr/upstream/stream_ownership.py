@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 
 from ..core import get_logger
+from ..core.settings import settings
 
 logger = get_logger(__name__)
 
@@ -74,10 +75,14 @@ class PersistentStreamFinalizer:
         self._task: asyncio.Future[None] | None = None
         self._lock = asyncio.Lock()
 
+    async def _bounded_finalize(self) -> None:
+        async with asyncio.timeout(settings.request_cleanup_timeout_seconds):
+            await self._finalize()
+
     async def run(self) -> None:
         async with self._lock:
             if self._task is None:
-                self._task = asyncio.ensure_future(self._finalize())
+                self._task = asyncio.ensure_future(self._bounded_finalize())
             task = self._task
         await asyncio.shield(task)
 

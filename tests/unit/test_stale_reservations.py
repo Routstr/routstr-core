@@ -428,3 +428,62 @@ async def test_proxy_reverts_reservation_on_client_disconnect() -> None:
             await proxy_module.proxy(request, "v1/chat/completions")
 
     revert_mock.assert_awaited_once_with(key, session, 1000, reservation_snapshot)
+
+
+@pytest.mark.asyncio
+async def test_absolute_expiry_releases_fresh_lease(session: AsyncSession) -> None:
+    now = int(time.time())
+    key = ApiKey(
+        hashed_key="expired-deadline",
+        balance=5000,
+        reserved_balance=1000,
+        reserved_at=now,
+    )
+    session.add(key)
+    session.add(
+        ReservationRelease(
+            id="expired",
+            key_hash=key.hashed_key,
+            billing_key_hash=key.hashed_key,
+            reserved_msats=1000,
+            created_at=now,
+            started_at=now - 100,
+            expires_at=now - 1,
+        )
+    )
+    await session.commit()
+    assert await release_stale_reservations(session, 300) == 1
+    await session.refresh(key)
+    assert key.reserved_balance == 0
+    assert key.balance == 5000
+
+
+@pytest.mark.asyncio
+async def test_expired_reservation_cannot_renew_or_claim_charge(
+    session: AsyncSession,
+) -> None:
+    from routstr.auth import (
+        ReservationSnapshot,
+        _claim_reservation_for_charge,
+        renew_reservation,
+    )
+
+    snapshot = ReservationSnapshot(
+        release_id="fenced",
+        key_hash="fenced-key",
+        billing_key_hash="fenced-key",
+        reserved_msats=1000,
+    )
+    session.add(ApiKey(hashed_key="fenced-key", balance=5000, reserved_balance=1000))
+    session.add(
+        ReservationRelease(
+            id="fenced",
+            key_hash="fenced-key",
+            billing_key_hash="fenced-key",
+            reserved_msats=1000,
+            expires_at=int(time.time()) - 1,
+        )
+    )
+    await session.commit()
+    assert not await renew_reservation(snapshot, session)
+    assert not await _claim_reservation_for_charge(snapshot, session)

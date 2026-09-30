@@ -637,6 +637,14 @@ async def pay_for_request(
     )
 
     # Charge the base cost for the request atomically to avoid race conditions
+    from .core.lifecycle import request_lifetime
+
+    lifetime = request_lifetime.get()
+    remaining_lifetime = (
+        max(0, lifetime.deadline - asyncio.get_running_loop().time())
+        if lifetime is not None
+        else settings.max_request_lifetime_seconds
+    )
     reserved_at_now = int(time.time())
     stmt = (
         update(ApiKey)
@@ -686,6 +694,9 @@ async def pay_for_request(
             billing_key_hash=reservation.billing_key_hash,
             reserved_msats=reservation.reserved_msats,
             status="active",
+            started_at=reserved_at_now,
+            expires_at=reserved_at_now
+            + math.ceil(remaining_lifetime + settings.request_cleanup_timeout_seconds),
         )
     )
     # Publish the identity before commit. If the commit succeeds but its
@@ -726,6 +737,11 @@ async def pay_for_request(
 
     # The reservation is durable; keep its lease fresh for the whole request
     # lifetime (upstream header waits, non-streaming and streaming alike).
+    from .core.lifecycle import request_lifetime
+
+    lifetime = request_lifetime.get()
+    if lifetime is not None:
+        lifetime.reservations.append(reservation)
     _start_reservation_heartbeat(reservation)
 
     try:
@@ -875,6 +891,10 @@ async def renew_reservation(
         update(ReservationRelease)
         .where(col(ReservationRelease.id) == snapshot.release_id)
         .where(col(ReservationRelease.status) == "active")
+        .where(
+            (col(ReservationRelease.expires_at).is_(None))
+            | (col(ReservationRelease.expires_at) > int(time.time()))
+        )
         .values(created_at=int(time.time()))
     )
     await session.commit()
@@ -902,12 +922,21 @@ def _start_reservation_heartbeat(snapshot: ReservationSnapshot) -> None:
     """
     interval = max(1, settings.stale_reservation_timeout_seconds // 3)
     owner = asyncio.current_task()
+    from .core.lifecycle import request_lifetime
+
+    lifetime = request_lifetime.get()
+    deadline = asyncio.get_running_loop().time() + settings.max_request_lifetime_seconds
 
     async def beat() -> None:
         try:
             while True:
                 await asyncio.sleep(interval)
-                if owner is None or owner.done():
+                if (
+                    owner is None
+                    or owner.done()
+                    or (lifetime is not None and lifetime.stopped)
+                    or asyncio.get_running_loop().time() >= deadline
+                ):
                     # Request control is gone; let the lease expire so the
                     # sweeper can release the reservation if no terminal
                     # transition ever ran.
@@ -1091,6 +1120,10 @@ async def _claim_reservation_for_charge(
         update(ReservationRelease)
         .where(col(ReservationRelease.id) == snapshot.release_id)
         .where(col(ReservationRelease.status) == "active")
+        .where(
+            col(ReservationRelease.expires_at).is_(None)
+            | (col(ReservationRelease.expires_at) > int(time.time()))
+        )
         .where(col(ReservationRelease.key_hash) == snapshot.key_hash)
         .where(col(ReservationRelease.billing_key_hash) == snapshot.billing_key_hash)
         .where(col(ReservationRelease.reserved_msats) == snapshot.reserved_msats)
