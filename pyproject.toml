@@ -72,10 +72,12 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["routstr"]
 
+[tool.ruff]
+extend-exclude = ["examples", "repro", "reservation-repro-main"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E501"]
-exclude = ["examples"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -85,6 +87,7 @@ check_untyped_defs = true
 disallow_untyped_calls = true
 disallow_incomplete_defs = true
 disallow_untyped_decorators = true
+exclude = ["^repro/", "^reservation-repro-main/"]
 
 [tool.uv.sources]
 routstr = { workspace = true }

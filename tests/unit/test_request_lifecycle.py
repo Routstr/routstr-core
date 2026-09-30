@@ -2,6 +2,7 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
+from starlette.types import Message, Receive, Scope, Send
 
 from routstr.core.lifecycle import RequestLifecycleMiddleware
 from routstr.core.settings import settings
@@ -9,13 +10,13 @@ from routstr.core.settings import settings
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reason", ["disconnect", "deadline", "send"])
-async def test_lifecycle_stops_live_work(reason):
+async def test_lifecycle_stops_live_work(reason: str) -> None:
     closed = asyncio.Event()
-    receive_queue = asyncio.Queue()
+    receive_queue: asyncio.Queue[Message] = asyncio.Queue()
     await receive_queue.put({"type": "http.request", "body": b"", "more_body": False})
-    sent = []
+    sent: list[Message] = []
 
-    async def app(scope, receive, send):
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
         try:
             assert (await receive())["type"] == "http.request"
             await send({"type": "http.response.start", "status": 200, "headers": []})
@@ -27,12 +28,12 @@ async def test_lifecycle_stops_live_work(reason):
         finally:
             closed.set()
 
-    async def send(message):
+    async def send(message: Message) -> None:
         sent.append(message)
         if reason == "send" and message["type"] == "http.response.body":
             await asyncio.sleep(100)
 
-    async def disconnect():
+    async def disconnect() -> None:
         await asyncio.sleep(0.02)
         await receive_queue.put({"type": "http.disconnect"})
 
