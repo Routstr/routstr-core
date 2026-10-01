@@ -148,12 +148,13 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
         # await ensure_models_bootstrapped()
 
-        from ..proxy import get_upstreams
+        from ..proxy import get_upstreams, mark_warming_up
         from ..upstream.helpers import refresh_upstreams_models_periodically
 
         # Provider discovery hits every upstream's /models (plus the OpenRouter
         # catalog for unpriced models), so keep it off the readiness path: the
         # app serves as soon as the DB is up and fills its model maps after.
+        mark_warming_up()
         bootstrap_task = asyncio.create_task(_bootstrap_providers_and_pricing())
 
         btc_price_task = asyncio.create_task(update_prices_periodically())
