@@ -1,16 +1,14 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import dynamic from 'next/dynamic';
 import { AlertCircle } from 'lucide-react';
 import type { Model } from '@/lib/api/schemas/models';
-import { AdminService } from '@/lib/api/services/admin';
+import { useModelsWithProviders } from '@/lib/hooks/use-models-with-providers';
 import { groupAndSortModelsByProvider } from '@/lib/utils/model-sort';
 import { AppPageShell } from '@/components/app-page-shell';
 import { PageHeader } from '@/components/page-header';
 import { ModelSelector } from '@/components/model-selector';
-import { ModelTester } from '@/components/model-tester';
-import { ApiEndpointTester } from '@/components/api-endpoint-tester';
 import { ModelSearchFilter } from '@/components/model-search-filter';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
@@ -23,6 +21,19 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
+// The testing tabs are never the landing view, so keeping them out of this
+// route's chunk is what lets the navigation itself resolve quickly.
+const ModelTester = dynamic(
+  () => import('@/components/model-tester').then((m) => m.ModelTester),
+  { loading: () => <Skeleton className='h-[420px] w-full' />, ssr: false }
+);
+
+const ApiEndpointTester = dynamic(
+  () =>
+    import('@/components/api-endpoint-tester').then((m) => m.ApiEndpointTester),
+  { loading: () => <Skeleton className='h-[420px] w-full' />, ssr: false }
+);
+
 export function ModelsPage() {
   const [filteredModels, setFilteredModels] = useState<Model[] | undefined>(
     undefined
@@ -31,16 +42,11 @@ export function ModelsPage() {
     useState<string>('all');
 
   const {
-    data: modelsData,
+    models,
+    groups,
     isLoading: isLoadingModels,
     error: modelsError,
-  } = useQuery({
-    queryKey: ['admin-models-with-providers'],
-    queryFn: () => AdminService.getModelsWithProviders(),
-    refetchOnWindowFocus: false,
-  });
-
-  const { models = [], groups = [] } = modelsData || {};
+  } = useModelsWithProviders();
 
   const groupedModels = useMemo(
     () => groupAndSortModelsByProvider(models),

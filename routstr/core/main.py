@@ -45,6 +45,7 @@ from .exceptions import (
     http_exception_handler,
     validation_exception_handler,
 )
+from .lifecycle import RequestLifecycleMiddleware
 from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
 from .not_found import _NOT_FOUND_HTML, not_found_catch_all  # noqa: F401
@@ -314,6 +315,10 @@ app.add_middleware(
 
 # Add logging middleware
 app.add_middleware(LoggingMiddleware)
+
+# Outermost: observe the actual downstream connection, not middleware streams.
+
+app.add_middleware(RequestLifecycleMiddleware)
 
 # Add exception handlers
 app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore

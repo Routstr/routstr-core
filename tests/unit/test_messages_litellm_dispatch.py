@@ -23,6 +23,9 @@ from routstr.core.db import ApiKey  # noqa: E402
 from routstr.payment.cost_calculation import CostData  # noqa: E402
 from routstr.payment.models import Architecture, Model, Pricing  # noqa: E402
 from routstr.upstream.base import BaseUpstreamProvider  # noqa: E402
+from routstr.upstream.messages_dispatch import (  # noqa: E402
+    prune_blank_system_blocks,
+)
 from routstr.wallet import MintConnectionError, TokenConsumedError  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -111,6 +114,39 @@ def _make_request(request_id: str | None = "req-test") -> Any:
 # ---------------------------------------------------------------------------
 # Helper / coercion
 # ---------------------------------------------------------------------------
+
+
+def test_prune_blank_system_blocks_drops_blank_blocks() -> None:
+    body = {
+        "system": [
+            {"type": "text", "text": "  \n"},
+            {"type": "text", "text": "real prompt"},
+        ]
+    }
+    prune_blank_system_blocks(body)
+    assert body["system"] == [{"type": "text", "text": "real prompt"}]
+
+
+def test_prune_blank_system_blocks_drops_key_when_all_blank() -> None:
+    body = {"system": [{"type": "text", "text": "\n"}], "max_tokens": 8}
+    prune_blank_system_blocks(body)
+    assert body == {"max_tokens": 8}
+
+
+def test_prune_blank_system_blocks_handles_string_system() -> None:
+    blank = {"system": "   "}
+    prune_blank_system_blocks(blank)
+    assert blank == {}
+
+    kept = {"system": "be brief"}
+    prune_blank_system_blocks(kept)
+    assert kept == {"system": "be brief"}
+
+
+def test_prune_blank_system_blocks_keeps_non_text_blocks() -> None:
+    body = {"system": [{"type": "image", "source": {}}]}
+    prune_blank_system_blocks(body)
+    assert body["system"] == [{"type": "image", "source": {}}]
 
 
 def test_coerce_litellm_payload_handles_dict() -> None:
@@ -1755,3 +1791,31 @@ async def test_x_cashu_zero_value_rejected_not_forwarded(
     assert body["error"]["code"] == "cashu_token_zero_value"
     # Spent-to-zero token must not be echoed back for retry.
     assert "X-Cashu" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_dispatch_passes_placeholder_key_for_keyless_upstream() -> None:
+    """A blank upstream key must not reach litellm, which would fall back to
+    OPENAI_API_KEY and fail with an AuthenticationError."""
+    provider = BaseUpstreamProvider(base_url="http://localhost:8000/v1", api_key="")
+    captured_kwargs: dict[str, Any] = {}
+
+    async def fake_acreate(**kwargs: Any) -> AsyncIterator[dict]:
+        captured_kwargs.update(kwargs)
+
+        async def no_events() -> AsyncIterator[dict]:
+            return
+            yield
+
+        return no_events()
+
+    with patch(
+        "litellm.anthropic.messages.acreate",
+        new=AsyncMock(side_effect=fake_acreate),
+    ):
+        await provider._dispatch_anthropic_messages(
+            request_body=_anthropic_request_body(stream=True),
+            model_obj=_make_model(),
+        )
+
+    assert captured_kwargs["api_key"] == "no-key"

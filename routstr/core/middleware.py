@@ -1,7 +1,7 @@
 import time
 import uuid
 from contextvars import ContextVar
-from typing import Callable
+from typing import AsyncIterator, Callable
 from urllib.parse import urlsplit
 
 from fastapi import Request, Response
@@ -9,6 +9,7 @@ from starlette.datastructures import Headers
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .logging import get_logger
+from .settings import settings
 
 logger = get_logger(__name__)
 
@@ -86,11 +87,18 @@ _SKIP_LOG_EXACT: frozenset[str] = frozenset(
 )
 
 
-def _should_log(method: str, path: str) -> bool:
+def _should_log(method: str, path: str, status_code: int | None = None) -> bool:
     if method in _SKIP_LOG_METHODS:
         return False
+    # Our own faults are never noise, whatever the path.
+    if status_code is not None and status_code >= 500:
+        return True
     if path in _SKIP_LOG_EXACT:
-        return False
+        # A 4xx storm on a UI-polled path is exactly what we need to see.
+        return status_code is not None and status_code >= 400
+    # Client errors on the skipped prefixes stay hidden: 404s under /_next/ are
+    # driven by whoever scans the node, and the admin UI's timer-driven polling
+    # turns one expired session into a 401 per poll.
     return not any(path.startswith(prefix) for prefix in _SKIP_LOG_PREFIXES)
 
 
@@ -103,11 +111,115 @@ def _attribution(request: Request) -> dict[str, object]:
     }
 
 
+def mark(request: Request, name: str) -> None:
+    """Record that stage ``name`` finished, for the completion log's timings."""
+    marks = getattr(request.state, "stage_marks", None)
+    if marks is not None:
+        marks[name] = time.monotonic()
+
+
+def _request_content_length(headers: Headers) -> int | None:
+    """Client-supplied length, dropped unless it is a plausible byte count."""
+    raw = headers.get("content-length")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
 class LoggingMiddleware(BaseHTTPMiddleware):
     """Middleware to log proxy interactions and page navigation.
 
     Skips logging for static assets and Next.js chunks to avoid noise.
     """
+
+    def _log_completion(
+        self,
+        *,
+        request: Request,
+        request_id: str,
+        path: str,
+        status_code: int,
+        duration: float,
+        headers_duration: float | None,
+        stage_start: float,
+        stage_marks: dict[str, float],
+        incoming_logged: bool,
+    ) -> None:
+        if not _should_log(request.method, path, status_code):
+            return
+
+        extra: dict[str, object] = {
+            "request_id": request_id,
+            "method": request.method,
+            "path": path,
+            "status_code": status_code,
+            "duration_ms": round(duration * 1000, 2),
+            "content_length": _request_content_length(request.headers),
+            **_attribution(request),
+        }
+        if headers_duration is not None:
+            extra["time_to_headers_ms"] = round(headers_duration * 1000, 2)
+        if not incoming_logged:
+            # Tells log consumers that join on request_id why the matching
+            # "Incoming request" record is missing.
+            extra["incoming_suppressed"] = True
+        for name, marked_at in stage_marks.items():
+            extra[f"{name}_ms"] = round((marked_at - stage_start) * 1000, 2)
+        if status_code >= 400:
+            error_detail = getattr(request.state, "error_detail", None)
+            if isinstance(error_detail, dict):
+                extra["error_type"] = error_detail.get("error_type")
+                extra["error_code"] = error_detail.get("error_code")
+                extra["error_message"] = error_detail.get("error_message")
+        log = (
+            logger.warning
+            if duration > settings.slow_request_warn_seconds
+            else logger.info
+        )
+        log("Request completed", extra=extra)
+
+    async def _timed_body(
+        self,
+        body_iterator: AsyncIterator[bytes],
+        *,
+        request: Request,
+        request_id: str,
+        client_app: str,
+        path: str,
+        status_code: int,
+        stage_start: float,
+        stage_marks: dict[str, float],
+        headers_duration: float,
+        incoming_logged: bool,
+    ) -> AsyncIterator[bytes]:
+        try:
+            async for chunk in body_iterator:
+                yield chunk
+        finally:
+            duration = time.monotonic() - stage_start
+            # dispatch() has already reset both context vars by now, and the
+            # logging filters read request_id/client_app from them.
+            request_token = request_id_context.set(request_id)
+            app_token = client_app_context.set(client_app)
+            try:
+                self._log_completion(
+                    request=request,
+                    request_id=request_id,
+                    path=path,
+                    status_code=status_code,
+                    duration=duration,
+                    headers_duration=headers_duration,
+                    stage_start=stage_start,
+                    stage_marks=stage_marks,
+                    incoming_logged=incoming_logged,
+                )
+            finally:
+                request_id_context.reset(request_token)
+                client_app_context.reset(app_token)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # Generate request ID
@@ -117,15 +229,17 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         # Set request ID in context for logging
         token = request_id_context.set(request_id)
 
-        client_app_token = client_app_context.set(
-            client_app_from_headers(request.headers)
-        )
+        client_app = client_app_from_headers(request.headers)
+        client_app_token = client_app_context.set(client_app)
 
         path = request.url.path
         should_log = _should_log(request.method, path)
 
-        # Start timing
-        start_time = time.time()
+        # Start timing. Monotonic throughout: a wall-clock step would otherwise
+        # produce negative durations and bogus slow-request warnings.
+        stage_start = time.monotonic()
+        stage_marks: dict[str, float] = {}
+        request.state.stage_marks = stage_marks
 
         if should_log:
             logger.info(
@@ -144,34 +258,52 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
 
-            if should_log:
-                duration = time.time() - start_time
-                extra: dict[str, object] = {
-                    "request_id": request_id,
-                    "method": request.method,
-                    "path": path,
-                    "status_code": response.status_code,
-                    "duration_ms": round(duration * 1000, 2),
-                    **_attribution(request),
-                }
-                if response.status_code >= 400:
-                    error_detail = getattr(request.state, "error_detail", None)
-                    if isinstance(error_detail, dict):
-                        extra["error_type"] = error_detail.get("error_type")
-                        extra["error_code"] = error_detail.get("error_code")
-                        extra["error_message"] = error_detail.get("error_message")
-                logger.info(
-                    "Request completed",
-                    extra=extra,
-                )
+            headers_duration = time.monotonic() - stage_start
+
             if hasattr(response, "headers"):
                 response.headers["x-routstr-request-id"] = request_id
+                # Headers are already on the wire before a streamed body ends,
+                # so this can only ever be time-to-headers.
+                response.headers["x-routstr-duration-ms"] = str(
+                    round(headers_duration * 1000, 2)
+                )
+
+            body_iterator = getattr(response, "body_iterator", None)
+            if body_iterator is None:
+                self._log_completion(
+                    request=request,
+                    request_id=request_id,
+                    path=path,
+                    status_code=response.status_code,
+                    duration=headers_duration,
+                    headers_duration=None,
+                    stage_start=stage_start,
+                    stage_marks=stage_marks,
+                    incoming_logged=should_log,
+                )
+                return response
+
+            # A StreamingResponse is barely started here: most of the time a
+            # slow completion spends in the node is spent relaying its body, so
+            # the completion log has to wait for the iterator to drain.
+            response.body_iterator = self._timed_body(
+                body_iterator,
+                request=request,
+                request_id=request_id,
+                client_app=client_app,
+                path=path,
+                status_code=response.status_code,
+                stage_start=stage_start,
+                stage_marks=stage_marks,
+                headers_duration=headers_duration,
+                incoming_logged=should_log,
+            )
 
             return response
 
         except Exception as e:
             # Always log failures, even for skipped paths, so we don't lose errors.
-            duration = time.time() - start_time
+            duration = time.monotonic() - stage_start
             logger.error(
                 "Request failed",
                 extra={
@@ -196,5 +328,6 @@ __all__ = [
     "LoggingMiddleware",
     "UNKNOWN_CLIENT_APP",
     "client_app_context",
+    "mark",
     "request_id_context",
 ]

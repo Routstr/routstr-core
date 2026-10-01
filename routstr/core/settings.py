@@ -117,6 +117,16 @@ class Settings(BaseSettings):
         default=604_800, env="DEAD_KEY_MIN_AGE_SECONDS"
     )
 
+    max_request_lifetime_seconds: float = Field(
+        default=1800, gt=0, env="MAX_REQUEST_LIFETIME_SECONDS"
+    )
+    downstream_send_timeout_seconds: float = Field(
+        default=60, gt=0, env="DOWNSTREAM_SEND_TIMEOUT_SECONDS"
+    )
+    request_cleanup_timeout_seconds: float = Field(
+        default=30, gt=0, env="REQUEST_CLEANUP_TIMEOUT_SECONDS"
+    )
+
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
     # Comma-separated METHOD:path pairs adding to the proxy's canonical
@@ -197,6 +207,9 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     enable_console_logging: bool = Field(default=True, env="ENABLE_CONSOLE_LOGGING")
+    slow_request_warn_seconds: float = Field(
+        default=60.0, gt=0, env="SLOW_REQUEST_WARN_SECONDS"
+    )
 
     # Other
     chat_completions_api_version: str = Field(

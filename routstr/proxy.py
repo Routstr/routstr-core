@@ -28,6 +28,7 @@ from .core.error_scope import (
     UPSTREAM_UNAVAILABLE,
 )
 from .core.exceptions import UpstreamError
+from .core.middleware import mark
 from .core.not_found import build_not_found_response
 from .core.settings import settings
 from .payment.helpers import (
@@ -474,6 +475,7 @@ async def proxy(request: Request, path: str) -> Response | StreamingResponse:
     request_body = await _read_bounded_body(request)
     if isinstance(request_body, Response):
         return request_body
+    mark(request, "body_read")
 
     async with create_session() as session:
         try:
@@ -777,6 +779,7 @@ async def _proxy(
         key = await get_bearer_token_key(
             headers, path, session, auth, max_cost_for_model, model_id
         )
+        mark(request, "auth")
 
     else:
         if request.method not in ["GET"]:
@@ -1012,7 +1015,7 @@ async def _proxy(
                         already_stripped.add(bad_param)
                         logger.warning(
                             "Upstream %s rejected param '%s' for model=%s; "
-                            "stripping and retrying same upstream",
+                            "correcting and retrying same upstream",
                             upstream.provider_type,
                             bad_param,
                             model_id,

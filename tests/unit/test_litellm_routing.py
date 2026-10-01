@@ -91,3 +91,24 @@ def test_detect_litellm_prefix_custom_default() -> None:
     assert detect_litellm_prefix("https://example.com", default="anthropic/") == (
         "anthropic/"
     )
+
+
+@pytest.mark.parametrize("model", ["gpt-6", "gpt-6-luna", "gpt-5.5"])
+def test_litellm_sends_max_completion_tokens_for_gpt_5_and_later(model: str) -> None:
+    """OpenAI rejects ``max_tokens`` on these models; litellm <1.101 only
+    rewrote it for names containing ``gpt-5``, so gpt-6 got a 400."""
+    import litellm
+    from litellm.utils import ProviderConfigManager
+
+    config = ProviderConfigManager.get_provider_chat_config(
+        model=model, provider=litellm.LlmProviders.OPENAI
+    )
+    assert config is not None
+    mapped = config.map_openai_params(
+        non_default_params={"max_tokens": 10},
+        optional_params={},
+        model=model,
+        drop_params=True,
+    )
+
+    assert mapped == {"max_completion_tokens": 10}

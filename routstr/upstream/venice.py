@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncGenerator, AsyncIterator
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
 from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
 from ..payment.models import Architecture, Model, Pricing, TopProvider
+from . import messages_dispatch
 from .base import BaseUpstreamProvider
+from .stream_ownership import aclose_if_needed
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -50,6 +53,73 @@ _UNENFORCEABLE_WEB_SEARCH_KEYS = frozenset(
     {"allowed_domains", "blocked_domains", "user_location"}
 )
 
+# Venice streams OpenAI reasoning models' encrypted reasoning as a trailing
+# ``reasoning_content`` delta carrying this marker. litellm turns it into a
+# plaintext ``thinking`` block after the answer, which clients render as
+# gibberish and which makes Claude Code report an empty final result.
+_ENCRYPTED_REASONING_MARKER = "__ENCRYPTED_REASONING__"
+
+
+async def _drop_encrypted_reasoning(
+    upstream: AsyncIterator[Any],
+) -> AsyncGenerator[bytes, None]:
+    """A thinking block's start carries no text, so it is held until its first
+    delta shows whether it is the encrypted payload; later indices shift down
+    to close the gap."""
+    encode = messages_dispatch.encode_sse
+    sse_buffer = b""
+    dropped: set[int] = set()
+    held: list[dict] | None = None
+    held_index: int | None = None
+
+    def shift(event: dict) -> dict:
+        index = event.get("index")
+        if not isinstance(index, int):
+            return event
+        gap = sum(1 for d in dropped if d < index)
+        return {**event, "index": index - gap} if gap else event
+
+    try:
+        async for chunk in upstream:
+            events, sse_buffer = messages_dispatch.events_from_chunk(chunk, sse_buffer)
+            for event in events:
+                etype = event.get("type")
+                index = event.get("index")
+                if held is not None:
+                    delta = event.get("delta") or {}
+                    is_own_delta = (
+                        index == held_index and etype == "content_block_delta"
+                    )
+                    thinking = str(delta.get("thinking") or "")
+                    if is_own_delta and thinking.startswith(
+                        _ENCRYPTED_REASONING_MARKER
+                    ):
+                        dropped.add(cast(int, index))
+                        held = None
+                        continue
+                    if is_own_delta and not thinking:
+                        held.append(event)
+                        continue
+                    for pending in held:
+                        yield encode(shift(pending))
+                    held = None
+                if index in dropped:
+                    continue
+                block = event.get("content_block") or {}
+                if (
+                    etype == "content_block_start"
+                    and block.get("type") == "thinking"
+                    and not block.get("thinking")
+                ):
+                    held, held_index = [event], index
+                    continue
+                yield encode(shift(event))
+        if held is not None:
+            for pending in held:
+                yield encode(shift(pending))
+    finally:
+        await aclose_if_needed(upstream)
+
 
 def _is_web_search_tool(tool: Any) -> bool:
     """An Anthropic server-side web-search tool, by either of its markers.
@@ -64,6 +134,35 @@ def _is_web_search_tool(tool: Any) -> bool:
     return (
         isinstance(tool_type, str) and tool_type.startswith("web_search")
     ) or tool.get("name") == "web_search"
+
+
+def _merge_cache_marked_system(body: dict) -> None:
+    """Venice rejects an OpenAI ``system`` message with two or more text parts
+    when any part carries ``cache_control`` (``400 system: text content blocks
+    must contain non-whitespace text``), even though every part is non-blank.
+    Claude Code always sends that shape. A single marked block is accepted and
+    still caches, so the prefix stays cacheable under the last marker.
+    """
+    system = body.get("system")
+    if not isinstance(system, list) or len(system) < 2:
+        return
+    if not all(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+        for block in system
+    ):
+        return
+    markers = [block["cache_control"] for block in system if block.get("cache_control")]
+    if not markers:
+        return
+    body["system"] = [
+        {
+            "type": "text",
+            "text": "\n\n".join(block["text"] for block in system),
+            "cache_control": markers[-1],
+        }
+    ]
 
 
 def _usd(entry: Any) -> float | None:
@@ -114,7 +213,16 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("venice/")
 
+    def transform_messages_stream(
+        self, stream: AsyncIterator[Any]
+    ) -> AsyncIterator[Any]:
+        return _drop_encrypted_reasoning(stream)
+
     def adapt_messages_request(self, body: dict, model_obj: Model) -> str:
+        _merge_cache_marked_system(body)
+        return self._adapt_web_search(body)
+
+    def _adapt_web_search(self, body: dict) -> str:
         """Trade an Anthropic web-search tool for Venice's own search switch.
 
         Left in the body, litellm's Anthropic adapter rewrites the tool into a

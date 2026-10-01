@@ -36,6 +36,12 @@ from .reasoning_effort import adapt_messages_body_for_litellm
 
 logger = get_logger(__name__)
 
+# Sent in place of a blank upstream key. LiteLLM treats ``""`` as missing and
+# falls back to the provider's env var (e.g. ``OPENAI_API_KEY``), failing with
+# an AuthenticationError for keyless upstreams such as self-hosted
+# OpenAI-compatible servers, which the chat path reaches without auth.
+KEYLESS_UPSTREAM_API_KEY = "no-key"
+
 # Anthropic-Messages-only fields that don't translate to OpenAI
 # Chat Completions. ``litellm.drop_params`` only filters *known*
 # unsupported params; these newer/extension fields get passed through
@@ -76,6 +82,34 @@ ALLOWED_MESSAGES_REQUEST_FIELDS: frozenset[str] = frozenset(
         "reasoning_effort",
     }
 )
+
+
+def prune_blank_system_blocks(body: dict) -> None:
+    """Drop whitespace-only ``system`` text.
+
+    Anthropic accepts a blank system prompt; OpenAI-compatible upstreams
+    reject it with ``text content blocks must contain non-whitespace text``.
+    """
+    system = body.get("system")
+    if isinstance(system, str):
+        if not system.strip():
+            body.pop("system", None)
+        return
+    if not isinstance(system, list):
+        return
+    kept = [
+        block
+        for block in system
+        if not (
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and not str(block.get("text") or "").strip()
+        )
+    ]
+    if kept:
+        body["system"] = kept
+    else:
+        body.pop("system", None)
 
 
 def coerce_litellm_payload(payload: object) -> dict:
@@ -372,16 +406,9 @@ def annotate_event(event: dict, requested_model: str | None) -> AnnotatedEvent:
             _coerce_float(root_cost_details.get("output_cost")),
         )
 
-    event_type = str(event.get("type") or "")
-    payload = json.dumps(event)
-    if event_type:
-        sse_bytes = f"event: {event_type}\ndata: {payload}\n\n".encode()
-    else:
-        sse_bytes = f"data: {payload}\n\n".encode()
-
     return AnnotatedEvent(
         event,
-        sse_bytes,
+        encode_sse(event),
         in_tokens,
         out_tokens,
         cache_read_tokens,
@@ -391,6 +418,14 @@ def annotate_event(event: dict, requested_model: str | None) -> AnnotatedEvent:
         output_cost,
         model,
     )
+
+
+def encode_sse(event: dict) -> bytes:
+    event_type = str(event.get("type") or "")
+    payload = json.dumps(event)
+    if event_type:
+        return f"event: {event_type}\ndata: {payload}\n\n".encode()
+    return f"data: {payload}\n\n".encode()
 
 
 async def stream_annotated_events(
@@ -459,6 +494,7 @@ async def dispatch_anthropic_messages(
     provider_prefix: str,
     transform_model_name: Callable[[str], str],
     adapt_request: Callable[[dict], str] | None = None,
+    transform_stream: Callable[[AsyncIterator[Any]], AsyncIterator[Any]] | None = None,
     log_extra: dict[str, Any] | None = None,
 ) -> tuple[bool, Any, str | None]:
     """Call ``litellm.anthropic.messages.acreate`` and return
@@ -471,6 +507,10 @@ async def dispatch_anthropic_messages(
     may rewrite it in place and returns a suffix for the upstream model name,
     which is how a provider expresses a feature litellm would otherwise
     translate into a parameter the upstream rejects.
+
+    ``transform_stream`` rewrites the upstream event stream before it is
+    aggregated or handed to the client, so a provider can repair events
+    litellm translates faithfully but clients cannot use.
     """
     if not request_body:
         raise UpstreamError("Missing request body for /v1/messages", status_code=400)
@@ -505,7 +545,35 @@ async def dispatch_anthropic_messages(
         )
     body = {k: v for k, v in body.items() if k in ALLOWED_MESSAGES_REQUEST_FIELDS}
 
+    prune_blank_system_blocks(body)
+
     model_suffix = adapt_request(body) if adapt_request else ""
+
+    # LiteLLM turns Anthropic's server-side web_search tool into the OpenAI
+    # `web_search_options` parameter. Generic OpenAI-compatible chat endpoints
+    # (including those serving Claude through a proxy) may reject that field.
+    # Only a provider with an explicit adaptation (e.g. Venice's model suffix)
+    # can preserve search semantics; do not silently remove the tool and return
+    # an answer that never searched. Native /v1/messages providers bypass this
+    # dispatcher and receive the original tool unchanged.
+    tools = body.get("tools")
+    if provider_prefix == "openai/" and isinstance(tools, list) and any(
+        isinstance(tool, dict)
+        and (
+            (
+                isinstance(tool.get("type"), str)
+                and tool["type"].startswith("web_search")
+            )
+            or tool.get("name") == "web_search"
+        )
+        for tool in tools
+    ):
+        raise UpstreamError(
+            "This upstream does not support Anthropic web search through "
+            "OpenAI-compatible /v1/messages translation",
+            status_code=400,
+            code="UNSUPPORTED_WEB_SEARCH",
+        )
 
     # Convention: `model.id` is the canonical upstream model name;
     # `forwarded_model_id` is the public alias the internal API exposes
@@ -519,7 +587,7 @@ async def dispatch_anthropic_messages(
     kwargs: dict = {
         "model": litellm_model,
         "api_base": base_url,
-        "api_key": api_key,
+        "api_key": api_key or KEYLESS_UPSTREAM_API_KEY,
         "stream": upstream_stream,
         **body,
     }
@@ -577,6 +645,9 @@ async def dispatch_anthropic_messages(
             details=rate_limit.as_details() if rate_limit else None,
             from_upstream_response=True,
         ) from exc
+
+    if transform_stream is not None and hasattr(result, "__aiter__"):
+        result = transform_stream(cast(AsyncIterator[Any], result))
 
     if not client_stream and hasattr(result, "__aiter__"):
         # Client asked for a non-streaming response but we always stream
