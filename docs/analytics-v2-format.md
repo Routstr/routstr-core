@@ -28,7 +28,7 @@ The `columns` array defines these positions, in order:
 
 | Position | Column | Meaning |
 | --- | --- | --- |
-| 0 | `completed_requests` | Successfully completed terminal settlements, including zero-charge completions |
+| 0 | `completed_requests` | Billed requests, including zero-charge completions and interrupted streams |
 | 1 | `input_observed_requests` | Requests with reported input usage |
 | 2 | `output_observed_requests` | Requests with reported output usage |
 | 3 | `cache_read_observed_requests` | Requests with reported cache-read usage |
