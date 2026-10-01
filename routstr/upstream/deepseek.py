@@ -1,9 +1,10 @@
 """First-class upstream for the DeepSeek API.
 
 Pricing comes from ``_PEAK_RATES`` below, not from litellm or OpenRouter:
-litellm's bundled ``deepseek-v4-flash`` entry is stale, the OpenRouter feed
-carries resale prices below DeepSeek's own peak rate, and neither knows the
-current ``deepseek-flash`` id. A model DeepSeek lists that the table does not
+litellm's bundled ``deepseek-v4-flash`` entry is stale (input, output and cache
+rates alike), the OpenRouter feed carries resale prices below DeepSeek's own
+peak rate, and neither the bundled map nor OpenRouter knows the current
+``deepseek-flash`` id. A model DeepSeek lists that the table does not
 cover is imported disabled rather than priced from those sources.
 
 DeepSeek bills peak hours at twice the off-peak rate. The node has one flat

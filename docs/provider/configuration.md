@@ -65,7 +65,7 @@ in `routstr/upstream/deepseek.py`, not from litellm or OpenRouter:
   does not price shows up disabled in the Admin Dashboard. Enable it with a
   manual price, or add it to the table.
 - **Cache hits** bill at DeepSeek's cache-hit rate (about 2% of the input
-  rate).
+  rate on flash, about 3% on pro).
 
 Thinking-mode `reasoning_content` is returned to clients unchanged in
 responses, and forwarded unchanged when it appears in conversation history.

@@ -12,9 +12,13 @@ with ``tools`` answers 400 when it is stripped.
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+import litellm
 import pytest
 
 from routstr.upstream import upstream_provider_classes
@@ -230,3 +234,64 @@ async def test_reasoning_content_in_history_reaches_upstream() -> None:
     sent = json.loads(out)
     assert sent["model"] == "deepseek-flash"
     assert sent["messages"] == messages
+
+
+_ANTHROPIC_SSE = (
+    b"event: message_start\n"
+    b'data: {"type":"message_start","message":{"id":"msg_1","type":"message",'
+    b'"role":"assistant","model":"deepseek-flash","content":[],'
+    b'"stop_reason":null,"usage":{"input_tokens":3,"output_tokens":0}}}\n\n'
+    b"event: message_stop\n"
+    b'data: {"type":"message_stop"}\n\n'
+)
+
+
+@pytest.fixture
+def anthropic_stub() -> Iterator[tuple[str, list[tuple[str, dict[str, Any]]]]]:
+    """Loopback stand-in for DeepSeek's Anthropic-format endpoint."""
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers["Content-Length"])
+            seen.append((self.path, json.loads(self.rfile.read(length))))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(_ANTHROPIC_SSE)))
+            self.end_headers()
+            self.wfile.write(_ANTHROPIC_SSE)
+
+        def log_message(self, *args: Any) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", seen
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.asyncio
+async def test_messages_stream_reaches_deepseek_anthropic_endpoint(
+    anthropic_stub: tuple[str, list[tuple[str, dict[str, Any]]]],
+) -> None:
+    # litellm sends deepseek/ Messages calls to DeepSeek's /anthropic endpoint;
+    # its stream iterator imports litellm.proxy, which needs ``backoff``.
+    api_base, seen = anthropic_stub
+    stream = await litellm.anthropic.messages.acreate(
+        model=DeepSeekUpstreamProvider.litellm_provider_prefix + "deepseek-flash",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8,
+        stream=True,
+        api_key="sk-test",
+        api_base=api_base,
+    )
+    chunks = [chunk async for chunk in stream]  # type: ignore[union-attr]
+
+    assert b"message_stop" in b"".join(chunks)
+    assert len(seen) == 1
+    assert seen[0][0] == "/anthropic/v1/messages"
+    assert seen[0][1]["model"] == "deepseek-flash"
