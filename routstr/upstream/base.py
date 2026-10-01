@@ -3076,25 +3076,40 @@ class BaseUpstreamProvider:
         input_cost = 0.0
         output_cost = 0.0
 
-        async for annotated in messages_dispatch.stream_annotated_events(
-            iterator, requested_model
-        ):
-            if annotated.model:
-                last_model_seen = annotated.model
-            # See _stream_litellm_messages for why this is max() not +=.
-            input_tokens = max(input_tokens, annotated.input_tokens)
-            output_tokens = max(output_tokens, annotated.output_tokens)
-            cache_read_input_tokens = max(
-                cache_read_input_tokens, annotated.cache_read_input_tokens
+        try:
+            annotated_events = messages_dispatch.stream_annotated_events(
+                iterator, requested_model
             )
-            cache_creation_input_tokens = max(
-                cache_creation_input_tokens,
-                annotated.cache_creation_input_tokens,
-            )
-            total_cost = max(total_cost, annotated.total_cost)
-            input_cost = max(input_cost, annotated.input_cost)
-            output_cost = max(output_cost, annotated.output_cost)
-            buffered.append(annotated)
+            async for annotated in annotated_events:
+                if annotated.model:
+                    last_model_seen = annotated.model
+                # See _stream_litellm_messages for why this is max() not +=.
+                input_tokens = max(input_tokens, annotated.input_tokens)
+                output_tokens = max(output_tokens, annotated.output_tokens)
+                cache_read_input_tokens = max(
+                    cache_read_input_tokens, annotated.cache_read_input_tokens
+                )
+                cache_creation_input_tokens = max(
+                    cache_creation_input_tokens,
+                    annotated.cache_creation_input_tokens,
+                )
+                total_cost = max(total_cost, annotated.total_cost)
+                input_cost = max(input_cost, annotated.input_cost)
+                output_cost = max(output_cost, annotated.output_cost)
+                buffered.append(annotated)
+        except Exception as exc:
+            # Buffering lets us return an HTTP error before sending headers.
+            if messages_dispatch.is_provider_exception(exc):
+                raise messages_dispatch.upstream_error_from_exception(
+                    exc,
+                    log_message="Upstream stream failed mid-flight",
+                    log_extra={
+                        "model": last_model_seen or requested_model or "unknown",
+                        "provider": self.provider_type or self.base_url,
+                        "request_id": request_id,
+                    },
+                ) from exc
+            raise
 
         response_headers: dict[str, str] = {
             "Cache-Control": "no-cache",
