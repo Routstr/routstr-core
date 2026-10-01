@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import type { Model } from '@/lib/api/schemas/models';
+import { useProgressiveList } from '@/lib/hooks/use-progressive-list';
 import type { AdminModelGroup } from '@/lib/api/services/admin';
 import type { DisplayUnit } from '@/lib/types/units';
 import { ModelItemCard } from '@/components/model-item-card';
@@ -24,6 +25,7 @@ import {
   Edit3,
   Globe,
   Key,
+  Loader2,
   MoreVertical,
   RefreshCw,
 } from 'lucide-react';
@@ -103,10 +105,21 @@ export function ModelProviderSection({
     });
   }, [provider, providerModels]);
 
+  const { visibleItems: visibleProviderModels, hiddenCount } =
+    useProgressiveList(keyedProviderModels);
+
+  const pendingRowsNotice =
+    hiddenCount > 0 ? (
+      <div className='text-muted-foreground flex items-center justify-center gap-2 p-3 text-xs sm:text-sm'>
+        <Loader2 className='h-3.5 w-3.5 animate-spin' />
+        Rendering {hiddenCount} more model{hiddenCount === 1 ? '' : 's'}…
+      </div>
+    ) : null;
+
   if (filterProvider) {
     return (
       <div className='bg-card/35 border-border/70 md:divide-border/75 overflow-hidden rounded-lg border md:divide-y'>
-        {keyedProviderModels.map(({ model, renderKey }) => (
+        {visibleProviderModels.map(({ model, renderKey }) => (
           <ModelItemCard
             key={renderKey}
             model={model}
@@ -125,6 +138,7 @@ export function ModelProviderSection({
             onDelete={() => onDeleteModel(model.id)}
           />
         ))}
+        {pendingRowsNotice}
       </div>
     );
   }
@@ -217,7 +231,7 @@ export function ModelProviderSection({
 
       <CardContent className='px-3 pt-0 pb-3 sm:px-6 sm:pb-6'>
         <div className='bg-card/35 border-border/70 md:divide-border/75 overflow-hidden rounded-lg border md:divide-y'>
-          {keyedProviderModels.map(({ model, renderKey }) => (
+          {visibleProviderModels.map(({ model, renderKey }) => (
             <ModelItemCard
               key={renderKey}
               model={model}
@@ -236,6 +250,7 @@ export function ModelProviderSection({
               onDelete={() => onDeleteModel(model.id)}
             />
           ))}
+          {pendingRowsNotice}
         </div>
       </CardContent>
     </Card>
