@@ -84,6 +84,34 @@ ALLOWED_MESSAGES_REQUEST_FIELDS: frozenset[str] = frozenset(
 )
 
 
+def prune_blank_system_blocks(body: dict) -> None:
+    """Drop whitespace-only ``system`` text.
+
+    Anthropic accepts a blank system prompt; OpenAI-compatible upstreams
+    reject it with ``text content blocks must contain non-whitespace text``.
+    """
+    system = body.get("system")
+    if isinstance(system, str):
+        if not system.strip():
+            body.pop("system", None)
+        return
+    if not isinstance(system, list):
+        return
+    kept = [
+        block
+        for block in system
+        if not (
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and not str(block.get("text") or "").strip()
+        )
+    ]
+    if kept:
+        body["system"] = kept
+    else:
+        body.pop("system", None)
+
+
 def coerce_litellm_payload(payload: object) -> dict:
     """Convert a litellm event into a plain dict.
 
@@ -378,16 +406,9 @@ def annotate_event(event: dict, requested_model: str | None) -> AnnotatedEvent:
             _coerce_float(root_cost_details.get("output_cost")),
         )
 
-    event_type = str(event.get("type") or "")
-    payload = json.dumps(event)
-    if event_type:
-        sse_bytes = f"event: {event_type}\ndata: {payload}\n\n".encode()
-    else:
-        sse_bytes = f"data: {payload}\n\n".encode()
-
     return AnnotatedEvent(
         event,
-        sse_bytes,
+        encode_sse(event),
         in_tokens,
         out_tokens,
         cache_read_tokens,
@@ -397,6 +418,14 @@ def annotate_event(event: dict, requested_model: str | None) -> AnnotatedEvent:
         output_cost,
         model,
     )
+
+
+def encode_sse(event: dict) -> bytes:
+    event_type = str(event.get("type") or "")
+    payload = json.dumps(event)
+    if event_type:
+        return f"event: {event_type}\ndata: {payload}\n\n".encode()
+    return f"data: {payload}\n\n".encode()
 
 
 async def stream_annotated_events(
@@ -465,6 +494,7 @@ async def dispatch_anthropic_messages(
     provider_prefix: str,
     transform_model_name: Callable[[str], str],
     adapt_request: Callable[[dict], str] | None = None,
+    transform_stream: Callable[[AsyncIterator[Any]], AsyncIterator[Any]] | None = None,
     log_extra: dict[str, Any] | None = None,
 ) -> tuple[bool, Any, str | None]:
     """Call ``litellm.anthropic.messages.acreate`` and return
@@ -477,6 +507,10 @@ async def dispatch_anthropic_messages(
     may rewrite it in place and returns a suffix for the upstream model name,
     which is how a provider expresses a feature litellm would otherwise
     translate into a parameter the upstream rejects.
+
+    ``transform_stream`` rewrites the upstream event stream before it is
+    aggregated or handed to the client, so a provider can repair events
+    litellm translates faithfully but clients cannot use.
     """
     if not request_body:
         raise UpstreamError("Missing request body for /v1/messages", status_code=400)
@@ -510,6 +544,8 @@ async def dispatch_anthropic_messages(
             extra={"dropped_keys": dropped},
         )
     body = {k: v for k, v in body.items() if k in ALLOWED_MESSAGES_REQUEST_FIELDS}
+
+    prune_blank_system_blocks(body)
 
     model_suffix = adapt_request(body) if adapt_request else ""
 
@@ -609,6 +645,9 @@ async def dispatch_anthropic_messages(
             details=rate_limit.as_details() if rate_limit else None,
             from_upstream_response=True,
         ) from exc
+
+    if transform_stream is not None and hasattr(result, "__aiter__"):
+        result = transform_stream(cast(AsyncIterator[Any], result))
 
     if not client_stream and hasattr(result, "__aiter__"):
         # Client asked for a non-streaming response but we always stream

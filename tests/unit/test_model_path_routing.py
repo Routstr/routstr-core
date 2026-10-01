@@ -706,6 +706,75 @@ async def test_pinned_recovery_preserves_routing_fields(
     fallback.forward_request.assert_not_awaited()
 
 
+_OPENAI_MAX_TOKENS_ERROR = json.dumps(
+    {
+        "error": {
+            "message": "Unsupported parameter: 'max_tokens' is not supported "
+            "with this model. Use 'max_completion_tokens' instead.",
+            "type": "invalid_request_error",
+            "param": "max_tokens",
+            "code": "unsupported_parameter",
+        }
+    }
+).encode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [False, True])
+async def test_rejected_max_tokens_is_renamed_and_retried_on_same_upstream(
+    pinned: bool,
+) -> None:
+    selected, fallback = _make_upstream(1), _make_upstream(2)
+    selected.forward_request = AsyncMock(
+        side_effect=[
+            MagicMock(status_code=400, body=_OPENAI_MAX_TOKENS_ERROR),
+            MagicMock(status_code=200, body=b"{}"),
+        ]
+    )
+    headers = {"authorization": "Bearer key"}
+    if pinned:
+        headers["x-routstr-model-path"] = encode_model_path(selected.base_url, MODEL_ID)
+    request = _make_request(
+        headers,
+        json.dumps(
+            {"model": MODEL_ID, "max_tokens": 300, "messages": [], "stream": True}
+        ).encode(),
+    )
+
+    response = await _run_proxy(
+        request, [(MagicMock(), selected), (MagicMock(), fallback)]
+    )
+
+    assert response.status_code == 200
+    assert selected.forward_request.await_count == 2
+    before, after = [
+        json.loads(call.args[3]) for call in selected.forward_request.await_args_list
+    ]
+    assert before["max_tokens"] == 300 and "max_completion_tokens" not in before
+    assert after["max_completion_tokens"] == 300 and "max_tokens" not in after
+    assert {k: v for k, v in after.items() if k != "max_completion_tokens"} == {
+        k: v for k, v in before.items() if k != "max_tokens"
+    }
+    fallback.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rename_that_changes_spend_bound_is_not_retried() -> None:
+    selected = _make_upstream(1, 400)
+    selected.forward_request.return_value.body = json.dumps(
+        {"error": {"message": "'max_tokens' is not supported. Use 'n' instead."}}
+    ).encode()
+    request = _make_request(
+        {"authorization": "Bearer key"},
+        json.dumps({"model": MODEL_ID, "max_tokens": 300}).encode(),
+    )
+
+    response = await _run_proxy(request, [(MagicMock(), selected)])
+
+    assert response.status_code == 400
+    selected.forward_request.assert_awaited_once()
+
+
 # --------------------------------------------------------------------------- #
 # Upstream 5xx -> 424 + UPSTREAM_UNAVAILABLE + scope header; node faults stay 500.
 # --------------------------------------------------------------------------- #

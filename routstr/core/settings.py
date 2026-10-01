@@ -133,6 +133,16 @@ class Settings(BaseSettings):
         default=604_800, env="DEAD_KEY_MIN_AGE_SECONDS"
     )
 
+    max_request_lifetime_seconds: float = Field(
+        default=1800, gt=0, env="MAX_REQUEST_LIFETIME_SECONDS"
+    )
+    downstream_send_timeout_seconds: float = Field(
+        default=60, gt=0, env="DOWNSTREAM_SEND_TIMEOUT_SECONDS"
+    )
+    request_cleanup_timeout_seconds: float = Field(
+        default=30, gt=0, env="REQUEST_CLEANUP_TIMEOUT_SECONDS"
+    )
+
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
     # Comma-separated METHOD:path pairs adding to the proxy's canonical
