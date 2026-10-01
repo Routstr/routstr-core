@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -23,6 +24,7 @@ from .core.db import (
     create_session,
 )
 from .core.error_scope import (
+    ERROR_SCOPE_HEADER,
     ERROR_SCOPE_UPSTREAM,
     UPSTREAM_ERROR_STATUS,
     UPSTREAM_UNAVAILABLE,
@@ -40,6 +42,12 @@ from .payment.helpers import (
 )
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
+from .upstream.cooldown import (
+    candidate_model_identity,
+    is_cooling_down,
+    provider_identity,
+    record_failure,
+)
 from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
 from .upstream.model_paths import (
@@ -115,8 +123,6 @@ def get_candidates(
     model_id_lower = model_id.lower()
     if candidates := _provider_map.get(model_id_lower):
         return candidates
-
-    import re
 
     base_model_id = re.sub(r"-\d{8}$", "", model_id_lower)
     if base_model_id != model_id_lower:
@@ -403,6 +409,18 @@ def _forwarding_allowed(path: str, method: str) -> bool:
 # deterministic rejection that fails identically on the next attempt.
 _RETRYABLE_UPSTREAM_5XX = frozenset({502, 503, 504})
 _UPSTREAM_5XX_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def _counts_toward_cooldown(status_code: int) -> bool:
+    """Provider faults and timeouts only — not client errors or rate limits."""
+    return status_code >= 500 or status_code == UPSTREAM_ERROR_STATUS
+
+
+def _upstream_response_failure(response: Response) -> bool:
+    return (
+        _counts_toward_cooldown(response.status_code)
+        and response.headers.get(ERROR_SCOPE_HEADER) == ERROR_SCOPE_UPSTREAM
+    )
 
 
 def _attribute_request(
@@ -695,6 +713,20 @@ async def _proxy(
                 request=request,
             )
 
+    # A provider that just failed this model repeatedly is skipped while some
+    # other candidate can serve it. An explicit route is never rerouted.
+    if selector is None:
+        healthy = [
+            candidate
+            for candidate in candidates
+            if not is_cooling_down(
+                provider_identity(candidate[1]),
+                candidate_model_identity(candidate[0], model_id),
+            )
+        ]
+        if healthy:
+            candidates = healthy
+
     # Reserve/max-cost checks use the best-ranked candidate; the failover loop
     # below rebinds (model_obj, upstream) per candidate so forwarding and
     # settlement always use the model of the provider actually being tried.
@@ -722,7 +754,7 @@ async def _proxy(
                             model_id,
                         )
                         continue
-                    return await forward_ehbp_x_cashu_request(
+                    response = await forward_ehbp_x_cashu_request(
                         request=request,
                         x_cashu_token=x_cashu,
                         path=path,
@@ -731,7 +763,7 @@ async def _proxy(
                         upstream=upstream,
                     )
                 elif is_responses_api:
-                    return await upstream.handle_x_cashu_responses(
+                    response = await upstream.handle_x_cashu_responses(
                         request,
                         x_cashu,
                         path,
@@ -740,7 +772,7 @@ async def _proxy(
                         request_body=request_body,
                     )
                 else:
-                    return await upstream.handle_x_cashu(
+                    response = await upstream.handle_x_cashu(
                         request,
                         x_cashu,
                         path,
@@ -748,6 +780,12 @@ async def _proxy(
                         model_obj,
                         request_body=request_body,
                     )
+                if _upstream_response_failure(response):
+                    record_failure(
+                        provider_identity(upstream),
+                        candidate_model_identity(model_obj, model_id),
+                    )
+                return response
             except UpstreamError as e:
                 logger.warning(
                     "Upstream %s failed (x-cashu) for model=%s: %s",
@@ -760,6 +798,13 @@ async def _proxy(
                         "status_code": e.status_code,
                     },
                 )
+                if e.scope == ERROR_SCOPE_UPSTREAM and _counts_toward_cooldown(
+                    e.status_code
+                ):
+                    record_failure(
+                        provider_identity(upstream),
+                        candidate_model_identity(model_obj, model_id),
+                    )
                 if i == len(candidates) - 1:
                     last_error = e
                 continue
@@ -1030,6 +1075,11 @@ async def _proxy(
                 break
 
             if response.status_code != 200:
+                if _upstream_response_failure(response):
+                    record_failure(
+                        provider_identity(upstream),
+                        candidate_model_identity(model_obj, model_id),
+                    )
                 # 424 is an upstream failure re-reported by error_scope.
                 # 502/503 are upstream errors, 429 rate limits.
                 should_retry = response.status_code in [
@@ -1117,6 +1167,13 @@ async def _proxy(
             raise
 
         except UpstreamError as e:
+            if e.scope == ERROR_SCOPE_UPSTREAM and _counts_toward_cooldown(
+                e.status_code
+            ):
+                record_failure(
+                    provider_identity(upstream),
+                    candidate_model_identity(model_obj, model_id),
+                )
             logger.warning(
                 "Upstream %s failed for model=%s: %s",
                 upstream.provider_type,

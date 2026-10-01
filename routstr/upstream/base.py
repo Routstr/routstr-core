@@ -34,6 +34,7 @@ from ..core.error_scope import (
     ERROR_SCOPE_HEADER,
     ERROR_SCOPE_NODE,
     ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
     client_code_for_upstream_error,
     client_status_for_upstream_error,
     upstream_status_details,
@@ -68,6 +69,7 @@ from .cache_breakpoints import (
     inject_anthropic_cache_breakpoints,
     is_explicit_cache_model,
 )
+from .cooldown import model_identity, provider_identity, record_failure
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
 from .http_client import acquire_upstream_http_client, build_x_cashu_client
 from .litellm_routing import detect_litellm_prefix
@@ -85,6 +87,7 @@ from .stream_ownership import (
     close_upstream_exchange,
     finalize_and_close_stream,
 )
+from .stream_timeout import GuardedStream, open_guarded_stream
 
 if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
@@ -1150,6 +1153,17 @@ class BaseUpstreamProvider:
             )
             return True
 
+    async def _guard_stream(
+        self, response: httpx.Response, model_obj: Model | None, *, sse: bool
+    ) -> GuardedStream:
+        def on_idle() -> None:
+            if model_obj is not None and model_obj.id:
+                record_failure(provider_identity(self), model_identity(model_obj.id))
+
+        return await open_guarded_stream(
+            response, self.provider_type, sse=sse, on_idle_timeout=on_idle
+        )
+
     async def handle_streaming_chat_completion(
         self,
         response: httpx.Response,
@@ -1171,6 +1185,8 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse with cost data injected at the end
         """
+        guarded_chunks = await self._guard_stream(response, model_obj, sse=True)
+
         if reservation_snapshot is None:
             async with create_session() as snapshot_session:
                 snapshot_key = await snapshot_session.get(key.__class__, key.hashed_key)
@@ -1374,7 +1390,7 @@ class BaseUpstreamProvider:
                 # multiple events can arrive together; buffering makes parsing
                 # boundary-independent for every provider.
                 splitter = SSEEventSplitter()
-                async for chunk in response.aiter_bytes():
+                async for chunk in guarded_chunks:
                     for raw_event in splitter.feed(chunk):
                         for out in _process_event(raw_event):
                             yield out
@@ -1460,7 +1476,9 @@ class BaseUpstreamProvider:
 
                         yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
 
-                if done_seen:
+                if guarded_chunks.timed_out:
+                    yield b'data: {"error":{"code":"UPSTREAM_TIMEOUT","message":"Upstream stream stalled"}}\n\n'
+                elif done_seen:
                     yield b"data: [DONE]\n\n"
 
             except httpx.RemoteProtocolError as stream_error:
@@ -1666,6 +1684,8 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse with cost data injected at the end
         """
+        guarded_chunks = await self._guard_stream(response, model_obj, sse=True)
+
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
 
         logger.debug(
@@ -1818,7 +1838,7 @@ class BaseUpstreamProvider:
                 # Buffer across network chunks; dispatch only on the SSE event
                 # delimiter so parsing is independent of byte boundaries.
                 splitter = SSEEventSplitter()
-                async for chunk in response.aiter_bytes():
+                async for chunk in guarded_chunks:
                     for raw_event in splitter.feed(chunk):
                         for out in _process_event(raw_event):
                             yield out
@@ -1867,7 +1887,9 @@ class BaseUpstreamProvider:
 
                         if usage_chunk_data is None:
                             usage_chunk_data = {
-                                "type": "response.completed",
+                                "type": "response.failed"
+                                if guarded_chunks.timed_out
+                                else "response.completed",
                                 "provider": provider_seen,
                                 "response": {
                                     "model": last_model_seen or "unknown",
@@ -1889,6 +1911,14 @@ class BaseUpstreamProvider:
                                     + cost_data.get("output_tokens", 0),
                                 },
                             }
+                        if guarded_chunks.timed_out:
+                            usage_chunk_data["type"] = "response.failed"
+                            response_data = usage_chunk_data.get("response")
+                            if isinstance(response_data, dict):
+                                response_data["error"] = {
+                                    "code": "UPSTREAM_TIMEOUT",
+                                    "message": "Upstream stream stalled",
+                                }
 
                         try:
                             self.inject_cost_metadata(
@@ -1904,7 +1934,12 @@ class BaseUpstreamProvider:
 
                         yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
 
-                if done_seen:
+                if guarded_chunks.timed_out and (
+                    usage_chunk_data is None
+                    or usage_chunk_data.get("type") != "response.failed"
+                ):
+                    yield b'data: {"error":{"code":"UPSTREAM_TIMEOUT","message":"Upstream stream stalled"}}\n\n'
+                if done_seen and not guarded_chunks.timed_out:
                     yield b"data: [DONE]\n\n"
 
             except httpx.RemoteProtocolError as stream_error:
@@ -2149,6 +2184,7 @@ class BaseUpstreamProvider:
         provider_fee: float | None,
         reservation_snapshot: ReservationSnapshot,
         finalizer: PersistentStreamFinalizer | None = None,
+        guarded_chunks: GuardedStream | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """Relay an opaque stream and settle it even if the caller disconnects."""
         if finalizer is None:
@@ -2166,12 +2202,22 @@ class BaseUpstreamProvider:
                 )
             )
         try:
-            async for chunk in response.aiter_bytes():
+            if guarded_chunks is None:
+                guarded_chunks = await self._guard_stream(
+                    response, model_obj, sse=False
+                )
+            async for chunk in guarded_chunks:
                 yield chunk
+            if guarded_chunks.timed_out:
+                raise UpstreamError(
+                    "Upstream stream stalled",
+                    status_code=UPSTREAM_ERROR_STATUS,
+                    code="UPSTREAM_TIMEOUT",
+                )
         finally:
             await finalizer.run()
 
-    def _generic_streaming_response(
+    async def _generic_streaming_response(
         self,
         response: httpx.Response,
         key_hash: str,
@@ -2181,6 +2227,7 @@ class BaseUpstreamProvider:
         provider_fee: float | None,
         reservation_snapshot: ReservationSnapshot,
     ) -> ClosingStreamingResponse:
+        guarded_chunks = await self._guard_stream(response, model_obj, sse=False)
         finalizer = PersistentStreamFinalizer(
             lambda: finalize_and_close_stream(
                 lambda: self._finalize_generic_streaming_payment(
@@ -2203,6 +2250,7 @@ class BaseUpstreamProvider:
             provider_fee,
             reservation_snapshot,
             finalizer,
+            guarded_chunks,
         )
         return ClosingStreamingResponse(
             stream,
@@ -2221,6 +2269,8 @@ class BaseUpstreamProvider:
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
     ) -> StreamingResponse:
+        guarded_chunks = await self._guard_stream(response, model_obj, sse=True)
+
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
         usage_finalized = False
         last_model_seen: str | None = None
@@ -2314,7 +2364,7 @@ class BaseUpstreamProvider:
                     total_cost = max(total_cost, _coerce_usd(usage_or_root.get(field)))
 
             try:
-                async for chunk in response.aiter_bytes():
+                async for chunk in guarded_chunks:
                     stored_chunks.append(chunk)
                     try:
                         decoded_chunk = chunk.decode("utf-8", errors="ignore")
@@ -2493,6 +2543,8 @@ class BaseUpstreamProvider:
                     maybe_cost_event = await finalize_without_usage()
                     if maybe_cost_event is not None:
                         yield maybe_cost_event
+                if guarded_chunks.timed_out:
+                    yield b'event: error\ndata: {"error":{"code":"UPSTREAM_TIMEOUT","message":"Upstream stream stalled"}}\n\n'
 
             except httpx.ReadError:
                 if not usage_finalized:
@@ -3451,7 +3503,7 @@ class BaseUpstreamProvider:
                 },
             )
 
-            result = self._generic_streaming_response(
+            result = await self._generic_streaming_response(
                 response,
                 key.hashed_key,
                 max_cost_for_model,
@@ -3736,7 +3788,7 @@ class BaseUpstreamProvider:
                 },
             )
 
-            result = self._generic_streaming_response(
+            result = await self._generic_streaming_response(
                 response,
                 key.hashed_key,
                 max_cost_for_model,
