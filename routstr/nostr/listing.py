@@ -9,7 +9,10 @@ import json
 import os
 import random
 import time
+import unicodedata
 from typing import Any, cast
+
+from nostr_sdk import Event
 
 from ..core import get_logger
 from ..core.settings import settings
@@ -249,6 +252,41 @@ async def _determine_provider_id(public_key_hex: str, relay_urls: list[str]) -> 
     fallback = public_key_hex[:12]
     logger.info(f"No existing provider_id found; using fallback: {fallback}")
     return fallback
+
+
+async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str]) -> str:
+    """Require a configured or unambiguous signed coordinate for durable stats."""
+    explicit = settings.provider_id
+    if explicit:
+        if len(explicit) > 64 or any(
+            unicodedata.category(char) == "Cc" for char in explicit
+        ):
+            raise ValueError("PROVIDER_ID must contain 1 to 64 printable characters")
+        return explicit
+    results = await asyncio.gather(
+        *(query_listing_events(url, public_key_hex) for url in relay_urls),
+        return_exceptions=True,
+    )
+    candidates: set[str] = set()
+    for result in results:
+        if isinstance(result, BaseException):
+            raise ValueError("Configure PROVIDER_ID while listing relays are unavailable")
+        events, ok = result
+        if not ok or len(events) >= 10:
+            raise ValueError("Configure PROVIDER_ID when listing history is incomplete")
+        for event in events:
+            try:
+                signed = Event.from_json(json.dumps(event))
+                if not signed.verify() or event.get("pubkey") != public_key_hex:
+                    continue
+                values = _get_tag_values(event, "d")
+                if event.get("kind") == 38421 and len(values) == 1 and values[0]:
+                    candidates.add(values[0])
+            except Exception:
+                continue
+    if len(candidates) != 1:
+        raise ValueError("Configure PROVIDER_ID to select one provider for public stats")
+    return next(iter(candidates))
 
 
 async def publish_to_relay(

@@ -14,9 +14,11 @@ import { useIsMobile } from '@/hooks/use-mobile';
 import { type ModelUsageMix } from '@/lib/api/services/admin';
 import type { DisplayUnit } from '@/lib/types/units';
 import { cn } from '@/lib/utils';
+import { parseBucketDate } from '@/lib/usage-time';
 
 interface TopModelsUsageChartProps {
   mix: ModelUsageMix;
+  completeCoverage?: boolean;
   displayUnit: DisplayUnit;
   usdPerSat: number | null;
 }
@@ -39,20 +41,8 @@ interface LeaderboardRow {
   provider: string;
   rank: number;
   totalRaw: number;
-  trend: LeaderboardTrend;
+  trend: LeaderboardTrend | null;
   trendPercent: number | null;
-}
-
-function parseBucketDate(value: string): Date | null {
-  const normalized = value.includes('T')
-    ? value
-    : `${value.replace(' ', 'T')}Z`;
-  const parsed = new Date(normalized);
-  if (!Number.isNaN(parsed.getTime())) {
-    return parsed;
-  }
-  const fallback = new Date(value);
-  return Number.isNaN(fallback.getTime()) ? null : fallback;
 }
 
 function hueFromString(input: string): number {
@@ -98,6 +88,7 @@ function formatTooltipTimestamp(
   const shouldShowTime = intervalMinutes <= 6 * 60 || hoursBack <= 48;
   if (shouldShowTime) {
     return date.toLocaleString([], {
+      timeZone: 'UTC',
       month: 'long',
       day: 'numeric',
       year: 'numeric',
@@ -106,6 +97,7 @@ function formatTooltipTimestamp(
     });
   }
   return date.toLocaleString([], {
+    timeZone: 'UTC',
     month: 'long',
     day: 'numeric',
     year: 'numeric',
@@ -126,6 +118,7 @@ function formatAxisTimestamp(
   const shouldShowTime = intervalMinutes <= 6 * 60 || hoursBack <= 48;
   if (shouldShowTime && hasMultipleDays) {
     return date.toLocaleString([], {
+      timeZone: 'UTC',
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
@@ -135,6 +128,7 @@ function formatAxisTimestamp(
 
   if (shouldShowTime) {
     return date.toLocaleTimeString([], {
+      timeZone: 'UTC',
       hour: '2-digit',
       minute: '2-digit',
     });
@@ -142,6 +136,7 @@ function formatAxisTimestamp(
 
   if (intervalMinutes >= 24 * 60 && hoursBack >= 24 * 180) {
     return date.toLocaleDateString([], {
+      timeZone: 'UTC',
       month: 'short',
       year: '2-digit',
     });
@@ -149,12 +144,14 @@ function formatAxisTimestamp(
 
   if (hasMultipleDays) {
     return date.toLocaleDateString([], {
+      timeZone: 'UTC',
       month: 'short',
       day: 'numeric',
     });
   }
 
   return date.toLocaleTimeString([], {
+    timeZone: 'UTC',
     hour: '2-digit',
     minute: '2-digit',
   });
@@ -240,6 +237,7 @@ function getModelPresentation(model: string): {
 
 export function TopModelsUsageChart({
   mix,
+  completeCoverage,
   displayUnit,
   usdPerSat,
 }: TopModelsUsageChartProps) {
@@ -304,8 +302,9 @@ export function TopModelsUsageChart({
         const modelCounts = metric.model_counts ?? {};
         const modelRevenue = metric.model_revenue_msats ?? {};
         const modelTokens = metric.model_tokens ?? {};
-        const point: Record<string, number | string> = {
+        const point: Record<string, number | string | null> = {
           timestamp: metric.timestamp,
+          coverage: metric.coverage ?? 'complete',
           total_successful: metric.total_successful,
           total_revenue_msats: metric.total_revenue_msats,
           total_tokens: metric.total_tokens,
@@ -315,9 +314,18 @@ export function TopModelsUsageChart({
         };
 
         for (const item of series) {
-          point[item.requestsKey] = modelCounts[item.label] ?? 0;
-          point[item.revenueKey] = modelRevenue[item.label] ?? 0;
-          point[item.tokensKey] = modelTokens[item.label] ?? 0;
+          point[item.requestsKey] =
+            metric.total_successful === null
+              ? null
+              : (modelCounts[item.label] ?? 0);
+          point[item.revenueKey] =
+            metric.total_revenue_msats === null
+              ? null
+              : (modelRevenue[item.label] ?? 0);
+          point[item.tokensKey] =
+            metric.total_tokens === null
+              ? null
+              : (modelTokens[item.label] ?? 0);
         }
 
         return point;
@@ -328,7 +336,7 @@ export function TopModelsUsageChart({
   const hasMultipleDays = useMemo(() => {
     const daySet = new Set(
       chartData.map((item) =>
-        parseBucketDate(String(item.timestamp))?.toDateString()
+        parseBucketDate(String(item.timestamp))?.toISOString().slice(0, 10)
       )
     );
     return daySet.size > 1;
@@ -471,6 +479,15 @@ export function TopModelsUsageChart({
     const rounded = abs >= 10 ? abs.toFixed(0) : abs.toFixed(1);
     return rounded.replace(/\.0$/, '');
   };
+  const canComparePeriods =
+    completeCoverage !== false &&
+    mix.bucket_fill_complete !== false &&
+    mixMetrics.every(
+      (metric) =>
+        !metric.coverage ||
+        metric.coverage === 'complete' ||
+        metric.coverage === 'updating'
+    );
   const leaderboardRows = useMemo<LeaderboardRow[]>(() => {
     if (leaderboardModels.length === 0 || mixMetrics.length === 0) {
       return [];
@@ -504,12 +521,12 @@ export function TopModelsUsageChart({
           0
         );
         const trendPercent =
-          previousRaw > 0
+          canComparePeriods && previousRaw > 0
             ? ((currentRaw - previousRaw) / previousRaw) * 100
             : null;
 
-        let trend: LeaderboardTrend = 'flat';
-        if (previousRaw <= 0 && currentRaw > 0) {
+        let trend: LeaderboardTrend | null = canComparePeriods ? 'flat' : null;
+        if (canComparePeriods && previousRaw <= 0 && currentRaw > 0) {
           trend = 'new';
         } else if (trendPercent !== null && trendPercent > 0.5) {
           trend = 'up';
@@ -547,7 +564,7 @@ export function TopModelsUsageChart({
       }));
 
     return rows;
-  }, [leaderboardModels, mixMetrics, mode, series]);
+  }, [canComparePeriods, leaderboardModels, mixMetrics, mode, series]);
 
   if (chartData.length === 0) {
     return null;
@@ -676,17 +693,22 @@ export function TopModelsUsageChart({
               />
               <ChartTooltip
                 cursor={false}
+                filterNull={false}
                 content={({ active, payload, label }) => {
                   if (!isChartPointerInside || !active || !payload?.length) {
                     return null;
                   }
 
+                  const point = payload[0]?.payload;
+                  const missing =
+                    point?.coverage === 'missing' ||
+                    payload.every((entry) => entry.value === null);
                   const rows = payload
                     .map((entry) => {
                       const value =
                         typeof entry.value === 'number'
                           ? entry.value
-                          : Number(entry.value || 0);
+                          : Number.NaN;
 
                       return {
                         color: String(entry.color || '#6b7280'),
@@ -701,9 +723,6 @@ export function TopModelsUsageChart({
                     .sort((a, b) => b.value - a.value);
 
                   const total = rows.reduce((sum, row) => sum + row.value, 0);
-                  if (rows.length === 0) {
-                    return null;
-                  }
 
                   return (
                     <div className='border-border/50 bg-background min-w-[220px] rounded-lg border px-2.5 py-2 text-xs shadow-xl'>
@@ -714,6 +733,17 @@ export function TopModelsUsageChart({
                           mix.hours_back
                         )}
                       </p>
+                      {missing ? (
+                        <p className='text-muted-foreground'>
+                          No collection data for this interval.
+                        </p>
+                      ) : point?.coverage === 'partial' ? (
+                        <p className='text-muted-foreground'>
+                          Partial collection. Recorded activity only.
+                        </p>
+                      ) : point?.coverage === 'updating' ? (
+                        <p className='text-muted-foreground'>Still updating.</p>
+                      ) : null}
                       <div className='space-y-1.5'>
                         {rows.map((row) => (
                           <div
@@ -742,7 +772,7 @@ export function TopModelsUsageChart({
                         <div className='grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3'>
                           <span className='text-muted-foreground'>Total</span>
                           <span className='text-foreground font-mono font-semibold tabular-nums'>
-                            {formatValue(total)}
+                            {missing ? 'Unavailable' : formatValue(total)}
                           </span>
                         </div>
                       </div>
@@ -782,7 +812,9 @@ export function TopModelsUsageChart({
                 Top models
               </p>
               <p className='text-muted-foreground text-xs'>
-                Change vs prior period
+                {canComparePeriods
+                  ? 'Recent half vs earlier half'
+                  : 'Recorded activity only'}
               </p>
             </div>
 
@@ -852,9 +884,11 @@ export function TopModelsUsageChart({
                       <span className='text-foreground font-mono tabular-nums'>
                         {formatLeaderboardTotal(row.totalRaw)}
                       </span>
-                      <span className={cn('font-medium', trendClass)}>
-                        {trendLabel}
-                      </span>
+                      {row.trend !== null ? (
+                        <span className={cn('font-medium', trendClass)}>
+                          {trendLabel}
+                        </span>
+                      ) : null}
                     </div>
                   );
                 })}
