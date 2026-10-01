@@ -492,10 +492,7 @@ def collapse_litellm_message(message: str) -> str:
     """Keep the innermost provider message and cap its length."""
     tail = message.rsplit("Original exception:", 1)[-1].strip()
     while True:
-        stripped = tail
-        for prefix in ("litellm.",):
-            if stripped.startswith(prefix):
-                stripped = stripped[len(prefix) :]
+        stripped = tail.removeprefix("litellm.")
         head, _, rest = stripped.partition(": ")
         if rest and head.endswith(("Error", "Exception")):
             stripped = rest.strip()
