@@ -277,6 +277,10 @@ _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     "completions": frozenset({"POST"}),
     "responses": frozenset({"POST"}),
     "messages": frozenset({"POST"}),
+    # Anthropic token-counting subroute; the proxy's allowlist is exact, so the
+    # "messages" entry above does not carry it. Clients (Claude Code, the
+    # Anthropic SDKs) call it before every request.
+    "messages/count_tokens": frozenset({"POST"}),
     "embeddings": frozenset({"POST"}),
     # TypeSafe System One decision endpoint: POST {state, model, questions}
     # -> {answers, usage}. Non-streaming, JSON in/out; billed from the
