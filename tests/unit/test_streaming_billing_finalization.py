@@ -364,7 +364,7 @@ async def test_aborted_generic_stream_still_records_its_settlement() -> None:
         patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
         patch("routstr.upstream.base.create_session", return_value=session_context),
     ):
-        response = provider._generic_streaming_response(
+        response = await provider._generic_streaming_response(
             upstream_response,
             "key-hash",
             500,
@@ -396,7 +396,7 @@ async def test_streaming_response_closes_iterator_when_downstream_send_is_cancel
     reservation = MagicMock(spec=ReservationSnapshot)
     upstream_response.status_code = 201
     upstream_response.headers = {"x-upstream": "preserved"}
-    response = provider._generic_streaming_response(
+    response = await provider._generic_streaming_response(
         upstream_response,
         "key-hash",
         500,
@@ -458,7 +458,7 @@ async def test_generic_stream_settles_when_response_start_fails() -> None:
     upstream_response.status_code = 201
     upstream_response.headers = {"x-upstream": "preserved"}
     reservation = MagicMock(spec=ReservationSnapshot)
-    response = provider._generic_streaming_response(
+    response = await provider._generic_streaming_response(
         upstream_response,
         "key-hash",
         500,
@@ -788,6 +788,11 @@ async def test_stream_closed_before_first_chunk_still_records_its_settlement(
         status_code=200, headers={"content-type": "text/event-stream"}
     )
     upstream_response.aclose = AsyncMock()
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield b"data: {}\n\n"
+
+    upstream_response.aiter_bytes = aiter_bytes
     key = MagicMock(spec=ApiKey)
     key.hashed_key = f"{api}-never-started"
     key.balance = 10_000
@@ -1198,12 +1203,12 @@ async def test_native_messages_error_event_still_records_its_settlement() -> Non
             True,
             {"input_tokens": 10, "output_tokens": 0},
             {"output_tokens": 5},
-            3,
+            15,
             (10, 5),
             ("reported", "reported"),
         ),
         (False, {}, {}, 3, (3, 0), ("estimated", "estimated")),
-        (True, {}, {"output_tokens": 5}, 3, (3, 5), ("estimated", "reported")),
+        (True, {}, {"output_tokens": 5}, 5, (0, 5), ("missing", "reported")),
     ],
 )
 async def test_native_messages_stats_ignore_network_chunk_boundaries(
@@ -1282,7 +1287,8 @@ async def test_native_messages_stats_ignore_network_chunk_boundaries(
             async for _ in response.body_iterator:
                 pass
 
-        # Billing keeps its existing parser and charge; stats retain reported usage.
+        # The stream guard hands billing whole SSE events, so neither billing
+        # nor stats depend on where the network split them.
         async with sessions() as session:
             stored_key = await session.get(ApiKey, key.hashed_key)
             assert stored_key is not None
