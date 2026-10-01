@@ -299,7 +299,10 @@ request, and settles from the response's `usage` like embeddings.
 **Notes:**
 
 - Only the `openai` provider serves this endpoint. A model that no OpenAI
-  provider on the node offers returns `400 unsupported_request`.
+  provider on the node offers returns `400 unsupported_request`, and a model
+  the node does not list at all returns `400 invalid_model`. Use the model id
+  from `/v1/models` (`gpt-6-luna`); the `openai/gpt-6-luna` alias resolves to
+  OpenRouter's copy and returns `400 unsupported_request`.
 - Pricing uses the node's catalog rate for the requested model.
 
 ## Images (Coming Soon)
