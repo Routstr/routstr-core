@@ -1015,10 +1015,16 @@ class AnalyticsV2Delivery:
         if retry_seconds < 0 or timeout_seconds <= 0:
             raise AnalyticsV2DeliveryError("Delivery timing is invalid")
         self._session_factory = session_factory
-        relays = sorted({_normalize_public_wss_url(url) for url in operator_relays})
+        relays: set[str] = set()
+        for url in operator_relays:
+            try:
+                relays.add(_normalize_public_wss_url(url))
+            except AnalyticsV2DeliveryError as error:
+                # The URL itself may carry credentials, so only the reason is logged.
+                logger.warning("Skipping analytics relay", extra={"reason": str(error)})
         if not relays:
             raise AnalyticsV2DeliveryError("At least one analytics relay is required")
-        self._targets = tuple(RelayTarget(url) for url in relays)
+        self._targets = tuple(RelayTarget(url) for url in sorted(relays))
         self._quorum = min(ANALYTICS_RELAY_QUORUM, len(self._targets))
         self._retry_ms = int(retry_seconds * 1000)
         self._timeout_seconds = timeout_seconds
