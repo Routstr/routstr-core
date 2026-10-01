@@ -18,6 +18,15 @@ if TYPE_CHECKING:
     from ..payment.models import Model
 
 
+def _event_usage(event: dict[str, Any], payload: dict[str, Any]) -> object:
+    usage = payload.get("usage")
+    if event.get("type") == "message_start" and isinstance(usage, dict):
+        # message_start's output count is a placeholder; message_delta carries
+        # the real one, so a stream stopped before it has no reported output.
+        return {key: value for key, value in usage.items() if key != "output_tokens"}
+    return usage
+
+
 @dataclass
 class TerminalOutcomeState:
     usage: dict[str, Any] | None = None
@@ -26,8 +35,10 @@ class TerminalOutcomeState:
         # Messages report input and output usage in separate events, and a
         # completed Responses event nests its usage under "response".
         for payload in (event.get("message"), event.get("response"), event):
-            if isinstance(payload, dict) and isinstance(payload.get("usage"), dict):
-                self.usage = {**(self.usage or {}), **payload["usage"]}
+            if isinstance(payload, dict):
+                usage = _event_usage(event, payload)
+                if isinstance(usage, dict):
+                    self.usage = {**(self.usage or {}), **usage}
 
 
 def terminal_outcome_context(
@@ -51,7 +62,9 @@ def event_usage_presence(event: object) -> UsageFieldPresence:
     for key in ("message", "response"):
         nested = event.get(key)
         if isinstance(nested, dict):
-            presence = presence.merged(usage_field_presence(nested.get("usage")))
+            presence = presence.merged(
+                usage_field_presence(_event_usage(event, nested))
+            )
     return presence
 
 
