@@ -15,7 +15,7 @@ from routstr.core.error_scope import (
     ERROR_SCOPE_UPSTREAM,
 )
 from routstr.core.exceptions import UpstreamError
-from routstr.core.settings import settings
+from routstr.core.settings import Settings, settings
 from routstr.upstream.base import BaseUpstreamProvider
 from routstr.upstream.cooldown import is_cooling_down, record_failure
 from routstr.upstream.stream_timeout import open_guarded_stream
@@ -149,15 +149,12 @@ async def test_zero_first_token_timeout_disables_the_guard(
     assert [chunk async for chunk in stream] == [b"first"]
 
 
-@pytest.mark.asyncio
-async def test_idle_timeout_ends_the_stream_without_raising(
-    fast_timeouts: None,
-) -> None:
-    stream = await open_guarded_stream(_response(_stalls_after_first()), "test")
-
-    # The stalled stream ends after the delivered bytes; the caller's finalizer
-    # then settles actual usage instead of the request hanging.
-    assert [chunk async for chunk in stream] == [b"first"]
+def test_stream_guards_are_off_by_default() -> None:
+    # Reasoning models can think silently for minutes; on by default, the
+    # guards would fail requests that succeed without them.
+    fields = Settings.__fields__
+    assert fields["upstream_first_token_timeout_seconds"].default == 0
+    assert fields["upstream_stream_idle_timeout_seconds"].default == 0
 
 
 @pytest.mark.asyncio

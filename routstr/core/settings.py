@@ -40,14 +40,15 @@ class Settings(BaseSettings):
     upstream_5xx_retry_attempts: int = Field(
         default=1, ge=0, env="UPSTREAM_5XX_RETRY_ATTEMPTS"
     )
-    # Streaming guards, both disabled by 0. A stream that never produces a
+    # Streaming guards, off by default (0). A stream that never produces a
     # first chunk can still fail over; one that stalls later can only be
-    # aborted and billed for what it delivered.
+    # aborted and billed for what it delivered. Reasoning models can stay
+    # silent for minutes, so set these above the longest expected think time.
     upstream_first_token_timeout_seconds: float = Field(
-        default=60.0, ge=0, env="UPSTREAM_FIRST_TOKEN_TIMEOUT_SECONDS"
+        default=0.0, ge=0, env="UPSTREAM_FIRST_TOKEN_TIMEOUT_SECONDS"
     )
     upstream_stream_idle_timeout_seconds: float = Field(
-        default=120.0, ge=0, env="UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS"
+        default=0.0, ge=0, env="UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS"
     )
     # Circuit breaker: timeouts/5xx per (provider, model) within a minute that
     # take the pair out of candidate selection. 0 seconds disables it.
