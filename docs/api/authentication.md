@@ -222,7 +222,7 @@ withdraw_balance(old_key)
 - Typo in API key
 - The credential is neither an `sk-...` key nor a `cashu...` token
 
-A well-formed `sk-...` key that this node has no record of is reported
+A credential starting with `sk-` that this node has no record of is reported
 separately as `key_not_found` (also 401) — see
 [Error Handling → Authentication Errors](errors.md#authentication-errors).
 

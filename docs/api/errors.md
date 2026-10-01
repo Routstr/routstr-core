@@ -119,10 +119,10 @@ Returned when the `Authorization` value is neither an `sk-...` API key nor a
 preview and length (`Invalid API key format: preview=… length=…`) to distinguish
 a typo from a wrong-shaped header.
 
-#### API Key Not Found (well-formed but unknown to this node)
+#### API Key Not Found (`sk-` key unknown to this node)
 
-Returned when the credential is a well-formed `sk-...` key that this node has no
-record of — for example a key minted by a different Routstr node, or one removed
+Returned when the credential starts with `sk-` and this node has no record of
+it — for example a key minted by a different Routstr node, or one removed
 by key pruning. This is *not* a formatting problem.
 
 ```json

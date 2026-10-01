@@ -293,12 +293,6 @@ async def _validate_bearer_key_locked(
                 "sk- API key not found in database",
                 extra={"key_preview": bearer_key[:10] + "..."},
             )
-            # The credential is a well-formed 'sk-...' API key: the format is
-            # valid and the failure is that the key does not exist on this node.
-            # Falling through to the generic handler below would report it as
-            # "Invalid API key format", sending callers after a formatting bug
-            # that does not exist. Report the real cause instead.
-            #
             # Keep the "Key not found." prefix verbatim: @routstr/sdk (<=0.4.6)
             # detects a dead key with a case-sensitive `body.includes("Key not
             # found")` probe, and uses it to purge the key from its store. The
