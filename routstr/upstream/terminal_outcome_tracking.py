@@ -160,8 +160,9 @@ def observe_terminal_sse_bytes(
             continue
         try:
             parsed = json.loads(payload)
-        except ValueError:
-            # Bytes cut inside a character raise UnicodeDecodeError, not JSONDecodeError.
+        except (ValueError, RecursionError):
+            # Bytes cut inside a character raise UnicodeDecodeError, not
+            # JSONDecodeError; an upstream's deep nesting raises RecursionError.
             continue
         if isinstance(parsed, dict):
             state.observe(parsed)
