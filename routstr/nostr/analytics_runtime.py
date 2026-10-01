@@ -15,6 +15,7 @@ from ..core.terminal_outcomes import (
 from ..core.vault import decrypt
 from .analytics_v2_delivery import (
     AnalyticsV2Delivery,
+    AnalyticsV2DeliveryError,
     AnalyticsV2Producer,
     DeliveryStateSnapshot,
     SharingDisabledError,
@@ -57,6 +58,7 @@ class AnalyticsCoordinator:
         self._relays: tuple[str, ...] = ()
         self._writer_started = False
         self._retry_at = 0.0
+        self._paused_reason: str | None = None
         self._closed = False
 
     async def prepare_startup(self) -> None:
@@ -120,10 +122,8 @@ class AnalyticsCoordinator:
         else:
             try:
                 provider_d = await resolve_provider_id_strict(pubkey, list(relays))
-            except Exception:
-                await self._stop_public(disable=state.sharing_enabled)
-                self._retry_at = time.monotonic() + 60
-                logger.exception("Stats need a stable provider identity before sharing")
+            except ValueError as error:
+                await self._pause(str(error), disable=state.sharing_enabled)
                 return
         identity = (private_key, pubkey, provider_d)
         if (
@@ -133,6 +133,13 @@ class AnalyticsCoordinator:
             and self._task is not None
             and not self._task.done()
         ):
+            return
+        try:
+            delivery = AnalyticsV2Delivery(create_session, operator_relays=list(relays))
+        except AnalyticsV2DeliveryError as error:
+            # Checked before activation, so a node that cannot deliver never
+            # opens and closes sharing on every retry.
+            await self._pause(str(error), disable=state.sharing_enabled)
             return
 
         identity_changed = state.identity_pubkey is not None and (
@@ -165,21 +172,28 @@ class AnalyticsCoordinator:
                 public_key_hex=pubkey,
                 provider_d=provider_d,
             )
-            self._delivery = AnalyticsV2Delivery(
-                create_session, operator_relays=list(relays)
-            )
+            self._delivery = delivery
             self._identity = identity
             self._relays = relays
             self._task = asyncio.create_task(
-                run_analytics_v2_publisher(producer, self._delivery),
+                run_analytics_v2_publisher(producer, delivery),
                 name="analytics-v2-publisher",
             )
+            self._paused_reason = None
         except SharingDisabledError:
             return
         except Exception:
             await self._stop_public(disable=True)
             self._retry_at = time.monotonic() + 60
             raise
+
+    async def _pause(self, reason: str, *, disable: bool) -> None:
+        await self._stop_public(disable=disable)
+        self._retry_at = time.monotonic() + 60
+        # Retried every minute; warn again only when the cause changes.
+        if reason != self._paused_reason:
+            self._paused_reason = reason
+            logger.warning("Stats sharing paused", extra={"reason": reason})
 
     async def _stop_task(self) -> None:
         task, self._task = self._task, None

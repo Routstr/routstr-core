@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -386,3 +387,48 @@ async def test_upgrade_preserves_existing_sharing_choice_across_restart(
             assert node.events == []
     finally:
         await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_relays_without_a_public_target_never_activate_sharing(
+    node: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
+    monkeypatch.setattr(runtime.settings, "relays", ["ws://umbrel.local:4848"])
+    await node.coordinator.prepare_startup()
+    for _ in range(2):
+        node.coordinator._retry_at = 0
+        await node.coordinator.sync_once()
+
+    state = await runtime.get_analytics_v2_delivery_state(node.sessions)
+    assert (state.sharing_enabled, state.generation) == (False, 0)
+    assert node.coordinator._task is None
+    assert node.writer.running
+
+
+@pytest.mark.asyncio
+async def test_missing_provider_identity_warns_once(
+    node: Any, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def unlisted(*args: object) -> str:
+        raise ValueError(
+            "Configure PROVIDER_ID to select one provider for public stats"
+        )
+
+    monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
+    monkeypatch.setattr(runtime.settings, "provider_id", "")
+    monkeypatch.setattr(runtime, "resolve_provider_id_strict", unlisted)
+    runtime_logger = logging.getLogger(runtime.__name__)
+    runtime_logger.addHandler(caplog.handler)
+    try:
+        await node.coordinator.prepare_startup()
+        for _ in range(3):
+            node.coordinator._retry_at = 0
+            await node.coordinator.sync_once()
+    finally:
+        runtime_logger.removeHandler(caplog.handler)
+
+    records = [r for r in caplog.records if r.name == runtime.__name__]
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "PROVIDER_ID" in records[0].__dict__["reason"]
+    assert node.coordinator._task is None
