@@ -99,8 +99,8 @@ async def get_temporary_balances_api(
     if search:
         pattern = f"%{search}%"
         filters.append(
-            col(ApiKey.hashed_key).like(pattern)
-            | col(ApiKey.refund_address).like(pattern)
+            col(ApiKey.hashed_key).ilike(pattern)
+            | col(ApiKey.refund_address).ilike(pattern)
         )
 
     async with create_session() as session:
@@ -165,12 +165,15 @@ async def get_temporary_balances_api(
             for key in api_keys
         ],
         "total": total,
+        # PostgreSQL SUM() over BIGINT returns NUMERIC, which asyncpg hands back
+        # as Decimal and JSON-serializes as a string. Coerce so both backends
+        # return ints.
         "totals": {
-            "total_balance": total_balance,
-            "total_reserved_balance": total_reserved_balance,
-            "total_available_balance": total_available_balance,
-            "total_spent": total_spent,
-            "total_requests": total_requests,
+            "total_balance": int(total_balance),
+            "total_reserved_balance": int(total_reserved_balance),
+            "total_available_balance": int(total_available_balance),
+            "total_spent": int(total_spent),
+            "total_requests": int(total_requests),
         },
     }
 
@@ -2016,10 +2019,10 @@ async def get_transactions_api(
         if search:
             search_pattern = f"%{search}%"
             base = base.where(
-                (col(CashuTransaction.id).like(search_pattern))
-                | (col(CashuTransaction.token).like(search_pattern))
-                | (col(CashuTransaction.request_id).like(search_pattern))
-                | (col(CashuTransaction.api_key_hashed_key).like(search_pattern))
+                (col(CashuTransaction.id).ilike(search_pattern))
+                | (col(CashuTransaction.token).ilike(search_pattern))
+                | (col(CashuTransaction.request_id).ilike(search_pattern))
+                | (col(CashuTransaction.api_key_hashed_key).ilike(search_pattern))
             )
 
         count_result = await session.exec(
@@ -2069,10 +2072,10 @@ async def get_lightning_invoices_api(
         if search:
             pattern = f"%{search}%"
             base = base.where(
-                (col(LightningInvoice.id).like(pattern))
-                | (col(LightningInvoice.bolt11).like(pattern))
-                | (col(LightningInvoice.payment_hash).like(pattern))
-                | (col(LightningInvoice.api_key_hash).like(pattern))
+                (col(LightningInvoice.id).ilike(pattern))
+                | (col(LightningInvoice.bolt11).ilike(pattern))
+                | (col(LightningInvoice.payment_hash).ilike(pattern))
+                | (col(LightningInvoice.api_key_hash).ilike(pattern))
             )
 
         count_result = await session.exec(
