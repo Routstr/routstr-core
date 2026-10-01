@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 from urllib.parse import urlsplit
 
+import litellm
+
 DEFAULT_PREFIX = "openai/"
 
 LITELLM_HOST_PREFIX_MAP: tuple[tuple[str, str], ...] = (
@@ -141,8 +143,6 @@ def configure_litellm() -> None:
     global _configured
     if _configured:
         return
-
-    import litellm
 
     if os.getenv("LITELLM_DEBUG") == "1":
         try:

@@ -79,13 +79,9 @@ async def _finish_read_transaction(session: AsyncSession) -> None:
 
 
 async def initialize_upstreams() -> None:
-    """Initialize upstream providers from database during application startup.
-
-    Models come from stored rows so startup stays off the network; the models
-    refresh loop does the first upstream fetch right after.
-    """
+    """Initialize upstream providers from database during application startup."""
     global _upstreams
-    _upstreams = await init_upstreams(fetch_models=False)
+    _upstreams = await init_upstreams()
     logger.info(f"Initialized {len(_upstreams)} upstream providers")
     await refresh_model_maps()
 

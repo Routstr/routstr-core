@@ -1,7 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Awaitable, Callable
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -61,20 +61,10 @@ async def _bootstrap_providers_and_pricing() -> None:
     """Fetch BTC price and load providers, then price their models in sats."""
     from ..payment.models import _update_sats_pricing_once
     from ..payment.price import _update_prices
-    from ..proxy import get_upstreams
 
     await asyncio.gather(
         _update_prices(), initialize_upstreams(), return_exceptions=True
     )
-
-    # initialize_upstreams() warms from stored rows only. The models refresh
-    # loop normally does the first upstream fetch; when it is disabled nothing
-    # else would ever reach the upstream, so do that one pass here.
-    if global_settings.models_refresh_interval_seconds <= 0:
-        await asyncio.gather(
-            *(u.refresh_models_cache() for u in get_upstreams()),
-            return_exceptions=True,
-        )
 
     try:
         await _update_sats_pricing_once()
@@ -83,6 +73,14 @@ async def _bootstrap_providers_and_pricing() -> None:
             "Initial sats pricing failed during startup bootstrap",
             extra={"error": str(e), "error_type": type(e).__name__},
         )
+
+
+async def _run_after(
+    task: asyncio.Task[None], start: Callable[[], Awaitable[None]]
+) -> None:
+    """Start ``start`` once ``task`` is done, whether it succeeded or not."""
+    await asyncio.wait({task})
+    await start()
 
 
 @asynccontextmanager
@@ -170,10 +168,15 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
         # Always started: the loop re-reads the enable flag and interval every
         # iteration, so 0 -> N (or re-enabling) takes effect without a restart.
+        # Its first pass waits for the bootstrap; before that there are no
+        # upstreams and it would sleep a full interval with nothing refreshed.
         from ..upstream.model_paths import refresh_model_paths_periodically
 
         model_paths_refresh_task = asyncio.create_task(
-            refresh_model_paths_periodically(get_upstreams)
+            _run_after(
+                bootstrap_task,
+                lambda: refresh_model_paths_periodically(get_upstreams),
+            )
         )
         payout_task = asyncio.create_task(periodic_payout())
         # Always started: the loop idles until an NSEC is configured and re-reads

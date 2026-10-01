@@ -25,6 +25,8 @@ import json
 from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any, Callable, NamedTuple, cast
 
+import litellm
+
 from ..core import get_logger
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
@@ -582,8 +584,6 @@ async def dispatch_anthropic_messages(
     """
     if not request_body:
         raise UpstreamError("Missing request body for /v1/messages", status_code=400)
-
-    import litellm
 
     try:
         body: dict = json.loads(request_body)
