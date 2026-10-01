@@ -434,4 +434,4 @@ async def test_truncated_json_tail_on_connection_close() -> None:
     # non-JSON ever reached the client.
     assert contents == ["ok"]
     assert adjustment.await_args is not None
-    assert adjustment.await_args.kwargs["terminal_outcome"] is None
+    assert adjustment.await_args.kwargs["terminal_outcome"] is terminal_outcome

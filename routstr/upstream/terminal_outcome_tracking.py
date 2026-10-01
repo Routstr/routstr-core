@@ -77,12 +77,6 @@ class TerminalOutcomeState:
     def settlement_context(
         self, *, require_success: bool = False
     ) -> TerminalOutcomeContext | None:
-        if self.failure_seen:
-            return None
-        if self.transport_failed and not self.success_marker_seen:
-            return None
-        if require_success and not self.success_marker_seen:
-            return None
         return self.context
 
 
