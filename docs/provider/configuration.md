@@ -48,6 +48,29 @@ Connect to your AI provider(s):
 | **Upstream URL** | API endpoint (e.g., `https://api.openai.com/v1`) |
 | **API Key**      | Your provider's API key                          |
 
+### DeepSeek
+
+Choose **DeepSeek** as the provider type and paste an API key from
+[platform.deepseek.com](https://platform.deepseek.com/api_keys); the base URL
+is fixed to `https://api.deepseek.com`. Setting `DEEPSEEK_API_KEY` seeds the
+provider on startup instead.
+
+Models are listed from DeepSeek's own `/models` and priced from a rate table
+in `routstr/upstream/deepseek.py`, not from litellm or OpenRouter:
+
+- **Peak rates only.** DeepSeek charges half price off-peak, but the node bills
+  one flat price per model, so it bills the peak rate. Clients overpay
+  off-peak; the node never bills below cost. Time-of-day pricing is planned.
+- **Unknown models import disabled.** A model DeepSeek lists that the table
+  does not price shows up disabled in the Admin Dashboard. Enable it with a
+  manual price, or add it to the table.
+- **Cache hits** bill at DeepSeek's cache-hit rate (about 2% of the input
+  rate on flash, about 3% on pro).
+
+Thinking-mode `reasoning_content` is returned to clients unchanged in
+responses, and forwarded unchanged when it appears in conversation history.
+DeepSeek requires it on requests that carry `tools` and ignores it otherwise.
+
 ### PPQ Auto Top-up
 
 PPQ providers can automatically purchase more credits when their USD balance

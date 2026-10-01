@@ -22,6 +22,7 @@ dependencies = [
     "pillow>=10",
     "openai>=1.98.0",
     "litellm>=1.101.2,<1.102",
+    "backoff>=2.2",  # litellm's native Anthropic-messages streaming (e.g. deepseek/) imports litellm.proxy, which needs it
     "orjson>=3.10",
 ]
 
