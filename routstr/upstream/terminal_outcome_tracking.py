@@ -1,9 +1,8 @@
-"""Capture how upstream responses end, for the settled outcome ledger."""
+"""Capture upstream usage and outcome contexts for the settled outcome ledger."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -21,63 +20,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class TerminalOutcomeState:
-    context: TerminalOutcomeContext | None
-    success_marker_seen: bool = False
-    failure_seen: bool = False
-    transport_failed: bool = False
     usage: dict[str, Any] | None = None
 
     def observe(self, event: dict[str, Any]) -> None:
-        event_type = str(event.get("type") or "").lower()
-        status = str(event.get("status") or "").lower()
-        nested_response = event.get("response")
-        if isinstance(nested_response, dict):
-            status = str(nested_response.get("status") or status).lower()
         # Messages report input and output usage in separate events, and a
         # completed Responses event nests its usage under "response".
-        for payload in (event.get("message"), nested_response, event):
+        for payload in (event.get("message"), event.get("response"), event):
             if isinstance(payload, dict) and isinstance(payload.get("usage"), dict):
                 self.usage = {**(self.usage or {}), **payload["usage"]}
-        if (
-            event.get("error") is not None
-            or event_type in {"error", "response.failed"}
-            or status in {"cancelled", "failed"}
-        ):
-            self.failure_seen = True
-            return
-        choices = event.get("choices")
-        if isinstance(choices, list):
-            finish_reasons = {
-                str(choice.get("finish_reason") or "").lower()
-                for choice in choices
-                if isinstance(choice, dict) and choice.get("finish_reason") is not None
-            }
-            if "error" in finish_reasons:
-                self.failure_seen = True
-                return
-            if finish_reasons - {""}:
-                self.success_marker_seen = True
-        # An output-limit truncation is a paid terminal response, like length.
-        if event_type in {
-            "response.completed",
-            "response.incomplete",
-            "message_stop",
-        } or status in {"completed", "incomplete"}:
-            self.success_marker_seen = True
-        delta = event.get("delta")
-        if isinstance(delta, dict) and delta.get("stop_reason") not in (None, ""):
-            self.success_marker_seen = True
-
-    def mark_success(self) -> None:
-        self.success_marker_seen = True
-
-    def mark_transport_failure(self) -> None:
-        self.transport_failed = True
-
-    def settlement_context(
-        self, *, require_success: bool = False
-    ) -> TerminalOutcomeContext | None:
-        return self.context
 
 
 def terminal_outcome_context(
@@ -159,18 +109,6 @@ def record_x_cashu_terminal_outcome(
     )
 
 
-async def track_generic_terminal_stream(
-    stream: AsyncIterator[bytes], state: TerminalOutcomeState
-) -> AsyncGenerator[bytes, None]:
-    try:
-        async for chunk in stream:
-            yield chunk
-        state.mark_success()
-    except BaseException:
-        state.mark_transport_failure()
-        raise
-
-
 def observe_terminal_sse_bytes(
     state: TerminalOutcomeState,
     buffered: bytes,
@@ -206,14 +144,11 @@ def observe_terminal_sse_bytes(
             continue
         payload = b"\n".join(data_lines)
         if payload.strip() == b"[DONE]":
-            state.mark_success()
             continue
         try:
             parsed = json.loads(payload)
         except ValueError:
             # Bytes cut inside a character raise UnicodeDecodeError, not JSONDecodeError.
-            if final:
-                state.mark_transport_failure()
             continue
         if isinstance(parsed, dict):
             state.observe(parsed)

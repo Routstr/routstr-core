@@ -3,7 +3,7 @@ import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import cast
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -304,7 +304,6 @@ async def test_generic_stream_completion_settles_and_closes_once() -> None:
         None,
         provider.provider_fee,
         reservation,
-        None,
     )
     response.aclose.assert_awaited_once_with()
 
@@ -339,7 +338,6 @@ async def test_generic_stream_abort_settles_and_closes_once() -> None:
         None,
         provider.provider_fee,
         reservation,
-        None,
     )
     response.aclose.assert_awaited_once_with()
 
@@ -444,7 +442,7 @@ async def test_streaming_response_closes_iterator_when_downstream_send_is_cancel
         None,
         provider.provider_fee,
         reservation,
-        ANY,
+        None,
     )
     upstream_response.aclose.assert_awaited_once_with()
 
@@ -500,7 +498,7 @@ async def test_generic_stream_settles_when_response_start_fails() -> None:
         None,
         provider.provider_fee,
         reservation,
-        ANY,
+        None,
     )
     upstream_response.aclose.assert_awaited_once_with()
 
@@ -1300,51 +1298,15 @@ async def test_native_messages_stats_ignore_network_chunk_boundaries(
         await engine.dispose()
 
 
-def test_anthropic_stop_reason_is_terminal_before_transport_failure() -> None:
-    terminal_outcome = TerminalOutcomeContext(
-        outcome_id="messages-stop-reason",
-        model_identifier="test-model",
-    )
-    state = TerminalOutcomeState(terminal_outcome)
-
-    state.observe(
-        {
-            "type": "message_delta",
-            "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 2},
-        }
-    )
-    state.mark_transport_failure()
-
-    assert state.settlement_context() is terminal_outcome
-
-
-def test_responses_output_limit_is_terminal_before_transport_failure() -> None:
-    terminal_outcome = TerminalOutcomeContext(
-        outcome_id="responses-incomplete",
-        model_identifier="test-model",
-    )
-    state = TerminalOutcomeState(terminal_outcome)
-
-    state.observe({"type": "response.incomplete", "response": {"status": "incomplete"}})
-    state.mark_transport_failure()
-
-    assert state.settlement_context() is terminal_outcome
-
-
 def test_stream_cut_inside_a_character_does_not_raise() -> None:
-    state = TerminalOutcomeState(
-        TerminalOutcomeContext(outcome_id="cut", model_identifier="test-model")
-    )
+    state = TerminalOutcomeState()
     tail = 'data: {"delta":{"text":"日本'.encode()[:-1]
 
     assert observe_terminal_sse_bytes(state, b"", tail, final=True) == b""
 
 
 def test_routstr_upstream_cost_event_is_not_provider_usage() -> None:
-    state = TerminalOutcomeState(
-        TerminalOutcomeContext(outcome_id="routstr-upstream", model_identifier="m")
-    )
+    state = TerminalOutcomeState()
     stream = (
         b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
         b'{"input_tokens":100,"cache_read_input_tokens":1000,"output_tokens":1}}}\n\n'
