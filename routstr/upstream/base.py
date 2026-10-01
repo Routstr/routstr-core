@@ -7,6 +7,7 @@ import traceback
 import typing
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from dataclasses import replace
 from typing import Any, Mapping, Self, cast
 
 import httpx
@@ -41,11 +42,18 @@ from ..core.error_scope import (
 )
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
+from ..core.terminal_outcomes import (
+    TerminalOutcomeContext,
+    mark_terminal_outcome_loss,
+)
 from ..payment.cost_calculation import (
     CostData,
     CostDataError,
+    CostMetadata,
     MaxCostData,
     calculate_cost,
+    cost_field,
+    unpriced_cost,
 )
 from ..payment.helpers import create_error_response
 from ..payment.models import (
@@ -57,6 +65,7 @@ from ..payment.models import (
     list_models,
 )
 from ..payment.price import sats_usd_price
+from ..payment.usage import UsageFieldPresence
 from ..wallet import (
     SPENT_TOKEN_CODES,
     classify_redemption_error,
@@ -88,6 +97,13 @@ from .stream_ownership import (
     finalize_and_close_stream,
 )
 from .stream_timeout import GuardedStream, open_guarded_stream
+from .terminal_outcome_tracking import (
+    TerminalOutcomeState,
+    event_usage_presence,
+    observe_terminal_sse_bytes,
+    record_x_cashu_terminal_outcome,
+    terminal_outcome_context,
+)
 
 if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
@@ -95,29 +111,16 @@ if typing.TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-CostMetadata = CostData | MaxCostData | dict[str, Any]
-
-
-def _cost_field(
-    cost_data: CostMetadata, field: str, default: int | float = 0
-) -> int | float:
-    if isinstance(cost_data, dict):
-        value = cost_data.get(field, default)
-    else:
-        value = getattr(cost_data, field, default)
-    return value if isinstance(value, (int, float)) else default
-
-
 def _settled_cost_msats(cost_data: CostMetadata) -> int:
-    charged = _cost_field(cost_data, "charged_msats", -1)
+    charged = cost_field(cost_data, "charged_msats", -1)
     if charged >= 0:
         return int(charged)
-    return int(_cost_field(cost_data, "total_msats"))
+    return int(cost_field(cost_data, "total_msats"))
 
 
 def _published_cost(cost_data: CostMetadata) -> dict[str, Any]:
     cost = dict(cost_data) if isinstance(cost_data, dict) else cost_data.dict()
-    computed_msats = int(_cost_field(cost_data, "total_msats"))
+    computed_msats = int(cost_field(cost_data, "total_msats"))
     settled_msats = _settled_cost_msats(cost_data)
     if computed_msats != settled_msats:
         cost["computed_msats"] = computed_msats
@@ -137,17 +140,17 @@ def _inject_cost_response_headers(
     sat cost fields.
     """
     settled_msats = _settled_cost_msats(cost_data)
-    computed_msats = int(_cost_field(cost_data, "total_msats"))
+    computed_msats = int(cost_field(cost_data, "total_msats"))
     headers["X-Routstr-Cost-Msats"] = str(settled_msats)
     if computed_msats != settled_msats:
         headers["X-Routstr-Computed-Cost-Msats"] = str(computed_msats)
     headers["X-Routstr-Input-Cost-Msats"] = str(
-        int(_cost_field(cost_data, "input_msats"))
+        int(cost_field(cost_data, "input_msats"))
     )
     headers["X-Routstr-Output-Cost-Msats"] = str(
-        int(_cost_field(cost_data, "output_msats"))
+        int(cost_field(cost_data, "output_msats"))
     )
-    total_usd = float(_cost_field(cost_data, "total_usd", 0.0))
+    total_usd = float(cost_field(cost_data, "total_usd", 0.0))
     if total_usd:
         headers["X-Routstr-Cost-Usd"] = str(total_usd)
 
@@ -253,26 +256,26 @@ def _inject_cost_into_usage(response_json: dict, cost_data: CostMetadata) -> Non
     # data always overwrites any upstream-provided cost values. Using
     # setdefault would silently keep stale upstream values and drop our
     # calculated msats breakdown.
-    computed_msats = int(_cost_field(cost_data, "total_msats"))
+    computed_msats = int(cost_field(cost_data, "total_msats"))
     settled_msats = _settled_cost_msats(cost_data)
     cost_obj: dict[str, int | float] = {
-        "base_msats": int(_cost_field(cost_data, "base_msats")),
-        "input_msats": int(_cost_field(cost_data, "input_msats")),
-        "output_msats": int(_cost_field(cost_data, "output_msats")),
+        "base_msats": int(cost_field(cost_data, "base_msats")),
+        "input_msats": int(cost_field(cost_data, "input_msats")),
+        "output_msats": int(cost_field(cost_data, "output_msats")),
         "total_msats": settled_msats,
         "charged_msats": settled_msats,
         "cache_read_input_tokens": int(
-            _cost_field(cost_data, "cache_read_input_tokens")
+            cost_field(cost_data, "cache_read_input_tokens")
         ),
         "cache_creation_input_tokens": int(
-            _cost_field(cost_data, "cache_creation_input_tokens")
+            cost_field(cost_data, "cache_creation_input_tokens")
         ),
-        "cache_read_msats": int(_cost_field(cost_data, "cache_read_msats")),
-        "cache_creation_msats": int(_cost_field(cost_data, "cache_creation_msats")),
+        "cache_read_msats": int(cost_field(cost_data, "cache_read_msats")),
+        "cache_creation_msats": int(cost_field(cost_data, "cache_creation_msats")),
     }
     if computed_msats != settled_msats:
         cost_obj["computed_msats"] = computed_msats
-    total_usd = float(_cost_field(cost_data, "total_usd", 0.0))
+    total_usd = float(cost_field(cost_data, "total_usd", 0.0))
     if total_usd:
         cost_obj["total_usd"] = total_usd
     usage["cost"] = cost_obj
@@ -1174,6 +1177,7 @@ class BaseUpstreamProvider:
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
         legacy_completion: bool = False,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1210,6 +1214,7 @@ class BaseUpstreamProvider:
         usage_finalized = False
         last_model_seen: str | None = None
         provider_seen: str | None = None
+        outcome_state = TerminalOutcomeState()
 
         async def finalize_db_only() -> None:
             nonlocal usage_finalized
@@ -1229,6 +1234,8 @@ class BaseUpstreamProvider:
                             model_obj,
                             self.provider_fee,
                             reservation_snapshot,
+                            terminal_outcome=terminal_outcome,
+                            terminal_usage=outcome_state.usage,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1323,6 +1330,7 @@ class BaseUpstreamProvider:
                 obj = json_codec.loads(data)
 
                 if isinstance(obj, dict):
+                    outcome_state.observe(obj)
                     usage_estimator.observe(obj)
                     provider_seen = self._stamp_streamed_provider(obj, provider_seen)
                     if obj.get("model"):
@@ -1417,6 +1425,7 @@ class BaseUpstreamProvider:
                                 model_obj,
                                 self.provider_fee,
                                 reservation_snapshot,
+                                terminal_outcome=terminal_outcome,
                             )
                             usage_finalized = True
                         except BaseException as e:
@@ -1525,6 +1534,7 @@ class BaseUpstreamProvider:
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
         legacy_completion: bool = False,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> Response:
         """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1583,6 +1593,7 @@ class BaseUpstreamProvider:
                 model_obj,
                 self.provider_fee,
                 reservation_snapshot,
+                terminal_outcome=terminal_outcome,
             )
 
             await session.refresh(key)
@@ -1673,6 +1684,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1700,6 +1712,7 @@ class BaseUpstreamProvider:
         usage_finalized = False
         last_model_seen: str | None = None
         provider_seen: str | None = None
+        outcome_state = TerminalOutcomeState()
 
         async def finalize_db_only() -> None:
             nonlocal usage_finalized
@@ -1719,6 +1732,8 @@ class BaseUpstreamProvider:
                             model_obj,
                             self.provider_fee,
                             reservation_snapshot,
+                            terminal_outcome=terminal_outcome,
+                            terminal_usage=outcome_state.usage,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1799,6 +1814,7 @@ class BaseUpstreamProvider:
                 obj = json_codec.loads(data)
 
                 if isinstance(obj, dict):
+                    outcome_state.observe(obj)
                     provider_seen = self._stamp_streamed_provider(obj, provider_seen)
                     if obj.get("model"):
                         last_model_seen = str(obj.get("model"))
@@ -1865,6 +1881,7 @@ class BaseUpstreamProvider:
                                 model_obj,
                                 self.provider_fee,
                                 reservation_snapshot,
+                                terminal_outcome=terminal_outcome,
                             )
                             usage_finalized = True
                         except BaseException as e:
@@ -1985,6 +2002,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> Response:
         """Handle non-streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -2044,6 +2062,7 @@ class BaseUpstreamProvider:
                 model_obj,
                 self.provider_fee,
                 reservation_snapshot,
+                terminal_outcome=terminal_outcome,
             )
 
             await session.refresh(key)
@@ -2133,6 +2152,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None,
         provider_fee: float | None,
         reservation_snapshot: ReservationSnapshot,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> None:
         """Finalize payment for a generic streaming request."""
         async with create_session() as session:
@@ -2156,6 +2176,7 @@ class BaseUpstreamProvider:
                     model_obj=model_obj,
                     provider_fee=provider_fee,
                     reservation_snapshot=reservation_snapshot,
+                    terminal_outcome=terminal_outcome,
                 )
                 logger.debug(
                     "Finalized generic streaming payment",
@@ -2226,6 +2247,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None,
         provider_fee: float | None,
         reservation_snapshot: ReservationSnapshot,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> ClosingStreamingResponse:
         guarded_chunks = await self._guard_stream(response, model_obj, sse=False)
         finalizer = PersistentStreamFinalizer(
@@ -2237,6 +2259,7 @@ class BaseUpstreamProvider:
                     model_obj,
                     provider_fee,
                     reservation_snapshot,
+                    terminal_outcome,
                 ),
                 response,
             )
@@ -2268,6 +2291,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> StreamingResponse:
         guarded_chunks = await self._guard_stream(response, model_obj, sse=True)
 
@@ -2275,6 +2299,8 @@ class BaseUpstreamProvider:
         usage_finalized = False
         last_model_seen: str | None = None
         provider_seen: str | None = None
+        usage_presence = UsageFieldPresence()
+        outcome_state = TerminalOutcomeState()
 
         async def finalize_without_usage() -> bytes | None:
             nonlocal usage_finalized
@@ -2294,6 +2320,9 @@ class BaseUpstreamProvider:
                         model_obj,
                         self.provider_fee,
                         reservation_snapshot,
+                        terminal_outcome=terminal_outcome,
+                        usage_presence=usage_presence,
+                        terminal_usage=outcome_state.usage,
                     )
                     usage_finalized = True
                     return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
@@ -2324,7 +2353,7 @@ class BaseUpstreamProvider:
         async def stream_with_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
-            nonlocal usage_finalized, last_model_seen, provider_seen
+            nonlocal usage_finalized, last_model_seen, provider_seen, usage_presence
             stored_chunks: list[bytes] = []
             input_tokens: int = 0
             output_tokens: int = 0
@@ -2333,6 +2362,7 @@ class BaseUpstreamProvider:
             total_cost: float = 0.0
             input_cost: float = 0.0
             output_cost: float = 0.0
+            terminal_sse_buffer = b""
 
             def _coerce_usd(value: object) -> float:
                 if value is None or isinstance(value, bool):
@@ -2366,6 +2396,9 @@ class BaseUpstreamProvider:
             try:
                 async for chunk in guarded_chunks:
                     stored_chunks.append(chunk)
+                    terminal_sse_buffer = observe_terminal_sse_bytes(
+                        outcome_state, terminal_sse_buffer, chunk
+                    )
                     try:
                         decoded_chunk = chunk.decode("utf-8", errors="ignore")
                         modified_lines = []
@@ -2375,6 +2408,9 @@ class BaseUpstreamProvider:
                                 try:
                                     data = json.loads(line[6:])
                                     if isinstance(data, dict):
+                                        usage_presence = usage_presence.merged(
+                                            event_usage_presence(data)
+                                        )
                                         usage_estimator.observe(data)
                                         msg = data.get("message", {})
                                         if msg and msg.get("model"):
@@ -2475,6 +2511,9 @@ class BaseUpstreamProvider:
                     except Exception:
                         yield chunk
 
+                observe_terminal_sse_bytes(
+                    outcome_state, terminal_sse_buffer, final=True
+                )
                 usage_data = {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
@@ -2512,6 +2551,9 @@ class BaseUpstreamProvider:
                                     model_obj,
                                     self.provider_fee,
                                     reservation_snapshot,
+                                    terminal_outcome=terminal_outcome,
+                                    usage_presence=usage_presence,
+                                    terminal_usage=outcome_state.usage,
                                 )
 
                                 self.inject_cost_metadata(
@@ -2579,6 +2621,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> Response:
         try:
             content = await response.aread()
@@ -2612,6 +2655,7 @@ class BaseUpstreamProvider:
                 model_obj,
                 self.provider_fee,
                 reservation_snapshot,
+                terminal_outcome=terminal_outcome,
             )
 
             self.inject_cost_metadata(response_json, cost_data, key)
@@ -2706,6 +2750,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         model_obj: Model,
         reservation_snapshot: ReservationSnapshot | None = None,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> Response | StreamingResponse:
         """Translate /v1/messages to upstream chat/completions via litellm.
 
@@ -2728,6 +2773,7 @@ class BaseUpstreamProvider:
                 model_obj,
                 reservation_snapshot,
                 request_body,
+                terminal_outcome,
             )
 
         response_json = messages_dispatch.coerce_litellm_payload(result)
@@ -2748,6 +2794,7 @@ class BaseUpstreamProvider:
             model_obj,
             self.provider_fee,
             reservation_snapshot,
+            terminal_outcome=terminal_outcome,
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
@@ -2796,6 +2843,7 @@ class BaseUpstreamProvider:
             )
 
         response_json = messages_dispatch.coerce_litellm_payload(result)
+        terminal_outcome = terminal_outcome_context(request_id, model_obj)
         self._apply_provider_field(response_json)
         if requested_model and "model" in response_json:
             response_json["model"] = requested_model
@@ -2813,19 +2861,27 @@ class BaseUpstreamProvider:
             self._fold_cache_into_input_tokens(response_json["usage"])
 
         response_headers: dict[str, str] = {}
+        refund_amount_sent = 0
         if cost_data:
             _inject_cost_response_headers(response_headers, cost_data)
             refund_amount = messages_dispatch.compute_refund(
                 amount, unit, cost_data.total_msats
             )
             if refund_amount > 0:
-                refund_token = await self.send_refund(
-                    refund_amount,
-                    unit,
-                    mint,
-                    request_id=request_id,
-                )
+                try:
+                    refund_token = await self.send_refund(
+                        refund_amount,
+                        unit,
+                        mint,
+                        request_id=request_id,
+                    )
+                except BaseException:
+                    mark_terminal_outcome_loss(
+                        "X-Cashu LiteLLM refund commit ambiguous"
+                    )
+                    raise
                 response_headers["X-Cashu"] = refund_token
+                refund_amount_sent = refund_amount
                 logger.info(
                     "Refund processed for non-streaming /v1/messages via litellm",
                     extra={
@@ -2834,6 +2890,14 @@ class BaseUpstreamProvider:
                         "model": response_json.get("model", "unknown"),
                     },
                 )
+
+            record_x_cashu_terminal_outcome(
+                terminal_outcome,
+                cost_data,
+                amount=amount,
+                unit=unit,
+                refund_amount=refund_amount_sent,
+            )
 
         return Response(
             content=json.dumps(response_json).encode(),
@@ -2853,6 +2917,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> StreamingResponse:
         """Re-emit a litellm Anthropic-event iterator as live SSE bytes
         with cost reconciliation appended at end of stream."""
@@ -2860,6 +2925,7 @@ class BaseUpstreamProvider:
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
         usage_finalized = False
         last_model_seen: str | None = None
+        usage_presence = UsageFieldPresence()
 
         async def finalize_without_usage() -> bytes | None:
             nonlocal usage_finalized
@@ -2891,6 +2957,8 @@ class BaseUpstreamProvider:
                         model_obj,
                         self.provider_fee,
                         reservation_snapshot,
+                        terminal_outcome=terminal_outcome,
+                        usage_presence=usage_presence,
                     )
                     usage_finalized = True
                     return (
@@ -2922,7 +2990,7 @@ class BaseUpstreamProvider:
         stream_finalizer = PersistentStreamFinalizer(finalize_stream)
 
         async def stream_with_cost() -> AsyncGenerator[bytes, None]:
-            nonlocal usage_finalized, last_model_seen
+            nonlocal usage_finalized, last_model_seen, usage_presence
             input_tokens = 0
             output_tokens = 0
             cache_read_input_tokens = 0
@@ -2935,6 +3003,9 @@ class BaseUpstreamProvider:
                 async for annotated in messages_dispatch.stream_annotated_events(
                     iterator, requested_model
                 ):
+                    usage_presence = usage_presence.merged(
+                        event_usage_presence(annotated.event)
+                    )
                     usage_estimator.observe(annotated.event)
                     if annotated.model:
                         last_model_seen = annotated.model
@@ -2996,6 +3067,8 @@ class BaseUpstreamProvider:
                                     model_obj,
                                     self.provider_fee,
                                     reservation_snapshot,
+                                    terminal_outcome=terminal_outcome,
+                                    usage_presence=usage_presence,
                                 )
                                 self.inject_cost_metadata(
                                     combined_data, cost_data, fresh_key
@@ -3072,15 +3145,20 @@ class BaseUpstreamProvider:
         output_tokens = 0
         cache_read_input_tokens = 0
         cache_creation_input_tokens = 0
+        usage_presence = UsageFieldPresence()
         total_cost = 0.0
         input_cost = 0.0
         output_cost = 0.0
+        terminal_outcome = terminal_outcome_context(request_id, model_obj)
 
         try:
             annotated_events = messages_dispatch.stream_annotated_events(
                 iterator, requested_model
             )
             async for annotated in annotated_events:
+                usage_presence = usage_presence.merged(
+                    event_usage_presence(annotated.event)
+                )
                 if annotated.model:
                     last_model_seen = annotated.model
                 # See _stream_litellm_messages for why this is max() not +=.
@@ -3115,6 +3193,8 @@ class BaseUpstreamProvider:
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
         }
+        refund_amount_sent = 0
+        settlement_failed = False
 
         if (
             input_tokens == 0
@@ -3159,7 +3239,10 @@ class BaseUpstreamProvider:
             }
             try:
                 cost_data = await self.get_x_cashu_cost(
-                    response_data, max_cost_for_model, model_obj
+                    response_data,
+                    max_cost_for_model,
+                    model_obj,
+                    usage_presence,
                 )
                 if cost_data:
                     refund_amount = messages_dispatch.compute_refund(
@@ -3173,6 +3256,7 @@ class BaseUpstreamProvider:
                             request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
+                        refund_amount_sent = refund_amount
                         logger.info(
                             "Refund processed for streaming /v1/messages via litellm",
                             extra={
@@ -3181,7 +3265,14 @@ class BaseUpstreamProvider:
                                 "model": last_model_seen,
                             },
                         )
+            except asyncio.CancelledError:
+                mark_terminal_outcome_loss(
+                    "X-Cashu LiteLLM stream settlement cancelled"
+                )
+                raise
             except Exception as exc:
+                settlement_failed = True
+                mark_terminal_outcome_loss("X-Cashu LiteLLM stream settlement failed")
                 logger.error(
                     "Error calculating cost for streaming /v1/messages",
                     extra={
@@ -3191,6 +3282,15 @@ class BaseUpstreamProvider:
                         "unit": unit,
                     },
                 )
+
+        if not settlement_failed:
+            record_x_cashu_terminal_outcome(
+                replace(terminal_outcome, **usage_presence.sources_dict()),
+                cost_data,
+                amount=amount,
+                unit=unit,
+                refund_amount=refund_amount_sent,
+            )
 
         if cost_data:
             _inject_cost_response_headers(response_headers, cost_data)
@@ -3249,6 +3349,9 @@ class BaseUpstreamProvider:
         """
         completion_path = _openai_completion_path(path)
         path = self.normalize_request_path(path, model_obj)
+        terminal_outcome = terminal_outcome_context(
+            getattr(request.state, "request_id", None), model_obj
+        )
 
         if (
             path.endswith("messages/count_tokens")
@@ -3268,6 +3371,7 @@ class BaseUpstreamProvider:
                 max_cost_for_model=max_cost_for_model,
                 model_obj=model_obj,
                 reservation_snapshot=reservation_snapshot,
+                terminal_outcome=terminal_outcome,
             )
 
         url = self.build_request_url(path, model_obj)
@@ -3404,6 +3508,7 @@ class BaseUpstreamProvider:
                             model_obj=model_obj,
                             reservation_snapshot=reservation_snapshot,
                             request_body=request_body,
+                            terminal_outcome=terminal_outcome,
                         )
                         response_handoff.handoff()
                         return result
@@ -3420,6 +3525,7 @@ class BaseUpstreamProvider:
                                 model_obj=model_obj,
                                 reservation_snapshot=reservation_snapshot,
                                 request_body=request_body,
+                                terminal_outcome=terminal_outcome,
                             )
                         finally:
                             await response_handoff.close()
@@ -3437,6 +3543,7 @@ class BaseUpstreamProvider:
                                 model_obj=model_obj,
                                 reservation_snapshot=reservation_snapshot,
                                 request_body=request_body,
+                                terminal_outcome=None,
                             )
                         finally:
                             await response_handoff.close()
@@ -3485,6 +3592,7 @@ class BaseUpstreamProvider:
                             reservation_snapshot=reservation_snapshot,
                             request_body=request_body,
                             legacy_completion=completion_path == "completions",
+                            terminal_outcome=terminal_outcome,
                         )
                         response_handoff.handoff()
                         return result
@@ -3502,6 +3610,7 @@ class BaseUpstreamProvider:
                             reservation_snapshot=reservation_snapshot,
                             request_body=request_body,
                             legacy_completion=completion_path == "completions",
+                            terminal_outcome=terminal_outcome,
                         )
                     finally:
                         await response_handoff.close()
@@ -3526,6 +3635,7 @@ class BaseUpstreamProvider:
                 model_obj,
                 self.provider_fee,
                 reservation_snapshot,
+                terminal_outcome=terminal_outcome,
             )
             response_handoff.handoff()
             return result
@@ -3650,6 +3760,9 @@ class BaseUpstreamProvider:
             Response or StreamingResponse from upstream with cost tracking
         """
         path = self.normalize_request_path(path, model_obj)
+        terminal_outcome = terminal_outcome_context(
+            getattr(request.state, "request_id", None), model_obj
+        )
         url = self.build_request_url(path, model_obj)
 
         original_model_id = (
@@ -3772,6 +3885,7 @@ class BaseUpstreamProvider:
                         model_obj=model_obj,
                         reservation_snapshot=reservation_snapshot,
                         request_body=transformed_body,
+                        terminal_outcome=terminal_outcome,
                     )
                     response_handoff.handoff()
                     return result
@@ -3787,6 +3901,7 @@ class BaseUpstreamProvider:
                             model_obj=model_obj,
                             reservation_snapshot=reservation_snapshot,
                             request_body=transformed_body,
+                            terminal_outcome=terminal_outcome,
                         )
                     finally:
                         await response_handoff.close()
@@ -3811,6 +3926,7 @@ class BaseUpstreamProvider:
                 model_obj,
                 self.provider_fee,
                 reservation_snapshot,
+                terminal_outcome=terminal_outcome,
             )
             response_handoff.handoff()
             return result
@@ -4005,6 +4121,7 @@ class BaseUpstreamProvider:
         response_data: dict,
         max_cost_for_model: int,
         model_obj: Model | None,
+        usage_presence: UsageFieldPresence | None = None,
     ) -> MaxCostData | CostData | None:
         """Calculate cost for X-Cashu payment based on response data.
 
@@ -4029,6 +4146,7 @@ class BaseUpstreamProvider:
             max_cost_for_model,
             model_obj,
             self.provider_fee,
+            usage_presence,
         ):
             case MaxCostData() as cost:
                 logger.debug(
@@ -4057,9 +4175,7 @@ class BaseUpstreamProvider:
                         "error_code": error.code,
                     },
                 )
-                return MaxCostData(
-                    base_msats=0, input_msats=0, output_msats=0, total_msats=0
-                )
+                return unpriced_cost(response_data, usage_presence)
         return None
 
     async def send_refund(
@@ -4142,6 +4258,7 @@ class BaseUpstreamProvider:
         request_id: str | None = None,
         model_obj: Model | None = None,
         request_body: bytes | None = None,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -4174,7 +4291,12 @@ class BaseUpstreamProvider:
         model = None
         cost_data: CostData | MaxCostData | None = None
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
+        refund_amount_sent = 0
+        settlement_failed = False
+        outcome_state = TerminalOutcomeState()
 
+        # Stats observe both SSE prefix forms; billing keeps its existing parse.
+        observe_terminal_sse_bytes(outcome_state, b"", content_str.encode(), final=True)
         lines = content_str.strip().split("\n")
         for line in lines:
             if line.startswith("data: "):
@@ -4266,6 +4388,7 @@ class BaseUpstreamProvider:
                         request_id=request_id,
                     )
                     response_headers["X-Cashu"] = refund_token
+                    refund_amount_sent = refund_amount
 
                     logger.info(
                         "Refund processed for streaming response",
@@ -4291,7 +4414,14 @@ class BaseUpstreamProvider:
                 # extractUsageFromResponseHeaders can populate
                 # inputMsats/outputMsats/totalMsats for x-cashu requests.
                 _inject_cost_response_headers(response_headers, cost_data)
+        except asyncio.CancelledError:
+            if terminal_outcome is not None:
+                mark_terminal_outcome_loss("X-Cashu streaming settlement cancelled")
+            raise
         except Exception as e:
+            settlement_failed = True
+            if terminal_outcome is not None:
+                mark_terminal_outcome_loss("X-Cashu streaming settlement failed")
             logger.error(
                 "Error calculating cost for streaming response",
                 extra={
@@ -4302,6 +4432,17 @@ class BaseUpstreamProvider:
                     "unit": unit,
                 },
             )
+
+        if not settlement_failed:
+            if terminal_outcome is not None:
+                record_x_cashu_terminal_outcome(
+                    terminal_outcome,
+                    cost_data,
+                    amount=amount,
+                    unit=unit,
+                    refund_amount=refund_amount_sent,
+                    usage=outcome_state.usage or usage_data,
+                )
 
         provider_seen: str | None = None
         for i, line in enumerate(lines):
@@ -4345,6 +4486,7 @@ class BaseUpstreamProvider:
         request_id: str | None = None,
         model_obj: Model | None = None,
         request_body: bytes | None = None,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -4437,12 +4579,17 @@ class BaseUpstreamProvider:
             )
 
             if refund_amount > 0:
-                refund_token = await self.send_refund(
-                    refund_amount,
-                    unit,
-                    mint,
-                    request_id=request_id,
-                )
+                try:
+                    refund_token = await self.send_refund(
+                        refund_amount,
+                        unit,
+                        mint,
+                        request_id=request_id,
+                    )
+                except BaseException:
+                    if terminal_outcome is not None:
+                        mark_terminal_outcome_loss("X-Cashu refund commit ambiguous")
+                    raise
                 response_headers["X-Cashu"] = refund_token
 
                 logger.info(
@@ -4454,6 +4601,15 @@ class BaseUpstreamProvider:
                         if len(refund_token) > 20
                         else refund_token,
                     },
+                )
+
+            if terminal_outcome is not None:
+                record_x_cashu_terminal_outcome(
+                    terminal_outcome,
+                    cost_data,
+                    amount=amount,
+                    unit=unit,
+                    refund_amount=max(0, refund_amount),
                 )
 
             return Response(
@@ -4512,6 +4668,7 @@ class BaseUpstreamProvider:
         request_id: str | None = None,
         model_obj: Model | None = None,
         request_body: bytes | None = None,
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
 
@@ -4559,6 +4716,7 @@ class BaseUpstreamProvider:
                     request_id=request_id,
                     model_obj=model_obj,
                     request_body=request_body,
+                    terminal_outcome=terminal_outcome,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_response(
@@ -4571,6 +4729,7 @@ class BaseUpstreamProvider:
                     request_id=request_id,
                     model_obj=model_obj,
                     request_body=request_body,
+                    terminal_outcome=terminal_outcome,
                 )
 
         except Exception as e:
@@ -4774,6 +4933,11 @@ class BaseUpstreamProvider:
                     request_id=getattr(request.state, "request_id", None),
                     model_obj=model_obj,
                     request_body=request_body,
+                    terminal_outcome=None
+                    if path.endswith("messages/count_tokens")
+                    else terminal_outcome_context(
+                        getattr(request.state, "request_id", None), model_obj
+                    ),
                 )
                 if isinstance(result, StreamingResponse) and not response.is_closed:
                     return attach_upstream_stream_owner(result, response, client)
@@ -5246,6 +5410,9 @@ class BaseUpstreamProvider:
         reasoning_tokens = 0
         cost_data: CostData | MaxCostData | None = None
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
+        refund_amount_sent = 0
+        settlement_failed = False
+        terminal_outcome = terminal_outcome_context(request_id, model_obj)
 
         for _fields, data in events:
             if data.strip() == "[DONE]":
@@ -5337,6 +5504,7 @@ class BaseUpstreamProvider:
                         request_id=request_id,
                     )
                     response_headers["X-Cashu"] = refund_token
+                    refund_amount_sent = refund_amount
 
                     logger.info(
                         "Refund processed for streaming Responses API response",
@@ -5362,7 +5530,12 @@ class BaseUpstreamProvider:
                 # extractUsageFromResponseHeaders can populate
                 # inputMsats/outputMsats/totalMsats for x-cashu requests.
                 _inject_cost_response_headers(response_headers, cost_data)
+        except asyncio.CancelledError:
+            mark_terminal_outcome_loss("X-Cashu Responses stream settlement cancelled")
+            raise
         except Exception as e:
+            settlement_failed = True
+            mark_terminal_outcome_loss("X-Cashu Responses stream settlement failed")
             logger.error(
                 "Error calculating cost for streaming Responses API response",
                 extra={
@@ -5372,6 +5545,16 @@ class BaseUpstreamProvider:
                     "amount": amount,
                     "unit": unit,
                 },
+            )
+
+        if not settlement_failed:
+            record_x_cashu_terminal_outcome(
+                terminal_outcome,
+                cost_data,
+                amount=amount,
+                unit=unit,
+                refund_amount=refund_amount_sent,
+                usage=usage_data,
             )
 
         provider_seen: str | None = None
@@ -5425,6 +5608,7 @@ class BaseUpstreamProvider:
 
         try:
             response_json = json.loads(content_str)
+            terminal_outcome = terminal_outcome_context(request_id, model_obj)
             self._apply_provider_field(response_json)
             _apply_estimated_usage(
                 response_json, request_body, model_obj, amount, unit, "responses"
@@ -5494,12 +5678,18 @@ class BaseUpstreamProvider:
             )
 
             if refund_amount > 0:
-                refund_token = await self.send_refund(
-                    refund_amount,
-                    unit,
-                    mint,
-                    request_id=request_id,
-                )
+                try:
+                    refund_token = await self.send_refund(
+                        refund_amount,
+                        unit,
+                        mint,
+                        request_id=request_id,
+                    )
+                except BaseException:
+                    mark_terminal_outcome_loss(
+                        "X-Cashu Responses refund commit ambiguous"
+                    )
+                    raise
                 response_headers["X-Cashu"] = refund_token
 
                 logger.info(
@@ -5512,6 +5702,15 @@ class BaseUpstreamProvider:
                         else refund_token,
                     },
                 )
+
+            record_x_cashu_terminal_outcome(
+                terminal_outcome,
+                cost_data,
+                amount=amount,
+                unit=unit,
+                refund_amount=max(0, refund_amount),
+                usage=response_json.get("usage"),
+            )
 
             return Response(
                 content=json.dumps(response_json),

@@ -9,7 +9,7 @@ request body, and echo the fallback's model id to the client.
 
 import json
 from typing import Any, AsyncGenerator
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -165,6 +165,7 @@ async def test_failover_serve_billed_at_serving_providers_rate(
     at the winner's (0.001/0.002) it would be 2_000 msats.
     """
     sent_requests: list[httpx.Request] = []
+    record_outcome = MagicMock()
 
     # Patch the network transport (not AsyncClient.send) so the in-process
     # ASGI test client is untouched and only the proxy's upstream hop is mocked.
@@ -185,6 +186,7 @@ async def test_failover_serve_billed_at_serving_providers_rate(
             "routstr.payment.cost_calculation.sats_usd_price",
             return_value=0.0005,
         ),
+        patch("routstr.auth.record_terminal_outcome", record_outcome),
     ):
         response = await authenticated_client.post(
             "/v1/chat/completions",
@@ -213,6 +215,11 @@ async def test_failover_serve_billed_at_serving_providers_rate(
 
     # Billed at the serving provider's rate: 1000/1000*5000 + 500/1000*10000.
     assert payload["cost"]["total_msats"] == 10_000
+    record_outcome.assert_called_once()
+    terminal_outcome = record_outcome.call_args.args[0]
+    serving_model = dual_provider_maps[1].get_cached_models()[0]
+    assert terminal_outcome.model_identifier == serving_model.id
+    assert record_outcome.call_args.kwargs["revenue_msats"] == 10_000
 
     # The fallback's larger max-cost envelope requires a replacement
     # reservation. The failed candidate is released, the serving candidate is
