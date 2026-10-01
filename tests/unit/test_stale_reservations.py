@@ -9,6 +9,7 @@ Covers:
 """
 
 import asyncio
+import math
 import time
 from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -69,7 +70,6 @@ async def test_pay_for_request_sets_reserved_at(
     payments_info = MagicMock()
     monkeypatch.setattr(auth_module.logger, "info", logger_info)
     monkeypatch.setattr(auth_module.payments_logger, "info", payments_info)
-
     before = int(time.time())
     await pay_for_request(key, 1_000, session)
 
@@ -85,6 +85,34 @@ async def test_pay_for_request_sets_reserved_at(
     assert len(success_logs) == 1
     payments_info.assert_called_once()
     assert payments_info.call_args.args == ("RESERVE",)
+
+
+@pytest.mark.asyncio
+async def test_pay_for_request_expires_at_has_floor_margin(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reserved_at_now floors to the second; expires_at must add 1s so a
+    finalizer finishing exactly at the nominal deadline isn't fenced out."""
+    key = ApiKey(hashed_key="floorkey", balance=10_000)
+    session.add(key)
+    await session.commit()
+
+    fixed_time = 1_700_000_000.9  # fractional second, floors when int()'d
+    monkeypatch.setattr(auth_module.time, "time", lambda: fixed_time)
+
+    snapshot = await pay_for_request(key, 1_000, session)
+
+    row = await session.get(ReservationRelease, snapshot.release_id)
+    assert row is not None
+    expected = (
+        int(fixed_time)
+        + math.ceil(
+            auth_module.settings.max_request_lifetime_seconds
+            + auth_module.settings.request_cleanup_timeout_seconds
+        )
+        + 1
+    )
+    assert row.expires_at == expected
 
 
 @pytest.mark.asyncio
@@ -428,3 +456,62 @@ async def test_proxy_reverts_reservation_on_client_disconnect() -> None:
             await proxy_module.proxy(request, "v1/chat/completions")
 
     revert_mock.assert_awaited_once_with(key, session, 1000, reservation_snapshot)
+
+
+@pytest.mark.asyncio
+async def test_absolute_expiry_releases_fresh_lease(session: AsyncSession) -> None:
+    now = int(time.time())
+    key = ApiKey(
+        hashed_key="expired-deadline",
+        balance=5000,
+        reserved_balance=1000,
+        reserved_at=now,
+    )
+    session.add(key)
+    session.add(
+        ReservationRelease(
+            id="expired",
+            key_hash=key.hashed_key,
+            billing_key_hash=key.hashed_key,
+            reserved_msats=1000,
+            created_at=now,
+            started_at=now - 100,
+            expires_at=now - 1,
+        )
+    )
+    await session.commit()
+    assert await release_stale_reservations(session, 300) == 1
+    await session.refresh(key)
+    assert key.reserved_balance == 0
+    assert key.balance == 5000
+
+
+@pytest.mark.asyncio
+async def test_expired_reservation_cannot_renew_or_claim_charge(
+    session: AsyncSession,
+) -> None:
+    from routstr.auth import (
+        ReservationSnapshot,
+        _claim_reservation_for_charge,
+        renew_reservation,
+    )
+
+    snapshot = ReservationSnapshot(
+        release_id="fenced",
+        key_hash="fenced-key",
+        billing_key_hash="fenced-key",
+        reserved_msats=1000,
+    )
+    session.add(ApiKey(hashed_key="fenced-key", balance=5000, reserved_balance=1000))
+    session.add(
+        ReservationRelease(
+            id="fenced",
+            key_hash="fenced-key",
+            billing_key_hash="fenced-key",
+            reserved_msats=1000,
+            expires_at=int(time.time()) - 1,
+        )
+    )
+    await session.commit()
+    assert not await renew_reservation(snapshot, session)
+    assert not await _claim_reservation_for_charge(snapshot, session)
