@@ -91,7 +91,7 @@ All errors follow a consistent format:
 | `not_found` | 404 | Resource not found |
 | `rate_limit_exceeded` | 429 | Too many requests |
 | `internal_error` | 500 | Server error |
-| `upstream_error` | 502 | Upstream API error |
+| `upstream_error` | 424 | Upstream API error — the provider failed, this node is healthy. Carries `error.code = UPSTREAM_UNAVAILABLE`, the `X-Routstr-Error-Scope: upstream` header, and the provider's own status in `error.upstream_status`. Rate limits stay `429` + `UPSTREAM_RATE_LIMIT`. See [Error Handling](errors.md#upstream-attribution-424-failed-dependency) |
 
 ## Endpoint Categories
 
@@ -104,6 +104,7 @@ Standard OpenAI-compatible endpoints:
 - **Responses**: `/v1/responses`
 - **Chat Completions**: `/v1/chat/completions`
 - **Embeddings**: `/v1/embeddings`
+- **System One**: `/v1/systemone` (TypeSafe decision models)
 - **Completions**: `/v1/completions` *(planned)*
 - **Images**: `/v1/images/generations` *(planned)*
 - **Audio**: `/v1/audio/transcriptions` *(planned)*
@@ -267,9 +268,10 @@ X-Webhook-Signature: sha256=...
 | 402 | Payment required |
 | 403 | Forbidden |
 | 404 | Not found |
+| 424 | Upstream provider failed (`X-Routstr-Error-Scope: upstream`) |
 | 429 | Rate limited |
-| 500 | Server error |
-| 502 | Upstream error |
+| 500 | Server error (no scope header) |
+| 502 | Gateway failure |
 | 503 | Service unavailable |
 
 ## CORS Support

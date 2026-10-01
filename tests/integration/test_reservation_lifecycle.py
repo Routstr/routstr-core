@@ -55,9 +55,13 @@ async def test_reserve_increases_reserved_balance(
     cost = 100
     key = await _persist(integration_session, _make_key(balance=500))
 
-    await pay_for_request(key, cost, integration_session)
+    reservation = await pay_for_request(key, cost, integration_session)
     await integration_session.refresh(key)
 
+    assert reservation.key_hash == key.hashed_key
+    assert reservation.billing_key_hash == key.hashed_key
+    assert reservation.reserved_msats == cost
+    assert reservation.release_id
     assert key.reserved_balance == cost
     assert key.balance == 500  # balance column is NOT decremented on reserve
     assert key.total_balance == 500 - cost  # available = balance - reserved
@@ -75,11 +79,11 @@ async def test_revert_releases_reservation(
     cost = 150
     key = await _persist(integration_session, _make_key(balance=300))
 
-    await pay_for_request(key, cost, integration_session)
+    reservation = await pay_for_request(key, cost, integration_session)
     await integration_session.refresh(key)
     assert key.reserved_balance == cost
 
-    await revert_pay_for_request(key, integration_session, cost)
+    await revert_pay_for_request(key, integration_session, cost, reservation)
     await integration_session.refresh(key)
 
     assert key.reserved_balance == 0

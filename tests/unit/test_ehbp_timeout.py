@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from routstr.core.exceptions import EhbpTimeoutError, UpstreamError
+from routstr.core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
+)
+from routstr.core.exceptions import (
+    EhbpConnectionError,
+    EhbpTimeoutError,
+    UpstreamError,
+)
 from routstr.upstream import ehbp as ehbp_module
 
 # ---------------------------------------------------------------------------
-# forward_ehbp_x_cashu_request — timeout fails closed with a refund + 504
+# forward_ehbp_x_cashu_request — timeout fails closed with a refund + 424
 # ---------------------------------------------------------------------------
 
 
@@ -48,7 +58,7 @@ def _ehbp_upstream_mocks() -> tuple[MagicMock, MagicMock]:
 
 
 @pytest.mark.asyncio
-async def test_x_cashu_timeout_refunds_and_returns_504(
+async def test_x_cashu_timeout_refunds_and_returns_424(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -78,34 +88,39 @@ async def test_x_cashu_timeout_refunds_and_returns_504(
         upstream=upstream,
     )
 
-    assert response.status_code == 504
+    assert response.status_code == UPSTREAM_ERROR_STATUS
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
     assert response.headers["X-Cashu"] == "refund-token"
+    body = json.loads(bytes(response.body))
+    assert body["error"]["type"] == "upstream_timeout"
+    assert body["error"]["code"] == "UPSTREAM_TIMEOUT"
     send_cashu_refund_mock.assert_awaited_once_with(1000, "msat", None, "req-123")
 
 
 # ---------------------------------------------------------------------------
 # forward_ehbp_request — the bearer path must let the timeout through, so
-# proxy.py can answer 504 instead of flattening it to a generic 500
+# proxy.py can answer 424 instead of flattening it to a generic 500
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_bearer_timeout_propagates_504(
+async def test_bearer_timeout_propagates_424(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A timed-out bearer request must not be rewritten to a 500.
 
     ``forward_ehbp_request`` ends in a bare ``except Exception`` that turns any
     error into ``UpstreamError(..., status_code=500)``. The ``except
-    UpstreamError: raise`` above it is the only thing preserving the 504 that
-    ``proxy.py`` returns to the client, so this test pins that handler.
+    UpstreamError: raise`` above it is the only thing preserving the upstream
+    timeout status that ``proxy.py`` returns to the client, so this test pins
+    that handler.
     """
     monkeypatch.setattr(
         ehbp_module,
         "forward_with_trailer",
         AsyncMock(
             side_effect=EhbpTimeoutError(
-                "EHBP upstream inference.tinfoil.sh timed out after 60s connecting"
+                "EHBP upstream inference.tinfoil.sh timed out after 600s connecting"
             )
         ),
     )
@@ -126,6 +141,51 @@ async def test_bearer_timeout_propagates_504(
             model_obj=model_obj,
         )
 
-    assert exc_info.value.status_code == 504
+    assert exc_info.value.status_code == UPSTREAM_ERROR_STATUS
     assert exc_info.value.code == "UPSTREAM_TIMEOUT"
+    assert exc_info.value.scope == ERROR_SCOPE_UPSTREAM
+    assert isinstance(exc_info.value, UpstreamError)
+
+
+@pytest.mark.asyncio
+async def test_bearer_connection_error_propagates_upstream_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connect failure must stay upstream-scoped instead of becoming a 500.
+
+    ``forward_with_trailer`` classifies TLS/connection failures as
+    :class:`EhbpConnectionError`; ``forward_ehbp_request``'s ``except
+    UpstreamError: raise`` must let it through so ``proxy.py`` answers 424 with
+    the upstream scope header rather than a node-scoped 500.
+    """
+    monkeypatch.setattr(
+        ehbp_module,
+        "forward_with_trailer",
+        AsyncMock(
+            side_effect=EhbpConnectionError(
+                "Unable to connect to EHBP upstream inference.tinfoil.sh: "
+                "ConnectionAbortedError"
+            )
+        ),
+    )
+    upstream, model_obj = _ehbp_upstream_mocks()
+    key = MagicMock()
+    key.hashed_key = "abcdef1234567890"
+
+    with pytest.raises(EhbpConnectionError) as exc_info:
+        await ehbp_module.forward_ehbp_request(
+            request=await _request(),
+            path="v1/chat/completions",
+            headers={},
+            request_body=b"opaque",
+            upstream=upstream,
+            key=key,
+            max_cost_for_model=5000,
+            session=MagicMock(),
+            model_obj=model_obj,
+        )
+
+    assert exc_info.value.status_code == UPSTREAM_ERROR_STATUS
+    assert exc_info.value.code == "UPSTREAM_UNAVAILABLE"
+    assert exc_info.value.scope == ERROR_SCOPE_UPSTREAM
     assert isinstance(exc_info.value, UpstreamError)

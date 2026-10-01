@@ -4,7 +4,7 @@ This guide covers error responses, codes, and handling strategies for the Routst
 
 ## Error Response Format
 
-All errors follow a consistent JSON structure:
+Versioned endpoints use a structured JSON error object:
 
 ```json
 {
@@ -19,6 +19,28 @@ All errors follow a consistent JSON structure:
 }
 ```
 
+### Lightning invoice errors
+
+The `/v2/lightning/*` endpoints use the structured error object above. In the
+HTTP response, `error` is available at the top level and mirrored under
+`detail.error`. Clients should branch on `error.code`.
+
+| Endpoint case | Status | `type` | `code` |
+|---------------|--------|--------|--------|
+| Top-up without a credential | 401 | `invalid_request_error` | `topup_authorization_required` |
+| Top-up with a non-`sk-` credential | 400 | `invalid_request_error` | `topup_invalid_api_key_format` |
+| Top-up target key not found | 404 | `invalid_request_error` | `topup_api_key_not_found` |
+| Invoice not found during status or recovery | 404 | `invalid_request_error` | `invoice_not_found` |
+| Cashu mint rate-limited | 503 | `mint_rate_limited` | `lightning_mint_rate_limited` |
+| Cashu mint unreachable | 503 | `mint_unreachable` | `lightning_mint_unreachable` |
+| Unexpected invoice creation failure | 500 | `api_error` | `invoice_creation_failed` |
+
+Request validation failures, including non-positive or excessive amounts, use
+FastAPI's standard 422 validation response. Only the 503 mint failures are retryable. Use backoff and honor the
+`Retry-After` header when present. The compatibility endpoints `/lightning/*` and
+`/v1/balance/lightning/*` retain their original string `detail` errors and
+legacy status behavior.
+
 ## HTTP Status Codes
 
 | Status | Meaning | Common Causes |
@@ -29,10 +51,49 @@ All errors follow a consistent JSON structure:
 | 403 | Forbidden | Access denied to resource |
 | 404 | Not Found | Endpoint or resource doesn't exist |
 | 422 | Unprocessable Entity | Validation errors |
-| 429 | Too Many Requests | Rate limit exceeded |
-| 500 | Internal Server Error | Server-side error |
-| 502 | Bad Gateway | Upstream API error |
+| 424 | Failed Dependency | An upstream inference provider failed. This node is healthy — see [Upstream attribution](#upstream-attribution-424-failed-dependency) |
+| 429 | Too Many Requests | Rate limit exceeded (this node or an upstream provider) |
+| 500 | Internal Server Error | Server-side error on this node |
+| 502 | Bad Gateway | Gateway-level failure |
 | 503 | Service Unavailable | Temporary outage |
+
+### Upstream attribution (424 Failed Dependency)
+
+When an upstream provider fails, this node is still healthy, so the failure is
+reported as a **non-5xx** status. Clients should not mark the node down for it.
+
+An upstream-attributable failure answers:
+
+- **Status:** `424`
+- **`error.code`:** `UPSTREAM_UNAVAILABLE`
+- **Header:** `X-Routstr-Error-Scope: upstream`
+- **`error.upstream_status`:** the provider's own status (e.g. `503`). Failures
+  built by the payment helpers carry it in `error.details.upstream_status`
+  instead
+
+```http
+HTTP/1.1 424 Failed Dependency
+X-Routstr-Error-Scope: upstream
+Content-Type: application/json
+
+{
+  "error": {
+    "type": "upstream_error",
+    "message": "Service Unavailable",
+    "code": "UPSTREAM_UNAVAILABLE",
+    "upstream_status": 503
+  }
+}
+```
+
+Two exceptions keep their own status:
+
+- **Rate limits** answer `429` with `error.code = UPSTREAM_RATE_LIMIT`, even
+  when the provider wrapped them in a 5xx.
+- **Provider-side 4xx** (`400`/`401`/`403`/`404`/`422`) passes through unchanged.
+
+Node faults (unreachable mint, database failure, internal exception) still
+answer `500` with **no** `X-Routstr-Error-Scope` header.
 
 ## Error Types
 
@@ -307,14 +368,18 @@ Retry-After: 45
 
 ### Upstream Errors
 
-#### Model Overloaded
+#### Upstream Unavailable
+
+A provider returned a 5xx (overloaded, bad gateway, timeout, or a provider-side
+outage). This node is healthy and your reservation has been reverted.
 
 ```json
 {
   "error": {
     "type": "upstream_error",
     "message": "Model is currently overloaded",
-    "code": "model_overloaded",
+    "code": "UPSTREAM_UNAVAILABLE",
+    "upstream_status": 503,
     "details": {
       "model": "gpt-4",
       "retry_after": 5
@@ -323,8 +388,11 @@ Retry-After: 45
 }
 ```
 
-**Status:** 503  
-**Resolution:** Retry request after delay
+**Status:** 424  
+**Header:** `X-Routstr-Error-Scope: upstream`  
+**Resolution:** Retry after a short backoff. If the node is configured with
+alternative providers for the model, it already retried them before answering —
+try another model or provider path if the failure persists.
 
 #### Upstream Timeout
 
@@ -342,7 +410,8 @@ Retry-After: 45
 }
 ```
 
-**Status:** 504  
+**Status:** 424  
+**Header:** `X-Routstr-Error-Scope: upstream`  
 **Resolution:** Retry with shorter prompt or max_tokens
 
 ### Content Policy
@@ -394,7 +463,7 @@ def retry_with_backoff(
             
             # Check if error is retryable
             if hasattr(e, 'status_code'):
-                if e.status_code in [429, 502, 503, 504]:
+                if e.status_code in [424, 429, 502, 503, 504]:
                     # Calculate delay with jitter
                     delay = min(
                         base_delay * (2 ** attempt) + random.uniform(0, 1),
@@ -419,6 +488,9 @@ Group errors for handling:
 class ErrorHandler:
     # Errors that should be retried
     RETRYABLE_ERRORS = {
+        'UPSTREAM_UNAVAILABLE',  # upstream 5xx, reported as HTTP 424
+        'UPSTREAM_RATE_LIMIT',   # HTTP 429
+        'UPSTREAM_TIMEOUT',      # EHBP upstream timeout, reported as HTTP 424
         'rate_limit',
         'upstream_timeout',
         'model_overloaded',

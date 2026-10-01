@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 
 import pytest
 from pydantic.v1 import ValidationError
@@ -7,7 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.core.settings import Settings, SettingsService, settings
+from routstr.core.settings import ENV_ONLY_FIELDS, Settings, SettingsService, settings
 
 NSEC_HEX = "1" * 64
 
@@ -70,6 +71,20 @@ def test_database_pool_defaults_provide_concurrency_headroom() -> None:
     assert s.database_pool_recycle == 1800
     assert s.database_pool_pre_ping is False
     assert s.database_pool_hold_warn_seconds == 10.0
+
+
+def test_env_only_settings_are_documented() -> None:
+    env_example = Path(__file__).parents[2] / ".env.example"
+    documented = {
+        line.lstrip("# ").split("=", 1)[0]
+        for line in env_example.read_text().splitlines()
+        if "=" in line
+    }
+    aliases = {
+        Settings.__fields__[field].field_info.extra["env"] for field in ENV_ONLY_FIELDS
+    }
+
+    assert aliases <= documented
 
 
 @pytest.mark.parametrize(
@@ -207,9 +222,7 @@ async def test_settings_initialize_discards_unknown_keys() -> None:
 
         # Simulate older persisted key name and an unknown key.
         await session.exec(  # type: ignore
-            text(
-                "UPDATE settings SET data = :data WHERE id = 1"
-            ).bindparams(
+            text("UPDATE settings SET data = :data WHERE id = 1").bindparams(
                 data='{"name":"LegacyNode","nostr_analytics_enabled":false,"unknown_key":123}'
             )
         )
@@ -279,7 +292,9 @@ async def test_upstream_api_key_survives_persistence(
         await SettingsService.initialize(session)
         await session.exec(  # type: ignore
             text("UPDATE settings SET data = :d WHERE id = 1").bindparams(
-                d=json.dumps({"name": "LegacyNode", "upstream_api_key": "sk-only-in-db"})
+                d=json.dumps(
+                    {"name": "LegacyNode", "upstream_api_key": "sk-only-in-db"}
+                )
             )
         )
         await session.commit()

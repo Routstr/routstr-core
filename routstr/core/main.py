@@ -18,7 +18,11 @@ from ..auth import (
 )
 from ..balance import balance_router, deprecated_wallet_router
 from ..cashu_compat import install_cashu_httpx_shim
-from ..lightning import lightning_router, periodic_invoice_watcher
+from ..lightning import (
+    lightning_router,
+    periodic_invoice_watcher,
+    v2_lightning_router,
+)
 from ..nostr import (
     announce_provider,
     providers_cache_refresher,
@@ -30,7 +34,7 @@ from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..refund import periodic_refund_reconcile
 from ..upstream.auto_topup import periodic_auto_topup
-from ..upstream.deepseek_v4_pricing_shim import register_deepseek_v4_pricing
+from ..upstream.http_client import close_upstream_http_client
 from ..upstream.litellm_routing import configure_litellm
 from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
 from .admin import admin_router
@@ -40,6 +44,7 @@ from .exceptions import (
     http_exception_handler,
     validation_exception_handler,
 )
+from .lifecycle import RequestLifecycleMiddleware
 from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
 from .not_found import _NOT_FOUND_HTML, not_found_catch_all  # noqa: F401
@@ -112,11 +117,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # Apply litellm-wide settings (drop_params, chat-completions URL,
         # debug logging) before any upstream provider dispatches a request.
         configure_litellm()
-
-        # TEMPORARY: backfill DeepSeek V4 pricing missing from litellm's cost
-        # map (BerriAI/litellm#30430). Remove this call and
-        # deepseek_v4_pricing_shim.py once litellm ships these models.
-        register_deepseek_v4_pricing()
 
         # Run database migrations on startup
         run_migrations()
@@ -285,6 +285,14 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 "Error stopping background tasks",
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
+        finally:
+            try:
+                await close_upstream_http_client()
+            except Exception as e:
+                logger.error(
+                    "Error closing upstream HTTP connection pools",
+                    extra={"error": str(e), "error_type": type(e).__name__},
+                )
 
 
 class _ImmutableStaticFiles(StaticFiles):
@@ -314,6 +322,7 @@ app.add_middleware(
     expose_headers=[
         "x-routstr-request-id",
         "x-cashu",
+        "x-routstr-error-scope",
         "x-routstr-cost-msats",
         "x-routstr-cost-usd",
         "x-routstr-input-cost-msats",
@@ -329,6 +338,10 @@ app.add_middleware(
 
 # Add logging middleware
 app.add_middleware(LoggingMiddleware)
+
+# Outermost: observe the actual downstream connection, not middleware streams.
+
+app.add_middleware(RequestLifecycleMiddleware)
 
 # Add exception handlers
 app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore
@@ -465,6 +478,7 @@ app.include_router(models_router)
 app.include_router(admin_router)
 app.include_router(balance_router)
 app.include_router(lightning_router)
+app.include_router(v2_lightning_router)
 app.include_router(deprecated_wallet_router)
 app.include_router(providers_router)
 app.include_router(proxy_router)

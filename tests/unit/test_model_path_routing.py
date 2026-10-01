@@ -9,7 +9,15 @@ import pytest
 from routstr import proxy as proxy_module
 from routstr.auth import ReservationSnapshot
 from routstr.core.db import ApiKey
+from routstr.core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_NODE,
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_UNAVAILABLE,
+)
 from routstr.upstream.model_paths import decode_model_path, encode_model_path
+
+from .proxy_test_utils import mock_request_stream, patch_proxy_session
 
 MODEL_ID = "test-model"
 
@@ -32,7 +40,7 @@ def _make_request(headers: dict[str, str], body: bytes) -> MagicMock:
     request = MagicMock()
     request.method = "POST"
     request.headers = headers
-    request.body = AsyncMock(return_value=body)
+    mock_request_stream(request, body)
     request.state = MagicMock()
     request.state.request_id = "req-model-path"
     return request
@@ -62,30 +70,42 @@ async def _run_proxy(
         ),
         patch.object(proxy_module, "check_token_balance", MagicMock()),
         patch.object(proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)),
-        patch.object(proxy_module, "pay_for_request", AsyncMock(return_value=1_000)),
         patch.object(
-            proxy_module,
-            "get_reservation_snapshot",
-            AsyncMock(return_value=reservation),
+            proxy_module, "pay_for_request", AsyncMock(return_value=reservation)
         ),
         patch.object(proxy_module, "revert_pay_for_request", AsyncMock()),
+        patch_proxy_session(MagicMock()),
     ):
-        return await proxy_module.proxy(request, path, session=MagicMock())
+        return await proxy_module.proxy(request, path)
 
 
 def test_decode_model_path_round_trips_encode() -> None:
     selector = decode_model_path(
-        encode_model_path("https://openrouter.ai/api/v1", 7, MODEL_ID, "deepinfra/fp8")
+        encode_model_path("https://openrouter.ai/api/v1", MODEL_ID, "deepinfra/fp8")
     )
     assert selector is not None
     assert selector.base_url == "https://openrouter.ai/api/v1"
-    assert selector.provider_id == 7
+    assert selector.provider_id is None
     assert selector.model_id == MODEL_ID
     assert selector.endpoint_tag == "deepinfra/fp8"
 
 
+def test_encoded_path_carries_no_provider_id() -> None:
+    assert "provider-id" not in encode_model_path("http://localhost", MODEL_ID)
+
+
+def test_decode_model_path_still_accepts_a_legacy_provider_id() -> None:
+    selector = decode_model_path(
+        "url=http%3A%2F%2Flocalhost&provider-id=7&model-id=test-model"
+    )
+    assert selector is not None
+    assert selector.provider_id == 7
+    assert selector.base_url == "http://localhost"
+    assert selector.model_id == MODEL_ID
+
+
 def test_decode_model_path_without_endpoint_has_no_tag() -> None:
-    selector = decode_model_path(encode_model_path("http://localhost", 1, MODEL_ID))
+    selector = decode_model_path(encode_model_path("http://localhost", MODEL_ID))
     assert selector is not None
     assert selector.endpoint_tag is None
 
@@ -94,10 +114,12 @@ def test_decode_model_path_without_endpoint_has_no_tag() -> None:
     "path",
     [
         "",
-        "url=http://localhost&model-id=test-model",
         "url=http://localhost&provider-id=abc&model-id=test-model",
+        "url=http://localhost&provider-id=0&model-id=test-model",
         "provider-id=1&model-id=test-model",
         "url=http://localhost&provider-id=1",
+        "model-id=test-model",
+        "url=http://localhost",
     ],
 )
 def test_decode_model_path_rejects_malformed_selectors(path: str) -> None:
@@ -105,20 +127,63 @@ def test_decode_model_path_rejects_malformed_selectors(path: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_path_routes_to_the_selected_provider() -> None:
-    first, selected = _make_upstream(1), _make_upstream(2)
+async def test_model_path_routes_to_the_cheapest_provider_sharing_the_url() -> None:
+    # get_candidates ranks by cost, so the first match for a provider-less
+    # selector is the cheapest provider configured against that URL.
+    cheapest, pricier = _make_upstream(1), _make_upstream(2)
     request = _make_request(
         {
             "authorization": "Bearer sk-mpkey",
-            "x-routstr-model-path": encode_model_path("http://localhost", 2, MODEL_ID),
+            "x-routstr-model-path": encode_model_path("http://localhost", MODEL_ID),
         },
         json.dumps({"model": MODEL_ID}).encode(),
     )
 
-    await _run_proxy(request, [(MagicMock(), first), (MagicMock(), selected)])
+    await _run_proxy(request, [(MagicMock(), cheapest), (MagicMock(), pricier)])
 
-    selected.forward_request.assert_awaited_once()
-    first.forward_request.assert_not_awaited()
+    cheapest.forward_request.assert_awaited_once()
+    pricier.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cheapest_provider_failure_does_not_fall_back_to_the_pricier_one() -> (
+    None
+):
+    cheapest, pricier = _make_upstream(1, status_code=503), _make_upstream(2)
+    request = _make_request(
+        {
+            "authorization": "Bearer sk-mpkey",
+            "x-routstr-model-path": encode_model_path("http://localhost", MODEL_ID),
+        },
+        json.dumps({"model": MODEL_ID}).encode(),
+    )
+
+    response = await _run_proxy(
+        request, [(MagicMock(), cheapest), (MagicMock(), pricier)]
+    )
+
+    assert response.status_code == 503
+    cheapest.forward_request.assert_awaited_once()
+    pricier.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_provider_id_still_pins_that_exact_provider() -> None:
+    cheapest, pinned = _make_upstream(1), _make_upstream(2)
+    request = _make_request(
+        {
+            "authorization": "Bearer sk-mpkey",
+            "x-routstr-model-path": (
+                f"url=http%3A%2F%2Flocalhost&provider-id=2&model-id={MODEL_ID}"
+            ),
+        },
+        json.dumps({"model": MODEL_ID}).encode(),
+    )
+
+    await _run_proxy(request, [(MagicMock(), cheapest), (MagicMock(), pinned)])
+
+    pinned.forward_request.assert_awaited_once()
+    cheapest.forward_request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -131,7 +196,7 @@ async def test_model_path_failure_is_returned_without_falling_back(
     request = _make_request(
         {
             "authorization": "Bearer sk-mpkey",
-            "x-routstr-model-path": encode_model_path("http://localhost", 1, MODEL_ID),
+            "x-routstr-model-path": encode_model_path("http://localhost", MODEL_ID),
         },
         json.dumps({"model": MODEL_ID}).encode(),
     )
@@ -146,12 +211,14 @@ async def test_model_path_failure_is_returned_without_falling_back(
 
 
 @pytest.mark.asyncio
-async def test_unknown_provider_in_model_path_is_rejected() -> None:
+async def test_unknown_legacy_provider_in_model_path_is_rejected() -> None:
     upstream = _make_upstream(1)
     request = _make_request(
         {
             "authorization": "Bearer sk-mpkey",
-            "x-routstr-model-path": encode_model_path("http://localhost", 99, MODEL_ID),
+            "x-routstr-model-path": (
+                f"url=http%3A%2F%2Flocalhost&provider-id=99&model-id={MODEL_ID}"
+            ),
         },
         json.dumps({"model": MODEL_ID}).encode(),
     )
@@ -170,7 +237,7 @@ async def test_model_path_disagreeing_with_the_body_model_is_rejected() -> None:
         {
             "authorization": "Bearer sk-mpkey",
             "x-routstr-model-path": encode_model_path(
-                "http://localhost", 1, "other-model"
+                "http://localhost", "other-model"
             ),
         },
         json.dumps({"model": MODEL_ID}).encode(),
@@ -207,7 +274,7 @@ async def test_endpoint_tag_pins_the_upstream_subprovider() -> None:
         {
             "authorization": "Bearer sk-mpkey",
             "x-routstr-model-path": encode_model_path(
-                "https://openrouter.ai/api/v1", 1, MODEL_ID, "deepinfra/fp8"
+                "https://openrouter.ai/api/v1", MODEL_ID, "deepinfra/fp8"
             ),
         },
         json.dumps({"model": MODEL_ID}).encode(),
@@ -245,7 +312,7 @@ async def test_selector_url_must_match_configured_provider() -> None:
         {
             "authorization": "Bearer key",
             "x-routstr-model-path": encode_model_path(
-                "http://169.254.169.254", 1, MODEL_ID
+                "http://169.254.169.254", MODEL_ID
             ),
         },
         json.dumps({"model": MODEL_ID}).encode(),
@@ -266,7 +333,7 @@ async def test_endpoint_pin_cannot_be_stripped_on_retry() -> None:
         {
             "authorization": "Bearer key",
             "x-routstr-model-path": encode_model_path(
-                upstream.base_url, 1, MODEL_ID, "deepinfra/fp8"
+                upstream.base_url, MODEL_ID, "deepinfra/fp8"
             ),
         },
         json.dumps({"model": MODEL_ID}).encode(),
@@ -298,7 +365,7 @@ async def test_cashu_receives_endpoint_pinned_body(path: str, handler: str) -> N
         {
             "x-cashu": "test-token",
             "x-routstr-model-path": encode_model_path(
-                upstream.base_url, 1, MODEL_ID, "deepinfra/fp8"
+                upstream.base_url, MODEL_ID, "deepinfra/fp8"
             ),
         },
         json.dumps(
@@ -330,8 +397,13 @@ def test_model_path_header_is_not_forwarded() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["v1/chat/completions", "v1/responses"])
-@pytest.mark.parametrize("status_code", [200, 429, 502])
-async def test_cashu_pin_reaches_http_transport(path: str, status_code: int) -> None:
+@pytest.mark.parametrize(
+    "status_code,client_status",
+    [(200, 200), (429, 429), (502, 424)],
+)
+async def test_cashu_pin_reaches_http_transport(
+    path: str, status_code: int, client_status: int
+) -> None:
     import httpx
     from fastapi.responses import Response
 
@@ -354,7 +426,7 @@ async def test_cashu_pin_reaches_http_transport(path: str, status_code: int) -> 
         {
             "x-cashu": "test-token",
             "x-routstr-model-path": encode_model_path(
-                upstream.base_url, 1, MODEL_ID, "deepinfra/fp8"
+                upstream.base_url, MODEL_ID, "deepinfra/fp8"
             ),
         },
         json.dumps({"model": MODEL_ID, "provider": {"allow_fallbacks": True}}).encode(),
@@ -382,7 +454,11 @@ async def test_cashu_pin_reaches_http_transport(path: str, status_code: int) -> 
         response = await _run_proxy(
             request, [(model, upstream), (model, fallback)], path
         )
-    assert response.status_code == status_code
+    assert response.status_code == client_status
+    if client_status == 424:
+        assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+        body = json.loads(bytes(response.body))
+        assert body["error"]["code"] == UPSTREAM_UNAVAILABLE
     redeem.assert_awaited_once()
     assert len(sent) == 1
     assert sent[0].url.host == "openrouter.ai"
@@ -418,14 +494,17 @@ async def test_pinned_exception_does_not_fall_back() -> None:
     request = _make_request(
         {
             "authorization": "Bearer key",
-            "x-routstr-model-path": encode_model_path(first.base_url, 1, MODEL_ID),
+            "x-routstr-model-path": encode_model_path(first.base_url, MODEL_ID),
         },
         json.dumps({"model": MODEL_ID}).encode(),
     )
     response = await _run_proxy(
         request, [(MagicMock(), first), (MagicMock(), fallback)]
     )
-    assert response.status_code == 503
+    # Pinned: no fallback.
+    assert response.status_code == 424
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+    assert json.loads(bytes(response.body))["error"]["code"] == UPSTREAM_UNAVAILABLE
     first.forward_request.assert_awaited_once()
     fallback.forward_request.assert_not_awaited()
 
@@ -442,7 +521,7 @@ async def test_unsupported_endpoint_pins_fail_before_payment(
     headers = {
         "x-cashu": "test-token",
         "x-routstr-model-path": encode_model_path(
-            upstream.base_url, 1, MODEL_ID, "deepinfra/fp8"
+            upstream.base_url, MODEL_ID, "deepinfra/fp8"
         ),
     }
     if is_ehbp:
@@ -453,8 +532,9 @@ async def test_unsupported_endpoint_pins_fail_before_payment(
         patch.object(
             proxy_module, "get_candidates", return_value=[(MagicMock(), upstream)]
         ),
+        patch_proxy_session(MagicMock()),
     ):
-        response = await proxy_module.proxy(request, path, MagicMock())
+        response = await proxy_module.proxy(request, path)
     assert response.status_code == 400
     assert json.loads(response.body)["error"]["type"] == "unsupported_request"
     payment.assert_not_called()
@@ -471,7 +551,7 @@ async def test_ehbp_pin_does_not_fall_back(cashu: bool) -> None:
     headers = {
         "ehbp-encapsulated-key": "sealed",
         "x-routstr-model": MODEL_ID,
-        "x-routstr-model-path": encode_model_path(selected.base_url, 1, MODEL_ID),
+        "x-routstr-model-path": encode_model_path(selected.base_url, MODEL_ID),
     }
     headers.update({"x-cashu": "token"} if cashu else {"authorization": "Bearer key"})
     request = _make_request(headers, b"encrypted-body")
@@ -484,7 +564,8 @@ async def test_ehbp_pin_does_not_fall_back(cashu: bool) -> None:
         response = await _run_proxy(
             request, [(MagicMock(), selected), (MagicMock(), fallback)]
         )
-    assert response.status_code == 503
+    assert response.status_code == 424
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
     forward.assert_awaited_once()
     assert forward.await_args is not None
     assert forward.await_args.kwargs["upstream"] is selected
@@ -495,7 +576,7 @@ async def test_duplicate_header_fields_are_rejected() -> None:
     from starlette.datastructures import Headers
 
     selected = _make_upstream(1)
-    route = encode_model_path(selected.base_url, 1, MODEL_ID).encode()
+    route = encode_model_path(selected.base_url, MODEL_ID).encode()
     request = _make_request({}, json.dumps({"model": MODEL_ID}).encode())
     request.headers = Headers(
         raw=[
@@ -512,7 +593,7 @@ async def test_duplicate_header_fields_are_rejected() -> None:
 @pytest.mark.asyncio
 async def test_attestation_does_not_ignore_model_path() -> None:
     request = _make_request(
-        {"x-routstr-model-path": encode_model_path("http://localhost", 1, MODEL_ID)},
+        {"x-routstr-model-path": encode_model_path("http://localhost", MODEL_ID)},
         b"",
     )
     request.method = "GET"
@@ -528,7 +609,7 @@ async def test_model_fallback_list_is_rejected_when_pinned() -> None:
     request = _make_request(
         {
             "authorization": "Bearer key",
-            "x-routstr-model-path": encode_model_path(selected.base_url, 1, MODEL_ID),
+            "x-routstr-model-path": encode_model_path(selected.base_url, MODEL_ID),
         },
         json.dumps({"model": MODEL_ID, "models": ["other-model"]}).encode(),
     )
@@ -564,7 +645,7 @@ async def test_pinned_recovery_stays_on_selected_provider(
         {
             "authorization": "Bearer key",
             "x-routstr-model-path": encode_model_path(
-                selected.base_url, 1, MODEL_ID, endpoint
+                selected.base_url, MODEL_ID, endpoint
             ),
         },
         json.dumps(
@@ -608,7 +689,7 @@ async def test_pinned_recovery_preserves_routing_fields(
         {
             "authorization": "Bearer key",
             "x-routstr-model-path": encode_model_path(
-                selected.base_url, 1, MODEL_ID, endpoint
+                selected.base_url, MODEL_ID, endpoint
             ),
         },
         json.dumps(
@@ -623,3 +704,144 @@ async def test_pinned_recovery_preserves_routing_fields(
     assert response.status_code == 400
     selected.forward_request.assert_awaited_once()
     fallback.forward_request.assert_not_awaited()
+
+
+_OPENAI_MAX_TOKENS_ERROR = json.dumps(
+    {
+        "error": {
+            "message": "Unsupported parameter: 'max_tokens' is not supported "
+            "with this model. Use 'max_completion_tokens' instead.",
+            "type": "invalid_request_error",
+            "param": "max_tokens",
+            "code": "unsupported_parameter",
+        }
+    }
+).encode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [False, True])
+async def test_rejected_max_tokens_is_renamed_and_retried_on_same_upstream(
+    pinned: bool,
+) -> None:
+    selected, fallback = _make_upstream(1), _make_upstream(2)
+    selected.forward_request = AsyncMock(
+        side_effect=[
+            MagicMock(status_code=400, body=_OPENAI_MAX_TOKENS_ERROR),
+            MagicMock(status_code=200, body=b"{}"),
+        ]
+    )
+    headers = {"authorization": "Bearer key"}
+    if pinned:
+        headers["x-routstr-model-path"] = encode_model_path(selected.base_url, MODEL_ID)
+    request = _make_request(
+        headers,
+        json.dumps(
+            {"model": MODEL_ID, "max_tokens": 300, "messages": [], "stream": True}
+        ).encode(),
+    )
+
+    response = await _run_proxy(
+        request, [(MagicMock(), selected), (MagicMock(), fallback)]
+    )
+
+    assert response.status_code == 200
+    assert selected.forward_request.await_count == 2
+    before, after = [
+        json.loads(call.args[3]) for call in selected.forward_request.await_args_list
+    ]
+    assert before["max_tokens"] == 300 and "max_completion_tokens" not in before
+    assert after["max_completion_tokens"] == 300 and "max_tokens" not in after
+    assert {k: v for k, v in after.items() if k != "max_completion_tokens"} == {
+        k: v for k, v in before.items() if k != "max_tokens"
+    }
+    fallback.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rename_that_changes_spend_bound_is_not_retried() -> None:
+    selected = _make_upstream(1, 400)
+    selected.forward_request.return_value.body = json.dumps(
+        {"error": {"message": "'max_tokens' is not supported. Use 'n' instead."}}
+    ).encode()
+    request = _make_request(
+        {"authorization": "Bearer key"},
+        json.dumps({"model": MODEL_ID, "max_tokens": 300}).encode(),
+    )
+
+    response = await _run_proxy(request, [(MagicMock(), selected)])
+
+    assert response.status_code == 400
+    selected.forward_request.assert_awaited_once()
+
+
+# --------------------------------------------------------------------------- #
+# Upstream 5xx -> 424 + UPSTREAM_UNAVAILABLE + scope header; node faults stay 500.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_upstream_424_fails_over_to_a_healthy_provider() -> None:
+    """An upstream-attributed 424 is still retryable: the caller only ever
+    sees the healthy provider's 200."""
+    from routstr.core.exceptions import UpstreamError
+
+    first, healthy = _make_upstream(1), _make_upstream(2)
+    first.forward_request.side_effect = UpstreamError("bad gateway", status_code=502)
+    request = _make_request(
+        {"authorization": "Bearer key"}, json.dumps({"model": MODEL_ID}).encode()
+    )
+
+    response = await _run_proxy(request, [(MagicMock(), first), (MagicMock(), healthy)])
+
+    assert response.status_code == 200
+    first.forward_request.assert_awaited_once()
+    healthy.forward_request.assert_awaited_once()
+    # The caller never sees the upstream error body or any scope header.
+    assert ERROR_SCOPE_HEADER not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_last_candidate_upstream_failure_reports_424() -> None:
+    """Every candidate failed on the provider hop: 424 + upstream scope, with
+    the provider's own status preserved for operators."""
+    from routstr.core.exceptions import UpstreamError
+
+    only = _make_upstream(1)
+    only.forward_request.side_effect = UpstreamError("bad gateway", status_code=502)
+    request = _make_request(
+        {"authorization": "Bearer key"}, json.dumps({"model": MODEL_ID}).encode()
+    )
+
+    response = await _run_proxy(request, [(MagicMock(), only)])
+
+    assert response.status_code == 424
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+    body = json.loads(bytes(response.body))
+    assert body["error"]["type"] == "upstream_error"
+    assert body["error"]["code"] == UPSTREAM_UNAVAILABLE
+    assert body["error"]["details"]["upstream_status"] == 502
+
+
+@pytest.mark.asyncio
+async def test_node_fault_stays_500_without_scope_header() -> None:
+    """A genuine node fault keeps its 500 and carries no scope header, so a
+    client can still tell this node is the broken one."""
+    from routstr.core.exceptions import UpstreamError
+
+    only = _make_upstream(1)
+    only.forward_request.side_effect = UpstreamError(
+        "An unexpected server error occurred",
+        status_code=500,
+        scope=ERROR_SCOPE_NODE,
+    )
+    request = _make_request(
+        {"authorization": "Bearer key"}, json.dumps({"model": MODEL_ID}).encode()
+    )
+
+    response = await _run_proxy(request, [(MagicMock(), only)])
+
+    assert response.status_code == 500
+    assert ERROR_SCOPE_HEADER not in response.headers
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] != UPSTREAM_UNAVAILABLE

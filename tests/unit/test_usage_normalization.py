@@ -92,6 +92,58 @@ from routstr.payment.usage import NormalizedUsage, normalize_usage
                 cache_write_tokens=2000,
             ),
         ),
+        # OpenAI Responses API: cached tokens nested under input_tokens_details
+        # and INCLUDED in input_tokens (same semantics as prompt_tokens) →
+        # subtracted. Real payload shape from /v1/responses response.completed.
+        (
+            {
+                "input_tokens": 9434,
+                "input_tokens_details": {
+                    "cached_tokens": 8704,
+                    "cache_write_tokens": 0,
+                },
+                "output_tokens": 9,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 9443,
+            },
+            NormalizedUsage(
+                input_tokens=730,
+                output_tokens=9,
+                cache_read_tokens=8704,
+                cache_write_tokens=0,
+            ),
+        ),
+        # OpenAI Responses API without a cache hit: input_tokens untouched.
+        (
+            {
+                "input_tokens": 9412,
+                "input_tokens_details": {
+                    "cached_tokens": 0,
+                    "cache_write_tokens": 0,
+                },
+                "output_tokens": 11,
+                "total_tokens": 9423,
+            },
+            NormalizedUsage(input_tokens=9412, output_tokens=11),
+        ),
+        # OpenAI Responses API with cache writes: both reads and writes are
+        # included in input_tokens → both subtracted.
+        (
+            {
+                "input_tokens": 1000,
+                "input_tokens_details": {
+                    "cached_tokens": 400,
+                    "cache_write_tokens": 200,
+                },
+                "output_tokens": 50,
+            },
+            NormalizedUsage(
+                input_tokens=400,
+                output_tokens=50,
+                cache_read_tokens=400,
+                cache_write_tokens=200,
+            ),
+        ),
         # litellm-normalized Anthropic: prompt_tokens is the grand total and the
         # write field is named cache_creation_tokens; top-level fields mirror it.
         # prompt_tokens present → both subtracted (NOT additive like native).

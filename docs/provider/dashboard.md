@@ -132,7 +132,9 @@ Connect to your AI provider:
 
 ### Cashu Mints
 
-Manage which mints you accept payments from:
+Manage which mints you accept payments from. A fresh node comes with two
+default mints preconfigured (`https://mint.minibits.cash/Bitcoin` and
+`https://mint.cubabitcoin.org`):
 
 - **Add Mint** — Enter a mint URL
 - **Remove Mint** — Stop accepting from a mint

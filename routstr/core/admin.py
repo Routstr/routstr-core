@@ -1760,6 +1760,34 @@ async def get_logs_api(
     }
 
 
+@admin_router.get(
+    "/api/logs/request/{request_id}", dependencies=[Depends(require_admin_api)]
+)
+async def get_logs_by_request_id_api(
+    request: Request,
+    request_id: str,
+    date: str | None = None,
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, object]:
+    """
+    Get every log entry belonging to a single request ID, oldest first.
+    """
+    log_entries = log_manager.search_logs(
+        date=date,
+        request_id=request_id,
+        limit=limit,
+    )
+    log_entries.sort(key=lambda entry: str(entry.get("asctime", "")))
+
+    return {
+        "logs": log_entries,
+        "total": len(log_entries),
+        "request_id": request_id,
+        "date": date,
+        "limit": limit,
+    }
+
+
 @admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
 async def get_log_dates_api(request: Request) -> dict[str, object]:
     logs_dir = Path("logs")
@@ -2023,6 +2051,7 @@ async def get_transactions_api(
 async def get_lightning_invoices_api(
     status: str | None = None,
     purpose: str | None = None,
+    direction: str | None = None,
     search: str | None = None,
     limit: int = 50,
     offset: int = 0,
@@ -2035,6 +2064,8 @@ async def get_lightning_invoices_api(
             base = base.where(LightningInvoice.status == status)
         if purpose:
             base = base.where(LightningInvoice.purpose == purpose)
+        if direction:
+            base = base.where(LightningInvoice.direction == direction)
         if search:
             pattern = f"%{search}%"
             base = base.where(

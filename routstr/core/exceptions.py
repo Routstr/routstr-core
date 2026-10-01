@@ -5,6 +5,11 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from .error_scope import (
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
+    UPSTREAM_UNAVAILABLE,
+)
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -18,6 +23,19 @@ class UpstreamError(Exception):
     string-matching the message. ``details`` holds optional structured,
     redaction-safe context. Both default to ``None`` for backwards
     compatibility.
+
+    ``from_upstream_response`` is True only when ``status_code`` is the status
+    the upstream itself answered with, as opposed to a status this proxy chose
+    for a transport failure, timeout or internal fault. Callers use it to
+    decide whether a status is safe to retry.
+
+    ``scope`` is ``"upstream"`` for provider failures, reported to the caller
+    as ``424`` (see :mod:`routstr.core.error_scope`), or ``"node"`` for local
+    faults, which keep their status. ``status_code`` stays the provider's own
+    status whenever ``from_upstream_response`` is True; the caller-visible
+    mapping happens at response construction. Proxy-chosen statuses (transport
+    failure, timeout) may already be the caller-visible one — only read
+    ``status_code`` as a provider status behind ``from_upstream_response``.
     """
 
     def __init__(
@@ -26,11 +44,15 @@ class UpstreamError(Exception):
         status_code: int = 502,
         code: str | None = None,
         details: dict[str, object] | None = None,
+        from_upstream_response: bool = False,
+        scope: str = ERROR_SCOPE_UPSTREAM,
     ):
         self.message = message
         self.status_code = status_code
         self.code = code
         self.details = details
+        self.from_upstream_response = from_upstream_response
+        self.scope = scope
         super().__init__(message)
 
 
@@ -38,8 +60,9 @@ class EhbpTimeoutError(UpstreamError):
     """Raised when an EHBP upstream times out waiting for a response.
 
     Distinct from a generic :class:`UpstreamError` so callers can map the
-    failure to a ``504 Gateway Timeout`` with a stable ``UPSTREAM_TIMEOUT``
-    code instead of a misleading ``500`` internal server error.
+    failure to a stable ``UPSTREAM_TIMEOUT`` code instead of a misleading
+    ``500`` internal server error. Reported as ``424``: the timeout happened on
+    the provider hop, not this node.
 
     ``details`` carries optional structured, redaction-safe context and is
     forwarded to the client by ``create_upstream_error_response``.
@@ -48,10 +71,47 @@ class EhbpTimeoutError(UpstreamError):
     def __init__(self, message: str, details: dict[str, object] | None = None):
         super().__init__(
             message,
-            status_code=504,
+            status_code=UPSTREAM_ERROR_STATUS,
             code="UPSTREAM_TIMEOUT",
             details=details,
         )
+
+
+class EhbpConnectionError(UpstreamError):
+    """Raised when an EHBP upstream cannot be reached.
+
+    Covers transport failures while establishing the provider connection: DNS
+    resolution, TCP refused/reset, or a TLS error that is not a handshake
+    timeout. Distinct from a generic :class:`UpstreamError` so the failure is
+    attributed to the provider hop (``UPSTREAM_UNAVAILABLE``, reported as
+    ``424``) instead of being flattened into a misleading node-scoped ``500``.
+
+    ``details`` carries optional structured, redaction-safe context and is
+    forwarded to the client by ``create_upstream_error_response``.
+    """
+
+    def __init__(self, message: str, details: dict[str, object] | None = None):
+        super().__init__(
+            message,
+            status_code=UPSTREAM_ERROR_STATUS,
+            code=UPSTREAM_UNAVAILABLE,
+            details=details,
+        )
+
+
+def _error_message_from_detail(detail: object) -> str | None:
+    """Extract a message from an HTTPException ``detail``, capped at 200 chars."""
+    if isinstance(detail, dict):
+        error = detail.get("error")
+        if isinstance(error, dict):
+            msg = error.get("message")
+            return str(msg)[:200] if isinstance(msg, str) else None
+        if isinstance(error, str):
+            return error[:200]
+        return None
+    if isinstance(detail, str):
+        return detail[:200]
+    return None
 
 
 async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -63,28 +123,41 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
     detail = getattr(exc, "detail", str(exc))
     path = request.url.path
 
-    # 4xx is client behaviour; the uvicorn access log already records it.
+    error_type: str | None = None
+    error_code: str | None = None
+    if isinstance(detail, dict):
+        error = detail.get("error")
+        if isinstance(error, dict):
+            error_type = error.get("type")
+            error_code = error.get("code")
+
+    # 5xx logs as error/warning, 4xx at INFO.
     if status_code >= 500:
-        error_type = None
-        if isinstance(detail, dict):
-            error = detail.get("error")
-            if isinstance(error, dict):
-                error_type = error.get("type")
-        log = (
+        log_fn = (
             logger.warning
             if error_type in {"mint_unreachable", "mint_rate_limited"}
             else logger.error
         )
-        log(
-            f"HTTP {status_code} on {path}: {detail}",
-            extra={
-                "request_id": request_id,
-                "status_code": status_code,
-                "detail": detail,
-                "path": path,
-                "error_type": error_type,
-            },
-        )
+    else:
+        log_fn = logger.info
+    log_fn(
+        f"HTTP {status_code} on {path}: {detail}",
+        extra={
+            "request_id": request_id,
+            "status_code": status_code,
+            "detail": detail,
+            "path": path,
+            "error_type": error_type,
+            "error_code": error_code,
+            "level": "http" if status_code < 500 else "server",
+        },
+    )
+    # Stash for LoggingMiddleware's completion log.
+    request.state.error_detail = {
+        "error_type": error_type,
+        "error_code": error_code,
+        "error_message": _error_message_from_detail(detail),
+    }
 
     if isinstance(detail, dict) and "error" in detail:
         content = {"detail": detail, **detail}
@@ -92,7 +165,8 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
         content = {"detail": detail}
     content["request_id"] = request_id
 
-    return JSONResponse(status_code=status_code, content=content)
+    headers = getattr(exc, "headers", None)
+    return JSONResponse(status_code=status_code, content=content, headers=headers)
 
 
 def json_compliant(value: object) -> object:

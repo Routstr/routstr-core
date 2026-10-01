@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import httpx
 
-from .base import BaseUpstreamProvider
+from .base import BaseUpstreamProvider, _reported_provider
+from .model_paths import public_provider_url
 from .pricing_resolver import (
     FallbackPricingResolver,
     ResolvedPricing,
@@ -26,7 +28,11 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
 
     provider_type = "generic"
     default_base_url = "http://localhost:8888"
-    platform_url = None
+    platform_url: str | None = None
+    # Subclasses that own an authoritative price table set this False so a model
+    # the table misses imports disabled instead of taking a litellm/OpenRouter
+    # price that may undercut the upstream's own rate.
+    use_fallback_pricing = True
 
     def __init__(
         self,
@@ -49,6 +55,21 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
             api_key=api_key,
             provider_fee=provider_fee,
         )
+
+    def _apply_provider_field(self, response_json: object) -> None:
+        """Stamp ``"generic:<upstream host>"`` unless the upstream named itself.
+
+        A generic upstream is not a router, so nothing identifies the serving
+        endpoint in the payload; the base URL host fills that role.
+        """
+        if not isinstance(response_json, dict):
+            return
+        if _reported_provider(response_json) is None:
+            response_json["provider"] = (
+                urlparse(public_provider_url(self.base_url)).hostname
+                or self.upstream_name
+            )
+        super()._apply_provider_field(response_json)
 
     @classmethod
     def _build_from_row(
@@ -91,6 +112,19 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
         if input_usd < 0 or output_usd < 0 or (input_usd == 0 and output_usd == 0):
             return None
 
+        # Venice ships a discounted cache-read rate as ``cache_input`` (e.g.
+        # deepseek-v4-1-flash: $0.0075/1M vs $0.375/1M input). Dropping it
+        # left ``input_cache_read`` at 0, which billing reads as "no cache
+        # rate" and falls back to the FULL input rate — a 50x overcharge on
+        # cache hits. A malformed/negative cache rate coerces to None and is
+        # treated as absent, never carried (same rule as the OpenRouter rung).
+        cache_read_usd = _as_float(pricing_info.get("cache_input", {}).get("usd"))
+        input_cache_read = (
+            cache_read_usd / 1_000_000
+            if cache_read_usd is not None and cache_read_usd > 0
+            else 0.0
+        )
+
         capabilities = model_spec.get("capabilities", {})
         input_modalities = ["text"]
         if capabilities.get("supportsVision", False):
@@ -101,6 +135,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
             completion=output_usd / 1_000_000,
             context_length=model_spec.get("availableContextTokens"),
             source="native",
+            input_cache_read=input_cache_read,
             input_modalities=input_modalities,
         )
 
@@ -131,7 +166,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                     model_spec = model_data.get("model_spec", {})
 
                     resolved = self._native_pricing(model_id, model_spec)
-                    if resolved is None:
+                    if resolved is None and self.use_fallback_pricing:
                         resolved = await resolver.resolve(model_id)
 
                     if resolved is None:

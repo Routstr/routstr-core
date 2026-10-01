@@ -33,7 +33,6 @@ async def test_authenticated_proxy_releases_db_connection_before_upstream_header
     request = MagicMock()
     request.method = "POST"
     request.headers = {"authorization": "Bearer test-key"}
-    request.body = AsyncMock(return_value=json.dumps({"model": "test-model"}).encode())
     request.url.path = "/v1/chat/completions"
     request.state.request_id = "pool-hold-regression"
 
@@ -59,7 +58,10 @@ async def test_authenticated_proxy_releases_db_connection_before_upstream_header
         patch("routstr.proxy.get_bearer_token_key", AsyncMock(return_value=key)),
     ):
         response = await proxy_module._proxy(
-            request, "v1/chat/completions", integration_session
+            request,
+            "v1/chat/completions",
+            integration_session,
+            json.dumps({"model": "test-model"}).encode(),
         )
 
     assert response.status_code == 200

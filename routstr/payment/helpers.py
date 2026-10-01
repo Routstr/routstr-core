@@ -15,6 +15,14 @@ from PIL import Image
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
+from ..core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_NODE,
+    ERROR_SCOPE_UPSTREAM,
+    client_code_for_upstream_error,
+    client_status_for_upstream_error,
+    upstream_status_details,
+)
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..core.settings import settings
@@ -654,13 +662,15 @@ def create_error_response(
     token: str | None = None,
     code: str | int | None = None,
     details: dict[str, object] | None = None,
+    error_scope: str | None = None,
 ) -> Response:
     """Create a standardized error response.
 
     ``code`` is a stable, machine-readable classification (e.g.
     ``UPSTREAM_RATE_LIMIT``); when omitted it defaults to the HTTP status code
     for backwards compatibility. ``details`` carries optional structured,
-    redaction-safe context.
+    redaction-safe context. ``error_scope`` is sent as the
+    :data:`ERROR_SCOPE_HEADER` response header.
     """
     error_obj: dict[str, object] = {
         "message": redact_org_ids(message),
@@ -669,6 +679,11 @@ def create_error_response(
     }
     if details is not None:
         error_obj["details"] = details
+    headers: dict[str, str] = {}
+    if token:
+        headers["X-Cashu"] = token
+    if error_scope is not None:
+        headers[ERROR_SCOPE_HEADER] = error_scope
     return Response(
         content=json.dumps(
             {
@@ -678,7 +693,7 @@ def create_error_response(
         ),
         status_code=status_code,
         media_type="application/json",
-        headers={"X-Cashu": token} if token else {},
+        headers=headers,
     )
 
 
@@ -687,13 +702,29 @@ def create_upstream_error_response(
     request: Request,
     fallback_status: int = 502,
 ) -> Response:
-    """Build an error response from an :class:`UpstreamError`, preserving its
-    structured ``code``, ``details``, and original ``status_code``."""
+    """Build an error response from an :class:`UpstreamError`.
+
+    Upstream-scoped errors are mapped via :mod:`routstr.core.error_scope`;
+    node-scoped errors keep their own status.
+    """
+    status_code = error.status_code or fallback_status
+    code = getattr(error, "code", None)
+    details = getattr(error, "details", None)
+    if getattr(error, "scope", ERROR_SCOPE_UPSTREAM) == ERROR_SCOPE_NODE:
+        return create_error_response(
+            "upstream_error",
+            str(error),
+            status_code,
+            request=request,
+            code=code,
+            details=details,
+        )
     return create_error_response(
         "upstream_error",
         str(error),
-        error.status_code or fallback_status,
+        client_status_for_upstream_error(status_code, code),
         request=request,
-        code=getattr(error, "code", None),
-        details=getattr(error, "details", None),
+        code=client_code_for_upstream_error(status_code, code),
+        details=upstream_status_details(details, status_code),
+        error_scope=ERROR_SCOPE_UPSTREAM,
     )

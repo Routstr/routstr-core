@@ -114,7 +114,7 @@ If your session runs out of funds, the API will return a `402` error.
 }
 ```
 
-**Action**: Top up your key using the `/lightning/invoice` (topup purpose) or `/v1/balance/topup` endpoints.
+**Action**: Top up your key using the `/v2/lightning/invoice` (topup purpose) or `/v1/balance/topup` endpoints.
 
 ### Rate Limiting
 Routstr passes through rate limits from the upstream provider. Handle `429 Too Many Requests` with standard exponential backoff.
