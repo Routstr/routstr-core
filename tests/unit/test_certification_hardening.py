@@ -51,9 +51,8 @@ def _probe(**kwargs: Any) -> ProbeResult:
 
 # Regression: a non-finite token count must not crash the usage row.
 # ``json.loads`` accepts the bare ``Infinity``/``NaN`` literals, so an
-# upstream can put them on the wire. Whether the parser rejects them (``warn``,
-# nothing to bill on) or raises (``fail``, unreadable usage), the row reports
-# it instead of raising.
+# upstream can put them on the wire. ``parse_token_count`` treats them as 0,
+# which is the "nothing to bill on" ``warn``.
 
 
 class TestNonFiniteTokenCounts:
@@ -69,7 +68,7 @@ class TestNonFiniteTokenCounts:
                 },
             )
         )
-        assert row["status"] in (STATUS_WARN, STATUS_FAIL)
+        assert row["status"] == STATUS_WARN
 
     def test_usage_row_survives_infinite_tokens_in_a_string(self) -> None:
         row = usage_capture_row(
@@ -78,7 +77,7 @@ class TestNonFiniteTokenCounts:
                 chat_payload={"usage": {"prompt_tokens": "Infinity"}},
             )
         )
-        assert row["status"] in (STATUS_WARN, STATUS_FAIL)
+        assert row["status"] == STATUS_WARN
 
 
 # Regression: ``certification_row`` stored non-dict evidence verbatim, so the
