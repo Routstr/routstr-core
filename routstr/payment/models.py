@@ -3,12 +3,11 @@ import json
 import random
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel as V2BaseModel
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic.v1 import BaseModel, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from ..core.db import ModelRow, UpstreamProviderRow, get_session
+from ..core.db import ModelRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
@@ -17,21 +16,6 @@ from .rates import BILLABLE_PRICING_FIELDS, coerce_rate, is_usable_rate
 logger = get_logger(__name__)
 
 models_router = APIRouter()
-
-_MODEL_TEST_ENDPOINT_PATHS = {
-    "chat-completions": "chat/completions",
-}
-
-# Cap the caller-supplied test payload to avoid forwarding oversized bodies
-# upstream on the operator's credentials.
-_MODEL_TEST_MAX_REQUEST_BYTES = 64 * 1024
-
-
-async def _require_admin_api(request: Request) -> None:
-    """Require admin auth without creating an import-time cycle with core.admin."""
-    from ..core.admin import require_admin_api
-
-    await require_admin_api(request)
 
 
 class Architecture(BaseModel):
@@ -644,95 +628,6 @@ async def update_sats_pricing() -> None:
             break
         except Exception as e:
             logger.error(f"Error updating sats pricing: {e}")
-
-
-class ModelTestRequest(V2BaseModel):
-    model_id: str
-    endpoint_type: str
-    request_data: dict
-
-
-@models_router.post("/api/models/test", dependencies=[Depends(_require_admin_api)])
-async def test_model(
-    payload: ModelTestRequest,
-    session: AsyncSession = Depends(get_session),
-) -> dict:
-    """Test a model by sending a request through its configured upstream provider."""
-    from sqlmodel import select
-
-    result = await session.execute(
-        select(ModelRow).where(ModelRow.id == payload.model_id)
-    )
-    model_row = result.scalars().first()
-
-    if not model_row:
-        return {
-            "success": False,
-            "error": f"Model '{payload.model_id}' not found in database",
-            "status_code": 404,
-        }
-
-    provider = await session.get(UpstreamProviderRow, model_row.upstream_provider_id)
-    if not provider:
-        return {
-            "success": False,
-            "error": "Upstream provider not found",
-            "status_code": 404,
-        }
-
-    endpoint_path = _MODEL_TEST_ENDPOINT_PATHS.get(payload.endpoint_type)
-    if endpoint_path is None:
-        raise HTTPException(status_code=400, detail="Unsupported endpoint_type")
-
-    actual_model_id = model_row.forwarded_model_id or model_row.id
-    request_data = dict(payload.request_data)
-    request_data["model"] = actual_model_id
-
-    try:
-        request_size = len(json.dumps(request_data).encode("utf-8"))
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="Invalid request_data")
-    if request_size > _MODEL_TEST_MAX_REQUEST_BYTES:
-        raise HTTPException(status_code=413, detail="request_data too large")
-
-    base_url = provider.base_url.rstrip("/")
-    url = f"{base_url}/{endpoint_path}"
-
-    logger.info(
-        "admin model test",
-        extra={
-            "model_id": payload.model_id,
-            "forwarded_model_id": actual_model_id,
-            "endpoint_type": payload.endpoint_type,
-            "upstream_provider_id": model_row.upstream_provider_id,
-            "request_bytes": request_size,
-        },
-    )
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {provider.api_key}",
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, json=request_data, headers=headers)
-            try:
-                response_data = response.json()
-            except Exception:
-                response_data = {"raw": response.text}
-
-            return {
-                "success": response.status_code < 400,
-                "data": response_data,
-                "status_code": response.status_code,
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "status_code": 500,
-        }
 
 
 @models_router.get("/v1/models/paths")
