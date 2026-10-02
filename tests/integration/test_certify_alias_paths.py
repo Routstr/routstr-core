@@ -106,7 +106,9 @@ async def test_certify_forwarded_alias_listed_path_succeeds(
         assert response.status_code == 200, response.text
         assert chat.call_count == 1
         body: dict[str, Any] = json.loads(chat.calls[0].request.content)
-        assert body["model"] == forwarded
+        # The path is keyed by the exposed id, but the upstream gets what the
+        # proxy sends for this row: transform_model_name(model.id).
+        assert body["model"] == "local-alias"
         assert body["provider"] == {"order": ["endpoint"], "allow_fallbacks": False}
         mismatch = await integration_client.post(
             f"/admin/api/upstream-providers/{provider.id}/certify",

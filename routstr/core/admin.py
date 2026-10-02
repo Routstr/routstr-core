@@ -1733,8 +1733,9 @@ async def certify_upstream_provider(
                 provider.provider_fee,
                 sats_to_usd,
             )
-        # The timeout applies per upstream call. The run makes up to five
-        # calls, so the request can stay open for up to five times it.
+        # The timeout applies per upstream call. The run makes up to six
+        # calls (models, two short probes after a max_completion_tokens retry,
+        # three cache probes), so the request can stay open for six times it.
         live_rows = await run_live_checks(
             provider.base_url,
             provider.api_key,

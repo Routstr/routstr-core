@@ -604,7 +604,7 @@ async def run_cache_checks(
     probe = await probe_cache(
         base_url,
         api_key,
-        model.forwarded_model_id or model.id,
+        model.id,
         endpoint_tag=endpoint_tag,
         client=client,
         timeout=timeout,

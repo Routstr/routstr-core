@@ -247,17 +247,14 @@ def shape_body(
 ) -> Any:
     """The JSON body the proxy would forward, model-name transforms included.
 
-    ``prepare_request_body`` rewrites ``model`` from ``model.id``; the probe
-    keeps the id it chose (``forwarded_model_id`` first) and only applies the
-    provider's own name transform to it.
+    ``prepare_request_body`` sets ``model`` from ``model.id``, exactly as
+    ``forward_request`` does, so an alias row's ``forwarded_model_id`` never
+    reaches the upstream here either.
     """
     if upstream is None or model is None:
         return body
     shaped = upstream.prepare_request_body(json.dumps(body).encode(), model)
-    data = json.loads(shaped) if shaped else dict(body)
-    if isinstance(data, dict) and isinstance(body.get("model"), str):
-        data["model"] = upstream.transform_model_name(body["model"])
-    return data
+    return json.loads(shaped) if shaped else body
 
 
 async def probe_upstream(
@@ -876,7 +873,7 @@ async def run_live_checks(
     probe = await probe_upstream(
         base_url,
         api_key,
-        model.forwarded_model_id or model.id,
+        model.id,
         endpoint_tag=endpoint_tag,
         client=client,
         timeout=timeout,

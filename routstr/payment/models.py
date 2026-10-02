@@ -689,7 +689,8 @@ def _model_test_target(
         upstream.build_request_url(path, model_obj),
         upstream.prepare_headers({"content-type": "application/json"}),
         dict(upstream.prepare_params(path, None)),
-        upstream.transform_model_name(model_id),
+        # The proxy forwards ``model.id``, not the row's client alias.
+        upstream.transform_model_name(model_obj.id),
     )
 
 
