@@ -233,9 +233,9 @@ async def test_an_absent_auxiliary_rate_is_still_accepted(
 async def test_numeric_string_price_is_still_accepted(
     integration_client: AsyncClient, integration_session: AsyncSession
 ) -> None:
-    """The stored pricing JSON has always accepted numeric strings, and the UI
-    round-trips rates through text fields. Rejecting a *malformed* rate must not
-    also reject a well-formed one that arrives spelled as a string."""
+    """The UI round-trips rates through text fields. Rejecting a *malformed*
+    rate must not also reject a well-formed one that arrives spelled as a
+    string — it is stored as the number it spells."""
     provider_id = await _make_provider(integration_session)
 
     resp = await integration_client.post(
@@ -249,7 +249,87 @@ async def test_numeric_string_price_is_still_accepted(
     assert resp.status_code == 200
     row = await integration_session.get(ModelRow, ("string-price", provider_id))
     assert row is not None
-    assert json.loads(row.pricing)["prompt"] == "0.000005"
+    assert json.loads(row.pricing)["prompt"] == pytest.approx(5e-06)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_all_string_prices_are_accepted_and_served(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """Every rate spelled as a string must be stored as a number and served.
+
+    The UI round-trips rates through text fields, so a payload can carry all of
+    them as strings. The read path compared the stored ``request`` string
+    against a float (``max("0", 0.0)``), so the write answered a 500 after the
+    row was committed, and the served catalog then skipped the row as
+    unreadable — the model never appeared in ``/v1/models``.
+    """
+    provider_id = await _make_provider(integration_session)
+    pricing: dict[str, object] = {k: str(v) for k, v in _pricing().items()}
+
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(provider_id, model_id="all-strings", pricing=pricing),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["pricing"]["prompt"] == pytest.approx(1.4e-7)
+    row = await integration_session.get(ModelRow, ("all-strings", provider_id))
+    assert row is not None
+    stored = json.loads(row.pricing)
+    assert stored["prompt"] == pytest.approx(1.4e-7)
+    assert stored["request"] == 0.0
+    assert all(isinstance(v, float) for v in stored.values())
+
+    public = await integration_client.get("/v1/models")
+    assert public.status_code == 200
+    served = {m["id"]: m for m in public.json()["data"]}
+    assert "all-strings" in served
+    assert served["all-strings"]["pricing"]["prompt"] == pytest.approx(1.4e-7)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_stored_string_prices_still_serve(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A row written before the edge normalized strings must still be readable."""
+    provider_id = await _make_provider(integration_session)
+    integration_session.add(
+        ModelRow(
+            id="legacy-strings",
+            name="legacy-strings",
+            description="d",
+            created=0,
+            context_length=8192,
+            architecture=json.dumps(
+                {
+                    "modality": "text",
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "unknown",
+                    "instruct_type": None,
+                }
+            ),
+            pricing=json.dumps(
+                {"prompt": "0.000001", "completion": "0.000002", "request": "0"}
+            ),
+            upstream_provider_id=provider_id,
+            enabled=True,
+            forwarded_model_id="legacy-strings",
+        )
+    )
+    await integration_session.commit()
+    await reinitialize_upstreams()
+
+    public = await integration_client.get("/v1/models")
+    assert public.status_code == 200
+    served = {m["id"]: m for m in public.json()["data"]}
+    assert "legacy-strings" in served
+    assert served["legacy-strings"]["pricing"]["prompt"] == pytest.approx(1e-06)
+    assert served["legacy-strings"]["pricing"]["request"] == 0.0
 
 
 def test_non_finite_price_is_rejected_by_the_write_model() -> None:
@@ -415,9 +495,7 @@ async def test_malformed_auxiliary_rate_is_rejected(
         # test is that the SERVER answers the bare NaN/Infinity literals
         # with a 422, so the literals must still reach it.
         body = json.dumps(
-            _payload(
-                provider_id, model_id="aux-rate", pricing=_pricing(**{field: bad})
-            )
+            _payload(provider_id, model_id="aux-rate", pricing=_pricing(**{field: bad}))
         ).encode("utf-8")
         resp = await integration_client.post(
             f"/admin/api/upstream-providers/{provider_id}/models",
