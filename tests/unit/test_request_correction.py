@@ -16,7 +16,13 @@ from routstr.upstream.request_correction import (
     Correction,
     correct_request,
     extract_error_message,
+    rename_unsupported_param,
     strip_unsupported_param,
+)
+
+OPENAI_MAX_TOKENS_ERROR = (
+    "Unsupported parameter: 'max_tokens' is not supported with this model. "
+    "Use 'max_completion_tokens' instead."
 )
 
 
@@ -137,6 +143,190 @@ class TestStripUnsupportedParam:
     def test_spend_shaping_guard_is_case_insensitive(self) -> None:
         body = {"model": "m", "Max_Tokens": 4}
         assert strip_unsupported_param(body, "`Max_Tokens` is deprecated") is None
+
+
+class TestRenameUnsupportedParam:
+    def test_renames_max_tokens_for_openai_reasoning_models(self) -> None:
+        body = {"model": "gpt-5.6-sol", "max_tokens": 256, "messages": []}
+        result = rename_unsupported_param(body, OPENAI_MAX_TOKENS_ERROR)
+        assert result is not None
+        new_body, label = result
+        assert label == "max_tokens->max_completion_tokens"
+        assert new_body == {
+            "model": "gpt-5.6-sol",
+            "max_completion_tokens": 256,
+            "messages": [],
+        }
+
+    def test_preserves_key_order(self) -> None:
+        body = {"model": "m", "max_tokens": 1, "stream": True}
+        result = rename_unsupported_param(body, OPENAI_MAX_TOKENS_ERROR)
+        assert result is not None
+        assert list(result[0]) == ["model", "max_completion_tokens", "stream"]
+
+    def test_does_not_mutate_input(self) -> None:
+        body = {"model": "m", "max_tokens": 8}
+        assert rename_unsupported_param(body, OPENAI_MAX_TOKENS_ERROR) is not None
+        assert body == {"model": "m", "max_tokens": 8}
+
+    def test_renames_between_any_output_caps(self) -> None:
+        caps = (
+            "max_tokens",
+            "max_completion_tokens",
+            "max_output_tokens",
+            "max_tokens_to_sample",
+        )
+        for param in caps:
+            for replacement in caps:
+                if param == replacement:
+                    continue
+                message = f"`{param}` is deprecated. Use `{replacement}` instead."
+                result = rename_unsupported_param({param: 7}, message)
+                assert result == ({replacement: 7}, f"{param}->{replacement}"), (
+                    param,
+                    replacement,
+                )
+
+    def test_renames_non_spend_param(self) -> None:
+        message = "'functions' is deprecated. Use 'tools' instead."
+        result = rename_unsupported_param({"functions": [{"name": "f"}]}, message)
+        assert result == ({"tools": [{"name": "f"}]}, "functions->tools")
+
+    def test_matches_across_quote_styles_case_and_newlines(self) -> None:
+        for message in (
+            'Unsupported parameter: "max_tokens" is not supported.\nUse '
+            '"max_completion_tokens" instead.',
+            "`max_tokens` IS UNSUPPORTED here; please USE `max_completion_tokens`"
+            " INSTEAD",
+            "'max_tokens' is no longer supported, use 'max_completion_tokens' instead",
+        ):
+            result = rename_unsupported_param({"max_tokens": 3}, message)
+            assert result is not None, message
+            assert result[0] == {"max_completion_tokens": 3}
+
+    def test_refuses_renames_that_change_the_spend_bound(self) -> None:
+        for param, replacement in (
+            ("max_tokens", "n"),
+            ("n", "best_of"),
+            ("best_of", "n"),
+            ("temperature", "max_tokens"),
+            ("max_tokens", "temperature"),
+            ("n", "max_tokens"),
+        ):
+            message = f"'{param}' is not supported. Use '{replacement}' instead."
+            assert rename_unsupported_param({param: 2}, message) is None, (
+                param,
+                replacement,
+            )
+
+    def test_spend_guard_is_case_insensitive(self) -> None:
+        ok = "'Max_Tokens' is not supported. Use 'MAX_COMPLETION_TOKENS' instead."
+        assert rename_unsupported_param({"Max_Tokens": 4}, ok) == (
+            {"MAX_COMPLETION_TOKENS": 4},
+            "Max_Tokens->MAX_COMPLETION_TOKENS",
+        )
+        bad = "'Max_Tokens' is not supported. Use 'N' instead."
+        assert rename_unsupported_param({"Max_Tokens": 4}, bad) is None
+
+    def test_declines_when_replacement_already_present(self) -> None:
+        body = {"max_tokens": 4, "max_completion_tokens": 8}
+        assert rename_unsupported_param(body, OPENAI_MAX_TOKENS_ERROR) is None
+
+    def test_declines_when_param_absent(self) -> None:
+        assert rename_unsupported_param({"model": "m"}, OPENAI_MAX_TOKENS_ERROR) is None
+
+    def test_declines_self_rename(self) -> None:
+        message = "'max_tokens' is deprecated. Use 'max_tokens' instead."
+        assert rename_unsupported_param({"max_tokens": 1}, message) is None
+
+    def test_declines_unquoted_or_missing_replacement(self) -> None:
+        for message in (
+            "`gpt-3` is deprecated, use gpt-4 instead",
+            "'max_tokens' is not supported, use max_completion_tokens instead",
+            "'max_tokens' is not supported with this model.",
+            "Use 'max_completion_tokens' instead.",
+        ):
+            assert rename_unsupported_param({"max_tokens": 1}, message) is None, message
+
+    def test_declines_nested_only_param(self) -> None:
+        body = {"reasoning": {"max_tokens": 5}}
+        assert rename_unsupported_param(body, OPENAI_MAX_TOKENS_ERROR) is None
+
+
+class TestCorrectRequestRename:
+    def test_openai_max_tokens_error_is_renamed_not_refused(self) -> None:
+        body = _body(model="gpt-5.6-sol", max_tokens=512, messages=[])
+        result = correct_request(body, OPENAI_MAX_TOKENS_ERROR, set())
+        assert isinstance(result, Correction)
+        assert result.label == "max_tokens->max_completion_tokens"
+        decoded = json.loads(result.body)
+        assert "max_tokens" not in decoded
+        assert decoded["max_completion_tokens"] == 512
+
+    def test_rename_wins_over_strip_for_non_spend_param(self) -> None:
+        body = _body(model="m", functions=[1])
+        result = correct_request(
+            body, "'functions' is deprecated. Use 'tools' instead.", set()
+        )
+        assert result is not None
+        assert json.loads(result.body) == {"model": "m", "tools": [1]}
+
+    def test_unsafe_rename_of_cap_still_surfaces_error(self) -> None:
+        body = _body(model="m", max_tokens=5)
+        assert (
+            correct_request(
+                body, "'max_tokens' is not supported. Use 'n' instead.", set()
+            )
+            is None
+        )
+
+    def test_applied_rename_does_not_repeat_or_strip_cap(self) -> None:
+        body = _body(model="m", max_tokens=5)
+        applied = {"max_tokens->max_completion_tokens"}
+        assert correct_request(body, OPENAI_MAX_TOKENS_ERROR, applied) is None
+
+    def test_rename_ping_pong_terminates(self) -> None:
+        """An upstream that flip-flops between names cannot loop forever."""
+        forward = OPENAI_MAX_TOKENS_ERROR
+        backward = "'max_completion_tokens' is not supported. Use 'max_tokens' instead."
+        body = _body(model="m", max_tokens=5)
+        applied: set[str] = set()
+        for attempt in range(10):
+            message = forward if attempt % 2 == 0 else backward
+            result = correct_request(body, message, applied)
+            if result is None:
+                break
+            body, applied = result.body, applied | {result.label}
+        else:
+            raise AssertionError("correction loop did not terminate")
+        assert applied == {
+            "max_tokens->max_completion_tokens",
+            "max_completion_tokens->max_tokens",
+        }
+        assert json.loads(body) == {"model": "m", "max_tokens": 5}
+
+    def test_buffered_openai_error_response_is_renamed(self) -> None:
+        resp = Response(
+            content=json.dumps(
+                {
+                    "error": {
+                        "message": OPENAI_MAX_TOKENS_ERROR,
+                        "type": "invalid_request_error",
+                        "param": "max_tokens",
+                        "code": "unsupported_parameter",
+                    }
+                }
+            ).encode(),
+            status_code=400,
+        )
+        body = _body(model="gpt-5.6-sol", max_tokens=64, stream=True)
+        result = correct_request(body, extract_error_message(resp), set())
+        assert result is not None
+        assert json.loads(result.body) == {
+            "model": "gpt-5.6-sol",
+            "max_completion_tokens": 64,
+            "stream": True,
+        }
 
 
 class TestExtractErrorMessage:

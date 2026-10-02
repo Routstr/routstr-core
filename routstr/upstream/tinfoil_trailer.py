@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import h11
 
 from ..core import get_logger
-from ..core.exceptions import EhbpTimeoutError
+from ..core.exceptions import EhbpConnectionError, EhbpTimeoutError
 
 logger = get_logger(__name__)
 
@@ -109,6 +109,21 @@ async def forward_with_trailer(
     except asyncio.TimeoutError as exc:
         raise EhbpTimeoutError(
             f"EHBP upstream {host} timed out after {timeout_seconds:g}s connecting"
+        ) from exc
+    except ConnectionAbortedError as exc:
+        # CPython's ssl module aborts a TLS handshake that outlives its
+        # internal timer ("SSL handshake is taking longer than N seconds")
+        # with ConnectionAbortedError. That is a connect timeout on the
+        # provider hop, not a local node fault, so surface it as a timeout.
+        raise EhbpTimeoutError(
+            f"EHBP upstream {host} TLS handshake timed out while connecting"
+        ) from exc
+    except (ssl.SSLError, ConnectionError, OSError) as exc:
+        # DNS failure, connection refused/reset, or a non-timeout TLS error:
+        # the provider could not be reached. Attribute it to the upstream hop
+        # rather than letting it become a node-scoped 500.
+        raise EhbpConnectionError(
+            f"Unable to connect to EHBP upstream {host}: {type(exc).__name__}"
         ) from exc
 
     try:

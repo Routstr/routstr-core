@@ -27,6 +27,12 @@ EXPENSIVE_BASE_URL = "https://expensive.example.com/v1"
 THIRD_BASE_URL = "https://third.example.com/v1"
 
 
+@pytest.fixture(autouse=True)
+def _no_upstream_5xx_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the same-upstream retry backoff out of the test runtime."""
+    monkeypatch.setattr("routstr.proxy._UPSTREAM_5XX_RETRY_BACKOFF_SECONDS", 0)
+
+
 def _make_model(
     model_id: str,
     prompt_sats: float,
@@ -191,14 +197,15 @@ async def test_failover_serve_billed_at_serving_providers_rate(
     assert response.status_code == 200
     payload = response.json()
 
-    # Both providers were attempted, cheapest first.
+    # The winner is tried twice: its 502 is retried in place before failover.
     assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
         "cheap.example.com",
         "expensive.example.com",
     ]
 
     # The fallback must be asked for ITS OWN model spelling, not the winner's.
-    forwarded_body = json.loads(sent_requests[1].content)
+    forwarded_body = json.loads(sent_requests[2].content)
     assert forwarded_body["model"] == "provb/dual-model"
 
     # The response echo names the model that actually served.
@@ -319,7 +326,9 @@ async def test_same_id_failover_settles_at_serving_price(
         )
 
     assert response.status_code == 200
+    # The winner's 502 is retried in place before failover.
     assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
         "cheap.example.com",
         "expensive.example.com",
     ]
@@ -459,7 +468,9 @@ async def test_usd_cost_serve_carries_serving_providers_fee(
         )
 
     assert response.status_code == 200
+    # The winner's 502 is retried in place before failover.
     assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
         "cheap.example.com",
         "expensive.example.com",
     ]
@@ -530,7 +541,11 @@ async def test_failover_beyond_balance_envelope_is_rejected(
     # The 20_000-sat envelope exceeds the key's 10_000-sat balance: the
     # fallback must be rejected before its upstream is ever contacted.
     assert response.status_code == 402
-    assert [r.url.host for r in sent_requests] == ["cheap.example.com"]
+    # The winner is retried in place; the fallback is still never contacted.
+    assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
+        "cheap.example.com",
+    ]
 @pytest.fixture
 async def raised_envelope_provider_maps(
     patched_db_engine: None,
@@ -593,7 +608,9 @@ async def test_failover_reserves_serving_candidates_envelope(
         )
 
     assert response.status_code == 200
+    # The winner's 502 is retried in place before failover.
     assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
         "cheap.example.com",
         "expensive.example.com",
     ]
@@ -610,3 +627,109 @@ async def test_failover_reserves_serving_candidates_envelope(
     charged = next(record for record in records if record.status == "charged")
     assert charged.reserved_msats > released.reserved_msats
     assert all(record.status != "active" for record in records)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_transient_502_retries_same_upstream_before_failing_over(
+    authenticated_client: AsyncClient,
+    dual_provider_maps: tuple[_StaticProvider, _StaticProvider],
+) -> None:
+    """A transient 502 is retried on the same upstream, not failed over at once.
+
+    The winner answers the first attempt with a 502 and the second with a
+    completion, so the pricier fallback is never contacted and the request is
+    billed at the winner's rate (2_000 msats, not the fallback's 10_000).
+    """
+    sent_requests: list[httpx.Request] = []
+    cheap_attempts = 0
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        nonlocal cheap_attempts
+        sent_requests.append(request)
+        if request.url.host == "cheap.example.com":
+            cheap_attempts += 1
+            if cheap_attempts == 1:
+                return httpx.Response(
+                    502,
+                    content=json.dumps({"error": {"message": "bad gateway"}}).encode(),
+                    headers={"content-type": "application/json"},
+                )
+        return _successful_upstream_response()
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    # Retried in place: same host twice, fallback never consulted.
+    assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
+        "cheap.example.com",
+    ]
+    payload = response.json()
+    assert payload["model"] == "prova/dual-model"
+    # Billed at the winner's rate, not the fallback's 10_000.
+    assert payload["cost"]["total_msats"] == 2_000
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_transport_failure_is_not_retried_in_place(
+    authenticated_client: AsyncClient,
+    dual_provider_maps: tuple[_StaticProvider, _StaticProvider],
+) -> None:
+    """A transport failure fails over at once instead of retrying in place.
+
+    The proxy maps a connect/timeout error to a 502 of its own, so the upstream
+    may already have accepted and billed the request: re-sending it is not safe.
+    """
+    sent_requests: list[httpx.Request] = []
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        sent_requests.append(request)
+        if request.url.host == "cheap.example.com":
+            raise httpx.ConnectError("connection refused", request=request)
+        return _successful_upstream_response()
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
+        "expensive.example.com",
+    ]

@@ -1,6 +1,7 @@
 from .anthropic import AnthropicUpstreamProvider
 from .azure import AzureUpstreamProvider
 from .base import BaseUpstreamProvider
+from .deepseek import DeepSeekUpstreamProvider
 from .fireworks import FireworksUpstreamProvider
 from .gemini import GeminiUpstreamProvider
 from .generic import GenericUpstreamProvider
@@ -13,11 +14,13 @@ from .ppqai import PPQAIUpstreamProvider
 from .routstr import RoutstrUpstreamProvider
 from .tinfoil import TinfoilUpstreamProvider
 from .typesafe import TypeSafeUpstreamProvider
+from .venice import VeniceUpstreamProvider
 from .xai import XAIUpstreamProvider
 
 upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
     AnthropicUpstreamProvider,
     AzureUpstreamProvider,
+    DeepSeekUpstreamProvider,
     FireworksUpstreamProvider,
     GeminiUpstreamProvider,
     GenericUpstreamProvider,
@@ -30,6 +33,7 @@ upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
     RoutstrUpstreamProvider,
     TinfoilUpstreamProvider,
     TypeSafeUpstreamProvider,
+    VeniceUpstreamProvider,
     XAIUpstreamProvider,
 ]
 """List of all upstream classes"""

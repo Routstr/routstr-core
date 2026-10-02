@@ -501,14 +501,50 @@ export class AdminService {
     const allModels: AdminModelAsModel[] = [];
     const seenModelIds = new Set<string>();
 
-    for (const provider of providers) {
-      try {
-        const providerModels = await this.getProviderModels(provider.id);
+    // One provider's catalog never depends on another's, and each miss costs an
+    // upstream round trip, so the whole fan-out happens in a single wave.
+    const providerResults = await Promise.all(
+      providers.map(async (provider) => {
+        try {
+          return {
+            provider,
+            models: await this.getProviderModels(provider.id),
+          };
+        } catch (error) {
+          console.error(
+            `Failed to fetch models for provider ${provider.id}:`,
+            error
+          );
+          return null;
+        }
+      })
+    );
 
-        providerModels.db_models.forEach((dbModel) => {
-          seenModelIds.add(dbModel.id);
+    for (const result of providerResults) {
+      if (!result) {
+        continue;
+      }
+      const { provider, models: providerModels } = result;
+      providerModels.db_models.forEach((dbModel) => {
+        seenModelIds.add(dbModel.id);
+        const modelWithProvider = {
+          ...dbModel,
+          upstream_provider_id: provider.id,
+        };
+        allModels.push({
+          ...this.transformAdminModelToModel(
+            modelWithProvider,
+            provider.provider_type
+          ),
+          has_own_api_key: false,
+          api_key_type: 'group',
+        });
+      });
+
+      providerModels.remote_models.forEach((remoteModel) => {
+        if (!seenModelIds.has(remoteModel.id)) {
           const modelWithProvider = {
-            ...dbModel,
+            ...remoteModel,
             upstream_provider_id: provider.id,
           };
           allModels.push({
@@ -517,33 +553,11 @@ export class AdminService {
               provider.provider_type
             ),
             has_own_api_key: false,
-            api_key_type: 'group',
+            api_key_type: 'remote',
+            soft_deleted: false,
           });
-        });
-
-        providerModels.remote_models.forEach((remoteModel) => {
-          if (!seenModelIds.has(remoteModel.id)) {
-            const modelWithProvider = {
-              ...remoteModel,
-              upstream_provider_id: provider.id,
-            };
-            allModels.push({
-              ...this.transformAdminModelToModel(
-                modelWithProvider,
-                provider.provider_type
-              ),
-              has_own_api_key: false,
-              api_key_type: 'remote',
-              soft_deleted: false,
-            });
-          }
-        });
-      } catch (error) {
-        console.error(
-          `Failed to fetch models for provider ${provider.id}:`,
-          error
-        );
-      }
+        }
+      });
     }
 
     return { models: allModels, groups };
@@ -993,6 +1007,7 @@ export class AdminService {
   static async getLightningInvoices(
     status?: string,
     purpose?: string,
+    direction?: string,
     search?: string,
     limit: number = 50,
     offset: number = 0
@@ -1000,6 +1015,7 @@ export class AdminService {
     const params = new URLSearchParams();
     if (status) params.append('status', status);
     if (purpose) params.append('purpose', purpose);
+    if (direction) params.append('direction', direction);
     if (search) params.append('search', search);
     params.append('limit', limit.toString());
     params.append('offset', offset.toString());
@@ -1359,9 +1375,17 @@ export interface LightningInvoice {
   amount_sats: number;
   description: string;
   payment_hash: string;
-  status: 'pending' | 'paid' | 'expired' | 'cancelled';
+  status:
+    | 'pending'
+    | 'settlement_pending'
+    | 'paid'
+    | 'failed'
+    | 'expired'
+    | 'cancelled'
+    | 'reconciliation_required';
   api_key_hash: string | null;
-  purpose: 'create' | 'topup';
+  direction: 'in' | 'out';
+  purpose: 'create' | 'topup' | 'payout';
   created_at: number;
   expires_at: number;
   paid_at: number | null;

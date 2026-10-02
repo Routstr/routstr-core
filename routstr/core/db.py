@@ -174,7 +174,10 @@ async def _transition_stale_reservation(
         update(ReservationRelease)
         .where(col(ReservationRelease.id) == reservation_id)
         .where(col(ReservationRelease.status) == "active")
-        .where(col(ReservationRelease.created_at) < cutoff)
+        .where(
+            (col(ReservationRelease.created_at) < cutoff)
+            | (col(ReservationRelease.expires_at) <= int(time.time()))
+        )
         .values(status="released")
     )
     return bool(transition.rowcount == 1)
@@ -221,7 +224,10 @@ async def release_stale_reservations(
     query = (
         select(ReservationRelease)
         .where(col(ReservationRelease.status) == "active")
-        .where(col(ReservationRelease.created_at) < cutoff)
+        .where(
+            (col(ReservationRelease.created_at) < cutoff)
+            | (col(ReservationRelease.expires_at) <= int(time.time()))
+        )
     )
     if key_hash is not None:
         query = query.where(
@@ -509,14 +515,17 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     status: str = Field(
         default="pending",
         description=(
-            "pending, settlement_pending, paid, expired, cancelled, "
+            "pending, settlement_pending, paid, failed, expired, cancelled, "
             "reconciliation_required"
         ),
     )
     api_key_hash: str | None = Field(
         default=None, description="Associated API key hash for topup operations"
     )
-    purpose: str = Field(description="create or topup")
+    direction: str = Field(
+        default="in", description="in for incoming invoices, out for payouts"
+    )
+    purpose: str = Field(description="create, topup or payout")
     mint_url: str | None = Field(
         default=None,
         description="Mint URL where the quote was created (fallback tracking)",
@@ -781,6 +790,8 @@ class ReservationRelease(SQLModel, table=True):  # type: ignore
     key_hash: str = Field(index=True)
     billing_key_hash: str = Field(index=True)
     reserved_msats: int
+    started_at: int | None = Field(default=None)
+    expires_at: int | None = Field(default=None, index=True)
     status: str = Field(default="active")
     created_at: int = Field(default_factory=lambda: int(time.time()))
 
@@ -1005,6 +1016,80 @@ async def complete_routstr_fee_payout(
     return result.rowcount == 1
 
 
+async def record_lightning_payout(
+    session: AsyncSession,
+    *,
+    quote_id: str,
+    bolt11: str,
+    amount_sats: int,
+    mint_url: str,
+    destination: str,
+) -> None:
+    """Record a dispatched payout so it shows up in the Lightning history."""
+    session.add(
+        LightningInvoice(
+            id=uuid.uuid4().hex,
+            bolt11=bolt11,
+            amount_sats=amount_sats,
+            description=f"Payout to {destination}",
+            payment_hash=quote_id,
+            status="pending",
+            direction="out",
+            purpose="payout",
+            mint_url=mint_url,
+            # Payouts settle or fail at the mint; they never expire on our side.
+            expires_at=int(time.time()),
+        )
+    )
+    await session.commit()
+
+
+async def settle_lightning_payout(
+    session: AsyncSession,
+    quote_id: str,
+    *,
+    status: str,
+    amount_sats: int | None = None,
+) -> None:
+    result = await session.exec(
+        select(LightningInvoice)
+        .where(col(LightningInvoice.payment_hash) == quote_id)
+        .where(col(LightningInvoice.direction) == "out")
+    )
+    payout = result.first()
+    if payout is None:
+        logger.warning(
+            "No Lightning payout history row for quote",
+            extra={"quote_id": quote_id, "status": status},
+        )
+        return
+    payout.status = status
+    if status == "paid":
+        payout.paid_at = int(time.time())
+        if amount_sats is not None:
+            payout.amount_sats = amount_sats
+    session.add(payout)
+    await session.commit()
+
+
+UNSETTLED_PAYOUT_STATUSES = ("pending", "reconciliation_required")
+
+
+async def list_unsettled_lightning_payouts(
+    session: AsyncSession, mint_url: str, *, created_before: int
+) -> list[LightningInvoice]:
+    """Payout rows whose mint outcome was never written back to history."""
+    result = await session.exec(
+        select(LightningInvoice)
+        .where(col(LightningInvoice.direction) == "out")
+        .where(col(LightningInvoice.mint_url) == mint_url)
+        .where(col(LightningInvoice.status).in_(UNSETTLED_PAYOUT_STATUSES))
+        .where(col(LightningInvoice.created_at) < created_before)
+        .order_by(col(LightningInvoice.created_at))
+    )
+    return list(result.all())
+
+
 async def total_user_liability(db_session: AsyncSession) -> int:
     """Return all outstanding user funds in millisatoshis.
 
@@ -1015,6 +1100,34 @@ async def total_user_liability(db_session: AsyncSession) -> int:
     unresolved_refunds = (
         select(func.coalesce(func.sum(Refund.amount_msats), 0))
         .where(col(Refund.status).in_(REFUND_UNRESOLVED_STATUSES))
+        .scalar_subquery()
+    )
+    result = await db_session.exec(select(key_balances + unresolved_refunds))
+    return int(result.one() or 0)
+
+
+async def user_liability_for_mint_and_unit(
+    db_session: AsyncSession, mint_url: str, unit: str
+) -> int:
+    """Return outstanding user funds that refund from one mint and unit, in msats.
+
+    Single statement, for the same atomicity reason as ``total_user_liability``.
+    """
+    key_balances = (
+        select(func.coalesce(func.sum(ApiKey.balance), 0))
+        .where(
+            col(ApiKey.refund_mint_url) == mint_url,
+            col(ApiKey.refund_currency) == unit,
+        )
+        .scalar_subquery()
+    )
+    unresolved_refunds = (
+        select(func.coalesce(func.sum(Refund.amount_msats), 0))
+        .where(
+            col(Refund.status).in_(REFUND_UNRESOLVED_STATUSES),
+            col(Refund.mint_url) == mint_url,
+            col(Refund.unit) == unit,
+        )
         .scalar_subquery()
     )
     result = await db_session.exec(select(key_balances + unresolved_refunds))

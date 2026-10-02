@@ -1,16 +1,16 @@
 import asyncio
 import inspect
 import json
+import re
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlmodel import select
 
 from .algorithm import create_model_mappings
 from .auth import (
     ReservationSnapshot,
-    get_reservation_snapshot,
     pay_for_request,
     revert_pay_for_request,
     validate_bearer_key,
@@ -22,9 +22,15 @@ from .core.db import (
     ModelRow,
     UpstreamProviderRow,
     create_session,
-    get_session,
+)
+from .core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
+    UPSTREAM_UNAVAILABLE,
 )
 from .core.exceptions import UpstreamError
+from .core.middleware import mark
 from .core.not_found import build_not_found_response
 from .core.settings import settings
 from .payment.helpers import (
@@ -36,6 +42,12 @@ from .payment.helpers import (
 )
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
+from .upstream.cooldown import (
+    candidate_model_identity,
+    is_cooling_down,
+    provider_identity,
+    record_failure,
+)
 from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
 from .upstream.model_paths import (
@@ -111,8 +123,6 @@ def get_candidates(
     model_id_lower = model_id.lower()
     if candidates := _provider_map.get(model_id_lower):
         return candidates
-
-    import re
 
     base_model_id = re.sub(r"-\d{8}$", "", model_id_lower)
     if base_model_id != model_id_lower:
@@ -267,6 +277,10 @@ _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     "completions": frozenset({"POST"}),
     "responses": frozenset({"POST"}),
     "messages": frozenset({"POST"}),
+    # Anthropic token-counting subroute; the proxy's allowlist is exact, so the
+    # "messages" entry above does not carry it. Clients (Claude Code, the
+    # Anthropic SDKs) call it before every request.
+    "messages/count_tokens": frozenset({"POST"}),
     "embeddings": frozenset({"POST"}),
     # TypeSafe System One decision endpoint: POST {state, model, questions}
     # -> {answers, usage}. Non-streaming, JSON in/out; billed from the
@@ -395,23 +409,109 @@ def _forwarding_allowed(path: str, method: str) -> bool:
     return method in _allowed_methods_for(_canonical_api_path(path))
 
 
-@proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
-async def proxy(
-    request: Request, path: str, session: AsyncSession = Depends(get_session)
-) -> Response | StreamingResponse:
-    """Run proxy setup in a short request session, never across response streaming."""
+# Gateway conditions a retry usually clears. 500 is excluded: as likely to be a
+# deterministic rejection that fails identically on the next attempt.
+_RETRYABLE_UPSTREAM_5XX = frozenset({502, 503, 504})
+_UPSTREAM_5XX_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def _counts_toward_cooldown(status_code: int) -> bool:
+    """Provider faults and timeouts only — not client errors or rate limits."""
+    return status_code >= 500 or status_code == UPSTREAM_ERROR_STATUS
+
+
+def _upstream_response_failure(response: Response) -> bool:
+    return (
+        _counts_toward_cooldown(response.status_code)
+        and response.headers.get(ERROR_SCOPE_HEADER) == ERROR_SCOPE_UPSTREAM
+    )
+
+
+def _attribute_request(
+    request: Request, model_obj: Model, upstream: BaseUpstreamProvider
+) -> None:
+    """Attribute the completion log line to the candidate being tried.
+
+    Uses the provider's model id rather than the requested alias, so aliases
+    and cross-provider spellings resolve to the model that was forwarded.
+    """
+    if model_obj.id:
+        request.state.model = model_obj.id
+    request.state.provider = upstream.provider_type
+
+
+class _BodyLimitExceeded(Exception):
+    """The client body is larger than ``max_request_body_bytes``."""
+
+
+async def _read_bounded_body(request: Request) -> bytes | Response:
+    """Read the request body under a size and time bound.
+
+    Returns the body, or the error response to send instead. Both bounds run
+    before any authentication or DB work, so an oversized or slowly uploaded
+    body cannot occupy the request for longer than the timeout.
+    """
+    max_bytes = settings.max_request_body_bytes
+    timeout = settings.request_body_timeout_seconds
+
+    async def read() -> bytes:
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > max_bytes:
+            raise _BodyLimitExceeded
+        body = bytearray()
+        async for chunk in request.stream():
+            body += chunk
+            # Chunked uploads declare no length, so the cap is enforced here.
+            if len(body) > max_bytes:
+                raise _BodyLimitExceeded
+        return bytes(body)
+
     try:
-        return await _proxy(request, path, session)
-    finally:
-        # FastAPI yield dependencies normally close after the response body is
-        # sent. Close explicitly so a long stream cannot retain DB resources.
-        close_result = session.close()
-        if inspect.isawaitable(close_result):
-            await close_result
+        body = await asyncio.wait_for(read(), timeout)
+    except _BodyLimitExceeded:
+        error_type, message, status = (
+            "invalid_request",
+            f"Request body exceeds the {max_bytes} byte limit",
+            413,
+        )
+    except asyncio.TimeoutError:
+        error_type, message, status = (
+            "timeout",
+            f"Request body not received within {timeout} seconds",
+            408,
+        )
+    else:
+        # Draining the stream leaves Starlette unable to serve a second read.
+        # Cache the body so later readers (EHBP forwarding, upstream stream
+        # passthrough) get it instead of "Stream consumed".
+        request._body = body
+        return body
+    return create_error_response(error_type, message, status, request=request)
+
+
+@proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
+async def proxy(request: Request, path: str) -> Response | StreamingResponse:
+    """Run proxy setup in a short request session, never across response streaming."""
+    # Read the body before opening a session: a slow uploader must not hold a
+    # DB connection while its request trickles in.
+    request_body = await _read_bounded_body(request)
+    if isinstance(request_body, Response):
+        return request_body
+    mark(request, "body_read")
+
+    async with create_session() as session:
+        try:
+            return await _proxy(request, path, session, request_body)
+        finally:
+            # Close explicitly so a long stream cannot retain DB resources
+            # while its response body is being sent.
+            close_result = session.close()
+            if inspect.isawaitable(close_result):
+                await close_result
 
 
 async def _proxy(
-    request: Request, path: str, session: AsyncSession
+    request: Request, path: str, session: AsyncSession, request_body: bytes
 ) -> Response | StreamingResponse:
     # Screen the path before any routing decision: reject ambiguous spellings,
     # then require a known API prefix so nothing unknown is forwarded with the
@@ -426,7 +526,6 @@ async def _proxy(
         return build_not_found_response(request, path)
 
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
-    request_body = await request.body()
 
     # EHBP (Encrypted HTTP Body Protocol) requests carry an Ehbp-Encapsulated-Key
     # header and a binary HPKE-sealed body. The proxy cannot parse the body to
@@ -450,6 +549,12 @@ async def _proxy(
         else:
             model_id = request_body_dict.get("model", "unknown")
 
+    # Set before routing so the completion log is attributed even when the
+    # request fails before an upstream is chosen (400/401/402). "unknown" is
+    # the no-model sentinel, not a model.
+    if isinstance(model_id, str) and model_id and model_id != "unknown":
+        request.state.model = model_id
+
     # Exact Tinfoil attestation GET routes don't map to models — forward
     # without model/cost/auth lookups. Do not prefix-match here: paths such as
     # /attestationjunk must continue through normal authentication.
@@ -472,11 +577,12 @@ async def _proxy(
 
         last_error_response = None
         for i, upstream in enumerate(selected_upstreams):
+            request.state.provider = upstream.provider_type
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
                 if (
-                    response.status_code in [502, 429]
+                    response.status_code in [424, 502, 503, 429]
                     and i < len(selected_upstreams) - 1
                 ):
                     logger.warning(
@@ -498,7 +604,12 @@ async def _proxy(
                     last_error_response = create_upstream_error_response(e, request)
                 continue
         return last_error_response or create_error_response(
-            "upstream_error", "All upstreams failed", 502, request=request
+            "upstream_error",
+            "All upstreams failed",
+            UPSTREAM_ERROR_STATUS,
+            request=request,
+            code=UPSTREAM_UNAVAILABLE,
+            error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
     selector: ModelPathSelector | None = None
@@ -606,6 +717,20 @@ async def _proxy(
                 request=request,
             )
 
+    # A provider that just failed this model repeatedly is skipped while some
+    # other candidate can serve it. An explicit route is never rerouted.
+    if selector is None:
+        healthy = [
+            candidate
+            for candidate in candidates
+            if not is_cooling_down(
+                provider_identity(candidate[1]),
+                candidate_model_identity(candidate[0], model_id),
+            )
+        ]
+        if healthy:
+            candidates = healthy
+
     # Reserve/max-cost checks use the best-ranked candidate; the failover loop
     # below rebinds (model_obj, upstream) per candidate so forwarding and
     # settlement always use the model of the provider actually being tried.
@@ -623,6 +748,7 @@ async def _proxy(
     if x_cashu := headers.get("x-cashu", None):
         last_error = None
         for i, (model_obj, upstream) in enumerate(candidates):
+            _attribute_request(request, model_obj, upstream)
             try:
                 if is_ehbp:
                     if not upstream.supports_ehbp:
@@ -632,7 +758,7 @@ async def _proxy(
                             model_id,
                         )
                         continue
-                    return await forward_ehbp_x_cashu_request(
+                    response = await forward_ehbp_x_cashu_request(
                         request=request,
                         x_cashu_token=x_cashu,
                         path=path,
@@ -641,7 +767,7 @@ async def _proxy(
                         upstream=upstream,
                     )
                 elif is_responses_api:
-                    return await upstream.handle_x_cashu_responses(
+                    response = await upstream.handle_x_cashu_responses(
                         request,
                         x_cashu,
                         path,
@@ -650,7 +776,7 @@ async def _proxy(
                         request_body=request_body,
                     )
                 else:
-                    return await upstream.handle_x_cashu(
+                    response = await upstream.handle_x_cashu(
                         request,
                         x_cashu,
                         path,
@@ -658,6 +784,12 @@ async def _proxy(
                         model_obj,
                         request_body=request_body,
                     )
+                if _upstream_response_failure(response):
+                    record_failure(
+                        provider_identity(upstream),
+                        candidate_model_identity(model_obj, model_id),
+                    )
+                return response
             except UpstreamError as e:
                 logger.warning(
                     "Upstream %s failed (x-cashu) for model=%s: %s",
@@ -670,6 +802,13 @@ async def _proxy(
                         "status_code": e.status_code,
                     },
                 )
+                if e.scope == ERROR_SCOPE_UPSTREAM and _counts_toward_cooldown(
+                    e.status_code
+                ):
+                    record_failure(
+                        provider_identity(upstream),
+                        candidate_model_identity(model_obj, model_id),
+                    )
                 if i == len(candidates) - 1:
                     last_error = e
                 continue
@@ -677,13 +816,19 @@ async def _proxy(
         if last_error is not None:
             return create_upstream_error_response(last_error, request)
         return create_error_response(
-            "upstream_error", "All upstreams failed", 502, request=request
+            "upstream_error",
+            "All upstreams failed",
+            UPSTREAM_ERROR_STATUS,
+            request=request,
+            code=UPSTREAM_UNAVAILABLE,
+            error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(
             headers, path, session, auth, max_cost_for_model, model_id
         )
+        mark(request, "auth")
 
     else:
         if request.method not in ["GET"]:
@@ -697,12 +842,16 @@ async def _proxy(
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
 
         last_error_response = None
-        for i, (_, upstream) in enumerate(candidates):
+        for i, (model_obj, upstream) in enumerate(candidates):
+            _attribute_request(request, model_obj, upstream)
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
 
-                if response.status_code in [502, 429] and i < len(candidates) - 1:
+                if (
+                    response.status_code in [424, 502, 503, 429]
+                    and i < len(candidates) - 1
+                ):
                     error_message = ""
                     try:
                         if hasattr(response, "body"):
@@ -736,14 +885,18 @@ async def _proxy(
                     last_error_response = create_upstream_error_response(e, request)
                 continue
         return last_error_response or create_error_response(
-            "upstream_error", "All upstreams failed", 502, request=request
+            "upstream_error",
+            "All upstreams failed",
+            UPSTREAM_ERROR_STATUS,
+            request=request,
+            code=UPSTREAM_UNAVAILABLE,
+            error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
     reservation_snapshot: ReservationSnapshot | None = None
     if is_ehbp or request_body_dict:
-        await pay_for_request(key, max_cost_for_model, session)
-        reservation_snapshot = await get_reservation_snapshot(key, session)
-        # Snapshot validation performs SELECTs after pay_for_request commits.
+        reservation_snapshot = await pay_for_request(key, max_cost_for_model, session)
+        # pay_for_request refreshes the key after committing the reservation.
         # End that read transaction before waiting on upstream response headers.
         await _finish_read_transaction(session)
 
@@ -770,18 +923,25 @@ async def _proxy(
                     key, session, max_cost_for_model, reservation_snapshot
                 )
                 try:
-                    await pay_for_request(key, candidate_max, session)
+                    reservation_snapshot = await pay_for_request(
+                        key, candidate_max, session
+                    )
                 except HTTPException:
                     if i == len(candidates) - 1:
                         raise
-                    await pay_for_request(key, max_cost_for_model, session)
-                    reservation_snapshot = await get_reservation_snapshot(key, session)
+                    reservation_snapshot = await pay_for_request(
+                        key, max_cost_for_model, session
+                    )
                     await _finish_read_transaction(session)
                     continue
-                reservation_snapshot = await get_reservation_snapshot(key, session)
                 await _finish_read_transaction(session)
                 max_cost_for_model = candidate_max
 
+        # Only once the candidate is actually tried: a fallback skipped for its
+        # reservation must not take over the last attempted upstream's line.
+        _attribute_request(request, model_obj, upstream)
+        retries_left = settings.upstream_5xx_retry_attempts
+        retry_index = 0
         headers = upstream.prepare_headers(dict(request.headers))
 
         try:
@@ -834,8 +994,39 @@ async def _proxy(
                             model_obj,
                             reservation_snapshot,
                         )
-                except UpstreamError:
-                    # Let the outer UpstreamError handler manage retry/revert
+                except UpstreamError as e:
+                    # Only a gateway status the upstream itself answered with:
+                    # re-sending the buffered body cannot double-bill. A 502 this
+                    # proxy invented for a transport error or timeout is not
+                    # retried — that request may already be running upstream.
+                    if (
+                        e.from_upstream_response
+                        and e.status_code in _RETRYABLE_UPSTREAM_5XX
+                        and retries_left > 0
+                    ):
+                        retries_left -= 1
+                        retry_index += 1
+                        logger.warning(
+                            "Upstream %s returned %s for model=%s; retrying same "
+                            "upstream (attempt %s, %s retries left)",
+                            upstream.provider_type,
+                            e.status_code,
+                            model_id,
+                            retry_index + 1,
+                            retries_left,
+                            extra={
+                                "provider": upstream.provider_type,
+                                "model": model_id,
+                                "status_code": e.status_code,
+                                "path": path,
+                                "retries_left": retries_left,
+                            },
+                        )
+                        await asyncio.sleep(
+                            _UPSTREAM_5XX_RETRY_BACKOFF_SECONDS * retry_index
+                        )
+                        continue
+                    # Let the outer UpstreamError handler manage failover/revert
                     raise
                 except Exception as e:
                     # Unexpected error (not an upstream failure) — revert and propagate
@@ -873,7 +1064,7 @@ async def _proxy(
                         already_stripped.add(bad_param)
                         logger.warning(
                             "Upstream %s rejected param '%s' for model=%s; "
-                            "stripping and retrying same upstream",
+                            "correcting and retrying same upstream",
                             upstream.provider_type,
                             bad_param,
                             model_id,
@@ -888,8 +1079,23 @@ async def _proxy(
                 break
 
             if response.status_code != 200:
-                # Check if we should retry (502 Upstream Error or 429 Rate Limit)
-                should_retry = response.status_code in [502, 429, 400, 401, 403, 404]
+                if _upstream_response_failure(response):
+                    record_failure(
+                        provider_identity(upstream),
+                        candidate_model_identity(model_obj, model_id),
+                    )
+                # 424 is an upstream failure re-reported by error_scope.
+                # 502/503 are upstream errors, 429 rate limits.
+                should_retry = response.status_code in [
+                    424,
+                    502,
+                    503,
+                    429,
+                    400,
+                    401,
+                    403,
+                    404,
+                ]
                 if should_retry and i < len(candidates) - 1:
                     error_message = ""
                     try:
@@ -965,6 +1171,13 @@ async def _proxy(
             raise
 
         except UpstreamError as e:
+            if e.scope == ERROR_SCOPE_UPSTREAM and _counts_toward_cooldown(
+                e.status_code
+            ):
+                record_failure(
+                    provider_identity(upstream),
+                    candidate_model_identity(model_obj, model_id),
+                )
             logger.warning(
                 "Upstream %s failed for model=%s: %s",
                 upstream.provider_type,
@@ -990,7 +1203,12 @@ async def _proxy(
 
     # Should not be reached given logic above
     return create_error_response(
-        "upstream_error", "All upstreams failed", 502, request=request
+        "upstream_error",
+        "All upstreams failed",
+        UPSTREAM_ERROR_STATUS,
+        request=request,
+        code=UPSTREAM_UNAVAILABLE,
+        error_scope=ERROR_SCOPE_UPSTREAM,
     )
 
 

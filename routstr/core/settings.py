@@ -11,6 +11,14 @@ from typing import Any
 from pydantic.v1 import BaseModel, BaseSettings, Field
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+# Mints a fresh node trusts out of the box, shared by the settings default and
+# the primary-mint fallback. Defined before the Settings class because the
+# default_factory lambda resolves it at class-definition time.
+DEFAULT_CASHU_MINTS: list[str] = [
+    "https://mint.minibits.cash/Bitcoin",
+    "https://mint.cubabitcoin.org",
+]
+
 
 class Settings(BaseSettings):
     class Config:
@@ -28,6 +36,26 @@ class Settings(BaseSettings):
     # Core
     upstream_base_url: str = Field(default="", env="UPSTREAM_BASE_URL")
     upstream_api_key: str = Field(default="", env="UPSTREAM_API_KEY")
+    # Extra attempts against the same upstream on a transient 5xx. 0 disables.
+    upstream_5xx_retry_attempts: int = Field(
+        default=1, ge=0, env="UPSTREAM_5XX_RETRY_ATTEMPTS"
+    )
+    # Streaming guards, off by default (0). A stream that never produces a
+    # first chunk can still fail over; one that stalls later can only be
+    # aborted and billed for what it delivered. Reasoning models can stay
+    # silent for minutes, so set these above the longest expected think time.
+    upstream_first_token_timeout_seconds: float = Field(
+        default=0.0, ge=0, env="UPSTREAM_FIRST_TOKEN_TIMEOUT_SECONDS"
+    )
+    upstream_stream_idle_timeout_seconds: float = Field(
+        default=0.0, ge=0, env="UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS"
+    )
+    # Circuit breaker: timeouts/5xx per (provider, model) within a minute that
+    # take the pair out of candidate selection. 0 seconds disables it.
+    upstream_allowed_fails: int = Field(default=3, ge=1, env="UPSTREAM_ALLOWED_FAILS")
+    upstream_cooldown_seconds: float = Field(
+        default=30.0, ge=0, env="UPSTREAM_COOLDOWN_SECONDS"
+    )
 
     # Node info
     name: str = Field(default="ARoutstrNode", env="NAME")
@@ -37,7 +65,12 @@ class Settings(BaseSettings):
     onion_url: str = Field(default="", env="ONION_URL")
 
     # Cashu
-    cashu_mints: list[str] = Field(default_factory=list, env="CASHU_MINTS")
+    # Mints a fresh node trusts out of the box. Setting CASHU_MINTS (env or
+    # dashboard) replaces this list entirely; an explicitly empty value yields
+    # an empty list (no trusted mints beyond primary_mint).
+    cashu_mints: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_CASHU_MINTS), env="CASHU_MINTS"
+    )
     receive_ln_address: str = Field(default="", env="RECEIVE_LN_ADDRESS")
     primary_mint: str = Field(default="", env="PRIMARY_MINT_URL")
     primary_mint_unit: str = Field(default="sat", env="PRIMARY_MINT_UNIT")
@@ -49,6 +82,8 @@ class Settings(BaseSettings):
     # Minimum available balance (in satoshis) before profit is paid out over
     # Lightning
     min_payout_sat: int = Field(default=210, gt=0, env="MIN_PAYOUT_SAT")
+    # Gross payout budget in sats, including fees.
+    max_payout_sat: int = Field(default=250_000, gt=0, env="MAX_PAYOUT_SAT")
     # Interval (seconds) between periodic payout attempts. Must be positive.
     payout_interval_seconds: int = Field(
         default=900, gt=0, env="PAYOUT_INTERVAL_SECONDS"
@@ -98,6 +133,16 @@ class Settings(BaseSettings):
         default=604_800, env="DEAD_KEY_MIN_AGE_SECONDS"
     )
 
+    max_request_lifetime_seconds: float = Field(
+        default=1800, gt=0, env="MAX_REQUEST_LIFETIME_SECONDS"
+    )
+    downstream_send_timeout_seconds: float = Field(
+        default=60, gt=0, env="DOWNSTREAM_SEND_TIMEOUT_SECONDS"
+    )
+    request_cleanup_timeout_seconds: float = Field(
+        default=30, gt=0, env="REQUEST_CLEANUP_TIMEOUT_SECONDS"
+    )
+
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
     # Comma-separated METHOD:path pairs adding to the proxy's canonical
@@ -106,6 +151,14 @@ class Settings(BaseSettings):
     # widens what the provider credential can be spent against, so wildcards
     # and prefixes are not supported.
     proxy_extra_allowed_paths: str = Field(default="", env="PROXY_EXTRA_ALLOWED_PATHS")
+    # Bound the client request body: a slow or oversized upload otherwise blocks
+    # the proxy before authentication and holds server resources for its duration.
+    request_body_timeout_seconds: float = Field(
+        default=30.0, gt=0, env="REQUEST_BODY_TIMEOUT_SECONDS"
+    )
+    max_request_body_bytes: int = Field(
+        default=20 * 1024 * 1024, gt=0, env="MAX_REQUEST_BODY_BYTES"
+    )
     tor_proxy_url: str = Field(default="socks5://127.0.0.1:9050", env="TOR_PROXY_URL")
     providers_refresh_interval_seconds: int = Field(
         default=0, env="PROVIDERS_REFRESH_INTERVAL_SECONDS"
@@ -158,9 +211,21 @@ class Settings(BaseSettings):
         default=30.0, gt=0, env="DATABASE_BUSY_TIMEOUT"
     )
 
+    # Per-origin upstream connection pools. These fields are env-only below.
+    upstream_max_connections: int = Field(
+        default=200, ge=1, env="UPSTREAM_MAX_CONNECTIONS"
+    )
+    upstream_pool_timeout: float = Field(default=5.0, gt=0, env="UPSTREAM_POOL_TIMEOUT")
+    upstream_read_timeout: float = Field(
+        default=900.0, gt=0, env="UPSTREAM_READ_TIMEOUT"
+    )
+
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     enable_console_logging: bool = Field(default=True, env="ENABLE_CONSOLE_LOGGING")
+    slow_request_warn_seconds: float = Field(
+        default=60.0, gt=0, env="SLOW_REQUEST_WARN_SECONDS"
+    )
 
     # Other
     chat_completions_api_version: str = Field(
@@ -219,6 +284,10 @@ ENV_ONLY_FIELDS = frozenset(
         "database_pool_pre_ping",
         "database_pool_hold_warn_seconds",
         "database_busy_timeout",
+        # Reconfiguring a live pool would disrupt in-flight streams.
+        "upstream_max_connections",
+        "upstream_pool_timeout",
+        "upstream_read_timeout",
     }
 )
 
@@ -256,7 +325,7 @@ def _apply_to_live_settings(data: dict[str, Any]) -> None:
 
 
 def _compute_primary_mint(cashu_mints: list[str]) -> str:
-    return cashu_mints[0] if cashu_mints else "https://mint.minibits.cash/Bitcoin"
+    return cashu_mints[0] if cashu_mints else DEFAULT_CASHU_MINTS[0]
 
 
 def derive_npub_from_nsec(nsec: str) -> str | None:

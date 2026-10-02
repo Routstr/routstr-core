@@ -17,8 +17,10 @@ import pytest
 from cashu.core.base import Proof
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from routstr.core import db
 from routstr.core.db import ApiKey, LightningInvoice
 from routstr.lightning import _create_api_key_record
 
@@ -79,6 +81,41 @@ async def test_invoice_persists_validity_date(
     stored = await integration_session.get(LightningInvoice, invoice.id)
     assert stored is not None
     assert stored.validity_date == expiry
+
+
+@pytest.mark.asyncio
+async def test_outgoing_payout_history_is_recorded_and_settled(
+    integration_session: AsyncSession,
+) -> None:
+    await db.record_lightning_payout(
+        integration_session,
+        quote_id="payout-quote",
+        bolt11="lnbc1payout",
+        amount_sats=1_000,
+        mint_url="https://mint.test",
+        destination="owner@example.com",
+    )
+
+    result = await integration_session.exec(
+        select(LightningInvoice).where(LightningInvoice.payment_hash == "payout-quote")
+    )
+    payout = result.one()
+    assert payout.direction == "out"
+    assert payout.purpose == "payout"
+    assert payout.status == "pending"
+    assert payout.mint_url == "https://mint.test"
+
+    await db.settle_lightning_payout(
+        integration_session,
+        "payout-quote",
+        status="paid",
+        amount_sats=995,
+    )
+    await integration_session.refresh(payout)
+
+    assert payout.status == "paid"
+    assert payout.amount_sats == 995
+    assert payout.paid_at is not None
 
 
 # ---------------------------------------------------------------------------

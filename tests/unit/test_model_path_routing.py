@@ -9,7 +9,15 @@ import pytest
 from routstr import proxy as proxy_module
 from routstr.auth import ReservationSnapshot
 from routstr.core.db import ApiKey
+from routstr.core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_NODE,
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_UNAVAILABLE,
+)
 from routstr.upstream.model_paths import decode_model_path, encode_model_path
+
+from .proxy_test_utils import mock_request_stream, patch_proxy_session
 
 MODEL_ID = "test-model"
 
@@ -32,7 +40,7 @@ def _make_request(headers: dict[str, str], body: bytes) -> MagicMock:
     request = MagicMock()
     request.method = "POST"
     request.headers = headers
-    request.body = AsyncMock(return_value=body)
+    mock_request_stream(request, body)
     request.state = MagicMock()
     request.state.request_id = "req-model-path"
     return request
@@ -62,15 +70,13 @@ async def _run_proxy(
         ),
         patch.object(proxy_module, "check_token_balance", MagicMock()),
         patch.object(proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)),
-        patch.object(proxy_module, "pay_for_request", AsyncMock(return_value=1_000)),
         patch.object(
-            proxy_module,
-            "get_reservation_snapshot",
-            AsyncMock(return_value=reservation),
+            proxy_module, "pay_for_request", AsyncMock(return_value=reservation)
         ),
         patch.object(proxy_module, "revert_pay_for_request", AsyncMock()),
+        patch_proxy_session(MagicMock()),
     ):
-        return await proxy_module.proxy(request, path, session=MagicMock())
+        return await proxy_module.proxy(request, path)
 
 
 def test_decode_model_path_round_trips_encode() -> None:
@@ -391,8 +397,13 @@ def test_model_path_header_is_not_forwarded() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["v1/chat/completions", "v1/responses"])
-@pytest.mark.parametrize("status_code", [200, 429, 502])
-async def test_cashu_pin_reaches_http_transport(path: str, status_code: int) -> None:
+@pytest.mark.parametrize(
+    "status_code,client_status",
+    [(200, 200), (429, 429), (502, 424)],
+)
+async def test_cashu_pin_reaches_http_transport(
+    path: str, status_code: int, client_status: int
+) -> None:
     import httpx
     from fastapi.responses import Response
 
@@ -443,7 +454,11 @@ async def test_cashu_pin_reaches_http_transport(path: str, status_code: int) -> 
         response = await _run_proxy(
             request, [(model, upstream), (model, fallback)], path
         )
-    assert response.status_code == status_code
+    assert response.status_code == client_status
+    if client_status == 424:
+        assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+        body = json.loads(bytes(response.body))
+        assert body["error"]["code"] == UPSTREAM_UNAVAILABLE
     redeem.assert_awaited_once()
     assert len(sent) == 1
     assert sent[0].url.host == "openrouter.ai"
@@ -486,7 +501,10 @@ async def test_pinned_exception_does_not_fall_back() -> None:
     response = await _run_proxy(
         request, [(MagicMock(), first), (MagicMock(), fallback)]
     )
-    assert response.status_code == 503
+    # Pinned: no fallback.
+    assert response.status_code == 424
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+    assert json.loads(bytes(response.body))["error"]["code"] == UPSTREAM_UNAVAILABLE
     first.forward_request.assert_awaited_once()
     fallback.forward_request.assert_not_awaited()
 
@@ -514,8 +532,9 @@ async def test_unsupported_endpoint_pins_fail_before_payment(
         patch.object(
             proxy_module, "get_candidates", return_value=[(MagicMock(), upstream)]
         ),
+        patch_proxy_session(MagicMock()),
     ):
-        response = await proxy_module.proxy(request, path, MagicMock())
+        response = await proxy_module.proxy(request, path)
     assert response.status_code == 400
     assert json.loads(response.body)["error"]["type"] == "unsupported_request"
     payment.assert_not_called()
@@ -545,7 +564,8 @@ async def test_ehbp_pin_does_not_fall_back(cashu: bool) -> None:
         response = await _run_proxy(
             request, [(MagicMock(), selected), (MagicMock(), fallback)]
         )
-    assert response.status_code == 503
+    assert response.status_code == 424
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
     forward.assert_awaited_once()
     assert forward.await_args is not None
     assert forward.await_args.kwargs["upstream"] is selected
@@ -684,3 +704,144 @@ async def test_pinned_recovery_preserves_routing_fields(
     assert response.status_code == 400
     selected.forward_request.assert_awaited_once()
     fallback.forward_request.assert_not_awaited()
+
+
+_OPENAI_MAX_TOKENS_ERROR = json.dumps(
+    {
+        "error": {
+            "message": "Unsupported parameter: 'max_tokens' is not supported "
+            "with this model. Use 'max_completion_tokens' instead.",
+            "type": "invalid_request_error",
+            "param": "max_tokens",
+            "code": "unsupported_parameter",
+        }
+    }
+).encode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [False, True])
+async def test_rejected_max_tokens_is_renamed_and_retried_on_same_upstream(
+    pinned: bool,
+) -> None:
+    selected, fallback = _make_upstream(1), _make_upstream(2)
+    selected.forward_request = AsyncMock(
+        side_effect=[
+            MagicMock(status_code=400, body=_OPENAI_MAX_TOKENS_ERROR),
+            MagicMock(status_code=200, body=b"{}"),
+        ]
+    )
+    headers = {"authorization": "Bearer key"}
+    if pinned:
+        headers["x-routstr-model-path"] = encode_model_path(selected.base_url, MODEL_ID)
+    request = _make_request(
+        headers,
+        json.dumps(
+            {"model": MODEL_ID, "max_tokens": 300, "messages": [], "stream": True}
+        ).encode(),
+    )
+
+    response = await _run_proxy(
+        request, [(MagicMock(), selected), (MagicMock(), fallback)]
+    )
+
+    assert response.status_code == 200
+    assert selected.forward_request.await_count == 2
+    before, after = [
+        json.loads(call.args[3]) for call in selected.forward_request.await_args_list
+    ]
+    assert before["max_tokens"] == 300 and "max_completion_tokens" not in before
+    assert after["max_completion_tokens"] == 300 and "max_tokens" not in after
+    assert {k: v for k, v in after.items() if k != "max_completion_tokens"} == {
+        k: v for k, v in before.items() if k != "max_tokens"
+    }
+    fallback.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rename_that_changes_spend_bound_is_not_retried() -> None:
+    selected = _make_upstream(1, 400)
+    selected.forward_request.return_value.body = json.dumps(
+        {"error": {"message": "'max_tokens' is not supported. Use 'n' instead."}}
+    ).encode()
+    request = _make_request(
+        {"authorization": "Bearer key"},
+        json.dumps({"model": MODEL_ID, "max_tokens": 300}).encode(),
+    )
+
+    response = await _run_proxy(request, [(MagicMock(), selected)])
+
+    assert response.status_code == 400
+    selected.forward_request.assert_awaited_once()
+
+
+# --------------------------------------------------------------------------- #
+# Upstream 5xx -> 424 + UPSTREAM_UNAVAILABLE + scope header; node faults stay 500.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_upstream_424_fails_over_to_a_healthy_provider() -> None:
+    """An upstream-attributed 424 is still retryable: the caller only ever
+    sees the healthy provider's 200."""
+    from routstr.core.exceptions import UpstreamError
+
+    first, healthy = _make_upstream(1), _make_upstream(2)
+    first.forward_request.side_effect = UpstreamError("bad gateway", status_code=502)
+    request = _make_request(
+        {"authorization": "Bearer key"}, json.dumps({"model": MODEL_ID}).encode()
+    )
+
+    response = await _run_proxy(request, [(MagicMock(), first), (MagicMock(), healthy)])
+
+    assert response.status_code == 200
+    first.forward_request.assert_awaited_once()
+    healthy.forward_request.assert_awaited_once()
+    # The caller never sees the upstream error body or any scope header.
+    assert ERROR_SCOPE_HEADER not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_last_candidate_upstream_failure_reports_424() -> None:
+    """Every candidate failed on the provider hop: 424 + upstream scope, with
+    the provider's own status preserved for operators."""
+    from routstr.core.exceptions import UpstreamError
+
+    only = _make_upstream(1)
+    only.forward_request.side_effect = UpstreamError("bad gateway", status_code=502)
+    request = _make_request(
+        {"authorization": "Bearer key"}, json.dumps({"model": MODEL_ID}).encode()
+    )
+
+    response = await _run_proxy(request, [(MagicMock(), only)])
+
+    assert response.status_code == 424
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+    body = json.loads(bytes(response.body))
+    assert body["error"]["type"] == "upstream_error"
+    assert body["error"]["code"] == UPSTREAM_UNAVAILABLE
+    assert body["error"]["details"]["upstream_status"] == 502
+
+
+@pytest.mark.asyncio
+async def test_node_fault_stays_500_without_scope_header() -> None:
+    """A genuine node fault keeps its 500 and carries no scope header, so a
+    client can still tell this node is the broken one."""
+    from routstr.core.exceptions import UpstreamError
+
+    only = _make_upstream(1)
+    only.forward_request.side_effect = UpstreamError(
+        "An unexpected server error occurred",
+        status_code=500,
+        scope=ERROR_SCOPE_NODE,
+    )
+    request = _make_request(
+        {"authorization": "Bearer key"}, json.dumps({"model": MODEL_ID}).encode()
+    )
+
+    response = await _run_proxy(request, [(MagicMock(), only)])
+
+    assert response.status_code == 500
+    assert ERROR_SCOPE_HEADER not in response.headers
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] != UPSTREAM_UNAVAILABLE

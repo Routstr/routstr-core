@@ -48,6 +48,29 @@ Connect to your AI provider(s):
 | **Upstream URL** | API endpoint (e.g., `https://api.openai.com/v1`) |
 | **API Key**      | Your provider's API key                          |
 
+### DeepSeek
+
+Choose **DeepSeek** as the provider type and paste an API key from
+[platform.deepseek.com](https://platform.deepseek.com/api_keys); the base URL
+is fixed to `https://api.deepseek.com`. Setting `DEEPSEEK_API_KEY` seeds the
+provider on startup instead.
+
+Models are listed from DeepSeek's own `/models` and priced from a rate table
+in `routstr/upstream/deepseek.py`, not from litellm or OpenRouter:
+
+- **Peak rates only.** DeepSeek charges half price off-peak, but the node bills
+  one flat price per model, so it bills the peak rate. Clients overpay
+  off-peak; the node never bills below cost. Time-of-day pricing is planned.
+- **Unknown models import disabled.** A model DeepSeek lists that the table
+  does not price shows up disabled in the Admin Dashboard. Enable it with a
+  manual price, or add it to the table.
+- **Cache hits** bill at DeepSeek's cache-hit rate (about 2% of the input
+  rate on flash, about 3% on pro).
+
+Thinking-mode `reasoning_content` is returned to clients unchanged in
+responses, and forwarded unchanged when it appears in conversation history.
+DeepSeek requires it on requests that carry `tools` and ignores it otherwise.
+
 ### PPQ Auto Top-up
 
 PPQ providers can automatically purchase more credits when their USD balance
@@ -139,6 +162,15 @@ Which mints to accept payments from:
 | --------- | ------------------------------- |
 | **Mints** | List of trusted Cashu mint URLs |
 
+A fresh node ships with two mints preconfigured:
+
+- `https://mint.minibits.cash/Bitcoin`
+- `https://mint.cubabitcoin.org`
+
+Setting `CASHU_MINTS` (env) or editing the list in the dashboard replaces this
+default entirely. An explicitly empty value leaves only the primary mint
+trusted.
+
 ### Lightning Withdrawals
 
 Automatic profit withdrawal:
@@ -197,13 +229,14 @@ Use environment variables for:
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
 | `NSEC`               | Legacy seed for the Nostr private key (otherwise set from the admin UI) | —                |
 | `ENABLE_ANALYTICS_SHARING` | Enable usage analytics sharing to Nostr | `true`                         |
-| `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin` |
+| `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin,https://mint.cubabitcoin.org` |
 | `MINT_OPERATION_CONCURRENCY` | Concurrent mint/unit balance reads | `4` |
 | `MINT_OPERATION_TIMEOUT_SECONDS` | Per-attempt timeout for mint network calls | `30` |
 | `MINT_MAX_CONCURRENCY` | Concurrent operations allowed per mint (`0` disables the limit) | `4` |
 | `MINT_RETRY_MAX_ATTEMPTS` | Retries after a timeout or HTTP 429 (`0` disables retries) | `3` |
 | `RECEIVE_LN_ADDRESS` | Lightning address for withdrawals | —                                    |
 | `MIN_PAYOUT_SAT`     | Min payout balance in sats (applies to all mints) | `210`                |
+| `MAX_PAYOUT_SAT`     | Maximum gross budget per periodic payout in sats, including fees (all mints) | `250000`             |
 | `PAYOUT_INTERVAL_SECONDS` | Payout loop interval (seconds) | `900`                            |
 | `TOR_PROXY_URL`      | SOCKS5 proxy for Tor              | `socks5://127.0.0.1:9050`            |
 | `CORS_ORIGINS`       | Allowed CORS origins              | `*`                                  |
@@ -215,6 +248,26 @@ Mint HTTP 429 responses create a per-mint cooldown. Operations that already hold
 Routstr's wallet mutation lock fail fast during that cooldown instead of waiting
 while blocking every other wallet mutation. Callers receive an error and may retry
 later; the current response does not include the cooldown duration.
+
+Read-only `/v1/checkstate` requests start at the SDK request-model limit
+(currently 1,000 proofs) and adapt downward on HTTP 413 or 500, down to one
+proof. A 500 is a size hypothesis, not a confirmed limit. Successful reduced
+sizes are cached per mint within each worker for 24 hours (and refreshed while
+in use). HTTP 429 never reduces the batch
+size. Scan deadline expiry opens a transport cooldown without shortening any
+existing rate-limit cooldown. Invalid, incomplete, or failed scans do
+not produce a partial spendable balance. Only explicit UNSPENT proofs qualify;
+PENDING proofs are retained but excluded from payouts.
+
+Each scan is bounded by a fixed 60-second deadline and a 128-request budget;
+exhausting either aborts that scan safely. Automatic splitting applies only to
+state checks, **not swaps or melts**. Their limits are independent, and ambiguous
+mutation outcomes must be reconciled rather than retried with different inputs.
+Periodic payouts reload local proofs without forcing a keyset refresh, skip
+state checks at/below `MIN_PAYOUT_SAT`, and cap each gross payout budget at
+`MAX_PAYOUT_SAT`. Oversized inputs receive enough change outputs to return the
+excess; they are not automatically swapped. The cap is not a proof-count limit
+or a guarantee of Lightning payment success.
 
 ### Priority
 

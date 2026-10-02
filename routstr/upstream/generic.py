@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import httpx
 
-from .base import BaseUpstreamProvider
+from .base import BaseUpstreamProvider, _reported_provider
+from .model_paths import public_provider_url
 from .pricing_resolver import (
     FallbackPricingResolver,
     ResolvedPricing,
@@ -26,7 +28,11 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
 
     provider_type = "generic"
     default_base_url = "http://localhost:8888"
-    platform_url = None
+    platform_url: str | None = None
+    # Subclasses that own an authoritative price table set this False so a model
+    # the table misses imports disabled instead of taking a litellm/OpenRouter
+    # price that may undercut the upstream's own rate.
+    use_fallback_pricing = True
 
     def __init__(
         self,
@@ -49,6 +55,21 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
             api_key=api_key,
             provider_fee=provider_fee,
         )
+
+    def _apply_provider_field(self, response_json: object) -> None:
+        """Stamp ``"generic:<upstream host>"`` unless the upstream named itself.
+
+        A generic upstream is not a router, so nothing identifies the serving
+        endpoint in the payload; the base URL host fills that role.
+        """
+        if not isinstance(response_json, dict):
+            return
+        if _reported_provider(response_json) is None:
+            response_json["provider"] = (
+                urlparse(public_provider_url(self.base_url)).hostname
+                or self.upstream_name
+            )
+        super()._apply_provider_field(response_json)
 
     @classmethod
     def _build_from_row(
@@ -145,7 +166,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                     model_spec = model_data.get("model_spec", {})
 
                     resolved = self._native_pricing(model_id, model_spec)
-                    if resolved is None:
+                    if resolved is None and self.use_fallback_pricing:
                         resolved = await resolver.resolve(model_id)
 
                     if resolved is None:

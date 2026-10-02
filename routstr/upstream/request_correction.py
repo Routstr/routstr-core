@@ -43,6 +43,18 @@ _UNSUPPORTED_PARAM_RE = re.compile(
 )
 
 
+# Matches upstream error text that rejects a param and names its replacement,
+# e.g. OpenAI's "Unsupported parameter: 'max_tokens' is not supported with this
+# model. Use 'max_completion_tokens' instead." Both names must be quoted so a
+# free-form hint like "use gpt-4 instead" never reads as a rename.
+_RENAMED_PARAM_RE = re.compile(
+    r"[`'\"](?P<param>[a-zA-Z_][a-zA-Z0-9_]*)[`'\"]\s+is\s+"
+    r"(?:deprecated|not\s+supported|unsupported|no\s+longer\s+supported)\b"
+    r".*?\buse\s+[`'\"](?P<replacement>[a-zA-Z_][a-zA-Z0-9_]*)[`'\"]\s+instead",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 # A corrector inspects the parsed request body and the upstream error message
 # and returns ``(new_body_dict, label)`` for a fix it can apply, or ``None`` to
 # decline. ``label`` identifies the fix so it is applied at most once per request.
@@ -100,6 +112,51 @@ _SPEND_SHAPING_PARAMS = frozenset(
     }
 )
 
+# Output caps are interchangeable spellings of the same limit, so moving the
+# value from one to another keeps the priced bound intact.
+_OUTPUT_CAP_PARAMS = frozenset(
+    {
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "max_tokens_to_sample",
+    }
+)
+
+
+def rename_unsupported_param(body: dict, error_message: str) -> tuple[dict, str] | None:
+    """Move a rejected top-level param to the name the upstream asked for.
+
+    Returns ``(new_body, label)`` with the value carried over unchanged, or
+    ``None`` when the error names no replacement, the param is absent, or the
+    replacement is already set.
+
+    A spend-shaping field is only renamed to another output cap: that keeps the
+    reservation's bound, whereas renaming into or out of any other spend-shaping
+    field could uncap or fan out the retry.
+    """
+    match = _RENAMED_PARAM_RE.search(error_message)
+    if not match:
+        return None
+    param, replacement = match.group("param"), match.group("replacement")
+    if param == replacement or param not in body or replacement in body:
+        return None
+    param_spend = param.lower() in _SPEND_SHAPING_PARAMS
+    replacement_spend = replacement.lower() in _SPEND_SHAPING_PARAMS
+    if (param_spend or replacement_spend) and not (
+        param.lower() in _OUTPUT_CAP_PARAMS
+        and replacement.lower() in _OUTPUT_CAP_PARAMS
+    ):
+        logger.warning(
+            "Upstream asked to rename '%s' to '%s'; refusing because it would "
+            "change the request's spend bound — surfacing the error",
+            param,
+            replacement,
+        )
+        return None
+    new_body = {(replacement if k == param else k): v for k, v in body.items()}
+    return new_body, f"{param}->{replacement}"
+
 
 def strip_unsupported_param(body: dict, error_message: str) -> tuple[dict, str] | None:
     """Drop a top-level param the upstream named as unsupported/deprecated.
@@ -130,7 +187,12 @@ def strip_unsupported_param(body: dict, error_message: str) -> tuple[dict, str] 
 
 
 # Ordered pipeline of correctors tried on each recoverable rejection.
-DEFAULT_CORRECTORS: tuple[Corrector, ...] = (strip_unsupported_param,)
+# Renaming runs first so a param with a named replacement keeps its value
+# instead of being dropped.
+DEFAULT_CORRECTORS: tuple[Corrector, ...] = (
+    rename_unsupported_param,
+    strip_unsupported_param,
+)
 
 
 def correct_request(

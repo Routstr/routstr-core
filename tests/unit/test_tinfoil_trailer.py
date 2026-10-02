@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import ssl
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from routstr.core.exceptions import EhbpTimeoutError, UpstreamError
+from routstr.core.error_scope import ERROR_SCOPE_UPSTREAM, UPSTREAM_ERROR_STATUS
+from routstr.core.exceptions import EhbpConnectionError, EhbpTimeoutError, UpstreamError
 from routstr.upstream.tinfoil_trailer import forward_with_trailer
 
 
@@ -169,6 +171,68 @@ async def test_forward_with_trailer_connect_timeout_raises_ehbp_timeout(
 
 
 @pytest.mark.asyncio
+async def test_forward_with_trailer_tls_handshake_timeout_raises_ehbp_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stdlib TLS handshake timer surfaces as ConnectionAbortedError.
+
+    CPython aborts a slow handshake with ``ConnectionAbortedError`` rather
+    than ``asyncio.TimeoutError``, so the connect handler must classify it as
+    an upstream timeout — otherwise it escapes to the node-scoped 500 in
+    ``forward_ehbp_request``.
+    """
+
+    async def _handshake_timeout(*_args: object, **_kwargs: object) -> object:
+        raise ConnectionAbortedError(
+            "SSL handshake is taking longer than 60.0 seconds: aborting the connection"
+        )
+
+    monkeypatch.setattr(
+        "routstr.upstream.tinfoil_trailer.asyncio.open_connection",
+        _handshake_timeout,
+    )
+
+    with pytest.raises(EhbpTimeoutError, match="TLS handshake timed out"):
+        await forward_with_trailer(
+            method="POST",
+            url="https://inference.tinfoil.sh/v1/chat/completions",
+            headers={},
+            body=b"opaque",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ConnectionRefusedError("connection refused"),
+        ConnectionResetError("connection reset"),
+        ssl.SSLError("certificate verify failed"),
+        OSError("name resolution failed"),
+    ],
+)
+async def test_forward_with_trailer_connection_failure_raises_ehbp_connection(
+    monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    """Non-timeout connect failures must be upstream-scoped, not node 500s."""
+
+    async def _fail_connect(*_args: object, **_kwargs: object) -> object:
+        raise exc
+
+    monkeypatch.setattr(
+        "routstr.upstream.tinfoil_trailer.asyncio.open_connection", _fail_connect
+    )
+
+    with pytest.raises(EhbpConnectionError, match="Unable to connect"):
+        await forward_with_trailer(
+            method="POST",
+            url="https://inference.tinfoil.sh/v1/chat/completions",
+            headers={},
+            body=b"opaque",
+        )
+
+
+@pytest.mark.asyncio
 async def test_forward_with_trailer_read_timeout_raises_ehbp_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -193,9 +257,10 @@ async def test_forward_with_trailer_read_timeout_raises_ehbp_timeout(
 
 def test_ehbp_timeout_error_metadata() -> None:
     exc = EhbpTimeoutError("boom")
-    assert exc.status_code == 504
+    assert exc.status_code == UPSTREAM_ERROR_STATUS
     assert exc.code == "UPSTREAM_TIMEOUT"
     assert exc.details is None
+    assert exc.scope == ERROR_SCOPE_UPSTREAM
     assert isinstance(exc, UpstreamError)
 
 
@@ -203,5 +268,20 @@ def test_ehbp_timeout_error_forwards_details() -> None:
     """``details`` must survive so the response builder can forward it."""
     exc = EhbpTimeoutError("boom", details={"phase": "connect"})
     assert exc.details == {"phase": "connect"}
-    assert exc.status_code == 504
+    assert exc.status_code == UPSTREAM_ERROR_STATUS
     assert exc.code == "UPSTREAM_TIMEOUT"
+
+
+def test_ehbp_connection_error_metadata() -> None:
+    exc = EhbpConnectionError("boom")
+    assert exc.status_code == UPSTREAM_ERROR_STATUS
+    assert exc.code == "UPSTREAM_UNAVAILABLE"
+    assert exc.details is None
+    assert exc.scope == ERROR_SCOPE_UPSTREAM
+    assert isinstance(exc, UpstreamError)
+
+
+def test_ehbp_connection_error_forwards_details() -> None:
+    exc = EhbpConnectionError("boom", details={"provider": "tinfoil"})
+    assert exc.details == {"provider": "tinfoil"}
+    assert exc.code == "UPSTREAM_UNAVAILABLE"

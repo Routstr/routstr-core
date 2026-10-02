@@ -51,6 +51,8 @@ def test_ambiguous_paths_are_rejected(path: str) -> None:
         "v1/chat/completions",
         "chat/completions",
         "v1/responses",
+        "v1/messages",
+        "v1/messages/count_tokens",
         "v1/embeddings",
         "models",
         "v1/models/gpt-4",
@@ -138,6 +140,7 @@ def test_known_prefix_does_not_carry_an_unknown_endpoint(path: str) -> None:
         ("completions", "POST"),
         ("v1/responses", "POST"),
         ("v1/messages", "POST"),
+        ("v1/messages/count_tokens", "POST"),
         ("v1/embeddings", "POST"),
         ("models", "GET"),
         ("attestation", "GET"),
@@ -161,6 +164,24 @@ def test_canonical_endpoints_are_forwarded(path: str, method: str) -> None:
 )
 def test_method_must_match_the_endpoint(path: str, method: str) -> None:
     assert _forwarding_allowed(path, method) is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "messages/count_tokens",
+        "v1/messages/count_tokens",
+        "v1/messages/count_tokens/",
+    ],
+)
+def test_count_tokens_endpoint_stays_allowed(path: str) -> None:
+    # Regression guard: /v1/messages/count_tokens is supported end-to-end
+    # (local handler when the upstream lacks native Anthropic support, plain
+    # forward otherwise), but the exact-match allowlist once omitted it, so
+    # Claude Code and the Anthropic SDKs were 404'd on every request. It must
+    # always be reachable, on POST only.
+    assert _forwarding_allowed(path, "POST") is True
+    assert _forwarding_allowed(path, "GET") is False
 
 
 def test_operator_additions_are_parsed_per_endpoint() -> None:

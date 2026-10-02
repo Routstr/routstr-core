@@ -5,7 +5,7 @@ import math
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Mapping
+from typing import AsyncIterator, Awaitable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Request
@@ -30,6 +30,14 @@ from ..core.db import (
 )
 from ..core.db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
+)
+from ..core.error_scope import (
+    ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_NODE,
+    ERROR_SCOPE_UPSTREAM,
+    UPSTREAM_ERROR_STATUS,
+    client_code_for_upstream_error,
+    client_status_for_upstream_error,
 )
 from ..core.exceptions import EhbpTimeoutError, UpstreamError
 from ..core.settings import settings
@@ -641,6 +649,37 @@ async def _release_failed_ehbp_charge(
     )
 
 
+async def _record_ehbp_settlement(
+    operation: Awaitable[int],
+    *,
+    key: ApiKey,
+    model_id: str,
+    settlement_type: str,
+) -> int:
+    """Expose EHBP settlement latency alongside normal request settlement."""
+    started = time.perf_counter()
+    # A rollback can expire the ORM instance, so capture this before the operation.
+    key_log_hash = key.hashed_key[:8] + "..."
+    succeeded = False
+    try:
+        result = await operation
+        succeeded = True
+        return result
+    finally:
+        logger.info(
+            "Payment settlement finished",
+            extra={
+                "key_hash": key_log_hash,
+                "model": model_id,
+                "settlement_type": settlement_type,
+                "settlement_duration_ms": round(
+                    (time.perf_counter() - started) * 1000, 2
+                ),
+                "settlement_succeeded": succeeded,
+            },
+        )
+
+
 async def finalize_ehbp_actual_cost_payment(
     key: ApiKey,
     session: AsyncSession,
@@ -879,6 +918,7 @@ async def forward_ehbp_request(
                 f"EHBP upstream {provider_type} returned {resp.status_code} "
                 f"for model {model_obj.id}: {body_preview[:200] or '<empty>'}",
                 status_code=resp.status_code,
+                from_upstream_response=True,
             )
 
         # Check for usage metrics in response headers (non-streaming) or
@@ -928,13 +968,18 @@ async def forward_ehbp_request(
             )
             billing_model = cost_info.pop("actual_model", None) or model_obj.id
             computed_msats = int(cost_info["total_msats"])
-            charged_msats = await finalize_ehbp_actual_cost_payment(
-                key,
-                session,
-                max_cost_for_model,
-                billing_model,
-                cost_info,
-                reservation_snapshot,
+            charged_msats = await _record_ehbp_settlement(
+                finalize_ehbp_actual_cost_payment(
+                    key,
+                    session,
+                    max_cost_for_model,
+                    billing_model,
+                    cost_info,
+                    reservation_snapshot,
+                ),
+                key=key,
+                model_id=billing_model,
+                settlement_type="ehbp_usage",
             )
             cost_data = {
                 **cost_info,
@@ -954,12 +999,17 @@ async def forward_ehbp_request(
                     "key_hash": key.hashed_key[:8] + "...",
                 },
             )
-            charged_msats = await finalize_ehbp_max_cost_payment(
-                key,
-                session,
-                max_cost_for_model,
-                model_obj.id,
-                reservation_snapshot,
+            charged_msats = await _record_ehbp_settlement(
+                finalize_ehbp_max_cost_payment(
+                    key,
+                    session,
+                    max_cost_for_model,
+                    model_obj.id,
+                    reservation_snapshot,
+                ),
+                key=key,
+                model_id=model_obj.id,
+                settlement_type="ehbp_unmeasured_release",
             )
             cost_data = {
                 "total_msats": charged_msats,
@@ -1031,7 +1081,11 @@ async def forward_ehbp_request(
                 "traceback": tb,
             },
         )
-        raise UpstreamError("An unexpected server error occurred", status_code=500)
+        raise UpstreamError(
+            "An unexpected server error occurred",
+            status_code=500,
+            scope=ERROR_SCOPE_NODE,
+        )
 
 
 async def forward_ehbp_x_cashu_request(
@@ -1127,15 +1181,21 @@ async def forward_ehbp_x_cashu_request(
                             "error": {
                                 "message": "Error forwarding EHBP request to upstream",
                                 "type": "upstream_error",
-                                "code": resp.status_code,
+                                # Pass the status as the code so a provider 4xx
+                                # keeps the legacy numeric ``code``.
+                                "code": client_code_for_upstream_error(
+                                    resp.status_code, resp.status_code
+                                ),
+                                "upstream_status": resp.status_code,
                                 "refund_token": refund_token,
                             }
                         }
                     ),
-                    status_code=resp.status_code,
+                    status_code=client_status_for_upstream_error(resp.status_code),
                     media_type="application/json",
                 )
                 error_response.headers["X-Cashu"] = refund_token
+                error_response.headers[ERROR_SCOPE_HEADER] = ERROR_SCOPE_UPSTREAM
                 return error_response
 
             # Compute refund from actual usage when available — check both
@@ -1241,9 +1301,10 @@ async def forward_ehbp_x_cashu_request(
                 error_response = create_error_response(
                     "upstream_timeout",
                     str(e),
-                    504,
+                    UPSTREAM_ERROR_STATUS,
                     request=request,
                     code="UPSTREAM_TIMEOUT",
+                    error_scope=ERROR_SCOPE_UPSTREAM,
                 )
                 error_response.headers["X-Cashu"] = refund_token
                 return error_response
@@ -1259,9 +1320,10 @@ async def forward_ehbp_x_cashu_request(
         return create_error_response(
             "upstream_timeout",
             str(e),
-            504,
+            UPSTREAM_ERROR_STATUS,
             request=request,
             code="UPSTREAM_TIMEOUT",
+            error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
     except Exception as e:
@@ -1283,8 +1345,9 @@ async def forward_ehbp_x_cashu_request(
                 error_response = create_error_response(
                     "upstream_error",
                     "EHBP request failed after token redemption; refunded token",
-                    502,
+                    UPSTREAM_ERROR_STATUS,
                     request=request,
+                    error_scope=ERROR_SCOPE_UPSTREAM,
                 )
                 error_response.headers["X-Cashu"] = refund_token
                 return error_response
@@ -1351,7 +1414,8 @@ async def forward_ehbp_x_cashu_request(
         return create_error_response(
             "cashu_error" if not redeemed else "upstream_error",
             f"EHBP X-Cashu request failed: {error_message}",
-            400 if not redeemed else 502,
+            400 if not redeemed else UPSTREAM_ERROR_STATUS,
             request=request,
             token=x_cashu_token if not redeemed else None,
+            error_scope=None if not redeemed else ERROR_SCOPE_UPSTREAM,
         )
