@@ -655,6 +655,44 @@ class ModelTestRequest(V2BaseModel):
     request_data: dict
 
 
+def _model_test_target(
+    provider: UpstreamProviderRow,
+    model_row: ModelRow,
+    endpoint_path: str,
+    model_id: str,
+) -> tuple[str, dict[str, str], dict[str, str], str]:
+    """URL, headers, query params and model id for a model test, shaped like
+    the proxy's.
+
+    With the provider's live upstream instance, use the hooks
+    ``forward_request`` uses (Azure's deployment path, ``api-key`` and
+    ``api-version``, Gemini's ``/openai`` base, Ollama's ``/v1``, model-name
+    transforms). Without one, assume a plain OpenAI-compatible base URL.
+    """
+    from ..proxy import get_upstreams
+
+    upstream = next(
+        (u for u in get_upstreams() if getattr(u, "db_id", None) == provider.id),
+        None,
+    )
+    if upstream is None:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {provider.api_key}",
+        }
+        url = f"{provider.base_url.rstrip('/')}/{endpoint_path}"
+        return url, headers, {}, model_id
+
+    model_obj = _build_model_from_row(model_row, False, provider.provider_fee)
+    path = upstream.normalize_request_path(f"v1/{endpoint_path}", model_obj)
+    return (
+        upstream.build_request_url(path, model_obj),
+        upstream.prepare_headers({"content-type": "application/json"}),
+        dict(upstream.prepare_params(path, None)),
+        upstream.transform_model_name(model_id),
+    )
+
+
 @models_router.post("/api/models/test", dependencies=[Depends(_require_admin_api)])
 async def test_model(
     payload: ModelTestRequest,
@@ -688,8 +726,10 @@ async def test_model(
         raise HTTPException(status_code=400, detail="Unsupported endpoint_type")
 
     actual_model_id = model_row.forwarded_model_id or model_row.id
-    request_data = dict(payload.request_data)
-    request_data["model"] = actual_model_id
+    url, headers, params, upstream_model_id = _model_test_target(
+        provider, model_row, endpoint_path, actual_model_id
+    )
+    request_data = {**payload.request_data, "model": upstream_model_id}
 
     try:
         request_size = len(json.dumps(request_data).encode("utf-8"))
@@ -697,9 +737,6 @@ async def test_model(
         raise HTTPException(status_code=400, detail="Invalid request_data")
     if request_size > _MODEL_TEST_MAX_REQUEST_BYTES:
         raise HTTPException(status_code=413, detail="request_data too large")
-
-    base_url = provider.base_url.rstrip("/")
-    url = f"{base_url}/{endpoint_path}"
 
     logger.info(
         "admin model test",
@@ -712,14 +749,11 @@ async def test_model(
         },
     )
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {provider.api_key}",
-    }
-
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, json=request_data, headers=headers)
+            response = await client.post(
+                url, json=request_data, headers=headers, params=params
+            )
             try:
                 response_data = response.json()
             except Exception:

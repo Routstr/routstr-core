@@ -179,6 +179,19 @@ class ProbeResult:
     chat_payload: dict[str, Any] | None = None
     chat_error: str | None = None
     chat_latency_ms: float | None = None
+    # ``max_completion_tokens`` once the upstream rejected ``max_tokens``.
+    token_limit_field: str = "max_tokens"
+
+
+def wants_max_completion_tokens(status: int | None, payload: Any) -> bool:
+    """Whether a 400 names ``max_completion_tokens`` as the field to use.
+
+    OpenAI's o-series and gpt-5 reject ``max_tokens`` on chat completions with
+    "Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens'".
+    """
+    if status != 400 or payload is None:
+        return False
+    return "max_completion_tokens" in json.dumps(payload, default=str)
 
 
 @dataclass
@@ -260,8 +273,10 @@ async def probe_upstream(
 ) -> ProbeResult:
     """Call the upstream's ``/models`` and a one-token completion.
 
-    Each HTTP call, including its body read, has an elapsed-time deadline.
-    A transport failure is a ``fail`` row, not a failed admin request.
+    A completion refused with a 400 naming ``max_completion_tokens`` is
+    retried once with that field (OpenAI o-series, gpt-5). Each HTTP call,
+    including its body read, has an elapsed-time deadline. A transport
+    failure is a ``fail`` row, not a failed admin request.
     """
     shape = probe_shape(base_url, api_key, upstream, model)
     result = ProbeResult(
@@ -300,49 +315,80 @@ async def probe_upstream(
             result.models_error = f"{type(exc).__name__}: {exc}"
             result.models_latency_ms = round((time.monotonic() - started) * 1000, 2)
 
-        started = time.monotonic()
         if not model_id:
             return result
-        request_body = {
-            "model": model_id,
-            "messages": [{"role": "user", "content": PROBE_PROMPT}],
-            "max_tokens": PROBE_MAX_TOKENS,
-            "stream": False,
-        }
-        if endpoint_tag:
-            request_body["provider"] = {
-                "order": [endpoint_tag],
-                "allow_fallbacks": False,
-            }
-        try:
-            async with asyncio.timeout(timeout):
-                response = await client.post(
-                    result.chat_url,
-                    json=shape_body(request_body, upstream, model),
-                    headers=headers,
-                    params=shape.chat_params,
-                )
-            result.chat_status = response.status_code
-            result.chat_latency_ms = round((time.monotonic() - started) * 1000, 2)
-            try:
-                payload = response.json()
-            except Exception as exc:  # noqa: BLE001 - any decode failure is the signal
-                result.chat_error = f"{type(exc).__name__}: {exc}"
-            else:
-                if isinstance(payload, dict):
-                    result.chat_payload = payload
-                else:
-                    result.chat_error = (
-                        f"expected a JSON object, got {type(payload).__name__}"
-                    )
-        except Exception as exc:  # noqa: BLE001 - transport failure is a row status
-            result.chat_error = f"{type(exc).__name__}: {exc}"
-            result.chat_latency_ms = round((time.monotonic() - started) * 1000, 2)
+        await _probe_chat(
+            client, result, model_id, shape, timeout, upstream, model, "max_tokens"
+        )
+        if wants_max_completion_tokens(result.chat_status, result.chat_payload):
+            await _probe_chat(
+                client,
+                result,
+                model_id,
+                shape,
+                timeout,
+                upstream,
+                model,
+                "max_completion_tokens",
+            )
     finally:
         if owns_client:
             await client.aclose()
 
     return result
+
+
+async def _probe_chat(
+    client: httpx.AsyncClient,
+    result: ProbeResult,
+    model_id: str,
+    shape: ProbeShape,
+    timeout: float,
+    upstream: "BaseUpstreamProvider | None",
+    model: "Model | None",
+    token_field: str,
+) -> None:
+    """Send the one-token completion and record its outcome on ``result``."""
+    request_body: dict[str, Any] = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": PROBE_PROMPT}],
+        token_field: PROBE_MAX_TOKENS,
+        "stream": False,
+    }
+    if result.endpoint_tag:
+        request_body["provider"] = {
+            "order": [result.endpoint_tag],
+            "allow_fallbacks": False,
+        }
+    result.token_limit_field = token_field
+    result.chat_status = None
+    result.chat_payload = None
+    result.chat_error = None
+    started = time.monotonic()
+    try:
+        async with asyncio.timeout(timeout):
+            response = await client.post(
+                result.chat_url,
+                json=shape_body(request_body, upstream, model),
+                headers=shape.headers,
+                params=shape.chat_params,
+            )
+        result.chat_status = response.status_code
+        result.chat_latency_ms = round((time.monotonic() - started) * 1000, 2)
+        try:
+            payload = response.json()
+        except Exception as exc:  # noqa: BLE001 - any decode failure is the signal
+            result.chat_error = f"{type(exc).__name__}: {exc}"
+        else:
+            if isinstance(payload, dict):
+                result.chat_payload = payload
+            else:
+                result.chat_error = (
+                    f"expected a JSON object, got {type(payload).__name__}"
+                )
+    except Exception as exc:  # noqa: BLE001 - transport failure is a row status
+        result.chat_error = f"{type(exc).__name__}: {exc}"
+        result.chat_latency_ms = round((time.monotonic() - started) * 1000, 2)
 
 
 # Row builders are pure: the network lives only in ``probe_upstream`` and
@@ -817,13 +863,15 @@ async def run_live_checks(
     check_cache: bool = True,
     endpoint_tag: str | None = None,
     upstream: "BaseUpstreamProvider | None" = None,
+    advertised_model: "Model | None" = None,
 ) -> list[dict[str, Any]]:
     """Probe one upstream and build the live/derived rows.
 
     ``check_cache`` adds the prompt-cache and margin rows, which cost two or
     three more completions against a long prompt. ``upstream`` shapes the
     probes like the proxy's own requests; without it they assume a plain
-    OpenAI-compatible base URL.
+    OpenAI-compatible base URL. ``advertised_model`` carries a pinned path's
+    own endpoint rates for the margin row to compare against ``model``'s.
     """
     probe = await probe_upstream(
         base_url,
@@ -927,6 +975,8 @@ async def run_live_checks(
                 pricing_known=pricing_known,
                 endpoint_tag=endpoint_tag,
                 upstream=upstream,
+                advertised_model=advertised_model,
+                token_limit_field=probe.token_limit_field,
             )
         )
     return rows

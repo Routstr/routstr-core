@@ -88,6 +88,16 @@ SHAPES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_proxy_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``reinitialize_upstreams`` rebinds module globals; restore them after
+    each test so the provider types seeded here never leak into others."""
+    from routstr import proxy
+
+    for name in ("_upstreams", "_provider_map", "_unique_models"):
+        monkeypatch.setattr(proxy, name, getattr(proxy, name).copy())
+
+
 async def _seed(session: AsyncSession, shape: Shape) -> int:
     provider = UpstreamProviderRow(
         provider_type=shape.provider_type,
@@ -183,3 +193,39 @@ def test_shape_body_keeps_a_single_cache_control_marker() -> None:
 
     assert json.dumps(shaped).count('"cache_control"') == 1
     assert shaped["model"] == "claude-sonnet-4-5-20250929"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", SHAPES, ids=[s.provider_type for s in SHAPES])
+async def test_model_test_matches_proxy_request(
+    shape: Shape,
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """``POST /api/models/test`` reaches the upstream the way the proxy does."""
+    with respx.mock(assert_all_called=False) as mock:
+        await _seed(integration_session, shape)
+        chat_route = mock.post(shape.chat_url).mock(
+            return_value=Response(200, json=_mock_chat_response(model=shape.model_id))
+        )
+
+        resp = await integration_client.post(
+            "/api/models/test",
+            headers=_admin_headers(),
+            json={
+                "model_id": shape.model_id,
+                "endpoint_type": "chat-completions",
+                "request_data": {"messages": [{"role": "user", "content": "hi"}]},
+            },
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True, resp.json()
+    assert chat_route.call_count == 1
+    request = chat_route.calls[0].request
+    header, value = shape.auth_header
+    assert request.headers.get(header) == value
+    for key, expected in shape.params.items():
+        assert request.url.params.get(key) == expected
+    assert json.loads(request.content)["model"] == shape.upstream_model

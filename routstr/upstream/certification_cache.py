@@ -99,7 +99,11 @@ class CacheProbeResult:
 
 
 def _request_body(
-    model_id: str, prefix: str, fmt: str, endpoint_tag: str | None
+    model_id: str,
+    prefix: str,
+    fmt: str,
+    endpoint_tag: str | None,
+    token_field: str = "max_tokens",
 ) -> dict[str, Any]:
     system: Any
     if fmt == "cache_control":
@@ -118,7 +122,7 @@ def _request_body(
             {"role": "system", "content": system},
             {"role": "user", "content": CACHE_PROBE_QUESTION},
         ],
-        "max_tokens": PROBE_MAX_TOKENS,
+        token_field: PROBE_MAX_TOKENS,
         "stream": False,
     }
     if endpoint_tag:
@@ -184,6 +188,7 @@ async def probe_cache(
     timeout: float = PROBE_TIMEOUT_SECONDS,
     upstream: "BaseUpstreamProvider | None" = None,
     model: "Model | None" = None,
+    token_limit_field: str = "max_tokens",
 ) -> CacheProbeResult:
     """Send the same long prompt twice.
 
@@ -202,7 +207,7 @@ async def probe_cache(
     async def post(
         fmt: str,
     ) -> tuple[int | None, dict[str, Any] | None, str | None, float]:
-        body = _request_body(model_id, prefix, fmt, endpoint_tag)
+        body = _request_body(model_id, prefix, fmt, endpoint_tag, token_limit_field)
         return await _post_completion(
             http,
             result.chat_url,
@@ -441,6 +446,7 @@ def cost_margin_row(
     provider_fee: float,
     sats_to_usd: float,
     pricing_known: bool = True,
+    advertised_model: Model | None = None,
 ) -> dict[str, Any]:
     """Configured token pricing must cover what the upstream reports charging.
 
@@ -450,11 +456,20 @@ def cost_margin_row(
     that omit cost, the served ``/v1/models`` list), so a sample where it
     falls below the fee-adjusted upstream cost means those paths underprice.
     Upstreams that report no cost give no sample and the row stays a warn.
+
+    ``model`` carries the pricing the proxy reserves and token-bills with. On
+    a pinned path, ``advertised_model`` carries the endpoint's own rates; a
+    covered margin whose advertised rates differ from the billed ones is a
+    warn, since ``/v1/models/paths`` then shows a price the node does not bill.
     """
+    advertised_pricing = (
+        advertised_model.sats_pricing if advertised_model is not None else None
+    )
     evidence: dict[str, Any] = {
         "model_id": model.id,
         "provider_fee": provider_fee,
         "sats_usd_price": sats_to_usd,
+        "pricing_basis": "model pricing the proxy reserves and token-bills with",
         "samples": [],
     }
     if model.sats_pricing is None or not pricing_known:
@@ -468,6 +483,7 @@ def cost_margin_row(
 
     samples: list[dict[str, Any]] = []
     short: list[str] = []
+    mismatched: list[str] = []
     for payload in payloads:
         if not isinstance(payload, dict):
             continue
@@ -480,6 +496,11 @@ def cost_margin_row(
             upstream_total = _expected_usd_msats(
                 reported_usd, provider_fee, sats_to_usd
             )
+            advertised_total = (
+                _expected_token_msats(advertised_pricing, usage)[0]
+                if advertised_pricing is not None
+                else None
+            )
         except (ValueError, OverflowError) as exc:
             evidence["error"] = f"{type(exc).__name__}: {exc}"
             return certification_row(
@@ -489,14 +510,17 @@ def cost_margin_row(
                 f"The margin could not be derived: {exc}.",
                 evidence,
             )
-        samples.append(
-            {
-                "usage": usage.dict(),
-                "reported_usd": reported_usd,
-                "upstream_msats_with_fee": upstream_total,
-                "configured_msats": configured_total,
-            }
-        )
+        sample: dict[str, Any] = {
+            "usage": usage.dict(),
+            "reported_usd": reported_usd,
+            "upstream_msats_with_fee": upstream_total,
+            "configured_msats": configured_total,
+        }
+        if advertised_total is not None:
+            sample["advertised_msats"] = advertised_total
+            if abs(advertised_total - configured_total) > COST_TOLERANCE_MSATS:
+                mismatched.append(f"{advertised_total} vs {configured_total}")
+        samples.append(sample)
         if configured_total + COST_TOLERANCE_MSATS < upstream_total:
             short.append(f"{configured_total} < {upstream_total}")
     evidence["samples"] = samples
@@ -519,6 +543,18 @@ def cost_margin_row(
             "Configured pricing is below the upstream's reported cost "
             f"(configured < upstream msats: {'; '.join(short)}); token-billed "
             "requests lose money.",
+            evidence,
+        )
+    if mismatched:
+        return certification_row(
+            ROW_MARGIN,
+            STATUS_WARN,
+            TITLE_MARGIN,
+            f"Configured pricing covers the upstream's reported cost on "
+            f"{len(samples)} sampled completion(s), but this path advertises "
+            f"different endpoint rates (advertised vs billed msats: "
+            f"{'; '.join(mismatched)}); the proxy reserves and token-bills "
+            "pinned requests with the model's own pricing.",
             evidence,
         )
     return certification_row(
@@ -561,6 +597,8 @@ async def run_cache_checks(
     pricing_known: bool = True,
     endpoint_tag: str | None = None,
     upstream: "BaseUpstreamProvider | None" = None,
+    advertised_model: Model | None = None,
+    token_limit_field: str = "max_tokens",
 ) -> list[dict[str, Any]]:
     """Run the cache probe and build the three cache/margin rows."""
     probe = await probe_cache(
@@ -572,6 +610,7 @@ async def run_cache_checks(
         timeout=timeout,
         upstream=upstream,
         model=model,
+        token_limit_field=token_limit_field,
     )
     cost_data = await _price_payload(probe.second_payload, model, provider_fee)
     return [
@@ -595,6 +634,7 @@ async def run_cache_checks(
                 provider_fee=provider_fee,
                 sats_to_usd=sats_to_usd,
                 pricing_known=pricing_known,
+                advertised_model=advertised_model,
             ),
         ),
     ]
