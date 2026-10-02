@@ -20,9 +20,6 @@ models_router = APIRouter()
 
 _MODEL_TEST_ENDPOINT_PATHS = {
     "chat-completions": "chat/completions",
-    "completions": "completions",
-    "embeddings": "embeddings",
-    "responses": "responses",
 }
 
 # Cap the caller-supplied test payload to avoid forwarding oversized bodies

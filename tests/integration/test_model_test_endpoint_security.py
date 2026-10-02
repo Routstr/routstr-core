@@ -31,9 +31,11 @@ async def test_model_test_endpoint_requires_admin_auth(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint_type", ["../../abuse", "embeddings"])
 async def test_model_test_endpoint_rejects_unsupported_endpoint_type(
     integration_client: AsyncClient,
     integration_session: Any,
+    endpoint_type: str,
 ) -> None:
     admin_token = "test-admin-token-model-test"
     admin_sessions[admin_token] = int(time.time()) + 3600
@@ -71,7 +73,7 @@ async def test_model_test_endpoint_rejects_unsupported_endpoint_type(
                 "/api/models/test",
                 json={
                     "model_id": "model-a",
-                    "endpoint_type": "../../abuse",
+                    "endpoint_type": endpoint_type,
                     "request_data": {"messages": []},
                 },
             )
