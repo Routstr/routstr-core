@@ -106,6 +106,19 @@ def is_warming_up() -> bool:
     return _warming_up
 
 
+def models_warming_up_response(request: Request) -> Response:
+    response = create_error_response(
+        "service_unavailable",
+        "Models are still loading, retry shortly",
+        503,
+        request=request,
+        code=MODELS_WARMING_UP,
+        error_scope=ERROR_SCOPE_NODE,
+    )
+    response.headers["Retry-After"] = str(WARMING_UP_RETRY_AFTER_SECONDS)
+    return response
+
+
 async def reinitialize_upstreams() -> None:
     """Re-initialize upstream providers from database (called after admin changes)."""
     global _upstreams
@@ -671,16 +684,7 @@ async def _proxy(
 
     if not candidates:
         if is_warming_up():
-            response = create_error_response(
-                "service_unavailable",
-                "Models are still loading, retry shortly",
-                503,
-                request=request,
-                code=MODELS_WARMING_UP,
-                error_scope=ERROR_SCOPE_NODE,
-            )
-            response.headers["Retry-After"] = str(WARMING_UP_RETRY_AFTER_SECONDS)
-            return response
+            return models_warming_up_response(request)
         return create_error_response(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
         )

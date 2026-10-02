@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import Response
 
 from routstr import proxy as proxy_module
 from routstr.core.error_scope import ERROR_SCOPE_HEADER, ERROR_SCOPE_NODE
@@ -56,3 +57,26 @@ async def test_failed_initialization_still_ends_warm_up() -> None:
         await proxy_module.initialize_upstreams()
 
     assert not proxy_module.is_warming_up()
+
+
+@pytest.mark.asyncio
+async def test_models_list_while_warming_up_is_retryable_503() -> None:
+    from routstr.payment.models import models
+
+    proxy_module.mark_warming_up()
+
+    response = await models(_chat_request(), MagicMock())
+
+    assert isinstance(response, Response)
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "2"
+
+
+@pytest.mark.asyncio
+async def test_models_list_after_warm_up_returns_data() -> None:
+    from routstr.payment.models import models
+
+    with patch.object(proxy_module, "get_unique_models", return_value=[]):
+        response = await models(_chat_request(), MagicMock())
+
+    assert response == {"data": []}
