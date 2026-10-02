@@ -37,11 +37,14 @@ from .certification import (
     _reported_usd_cost,
     _token_rates,
     certification_row,
+    probe_shape,
     safe_row,
+    shape_body,
 )
 
 if TYPE_CHECKING:
     from ..payment.models import Model
+    from .base import BaseUpstreamProvider
 
 logger = get_logger(__name__)
 
@@ -129,14 +132,15 @@ def _request_body(
 async def _post_completion(
     client: httpx.AsyncClient,
     url: str,
-    body: dict[str, Any],
+    body: Any,
     headers: dict[str, str],
+    params: dict[str, str],
     timeout: float,
 ) -> tuple[int | None, dict[str, Any] | None, str | None, float]:
     started = time.monotonic()
     try:
         async with asyncio.timeout(timeout):
-            response = await client.post(url, json=body, headers=headers)
+            response = await client.post(url, json=body, headers=headers, params=params)
     except Exception as exc:  # noqa: BLE001 - transport failure is a row status
         latency = round((time.monotonic() - started) * 1000, 2)
         return None, None, f"{type(exc).__name__}: {exc}", latency
@@ -178,6 +182,8 @@ async def probe_cache(
     endpoint_tag: str | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = PROBE_TIMEOUT_SECONDS,
+    upstream: "BaseUpstreamProvider | None" = None,
+    model: "Model | None" = None,
 ) -> CacheProbeResult:
     """Send the same long prompt twice.
 
@@ -186,49 +192,39 @@ async def probe_cache(
     retry on HTTP 400/422, and the second call mirrors whichever format
     succeeded. Each call's elapsed deadline includes the response body.
     """
-    base = base_url.rstrip("/")
-    result = CacheProbeResult(
-        chat_url=f"{base}/chat/completions", endpoint_tag=endpoint_tag
-    )
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    shape = probe_shape(base_url, api_key, upstream, model)
+    result = CacheProbeResult(chat_url=shape.chat_url, endpoint_tag=endpoint_tag)
     prefix = cache_probe_prefix()
 
     owns_client = client is None
-    if client is None:
-        client = httpx.AsyncClient(timeout=timeout)
-    try:
-        first = await _post_completion(
-            client,
+    http = client if client is not None else httpx.AsyncClient(timeout=timeout)
+
+    async def post(
+        fmt: str,
+    ) -> tuple[int | None, dict[str, Any] | None, str | None, float]:
+        body = _request_body(model_id, prefix, fmt, endpoint_tag)
+        return await _post_completion(
+            http,
             result.chat_url,
-            _request_body(model_id, prefix, "cache_control", endpoint_tag),
-            headers,
+            shape_body(body, upstream, model),
+            shape.headers,
+            shape.chat_params,
             timeout,
         )
+
+    try:
+        first = await post("cache_control")
         if first[0] in (400, 422):
             result.request_format = "plain"
-            first = await _post_completion(
-                client,
-                result.chat_url,
-                _request_body(model_id, prefix, "plain", endpoint_tag),
-                headers,
-                timeout,
-            )
+            first = await post("plain")
         _record(result, first)
         if not _is_2xx(first[0]):
             return result
-        second = await _post_completion(
-            client,
-            result.chat_url,
-            _request_body(model_id, prefix, result.request_format, endpoint_tag),
-            headers,
-            timeout,
-        )
+        second = await post(result.request_format)
         _record(result, second)
     finally:
         if owns_client:
-            await client.aclose()
+            await http.aclose()
     return result
 
 
@@ -564,6 +560,7 @@ async def run_cache_checks(
     timeout: float = PROBE_TIMEOUT_SECONDS,
     pricing_known: bool = True,
     endpoint_tag: str | None = None,
+    upstream: "BaseUpstreamProvider | None" = None,
 ) -> list[dict[str, Any]]:
     """Run the cache probe and build the three cache/margin rows."""
     probe = await probe_cache(
@@ -573,6 +570,8 @@ async def run_cache_checks(
         endpoint_tag=endpoint_tag,
         client=client,
         timeout=timeout,
+        upstream=upstream,
+        model=model,
     )
     cost_data = await _price_payload(probe.second_payload, model, provider_fee)
     return [

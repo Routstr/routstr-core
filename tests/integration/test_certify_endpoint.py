@@ -22,6 +22,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from routstr.core.admin import admin_sessions
 from routstr.core.db import ModelPathRow, ModelRow, UpstreamProviderRow
 from routstr.proxy import reinitialize_upstreams
+from routstr.upstream.generic import GenericUpstreamProvider
 from routstr.upstream.model_paths import encode_model_path
 
 
@@ -805,9 +806,7 @@ async def test_certify_explicit_discovered_model_without_override(
         0.0005,
     )
 
-    class FakeUpstream:
-        db_id = provider.id
-
+    class FakeUpstream(GenericUpstreamProvider):
         def get_cached_models(self) -> list[Model]:
             return [remote_model]
 
@@ -820,7 +819,9 @@ async def test_certify_explicit_discovered_model_without_override(
         return_value=Response(200, json=_mock_chat_response(model="remote-model"))
     )
 
-    with patch("routstr.proxy.get_upstreams", return_value=[FakeUpstream()]):
+    fake = FakeUpstream(base_url=provider.base_url, api_key=provider.api_key)
+    fake.db_id = provider.id
+    with patch("routstr.proxy.get_upstreams", return_value=[fake]):
         resp = await integration_client.post(
             f"/admin/api/upstream-providers/{provider.id}/certify",
             headers=_admin_headers(),

@@ -1523,7 +1523,6 @@ async def get_upstream_provider_report(provider_id: str) -> dict[str, object]:
 class CertifyRequest(BaseModel):
     model_id: str | None = None
     model_path: str | None = None
-    timeout_seconds: float | None = None
     check_cache: bool = True
 
 
@@ -1538,8 +1537,9 @@ async def certify_upstream_provider(
 
     Unlike the read-only ``GET …/report``, this probes the upstream over the
     network and runs the node's cost engine on the real response. It never
-    enters the billing path, so it costs at most one completion's worth of
-    upstream credit and nothing from the node's wallet.
+    enters the billing path, so it costs nothing from the node's wallet. Its
+    upstream spend is a one-token completion, plus two or three one-token
+    completions on a ~4.4k-token prompt when ``check_cache`` is set.
 
     Returns the read-only report's four ``pricing.*`` rows (re-derived here so
     the certification is self-contained), the live rows from
@@ -1547,7 +1547,6 @@ async def certify_upstream_provider(
     operator-facing goals.
     """
     from ..upstream.certification import (
-        MAX_PROBE_TIMEOUT_SECONDS,
         PROBE_TIMEOUT_SECONDS,
         build_checklist,
         run_live_checks,
@@ -1565,6 +1564,7 @@ async def certify_upstream_provider(
         enabled_rows = list(result.all())
 
         endpoint_tag: str | None = None
+        path_model_id: str | None = None
         selected_path: ModelPathRow | None = None
         if payload.model_path is not None:
             from ..upstream.model_paths import decode_model_path
@@ -1585,6 +1585,7 @@ async def certify_upstream_provider(
                     detail="Model path is not available for this provider",
                 )
             endpoint_tag = selector.endpoint_tag
+            path_model_id = selector.model_id
 
     evaluations = [
         _evaluate_model_row(row, provider, provider_pk) for row in enabled_rows
@@ -1609,6 +1610,12 @@ async def certify_upstream_provider(
 
     from ..proxy import get_candidates, get_upstreams
 
+    # The live upstream instance shapes the probes exactly like the proxy's
+    # own requests (paths, auth headers, query params, model-name transforms).
+    upstream_obj = next(
+        (u for u in get_upstreams() if getattr(u, "db_id", None) == provider_pk),
+        None,
+    )
     model_obj = None
     if model_id:
         try:
@@ -1633,20 +1640,15 @@ async def certify_upstream_provider(
         # The active upstream cache carries the same fee-adjusted USD and sats
         # pricing used by the proxy, so it is the authoritative fallback for a
         # pre-configuration certification probe.
-        if model_obj is None:
-            for upstream in get_upstreams():
-                if getattr(upstream, "db_id", None) != provider_pk:
-                    continue
-                model_obj = next(
-                    (
-                        model
-                        for model in upstream.get_cached_models()
-                        if model.id == model_id or model.forwarded_model_id == model_id
-                    ),
-                    None,
-                )
-                if model_obj is not None:
-                    break
+        if model_obj is None and upstream_obj is not None:
+            model_obj = next(
+                (
+                    model
+                    for model in upstream_obj.get_cached_models()
+                    if model.id == model_id or model.forwarded_model_id == model_id
+                ),
+                None,
+            )
     if selected_path is not None:
         from ..upstream.model_paths import exposed_model_id
 
@@ -1654,7 +1656,8 @@ async def certify_upstream_provider(
         if (
             payload.model_id is None
             or selected_id is None
-            or selected_id.lower() != selector.model_id.lower()
+            or path_model_id is None
+            or selected_id.lower() != path_model_id.lower()
         ):
             raise HTTPException(
                 status_code=400,
@@ -1726,23 +1729,18 @@ async def certify_upstream_provider(
                 provider.provider_fee,
                 sats_to_usd,
             )
-        # Clamp the admin-supplied timeout per upstream call. The run makes up
-        # to five calls, so the request can stay open for up to five times it.
-        requested = (
-            payload.timeout_seconds
-            if payload.timeout_seconds is not None
-            else PROBE_TIMEOUT_SECONDS
-        )
-        timeout = min(max(requested, 1.0), MAX_PROBE_TIMEOUT_SECONDS)
+        # The timeout applies per upstream call. The run makes up to five
+        # calls, so the request can stay open for up to five times it.
         live_rows = await run_live_checks(
             provider.base_url,
             provider.api_key,
             model_obj,
             provider_fee=provider.provider_fee,
             sats_to_usd=sats_to_usd,
-            timeout=timeout,
+            timeout=PROBE_TIMEOUT_SECONDS,
             check_cache=payload.check_cache,
             endpoint_tag=endpoint_tag,
+            upstream=upstream_obj,
         )
 
     rows = pricing_rows + live_rows

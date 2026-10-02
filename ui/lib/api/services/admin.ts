@@ -79,7 +79,6 @@ export type ProviderCertification = z.infer<typeof ProviderCertificationSchema>;
 export type CertifyProviderRequest = {
   model_id?: string;
   model_path?: string;
-  timeout_seconds?: number;
   check_cache?: boolean;
 };
 

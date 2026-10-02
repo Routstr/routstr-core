@@ -145,7 +145,9 @@ async def test_standalone_preserves_fee_cache_rates_and_usd_fee(
             return httpx.Response(200, json={"data": [{"id": "test-model"}]})
         return httpx.Response(200, json={"model": "test-model", "usage": usage})
 
-    kwargs = {"prompt_price": 1e-6, "completion_price": 2e-6} if explicit else {}
+    kwargs: dict[str, Any] = (
+        {"prompt_price": 1e-6, "completion_price": 2e-6} if explicit else {}
+    )
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         result = await certify_upstream_url(
             "https://mock.example/v1",

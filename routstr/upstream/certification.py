@@ -4,7 +4,9 @@ Extends the read-only pricing rows, which never touch the network, with the
 ones that must: a ``/models`` heartbeat and a one-token completion.
 
 Probes call the upstream directly with ``httpx``, never through the node's
-billing path — no reservation, no Cashu, at most one token of upstream spend.
+billing path — no reservation, no Cashu. Upstream spend is one one-token
+completion, plus two or three one-token completions on a ~4.4k-token prompt
+when the cache checks are enabled (per certified model path).
 They sit behind ``POST …/certify`` rather than the read-only ``GET …/report``
 because they can block for the length of the timeout.
 """
@@ -25,13 +27,14 @@ from urllib.parse import urlparse
 import httpx
 
 from ..core.logging import get_logger
-from ..payment.cost_calculation import calculate_cost
+from ..payment.cost_calculation import _resolve_usd_cost, calculate_cost
 from ..payment.rates import coerce_rate
 from ..payment.usage import normalize_usage
 from .model_paths import is_openrouter_base_url
 
 if TYPE_CHECKING:
     from ..payment.models import Model
+    from .base import BaseUpstreamProvider
 
 logger = get_logger(__name__)
 
@@ -43,9 +46,6 @@ TICKS = {STATUS_OK: "☑️", STATUS_WARN: "⚠️", STATUS_FAIL: "❌"}
 
 # Bounded so a dead upstream fails the row rather than wedging the request.
 PROBE_TIMEOUT_SECONDS = 15.0
-
-# Ceiling for the caller-supplied timeout override.
-MAX_PROBE_TIMEOUT_SECONDS = 60.0
 
 # The cheapest request that still exercises the usage/cost path.
 PROBE_MAX_TOKENS = 1
@@ -181,6 +181,72 @@ class ProbeResult:
     chat_latency_ms: float | None = None
 
 
+@dataclass
+class ProbeShape:
+    """Where the probe calls go and how they are authenticated."""
+
+    models_url: str
+    chat_url: str
+    headers: dict[str, str]
+    models_params: dict[str, str]
+    chat_params: dict[str, str]
+
+
+def probe_shape(
+    base_url: str,
+    api_key: str,
+    upstream: "BaseUpstreamProvider | None" = None,
+    model: "Model | None" = None,
+) -> ProbeShape:
+    """The URLs, headers and query params a probe sends.
+
+    With the node's upstream instance, use the hooks
+    ``BaseUpstreamProvider.forward_request`` uses, so the probe reaches what
+    the proxy reaches (Azure's deployment path and ``api-key``, Gemini's
+    ``/openai`` base, Ollama's ``/v1``). Without one (the CLI), assume a plain
+    OpenAI-compatible base URL.
+    """
+    if upstream is None:
+        base = base_url.rstrip("/")
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return ProbeShape(f"{base}/models", f"{base}/chat/completions", headers, {}, {})
+    chat_path = upstream.normalize_request_path("v1/chat/completions", model)
+    # Azure lists models under ``/openai/models``, not at its endpoint root.
+    if upstream.provider_type == "azure":
+        models_path = "openai/models"
+    else:
+        models_path = upstream.normalize_request_path("v1/models")
+    return ProbeShape(
+        models_url=upstream.build_request_url(models_path),
+        chat_url=upstream.build_request_url(chat_path, model),
+        headers=upstream.prepare_headers({"content-type": "application/json"}),
+        models_params=dict(upstream.prepare_params(models_path, None)),
+        chat_params=dict(upstream.prepare_params(chat_path, None)),
+    )
+
+
+def shape_body(
+    body: dict[str, Any],
+    upstream: "BaseUpstreamProvider | None" = None,
+    model: "Model | None" = None,
+) -> Any:
+    """The JSON body the proxy would forward, model-name transforms included.
+
+    ``prepare_request_body`` rewrites ``model`` from ``model.id``; the probe
+    keeps the id it chose (``forwarded_model_id`` first) and only applies the
+    provider's own name transform to it.
+    """
+    if upstream is None or model is None:
+        return body
+    shaped = upstream.prepare_request_body(json.dumps(body).encode(), model)
+    data = json.loads(shaped) if shaped else dict(body)
+    if isinstance(data, dict) and isinstance(body.get("model"), str):
+        data["model"] = upstream.transform_model_name(body["model"])
+    return data
+
+
 async def probe_upstream(
     base_url: str,
     api_key: str,
@@ -189,22 +255,22 @@ async def probe_upstream(
     endpoint_tag: str | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = PROBE_TIMEOUT_SECONDS,
+    upstream: "BaseUpstreamProvider | None" = None,
+    model: "Model | None" = None,
 ) -> ProbeResult:
     """Call the upstream's ``/models`` and a one-token completion.
 
     Each HTTP call, including its body read, has an elapsed-time deadline.
     A transport failure is a ``fail`` row, not a failed admin request.
     """
-    base = base_url.rstrip("/")
+    shape = probe_shape(base_url, api_key, upstream, model)
     result = ProbeResult(
         base_url=base_url,
-        models_url=f"{base}/models",
-        chat_url=f"{base}/chat/completions",
+        models_url=shape.models_url,
+        chat_url=shape.chat_url,
         endpoint_tag=endpoint_tag,
     )
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = shape.headers
 
     owns_client = client is None
     if client is None:
@@ -214,7 +280,9 @@ async def probe_upstream(
         started = time.monotonic()
         try:
             async with asyncio.timeout(timeout):
-                response = await client.get(result.models_url, headers=headers)
+                response = await client.get(
+                    result.models_url, headers=headers, params=shape.models_params
+                )
             result.models_status = response.status_code
             result.models_latency_ms = round((time.monotonic() - started) * 1000, 2)
             try:
@@ -249,7 +317,10 @@ async def probe_upstream(
         try:
             async with asyncio.timeout(timeout):
                 response = await client.post(
-                    result.chat_url, json=request_body, headers=headers
+                    result.chat_url,
+                    json=shape_body(request_body, upstream, model),
+                    headers=headers,
+                    params=shape.chat_params,
                 )
             result.chat_status = response.status_code
             result.chat_latency_ms = round((time.monotonic() - started) * 1000, 2)
@@ -497,27 +568,14 @@ def _truncate(value: Any, limit: int = 400) -> Any:
 def _reported_usd_cost(payload: dict[str, Any]) -> float:
     """The upstream-reported USD cost, or 0.0 when it reported none.
 
-    Mirrors ``_resolve_usd_cost``'s priority and shares ``coerce_rate``, so
-    this helper and the engine agree on *whether* a cost was reported; only
-    the arithmetic below is re-derived independently.
+    Uses the engine's own ``_resolve_usd_cost`` so both agree on *which*
+    figure is the cost (PPQ.AI BYOK bills ``upstream_inference_cost`` plus the
+    fee); only the arithmetic below is re-derived independently.
     """
     usage = payload.get("usage")
     if not isinstance(usage, dict):
         return 0.0
-    cost_details = usage.get("cost_details")
-    if isinstance(cost_details, dict):
-        total = coerce_rate(cost_details.get("total_cost"))
-        if total is not None and total > 0:
-            return total
-        inference = coerce_rate(cost_details.get("upstream_inference_cost"))
-        if inference is not None and inference > 0 and usage.get("is_byok"):
-            return inference + (coerce_rate(usage.get("cost")) or 0.0)
-    for source in (usage, payload):
-        for field in ("total_cost", "cost"):
-            value = coerce_rate(source.get(field))
-            if value is not None and value > 0:
-                return value
-    return 0.0
+    return _resolve_usd_cost(usage, payload)
 
 
 def _fixed_token_pricing_active() -> bool:
@@ -758,11 +816,14 @@ async def run_live_checks(
     pricing_known: bool = True,
     check_cache: bool = True,
     endpoint_tag: str | None = None,
+    upstream: "BaseUpstreamProvider | None" = None,
 ) -> list[dict[str, Any]]:
     """Probe one upstream and build the live/derived rows.
 
-    ``check_cache`` adds the prompt-cache and margin rows, which cost two
-    more completions against a long prompt.
+    ``check_cache`` adds the prompt-cache and margin rows, which cost two or
+    three more completions against a long prompt. ``upstream`` shapes the
+    probes like the proxy's own requests; without it they assume a plain
+    OpenAI-compatible base URL.
     """
     probe = await probe_upstream(
         base_url,
@@ -771,6 +832,8 @@ async def run_live_checks(
         endpoint_tag=endpoint_tag,
         client=client,
         timeout=timeout,
+        upstream=upstream,
+        model=model,
     )
     rows = [
         safe_row(
@@ -863,6 +926,7 @@ async def run_live_checks(
                 timeout=timeout,
                 pricing_known=pricing_known,
                 endpoint_tag=endpoint_tag,
+                upstream=upstream,
             )
         )
     return rows

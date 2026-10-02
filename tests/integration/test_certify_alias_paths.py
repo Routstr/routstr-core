@@ -12,7 +12,8 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from routstr.core.db import ModelPathRow
 from routstr.proxy import reinitialize_upstreams
 from routstr.upstream.model_paths import encode_model_path
-from tests.integration.test_certify_endpoint import (
+
+from .test_certify_endpoint import (
     _admin_headers,
     _make_provider,
     _model_row,

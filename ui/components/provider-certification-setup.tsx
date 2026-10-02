@@ -304,6 +304,12 @@ export function ProviderCertificationSetupPanel({
           Probe prompt caching and margin
         </Label>
       </div>
+      {setup.checkCache && (
+        <p className='text-muted-foreground text-xs'>
+          Sends 2–3 extra completions with a ~4.4k-token prompt per model path,
+          billed by the upstream.
+        </p>
+      )}
     </div>
   );
 }
