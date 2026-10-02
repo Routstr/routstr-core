@@ -21,16 +21,10 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
-// The testing tabs are never the landing view, so keeping them out of this
+// The testing tab is never the landing view, so keeping it out of this
 // route's chunk is what lets the navigation itself resolve quickly.
 const ModelTester = dynamic(
   () => import('@/components/model-tester').then((m) => m.ModelTester),
-  { loading: () => <Skeleton className='h-[420px] w-full' />, ssr: false }
-);
-
-const ApiEndpointTester = dynamic(
-  () =>
-    import('@/components/api-endpoint-tester').then((m) => m.ApiEndpointTester),
   { loading: () => <Skeleton className='h-[420px] w-full' />, ssr: false }
 );
 
@@ -130,14 +124,6 @@ export function ModelsPage() {
             >
               Basic Testing
             </TabsTrigger>
-            {/*
-            <TabsTrigger
-              value='test-api'
-              className='h-9 snap-start px-2 text-[13px] sm:h-10 sm:px-2.5 sm:text-sm'
-            >
-              API Endpoints
-            </TabsTrigger>
-            */}
           </TabsList>
 
           <TabsContent value='manage' className='mt-0'>
@@ -224,34 +210,6 @@ export function ModelsPage() {
               </Alert>
             ) : (
               <ModelTester models={models} />
-            )}
-          </TabsContent>
-
-          <TabsContent value='test-api' className='mt-0 space-y-3'>
-            <div className='space-y-1'>
-              <h3 className='text-base font-semibold'>
-                OpenAI Endpoint Testing
-              </h3>
-              <p className='text-muted-foreground text-sm'>
-                Validate chat, embeddings, image, audio, and model-listing
-                endpoints through the secure proxy.
-              </p>
-            </div>
-            {isLoadingModels ? (
-              <div className='space-y-4'>
-                <Skeleton className='h-[320px] w-full' />
-                <Skeleton className='h-[220px] w-full' />
-              </div>
-            ) : modelsError ? (
-              <Alert variant='destructive'>
-                <AlertCircle className='h-4 w-4' />
-                <AlertDescription>
-                  Failed to load models for API testing. Please try refreshing
-                  the page.
-                </AlertDescription>
-              </Alert>
-            ) : (
-              <ApiEndpointTester models={models} />
             )}
           </TabsContent>
         </Tabs>
