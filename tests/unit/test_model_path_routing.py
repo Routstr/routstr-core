@@ -853,7 +853,7 @@ _SATS_USD = 0.001
 _ENDPOINT_PRICING = {"prompt": 2e-6, "completion": 4e-6}
 
 
-def _priced_model() -> Any:
+def _priced_model(prompt: float = 1e-6, completion: float = 2e-6) -> Any:
     from routstr.payment.models import (
         Architecture,
         Model,
@@ -875,7 +875,7 @@ def _priced_model() -> Any:
             tokenizer="unknown",
             instruct_type=None,
         ),
-        pricing=Pricing(prompt=1e-6, completion=2e-6),
+        pricing=Pricing(prompt=prompt, completion=completion),
     )
     (
         model.pricing.max_prompt_cost,
@@ -885,7 +885,11 @@ def _priced_model() -> Any:
     return _update_model_sats_pricing(model, _SATS_USD)
 
 
-def _endpoint_row(model_id: str = MODEL_ID, endpoint_tag: str = "deepinfra/fp8") -> Any:
+def _endpoint_row(
+    model_id: str = MODEL_ID,
+    endpoint_tag: str = "deepinfra/fp8",
+    **limits: int,
+) -> Any:
     from routstr.core.db import ModelPathRow
 
     return ModelPathRow(
@@ -894,14 +898,21 @@ def _endpoint_row(model_id: str = MODEL_ID, endpoint_tag: str = "deepinfra/fp8")
         provider_slug="openrouter",
         provider_type="openrouter",
         endpoint_tag=endpoint_tag,
-        model_metadata=json.dumps({"id": model_id, "pricing": _ENDPOINT_PRICING}),
+        model_metadata=json.dumps(
+            {"id": model_id, "pricing": _ENDPOINT_PRICING, **limits}
+        ),
         upstream_provider_id=1,
     )
 
 
-def _session_with_rows(rows: list[Any]) -> MagicMock:
+def _session_with_rows(rows: list[Any], override: Any = None) -> MagicMock:
+    """Answers the path-row query with ``rows``, the override one with ``override``."""
     session = MagicMock()
-    session.exec = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
+    session.exec = AsyncMock(
+        return_value=MagicMock(
+            all=MagicMock(return_value=rows), first=MagicMock(return_value=override)
+        )
+    )
     return session
 
 
@@ -981,3 +992,53 @@ async def test_endpoint_pin_without_sats_price_keeps_model_pricing() -> None:
         )
     assert priced is model
     session.exec.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_endpoint_pin_reserves_the_max_cost_paths_quotes() -> None:
+    """The reservation uses the endpoint's own context and completion limits,
+    the same ones ``/v1/models/paths`` quotes its max cost from."""
+    from routstr.upstream.model_paths import _serialize_path
+
+    row = _endpoint_row(context_length=32768, max_completion_tokens=8192)
+    with patch("routstr.payment.price.SATS_USD_PRICE", _SATS_USD):
+        priced = await proxy_module._price_pinned_endpoint(
+            _session_with_rows([row]),
+            _endpoint_selector(),
+            _priced_model(),
+            _openrouter_upstream(),
+        )
+        quoted = _serialize_path(row, 1.0)["model"]["sats_pricing"]["max_cost"]
+
+    assert priced.sats_pricing is not None and priced.top_provider is not None
+    assert priced.sats_pricing.max_cost == pytest.approx(quoted)
+    assert priced.top_provider.max_completion_tokens == 8192
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        # The operator's override is above the endpoint: it stays the price.
+        ((6e-6, 12e-6), (6e-6, 12e-6)),
+        # The endpoint costs more than the override: never bill below cost.
+        ((1e-6, 2e-6), (2e-6, 4e-6)),
+        # Each rate takes the higher of the two.
+        ((3e-6, 1e-6), (3e-6, 4e-6)),
+    ],
+)
+async def test_endpoint_pin_never_bills_below_an_operator_override(
+    override: tuple[float, float], expected: tuple[float, float]
+) -> None:
+    from routstr.core.db import ModelRow
+
+    model = _priced_model(*override)
+    with patch("routstr.payment.price.SATS_USD_PRICE", _SATS_USD):
+        priced = await proxy_module._price_pinned_endpoint(
+            _session_with_rows([_endpoint_row()], override=MagicMock(spec=ModelRow)),
+            _endpoint_selector(),
+            model,
+            _openrouter_upstream(),
+        )
+
+    assert (priced.pricing.prompt, priced.pricing.completion) == pytest.approx(expected)

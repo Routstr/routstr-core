@@ -38,7 +38,7 @@ from ..core.logging import get_logger
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
 
-    from ..payment.models import Model
+    from ..payment.models import Model, Pricing
     from .base import BaseUpstreamProvider
 
 logger = get_logger(__name__)
@@ -893,19 +893,26 @@ def apply_model_path_pricing(
     row: ModelPathRow,
     provider_fee: float,
     sats_to_usd: float,
+    floor: "Pricing | None" = None,
 ) -> "Model":
     """Return ``model`` priced from an exact endpoint path's own rates.
 
     Direct paths already use the provider model cache and therefore carry the
     same pricing as ``model``. OpenRouter endpoint rows instead contain raw,
-    endpoint-specific USD rates, which can differ from the model's default
-    listing; the proxy reserves and token-bills a pinned endpoint with them.
+    endpoint-specific USD rates and limits, which can differ from the model's
+    default listing; OpenRouter charges the endpoint that serves the request,
+    so the proxy reserves and token-bills a pinned endpoint with them, using
+    the same limits ``/v1/models/paths`` quotes its max cost from.
+
+    ``floor`` is an operator price override: no rate is billed below it, so
+    pinning an endpoint cannot bypass the operator's pricing.
     """
     if row.endpoint_tag is None:
         return model
 
     from ..payment.models import (
         Pricing,
+        TopProvider,
         _calculate_usd_max_costs,
         _update_model_sats_pricing,
         backfill_cache_pricing,
@@ -921,10 +928,27 @@ def apply_model_path_pricing(
             model.forwarded_model_id or row.model_id,
             Pricing.parse_obj(metadata["pricing"]),
         )
-        pricing = Pricing.parse_obj(
-            {key: float(value) * provider_fee for key, value in pricing.dict().items()}
-        )
-        priced = model.copy(update={"pricing": pricing, "sats_pricing": None})
+        rates = {
+            key: float(value) * provider_fee
+            for key, value in pricing.dict().items()
+            if not key.startswith("max_")
+        }
+        if floor is not None:
+            rates = {
+                key: max(value, float(getattr(floor, key)))
+                for key, value in rates.items()
+            }
+        pricing = Pricing.parse_obj(rates)
+        update: dict[str, Any] = {"pricing": pricing, "sats_pricing": None}
+        context_length = metadata.get("context_length")
+        max_completion_tokens = metadata.get("max_completion_tokens")
+        if context_length or max_completion_tokens:
+            update["context_length"] = context_length or model.context_length
+            update["top_provider"] = TopProvider(
+                context_length=context_length,
+                max_completion_tokens=max_completion_tokens,
+            )
+        priced = model.copy(update=update)
         (
             pricing.max_prompt_cost,
             pricing.max_completion_cost,
@@ -937,6 +961,37 @@ def apply_model_path_pricing(
             extra={"model_id": model.id, "path": row.path, "error": str(exc)},
         )
         return model
+
+
+async def price_pinned_endpoint(
+    session: AsyncSession,
+    model: "Model",
+    row: ModelPathRow,
+    provider_fee: float,
+    sats_to_usd: float,
+) -> "Model":
+    """Price ``model`` for a request pinned to ``row``'s endpoint.
+
+    An enabled operator override for the model on this provider is the
+    price floor; ``model`` already carries it, since overrides replace the
+    provider's model in routing.
+    """
+    override = (
+        await session.exec(
+            select(ModelRow).where(
+                ModelRow.id == model.id,
+                ModelRow.upstream_provider_id == row.upstream_provider_id,
+                ModelRow.enabled,
+            )
+        )
+    ).first()
+    return apply_model_path_pricing(
+        model,
+        row,
+        provider_fee,
+        sats_to_usd,
+        floor=model.pricing if override is not None else None,
+    )
 
 
 def _serialize_path(row: ModelPathRow, provider_fee: float) -> dict[str, Any]:

@@ -409,15 +409,16 @@ async def test_certify_margin_bills_pinned_path_pricing(
 
     assert resp.status_code == 200, resp.text
     margin = _find_row(resp.json()["rows"], "cost.margin")
-    # The proxy bills a pinned endpoint at its own rates, not the model's
-    # (which would give 3, 356 and 43); the endpoint's cache-read rate falls
-    # short of what it reported charging on the cached call.
+    # The proxy bills a pinned endpoint at its own rates, with the operator's
+    # override as the floor per rate: the endpoint's prompt rate, the
+    # override's completion and cache-read rates. The model's rates alone
+    # would give 3, 356 and 43; the endpoint's alone 3, 289 and 15, which
+    # misses the cached call's reported cost of 26.
     assert [
         (sample["upstream_msats_with_fee"], sample["configured_msats"])
         for sample in margin["evidence"]["samples"]
-    ] == [(3, 3), (269, 289), (26, 15)]
-    assert margin["status"] == "fail"
-    assert "15 < 26" in margin["detail"]
+    ] == [(3, 3), (269, 289), (26, 27)]
+    assert margin["status"] == "ok"
 
 
 @pytest.mark.integration
