@@ -1727,16 +1727,14 @@ async def certify_upstream_provider(
         # The proxy reserves and token-bills a pinned endpoint at that
         # endpoint's own rates, so the cost rows price it the same way.
         if selected_path is not None:
-            from ..upstream.model_paths import price_pinned_endpoint
+            from ..upstream.model_paths import apply_model_path_pricing
 
-            async with create_session() as session:
-                model_obj = await price_pinned_endpoint(
-                    session,
-                    model_obj,
-                    selected_path,
-                    provider.provider_fee,
-                    sats_to_usd,
-                )
+            model_obj = apply_model_path_pricing(
+                model_obj,
+                selected_path,
+                provider.provider_fee,
+                sats_to_usd,
+            )
         # The timeout applies per upstream call. The run makes up to six
         # calls (models, two short probes after a max_completion_tokens retry,
         # three cache probes), so the request can stay open for six times it.

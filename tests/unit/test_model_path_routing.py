@@ -910,14 +910,9 @@ def _endpoint_row(
     )
 
 
-def _session_with_rows(rows: list[Any], override: Any = None) -> MagicMock:
-    """Answers the path-row query with ``rows``, the override one with ``override``."""
+def _session_with_rows(rows: list[Any]) -> MagicMock:
     session = MagicMock()
-    session.exec = AsyncMock(
-        return_value=MagicMock(
-            all=MagicMock(return_value=rows), first=MagicMock(return_value=override)
-        )
-    )
+    session.exec = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
     return session
 
 
@@ -1018,71 +1013,3 @@ async def test_endpoint_pin_reserves_the_max_cost_paths_quotes() -> None:
     assert priced.sats_pricing is not None and priced.top_provider is not None
     assert priced.sats_pricing.max_cost == pytest.approx(quoted)
     assert priced.top_provider.max_completion_tokens == 8192
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("override", "expected"),
-    [
-        # The operator's override is above the endpoint: it stays the price.
-        ((6e-6, 12e-6), (6e-6, 12e-6)),
-        # The endpoint costs more than the override: never bill below cost.
-        ((1e-6, 2e-6), (2e-6, 4e-6)),
-        # Each rate takes the higher of the two.
-        ((3e-6, 1e-6), (3e-6, 4e-6)),
-    ],
-)
-async def test_endpoint_pin_never_bills_below_an_operator_override(
-    override: tuple[float, float], expected: tuple[float, float]
-) -> None:
-    from routstr.core.db import ModelRow
-
-    model = _priced_model(*override)
-    with patch("routstr.payment.price.SATS_USD_PRICE", _SATS_USD):
-        priced = await proxy_module._price_pinned_endpoint(
-            _session_with_rows([_endpoint_row()], override=MagicMock(spec=ModelRow)),
-            _endpoint_selector(),
-            model,
-            _openrouter_upstream(),
-        )
-
-    assert (priced.pricing.prompt, priced.pricing.completion) == pytest.approx(expected)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("override", "endpoint", "expected_cache_read"),
-    [
-        # The override has no cache rate, so its cache reads bill at its
-        # prompt rate; the endpoint's cheaper cache rate must not undercut it.
-        (
-            (2e-6, 8e-6, 0.0),
-            {"prompt": 1e-6, "completion": 2e-6, "input_cache_read": 1e-7},
-            2e-6,
-        ),
-        # The endpoint has no cache rate, so it charges its prompt rate; the
-        # override's cheaper cache rate must not bill below that cost.
-        ((1e-6, 2e-6, 1e-8), {"prompt": 2e-6, "completion": 4e-6}, 2e-6),
-    ],
-    ids=["override-without-cache-rate", "endpoint-without-cache-rate"],
-)
-async def test_override_floor_compares_effective_cache_rates(
-    override: tuple[float, float, float],
-    endpoint: dict[str, float],
-    expected_cache_read: float,
-) -> None:
-    """A zero cache rate is billed at the prompt rate, so the floor compares
-    those effective rates rather than the zeros."""
-    from routstr.core.db import ModelRow
-
-    with patch("routstr.payment.price.SATS_USD_PRICE", _SATS_USD):
-        priced = await proxy_module._price_pinned_endpoint(
-            _session_with_rows(
-                [_endpoint_row(pricing=endpoint)], override=MagicMock(spec=ModelRow)
-            ),
-            _endpoint_selector(),
-            _priced_model(*override),
-            _openrouter_upstream(),
-        )
-
-    assert priced.pricing.input_cache_read == pytest.approx(expected_cache_read)

@@ -53,9 +53,9 @@ from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
 from .upstream.model_paths import (
     ModelPathSelector,
+    apply_model_path_pricing,
     decode_model_path,
     is_openrouter_base_url,
-    price_pinned_endpoint,
     public_model_id,
     public_provider_url,
 )
@@ -194,9 +194,7 @@ async def _price_pinned_endpoint(
             extra={"model": selector.model_id, "endpoint": selector.endpoint_tag},
         )
         return model_obj
-    return await price_pinned_endpoint(
-        session, model_obj, row, upstream.provider_fee, sats_to_usd
-    )
+    return apply_model_path_pricing(model_obj, row, upstream.provider_fee, sats_to_usd)
 
 
 def get_model_instance(model_id: str) -> Model | None:

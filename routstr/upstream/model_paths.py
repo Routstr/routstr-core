@@ -38,7 +38,7 @@ from ..core.logging import get_logger
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
 
-    from ..payment.models import Model, Pricing
+    from ..payment.models import Model
     from .base import BaseUpstreamProvider
 
 logger = get_logger(__name__)
@@ -893,7 +893,6 @@ def apply_model_path_pricing(
     row: ModelPathRow,
     provider_fee: float,
     sats_to_usd: float,
-    floor: "Pricing | None" = None,
 ) -> "Model":
     """Return ``model`` priced from an exact endpoint path's own rates.
 
@@ -903,9 +902,6 @@ def apply_model_path_pricing(
     default listing; OpenRouter charges the endpoint that serves the request,
     so the proxy reserves and token-bills a pinned endpoint with them, using
     the same limits ``/v1/models/paths`` quotes its max cost from.
-
-    ``floor`` is an operator price override: no rate is billed below it, so
-    pinning an endpoint cannot bypass the operator's pricing.
     """
     if row.endpoint_tag is None:
         return model
@@ -928,20 +924,9 @@ def apply_model_path_pricing(
             model.forwarded_model_id or row.model_id,
             Pricing.parse_obj(metadata["pricing"]),
         )
-        rates = {
-            key: float(value) * provider_fee
-            for key, value in pricing.dict().items()
-            if not key.startswith("max_")
-        }
-        if floor is not None:
-            floor_rates = _effective_cache_rates(
-                {key: float(getattr(floor, key)) for key in rates}
-            )
-            rates = {
-                key: max(value, floor_rates[key])
-                for key, value in _effective_cache_rates(rates).items()
-            }
-        pricing = Pricing.parse_obj(rates)
+        pricing = Pricing.parse_obj(
+            {key: float(value) * provider_fee for key, value in pricing.dict().items()}
+        )
         update: dict[str, Any] = {"pricing": pricing, "sats_pricing": None}
         context_length = metadata.get("context_length")
         max_completion_tokens = metadata.get("max_completion_tokens")
@@ -964,51 +949,6 @@ def apply_model_path_pricing(
             extra={"model_id": model.id, "path": row.path, "error": str(exc)},
         )
         return model
-
-
-def _effective_cache_rates(rates: dict[str, float]) -> dict[str, float]:
-    """Spell out cache rates settlement reads as "bill at the prompt rate".
-
-    A zero cache rate is billed at the prompt rate, so a per-rate ``max``
-    must compare those prompt rates, not the zeros.
-    """
-    return {
-        key: value
-        if value > 0 or key not in ("input_cache_read", "input_cache_write")
-        else rates["prompt"]
-        for key, value in rates.items()
-    }
-
-
-async def price_pinned_endpoint(
-    session: AsyncSession,
-    model: "Model",
-    row: ModelPathRow,
-    provider_fee: float,
-    sats_to_usd: float,
-) -> "Model":
-    """Price ``model`` for a request pinned to ``row``'s endpoint.
-
-    An enabled operator override for the model on this provider is the
-    price floor; ``model`` already carries it, since overrides replace the
-    provider's model in routing.
-    """
-    override = (
-        await session.exec(
-            select(ModelRow).where(
-                ModelRow.id == model.id,
-                ModelRow.upstream_provider_id == row.upstream_provider_id,
-                ModelRow.enabled,
-            )
-        )
-    ).first()
-    return apply_model_path_pricing(
-        model,
-        row,
-        provider_fee,
-        sats_to_usd,
-        floor=model.pricing if override is not None else None,
-    )
 
 
 def _serialize_path(row: ModelPathRow, provider_fee: float) -> dict[str, Any]:
