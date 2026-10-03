@@ -1,12 +1,16 @@
 import json
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ModelRow
 from routstr.payment.models import Pricing, _row_to_model, list_models
+from routstr.upstream.base import BaseUpstreamProvider
 from routstr.upstream.helpers import get_all_models_with_overrides
 from routstr.upstream.model_paths import _price_in_sats
 
@@ -34,24 +38,25 @@ def _row(cache_rate: float = 0) -> ModelRow:
     )
 
 
-def _session(row: ModelRow, provider_type: str):
+def _session(row: ModelRow, provider_type: str) -> AsyncSession:
     provider = SimpleNamespace(
         id=1, enabled=True, provider_fee=1.1, provider_type=provider_type
     )
-    return SimpleNamespace(
+    return MagicMock(
+        spec=AsyncSession,
         exec=AsyncMock(
             side_effect=[
                 SimpleNamespace(all=lambda: [row]),
                 SimpleNamespace(all=lambda: [provider]),
             ]
-        )
+        ),
     )
 
 
 @pytest.mark.parametrize("provider_type", ["ppqai", "venice"])
 @pytest.mark.parametrize("cache_rate", [0, 7e-7])
 def test_db_conversion_preserves_native_or_explicit_cache_prices(
-    provider_type, cache_rate
+    provider_type: str, cache_rate: float
 ) -> None:
     row = _row(cache_rate)
     stored = row.pricing
@@ -71,7 +76,7 @@ def test_db_conversion_preserves_native_or_explicit_cache_prices(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider_type", ["ppqai", "venice"])
 async def test_admin_listing_passes_provider_policy_to_database_conversion(
-    provider_type,
+    provider_type: str,
 ) -> None:
     with (
         patch("routstr.payment.models.backfill_cache_pricing") as backfill,
@@ -86,16 +91,17 @@ async def test_admin_listing_passes_provider_policy_to_database_conversion(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider_type", ["ppqai", "venice"])
 async def test_runtime_overrides_do_not_reintroduce_generic_cache_prices(
-    provider_type,
+    provider_type: str,
 ) -> None:
     row = _row()
     session = _session(row, provider_type)
 
     @asynccontextmanager
-    async def create_session():
+    async def create_session() -> AsyncIterator[AsyncSession]:
         yield session
 
-    upstream = SimpleNamespace(
+    upstream = MagicMock(
+        spec=BaseUpstreamProvider,
         db_id=1,
         provider_type=provider_type,
         base_url="https://example.invalid",
@@ -115,8 +121,8 @@ async def test_runtime_overrides_do_not_reintroduce_generic_cache_prices(
 
 
 @pytest.mark.parametrize("provider_type", ["ppqai", "venice"])
-def test_path_sats_conversion_respects_native_cache_policy(provider_type) -> None:
-    model = {
+def test_path_sats_conversion_respects_native_cache_policy(provider_type: str) -> None:
+    model: dict[str, Any] = {
         "id": "vendor/model",
         "pricing": {"prompt": 4e-6, "completion": 8e-6},
         "context_length": 8192,

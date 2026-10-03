@@ -21,6 +21,7 @@ def _model() -> Model:
             input_modalities=["text"],
             output_modalities=["text"],
             tokenizer="Unknown",
+            instruct_type=None,
         ),
         pricing=Pricing(
             prompt=1e-6,
@@ -89,7 +90,7 @@ async def test_ppq_alias_matches_do_not_share_mutated_prices() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("metadata", [None, []])
 async def test_ppq_partial_api_prices_fall_back_per_field_preserving_zero(
-    metadata,
+    metadata: list[dict] | None,
 ) -> None:
     (model,) = await _fetch(
         [
@@ -111,7 +112,7 @@ async def test_ppq_partial_api_prices_fall_back_per_field_preserving_zero(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rate", [None, -1, float("inf"), float("nan")])
 async def test_ppq_unpriced_or_invalid_native_rate_is_not_replaced_by_openrouter(
-    rate,
+    rate: float | None,
 ) -> None:
     assert (
         await _fetch(
@@ -126,7 +127,9 @@ async def test_ppq_unpriced_or_invalid_native_rate_is_not_replaced_by_openrouter
 
 
 @pytest.mark.parametrize("provider", [PPQAIUpstreamProvider, VeniceUpstreamProvider])
-def test_native_catalog_providers_do_not_backfill_generic_cache_rates(provider) -> None:
+def test_native_catalog_providers_do_not_backfill_generic_cache_rates(
+    provider: type[PPQAIUpstreamProvider | VeniceUpstreamProvider],
+) -> None:
     model = _model()
     model.pricing = Pricing(prompt=4e-6, completion=8e-6)
     with patch("routstr.upstream.base.backfill_cache_pricing") as backfill:

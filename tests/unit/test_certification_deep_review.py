@@ -192,10 +192,14 @@ def test_no_evaluated_models_warns_all_pricing_rows() -> None:
             _report_row_served_matches_configured,
         )
     ]
-    assert all(
-        row["status"] == "warn" and row["evidence"]["checked"] == 0 for row in rows
-    )
-    assert all("Not evaluated" in row["detail"] for row in rows)
+    for row in rows:
+        assert row["status"] == "warn"
+        evidence = row["evidence"]
+        assert isinstance(evidence, dict)
+        assert evidence["checked"] == 0
+        detail = row["detail"]
+        assert isinstance(detail, str)
+        assert "Not evaluated" in detail
     assert (
         next(c for c in build_checklist(rows) if c["goal"] == "pricing_v1_models")[
             "status"

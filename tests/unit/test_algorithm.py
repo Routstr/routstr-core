@@ -273,8 +273,12 @@ def test_create_model_mappings_applies_custom_provider_fees_before_advertising(
     }
 
     def fake_row_to_model(
-        row, *, apply_provider_fee, provider_fee, provider_type
-    ) -> Model:  # type: ignore[no-untyped-def]
+        row: SimpleNamespace,
+        *,
+        apply_provider_fee: bool,
+        provider_fee: float,
+        provider_type: str,
+    ) -> Model:
         assert provider_type == providers[row.upstream_provider_id - 1].provider_type
         assert apply_provider_fee is True
         return create_test_model(
