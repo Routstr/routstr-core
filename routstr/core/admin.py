@@ -617,7 +617,10 @@ async def upsert_provider_model(
     await refresh_model_maps()
     await _refresh_provider_model_paths(provider_pk)
     return _row_to_model(
-        row, apply_provider_fee=True, provider_fee=provider.provider_fee
+        row,
+        apply_provider_fee=True,
+        provider_fee=provider.provider_fee,
+        provider_type=provider.provider_type,
     ).dict()  # type: ignore
 
 
@@ -653,7 +656,10 @@ async def get_provider_model(provider_id: str, model_id: str) -> dict[str, objec
         # is not a usable number must be shown as it is, not encoded as `null`.
         return json_compliant(  # type: ignore[return-value]
             _row_to_model(
-                row, apply_provider_fee=False, provider_fee=provider.provider_fee
+                row,
+                apply_provider_fee=False,
+                provider_fee=provider.provider_fee,
+                provider_type=provider.provider_type,
             ).dict()
         )
 
@@ -1311,7 +1317,10 @@ def _evaluate_model_row(
 ) -> _ModelEvaluation:
     try:
         configured: Model | None = _build_model_from_row(
-            row, apply_provider_fee=True, provider_fee=provider.provider_fee
+            row,
+            apply_provider_fee=True,
+            provider_fee=provider.provider_fee,
+            provider_type=provider.provider_type,
         )
         build_error = None
     except Exception as exc:
@@ -1352,7 +1361,9 @@ def _aggregate_row(
     """
     evidence: dict[str, object] = {"checked": checked, "flagged": list(flagged)}
     if checked == 0:
-        return _report_row(row_id, "ok", title, empty_detail, evidence)
+        return _report_row(
+            row_id, "warn", title, f"Not evaluated — {empty_detail}", evidence
+        )
     if flagged:
         return _report_row(row_id, fail_status, title, flagged_detail, evidence)
     return _report_row(row_id, "ok", title, ok_detail, evidence)

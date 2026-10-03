@@ -448,7 +448,7 @@ async def test_cache_rate_ignores_an_enabled_model_that_is_not_served(
 
     assert resp.status_code == 200, resp.text
     row = _find_row(resp.json()["rows"], "pricing.cache_rate")
-    assert row["status"] == "ok", row
+    assert row["status"] == "warn", row
     assert row["evidence"]["checked"] == 0
     assert "unserved-model" not in json.dumps(row["evidence"])
 

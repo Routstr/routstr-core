@@ -343,9 +343,7 @@ async def test_certify_margin_bills_pinned_path_pricing(
         },
         base_url=base_url,
     )
-    model_path = encode_model_path(
-        base_url, "cert-test-model", "deepinfra/fp8"
-    )
+    model_path = encode_model_path(base_url, "cert-test-model", "deepinfra/fp8")
     integration_session.add(
         ModelPathRow(
             model_id="cert-test-model",
@@ -834,6 +832,14 @@ async def test_certify_explicit_discovered_model_without_override(
     assert _find_row(rows, "endpoint.reachable")["status"] == "ok"
     assert _find_row(rows, "usage.capture")["status"] == "ok"
     assert _find_row(rows, "cost.prompt_completion")["status"] == "ok"
+    pricing_rows = [row for row in rows if row["id"].startswith("pricing.")]
+    assert len(pricing_rows) == 4
+    assert all(row["evidence"]["checked"] == 0 for row in pricing_rows)
+    assert all(row["status"] == "warn" for row in pricing_rows)
+    pricing_goal = next(
+        goal for goal in resp.json()["checklist"] if goal["goal"] == "pricing_v1_models"
+    )
+    assert pricing_goal["status"] == "warn"
 
 
 @pytest.mark.integration

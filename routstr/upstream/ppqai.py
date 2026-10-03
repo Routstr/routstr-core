@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import time
 from dataclasses import dataclass, field
@@ -226,6 +227,27 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                     if ppqai_model.id in self.IGNORED_MODEL_IDS:
                         continue
 
+                    api_pricing = ppqai_model.pricing.api or {}
+                    input_price = api_pricing.get("input_per_1M")
+                    if input_price is None:
+                        input_price = ppqai_model.pricing.input_per_1M_tokens
+                    output_price = api_pricing.get("output_per_1M")
+                    if output_price is None:
+                        output_price = ppqai_model.pricing.output_per_1M_tokens
+                    if any(
+                        rate is None or not math.isfinite(rate) or rate < 0
+                        for rate in (input_price, output_price)
+                    ):
+                        logger.warning(
+                            "Skipping PPQ model without valid native token prices",
+                            extra={"model_id": ppqai_model.id},
+                        )
+                        continue
+                    assert input_price is not None and output_price is not None
+                    pricing = Pricing(
+                        prompt=input_price / 1_000_000,
+                        completion=output_price / 1_000_000,
+                    )
                     or_model = next(
                         (
                             model
@@ -238,44 +260,20 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                     )
 
                     if or_model:
-                        input_price = None
-                        if ppqai_model.pricing.api:
-                            input_price = ppqai_model.pricing.api.get("input_per_1M")
-                        elif ppqai_model.pricing.input_per_1M_tokens:
-                            input_price = ppqai_model.pricing.input_per_1M_tokens
-
-                        if input_price is not None:
-                            or_model.pricing.prompt = input_price / 1_000_000
-
-                        output_price = None
-                        if ppqai_model.pricing.api:
-                            output_price = ppqai_model.pricing.api.get("output_per_1M")
-                        elif ppqai_model.pricing.output_per_1M_tokens:
-                            output_price = ppqai_model.pricing.output_per_1M_tokens
-
-                        if output_price is not None:
-                            or_model.pricing.completion = output_price / 1_000_000
-
-                        if cl := ppqai_model.context_length:
-                            or_model.context_length = cl
-                        models.append(or_model)
+                        # OpenRouter supplies metadata, not PPQ billing rates.
+                        models.append(
+                            or_model.copy(
+                                deep=True,
+                                update={
+                                    "id": ppqai_model.id,
+                                    "pricing": pricing,
+                                    "sats_pricing": None,
+                                    "context_length": ppqai_model.context_length
+                                    or or_model.context_length,
+                                },
+                            )
+                        )
                     else:
-                        input_price = 0.0
-                        if ppqai_model.pricing.api:
-                            input_price = ppqai_model.pricing.api.get(
-                                "input_per_1M", 0.0
-                            )
-                        elif ppqai_model.pricing.input_per_1M_tokens:
-                            input_price = ppqai_model.pricing.input_per_1M_tokens
-
-                        output_price = 0.0
-                        if ppqai_model.pricing.api:
-                            output_price = ppqai_model.pricing.api.get(
-                                "output_per_1M", 0.0
-                            )
-                        elif ppqai_model.pricing.output_per_1M_tokens:
-                            output_price = ppqai_model.pricing.output_per_1M_tokens
-
                         models.append(
                             Model(
                                 id=ppqai_model.id,
@@ -290,14 +288,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                                     tokenizer="Unknown",
                                     instruct_type=None,
                                 ),
-                                pricing=Pricing(
-                                    prompt=input_price / 1_000_000,
-                                    completion=output_price / 1_000_000,
-                                    request=0.0,
-                                    image=0.0,
-                                    web_search=0.0,
-                                    internal_reasoning=0.0,
-                                ),
+                                pricing=pricing,
                             )
                         )
                 except Exception as e:
