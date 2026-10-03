@@ -3,12 +3,11 @@ import json
 import random
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel as V2BaseModel
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic.v1 import BaseModel, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from ..core.db import ModelRow, UpstreamProviderRow, get_session
+from ..core.db import ModelRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
@@ -17,24 +16,6 @@ from .rates import BILLABLE_PRICING_FIELDS, coerce_rate, is_usable_rate
 logger = get_logger(__name__)
 
 models_router = APIRouter()
-
-_MODEL_TEST_ENDPOINT_PATHS = {
-    "chat-completions": "chat/completions",
-    "completions": "completions",
-    "embeddings": "embeddings",
-    "responses": "responses",
-}
-
-# Cap the caller-supplied test payload to avoid forwarding oversized bodies
-# upstream on the operator's credentials.
-_MODEL_TEST_MAX_REQUEST_BYTES = 64 * 1024
-
-
-async def _require_admin_api(request: Request) -> None:
-    """Require admin auth without creating an import-time cycle with core.admin."""
-    from ..core.admin import require_admin_api
-
-    await require_admin_api(request)
 
 
 class Architecture(BaseModel):
@@ -649,130 +630,6 @@ async def update_sats_pricing() -> None:
             break
         except Exception as e:
             logger.error(f"Error updating sats pricing: {e}")
-
-
-class ModelTestRequest(V2BaseModel):
-    model_id: str
-    endpoint_type: str
-    request_data: dict
-
-
-def _model_test_target(
-    provider: UpstreamProviderRow,
-    model_row: ModelRow,
-    endpoint_path: str,
-    model_id: str,
-) -> tuple[str, dict[str, str], dict[str, str], str]:
-    """URL, headers, query params and model id for a model test, shaped like
-    the proxy's.
-
-    With the provider's live upstream instance, use the hooks
-    ``forward_request`` uses (Azure's deployment path, ``api-key`` and
-    ``api-version``, Gemini's ``/openai`` base, Ollama's ``/v1``, model-name
-    transforms). Without one, assume a plain OpenAI-compatible base URL.
-    """
-    from ..proxy import get_upstreams
-
-    upstream = next(
-        (u for u in get_upstreams() if getattr(u, "db_id", None) == provider.id),
-        None,
-    )
-    if upstream is None:
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {provider.api_key}",
-        }
-        url = f"{provider.base_url.rstrip('/')}/{endpoint_path}"
-        return url, headers, {}, model_id
-
-    model_obj = _build_model_from_row(model_row, False, provider.provider_fee)
-    path = upstream.normalize_request_path(f"v1/{endpoint_path}", model_obj)
-    return (
-        upstream.build_request_url(path, model_obj),
-        upstream.prepare_headers({"content-type": "application/json"}),
-        dict(upstream.prepare_params(path, None)),
-        # The proxy forwards ``model.id``, not the row's client alias.
-        upstream.transform_model_name(model_obj.id),
-    )
-
-
-@models_router.post("/api/models/test", dependencies=[Depends(_require_admin_api)])
-async def test_model(
-    payload: ModelTestRequest,
-    session: AsyncSession = Depends(get_session),
-) -> dict:
-    """Test a model by sending a request through its configured upstream provider."""
-    from sqlmodel import select
-
-    result = await session.execute(
-        select(ModelRow).where(ModelRow.id == payload.model_id)
-    )
-    model_row = result.scalars().first()
-
-    if not model_row:
-        return {
-            "success": False,
-            "error": f"Model '{payload.model_id}' not found in database",
-            "status_code": 404,
-        }
-
-    provider = await session.get(UpstreamProviderRow, model_row.upstream_provider_id)
-    if not provider:
-        return {
-            "success": False,
-            "error": "Upstream provider not found",
-            "status_code": 404,
-        }
-
-    endpoint_path = _MODEL_TEST_ENDPOINT_PATHS.get(payload.endpoint_type)
-    if endpoint_path is None:
-        raise HTTPException(status_code=400, detail="Unsupported endpoint_type")
-
-    actual_model_id = model_row.forwarded_model_id or model_row.id
-    url, headers, params, upstream_model_id = _model_test_target(
-        provider, model_row, endpoint_path, actual_model_id
-    )
-    request_data = {**payload.request_data, "model": upstream_model_id}
-
-    try:
-        request_size = len(json.dumps(request_data).encode("utf-8"))
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="Invalid request_data")
-    if request_size > _MODEL_TEST_MAX_REQUEST_BYTES:
-        raise HTTPException(status_code=413, detail="request_data too large")
-
-    logger.info(
-        "admin model test",
-        extra={
-            "model_id": payload.model_id,
-            "forwarded_model_id": actual_model_id,
-            "endpoint_type": payload.endpoint_type,
-            "upstream_provider_id": model_row.upstream_provider_id,
-            "request_bytes": request_size,
-        },
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                url, json=request_data, headers=headers, params=params
-            )
-            try:
-                response_data = response.json()
-            except Exception:
-                response_data = {"raw": response.text}
-
-            return {
-                "success": response.status_code < 400,
-                "data": response_data,
-                "status_code": response.status_code,
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "status_code": 500,
-        }
 
 
 @models_router.get("/v1/models/paths")
