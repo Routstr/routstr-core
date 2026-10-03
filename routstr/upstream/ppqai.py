@@ -221,6 +221,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
             ]
 
             models = []
+            seen_ids: set[str] = set()
             for model_data in models_data:
                 try:
                     ppqai_model = PPQAIModel.parse_obj(model_data)
@@ -259,13 +260,16 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                         None,
                     )
 
+                    model_id = or_model.id if or_model else ppqai_model.id
+                    if model_id.lower() in seen_ids:
+                        continue
+
                     if or_model:
-                        # OpenRouter supplies metadata, not PPQ billing rates.
+                        # Keep the stored model identity, but not foreign billing rates.
                         models.append(
                             or_model.copy(
                                 deep=True,
                                 update={
-                                    "id": ppqai_model.id,
                                     "pricing": pricing,
                                     "sats_pricing": None,
                                     "context_length": ppqai_model.context_length
@@ -291,6 +295,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                                 pricing=pricing,
                             )
                         )
+                    seen_ids.add(model_id.lower())
                 except Exception as e:
                     logger.warning(
                         "Failed to parse PPQ.AI model",

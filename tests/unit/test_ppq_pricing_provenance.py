@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
+from routstr.algorithm import create_model_mappings
+from routstr.core.db import ModelRow
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream.ppqai import PPQAIUpstreamProvider
 from routstr.upstream.venice import VeniceUpstreamProvider
@@ -75,16 +77,77 @@ async def test_ppq_does_not_inherit_other_provider_cache_or_request_rates() -> N
 
 
 @pytest.mark.asyncio
-async def test_ppq_alias_matches_do_not_share_mutated_prices() -> None:
+async def test_ppq_alias_matches_emit_first_stable_id_once() -> None:
     models = await _fetch(
         [
             _entry("vendor/model", {"api": {"input_per_1M": 4, "output_per_1M": 8}}),
             _entry("model", {"api": {"input_per_1M": 6, "output_per_1M": 9}}),
         ]
     )
-    assert [m.id for m in models] == ["vendor/model", "model"]
-    assert [m.pricing.prompt for m in models] == [4e-6, 6e-6]
-    assert models[0] is not models[1]
+    assert [m.id for m in models] == ["vendor/model"]
+    assert models[0].pricing.prompt == 4e-6
+
+
+@pytest.mark.asyncio
+async def test_ppq_suffix_match_keeps_disabled_model_unroutable() -> None:
+    metadata = _model().copy(
+        update={"id": "openai/gpt-4o", "canonical_slug": "openai/gpt-4o"}
+    )
+    discovered = await _fetch(
+        [_entry("gpt-4o", {"api": {"input_per_1M": 4, "output_per_1M": 8}})],
+        [metadata.dict()],
+    )
+    provider = PPQAIUpstreamProvider("test-only")
+    provider.db_id = 7
+    with patch.object(provider, "get_cached_models", return_value=discovered):
+        _, provider_map, unique_models = create_model_mappings(
+            [provider], {}, {("openai/gpt-4o", 7)}
+        )
+    assert provider_map == {}
+    assert unique_models == {}
+    assert discovered[0].id == metadata.id
+    assert provider.transform_model_name(discovered[0].id) == metadata.id
+
+
+@pytest.mark.asyncio
+async def test_ppq_suffix_match_keeps_override_as_only_candidate() -> None:
+    metadata = _model().copy(
+        update={"id": "openai/gpt-4o", "canonical_slug": "openai/gpt-4o"}
+    )
+    discovered = await _fetch(
+        [_entry("gpt-4o", {"api": {"input_per_1M": 4, "output_per_1M": 8}})],
+        [metadata.dict()],
+    )
+    provider = PPQAIUpstreamProvider("test-only")
+    provider.db_id = 7
+    override = ModelRow(
+        id=metadata.id,
+        name=metadata.name,
+        created=0,
+        description="",
+        context_length=8192,
+        architecture=metadata.architecture.json(),
+        pricing=Pricing(prompt=9e-6, completion=18e-6).json(),
+        enabled=True,
+        upstream_provider_id=7,
+        forwarded_model_id="operator-alias",
+    )
+    with (
+        patch.object(provider, "get_cached_models", return_value=discovered),
+        patch("routstr.payment.models.sats_usd_price", return_value=0.001),
+    ):
+        _, provider_map, _ = create_model_mappings(
+            [provider], {(metadata.id, 7): (override, 1.0)}, set()
+        )
+    assert metadata.id in provider_map
+    assert "operator-alias" in provider_map
+    for candidates in provider_map.values():
+        assert len(candidates) == 1
+        candidate, serving = candidates[0]
+        assert serving is provider
+        assert candidate.id == metadata.id
+        assert candidate.forwarded_model_id == "operator-alias"
+        assert candidate.pricing.prompt == 9e-6
 
 
 @pytest.mark.asyncio
