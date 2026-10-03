@@ -435,7 +435,11 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     enabled: bool = Field(default=True, description="Whether this model is enabled")
     forwarded_model_id: str | None = Field(
         default=None,
-        description="Model ID to use when forwarding requests to upstream provider. Defaults to id if not set.",
+        description=(
+            "Client-facing alias advertised by /v1/models and accepted on "
+            "requests in place of id. JSON request bodies sent upstream carry "
+            "id (via the provider's transform_model_name), not this value."
+        ),
     )
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
 

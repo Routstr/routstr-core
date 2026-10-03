@@ -228,10 +228,11 @@ def openrouter_author_slug(model: object) -> str | None:
     """Return a canonical ``author/slug`` for the OpenRouter endpoints API.
 
     Prefer ``canonical_slug``, then a slash-containing ``id``, then a
-    slash-containing ``forwarded_model_id``. The forwarded id is exactly what
-    the proxy sends upstream for admin-created alias rows (``base.py`` forwards
-    ``forwarded_model_id or id``), so it is a valid OpenRouter id when the
-    bare ``id`` is a local alias with no slash.
+    slash-containing ``forwarded_model_id``. That field is the client-facing
+    alias: JSON request bodies sent upstream carry
+    ``transform_model_name(model.id)``, not it (``base.py``). It is used here
+    only as a last-resort guess at an ``author/slug`` when neither
+    ``canonical_slug`` nor ``id`` carries one.
     """
     canonical = getattr(model, "canonical_slug", None)
     if canonical and "/" in canonical:
