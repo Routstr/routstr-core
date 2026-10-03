@@ -328,7 +328,7 @@ async def test_certify_model_path_pins_every_completion(
 @pytest.mark.integration
 @pytest.mark.asyncio
 @respx.mock
-async def test_certify_margin_bills_model_pricing_and_reports_path_pricing(
+async def test_certify_margin_bills_pinned_path_pricing(
     integration_client: AsyncClient, integration_session: AsyncSession
 ) -> None:
     base_url = "https://openrouter.ai/api/v1"
@@ -409,20 +409,15 @@ async def test_certify_margin_bills_model_pricing_and_reports_path_pricing(
 
     assert resp.status_code == 200, resp.text
     margin = _find_row(resp.json()["rows"], "cost.margin")
-    # The proxy reserves and token-bills a pinned request with the model's own
-    # pricing (``configured_msats``); the path's endpoint rates are reported
-    # alongside (``advertised_msats``) and differ, so the covered margin warns.
+    # The proxy bills a pinned endpoint at its own rates, not the model's
+    # (which would give 3, 356 and 43); the endpoint's cache-read rate falls
+    # short of what it reported charging on the cached call.
     assert [
-        (
-            sample["upstream_msats_with_fee"],
-            sample["configured_msats"],
-            sample["advertised_msats"],
-        )
+        (sample["upstream_msats_with_fee"], sample["configured_msats"])
         for sample in margin["evidence"]["samples"]
-    ] == [(3, 3, 3), (269, 356, 289), (26, 43, 15)]
-    assert margin["status"] == "warn"
-    assert "advertises different endpoint rates" in margin["detail"]
-    assert "289 vs 356" in margin["detail"]
+    ] == [(3, 3), (269, 289), (26, 15)]
+    assert margin["status"] == "fail"
+    assert "15 < 26" in margin["detail"]
 
 
 @pytest.mark.integration

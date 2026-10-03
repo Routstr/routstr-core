@@ -446,7 +446,6 @@ def cost_margin_row(
     provider_fee: float,
     sats_to_usd: float,
     pricing_known: bool = True,
-    advertised_model: Model | None = None,
 ) -> dict[str, Any]:
     """Configured token pricing must cover what the upstream reports charging.
 
@@ -457,14 +456,9 @@ def cost_margin_row(
     falls below the fee-adjusted upstream cost means those paths underprice.
     Upstreams that report no cost give no sample and the row stays a warn.
 
-    ``model`` carries the pricing the proxy reserves and token-bills with. On
-    a pinned path, ``advertised_model`` carries the endpoint's own rates; a
-    covered margin whose advertised rates differ from the billed ones is a
-    warn, since ``/v1/models/paths`` then shows a price the node does not bill.
+    ``model`` carries the pricing the proxy reserves and token-bills with,
+    which on a pinned endpoint is that endpoint's own rates.
     """
-    advertised_pricing = (
-        advertised_model.sats_pricing if advertised_model is not None else None
-    )
     evidence: dict[str, Any] = {
         "model_id": model.id,
         "provider_fee": provider_fee,
@@ -483,7 +477,6 @@ def cost_margin_row(
 
     samples: list[dict[str, Any]] = []
     short: list[str] = []
-    mismatched: list[str] = []
     for payload in payloads:
         if not isinstance(payload, dict):
             continue
@@ -495,11 +488,6 @@ def cost_margin_row(
             configured_total, _, _ = _expected_token_msats(model.sats_pricing, usage)
             upstream_total = _expected_usd_msats(
                 reported_usd, provider_fee, sats_to_usd
-            )
-            advertised_total = (
-                _expected_token_msats(advertised_pricing, usage)[0]
-                if advertised_pricing is not None
-                else None
             )
         except (ValueError, OverflowError) as exc:
             evidence["error"] = f"{type(exc).__name__}: {exc}"
@@ -516,10 +504,6 @@ def cost_margin_row(
             "upstream_msats_with_fee": upstream_total,
             "configured_msats": configured_total,
         }
-        if advertised_total is not None:
-            sample["advertised_msats"] = advertised_total
-            if abs(advertised_total - configured_total) > COST_TOLERANCE_MSATS:
-                mismatched.append(f"{advertised_total} vs {configured_total}")
         samples.append(sample)
         if configured_total + COST_TOLERANCE_MSATS < upstream_total:
             short.append(f"{configured_total} < {upstream_total}")
@@ -543,18 +527,6 @@ def cost_margin_row(
             "Configured pricing is below the upstream's reported cost "
             f"(configured < upstream msats: {'; '.join(short)}); token-billed "
             "requests lose money.",
-            evidence,
-        )
-    if mismatched:
-        return certification_row(
-            ROW_MARGIN,
-            STATUS_WARN,
-            TITLE_MARGIN,
-            f"Configured pricing covers the upstream's reported cost on "
-            f"{len(samples)} sampled completion(s), but this path advertises "
-            f"different endpoint rates (advertised vs billed msats: "
-            f"{'; '.join(mismatched)}); the proxy reserves and token-bills "
-            "pinned requests with the model's own pricing.",
             evidence,
         )
     return certification_row(
@@ -597,7 +569,6 @@ async def run_cache_checks(
     pricing_known: bool = True,
     endpoint_tag: str | None = None,
     upstream: "BaseUpstreamProvider | None" = None,
-    advertised_model: Model | None = None,
     token_limit_field: str = "max_tokens",
 ) -> list[dict[str, Any]]:
     """Run the cache probe and build the three cache/margin rows."""
@@ -634,7 +605,6 @@ async def run_cache_checks(
                 provider_fee=provider_fee,
                 sats_to_usd=sats_to_usd,
                 pricing_known=pricing_known,
-                advertised_model=advertised_model,
             ),
         ),
     ]

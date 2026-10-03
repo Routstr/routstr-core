@@ -50,6 +50,7 @@ async def _run_proxy(
     request: MagicMock,
     candidates: list[tuple[Any, Any]],
     path: str = "v1/chat/completions",
+    session: Any = None,
 ) -> Any:
     key = ApiKey(hashed_key="mpkey", balance=10_000)
     reservation = ReservationSnapshot(
@@ -74,7 +75,7 @@ async def _run_proxy(
             proxy_module, "pay_for_request", AsyncMock(return_value=reservation)
         ),
         patch.object(proxy_module, "revert_pay_for_request", AsyncMock()),
-        patch_proxy_session(MagicMock()),
+        patch_proxy_session(session if session is not None else MagicMock()),
     ):
         return await proxy_module.proxy(request, path)
 
@@ -845,3 +846,138 @@ async def test_node_fault_stays_500_without_scope_header() -> None:
     assert ERROR_SCOPE_HEADER not in response.headers
     body = json.loads(bytes(response.body))
     assert body["error"]["code"] != UPSTREAM_UNAVAILABLE
+
+
+_OPENROUTER = "https://openrouter.ai/api/v1"
+_SATS_USD = 0.001
+_ENDPOINT_PRICING = {"prompt": 2e-6, "completion": 4e-6}
+
+
+def _priced_model() -> Any:
+    from routstr.payment.models import (
+        Architecture,
+        Model,
+        Pricing,
+        _calculate_usd_max_costs,
+        _update_model_sats_pricing,
+    )
+
+    model = Model(
+        id=MODEL_ID,
+        name=MODEL_ID,
+        created=0,
+        description="",
+        context_length=8192,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="unknown",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=1e-6, completion=2e-6),
+    )
+    (
+        model.pricing.max_prompt_cost,
+        model.pricing.max_completion_cost,
+        model.pricing.max_cost,
+    ) = _calculate_usd_max_costs(model)
+    return _update_model_sats_pricing(model, _SATS_USD)
+
+
+def _endpoint_row(model_id: str = MODEL_ID, endpoint_tag: str = "deepinfra/fp8") -> Any:
+    from routstr.core.db import ModelPathRow
+
+    return ModelPathRow(
+        model_id=model_id,
+        path=encode_model_path(_OPENROUTER, model_id, endpoint_tag),
+        provider_slug="openrouter",
+        provider_type="openrouter",
+        endpoint_tag=endpoint_tag,
+        model_metadata=json.dumps({"id": model_id, "pricing": _ENDPOINT_PRICING}),
+        upstream_provider_id=1,
+    )
+
+
+def _session_with_rows(rows: list[Any]) -> MagicMock:
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
+    return session
+
+
+def _endpoint_selector() -> Any:
+    selector = decode_model_path(
+        encode_model_path(_OPENROUTER, MODEL_ID, "deepinfra/fp8")
+    )
+    assert selector is not None
+    return selector
+
+
+def _openrouter_upstream() -> MagicMock:
+    upstream = _make_upstream(1)
+    upstream.base_url = _OPENROUTER
+    upstream.provider_fee = 1.0
+    return upstream
+
+
+@pytest.mark.asyncio
+async def test_endpoint_pin_bills_the_endpoint_pricing() -> None:
+    """A pinned endpoint is reserved and billed at the rates
+    ``/v1/models/paths`` quotes for it, not the model's default listing."""
+    model = _priced_model()
+    upstream = _openrouter_upstream()
+    request = _make_request(
+        {
+            "authorization": "Bearer sk-mpkey",
+            "x-routstr-model-path": encode_model_path(
+                _OPENROUTER, MODEL_ID, "deepinfra/fp8"
+            ),
+        },
+        json.dumps({"model": MODEL_ID}).encode(),
+    )
+
+    with patch("routstr.payment.price.SATS_USD_PRICE", _SATS_USD):
+        await _run_proxy(
+            request, [(model, upstream)], session=_session_with_rows([_endpoint_row()])
+        )
+
+    billed = upstream.forward_request.await_args.args[7]
+    assert billed.sats_pricing.prompt == pytest.approx(2e-6 / _SATS_USD)
+    assert billed.sats_pricing.completion == pytest.approx(4e-6 / _SATS_USD)
+    assert billed.sats_pricing.max_cost > model.sats_pricing.max_cost
+    assert model.sats_pricing.prompt == pytest.approx(1e-6 / _SATS_USD)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rows",
+    [[], [_endpoint_row(model_id="other-model")]],
+    ids=["no-stored-path", "other-model"],
+)
+async def test_endpoint_pin_without_a_stored_path_keeps_model_pricing(
+    rows: list[Any],
+) -> None:
+    model = _priced_model()
+    with patch("routstr.payment.price.SATS_USD_PRICE", _SATS_USD):
+        priced = await proxy_module._price_pinned_endpoint(
+            _session_with_rows(rows),
+            _endpoint_selector(),
+            model,
+            _openrouter_upstream(),
+        )
+    assert priced is model
+
+
+@pytest.mark.asyncio
+async def test_endpoint_pin_without_sats_price_keeps_model_pricing() -> None:
+    model = _priced_model()
+    session = _session_with_rows([_endpoint_row()])
+    with patch("routstr.payment.price.SATS_USD_PRICE", None):
+        priced = await proxy_module._price_pinned_endpoint(
+            session,
+            _endpoint_selector(),
+            model,
+            _openrouter_upstream(),
+        )
+    assert priced is model
+    session.exec.assert_not_awaited()

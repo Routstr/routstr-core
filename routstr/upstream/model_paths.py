@@ -898,8 +898,8 @@ def apply_model_path_pricing(
 
     Direct paths already use the provider model cache and therefore carry the
     same pricing as ``model``. OpenRouter endpoint rows instead contain raw,
-    endpoint-specific USD rates; certification compares them against the
-    model's own pricing, which the proxy reserves and token-bills with.
+    endpoint-specific USD rates, which can differ from the model's default
+    listing; the proxy reserves and token-bills a pinned endpoint with them.
     """
     if row.endpoint_tag is None:
         return model
@@ -933,7 +933,7 @@ def apply_model_path_pricing(
         return _update_model_sats_pricing(priced, sats_to_usd)
     except Exception as exc:
         logger.warning(
-            "Could not apply model-path pricing for certification",
+            "Could not apply model-path pricing",
             extra={"model_id": model.id, "path": row.path, "error": str(exc)},
         )
         return model
