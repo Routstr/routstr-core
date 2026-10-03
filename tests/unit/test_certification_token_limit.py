@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from routstr.upstream.certification import (
+    PROBE_MAX_TOKENS,
     STATUS_OK,
     certify_upstream_url,
     wants_max_completion_tokens,
@@ -79,7 +80,9 @@ async def test_probe_retries_with_max_completion_tokens() -> None:
     # Rejected probe, retried probe, then both cache-probe calls reuse the
     # accepted field instead of being rejected again.
     assert ["max_tokens" in body for body in bodies] == [True, False, False, False]
-    assert all(body.get("max_completion_tokens") == 1 for body in bodies[1:])
+    assert all(
+        body.get("max_completion_tokens") == PROBE_MAX_TOKENS for body in bodies[1:]
+    )
 
 
 @pytest.mark.asyncio

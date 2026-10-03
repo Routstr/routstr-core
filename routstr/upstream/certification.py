@@ -1,12 +1,12 @@
 """Live certification checks for an upstream provider endpoint.
 
 Extends the read-only pricing rows, which never touch the network, with the
-ones that must: a ``/models`` heartbeat and a one-token completion.
+ones that must: a ``/models`` heartbeat and a bounded completion.
 
 Probes call the upstream directly with ``httpx``, never through the node's
-billing path — no reservation, no Cashu. Upstream spend is one one-token
-completion, plus two or three one-token completions on a ~4.4k-token prompt
-when the cache checks are enabled (per certified model path).
+billing path — no reservation, no Cashu. Output budgets start at 32 tokens
+and rise only on recognized limit rejections, up to 2048. Cache checks add
+repeated completions on a ~4.4k-token prompt (per certified model path).
 They sit behind ``POST …/certify`` rather than the read-only ``GET …/report``
 because they can block for the length of the timeout.
 """
@@ -21,7 +21,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -31,6 +31,14 @@ from ..core.logging import get_logger
 from ..payment.cost_calculation import _resolve_usd_cost, calculate_cost
 from ..payment.rates import coerce_rate
 from ..payment.usage import normalize_usage
+from .certification_probe import (
+    PROBE_MAX_TOKENS,
+    PROBE_TIMEOUT_SECONDS,
+    send_completion,
+)
+from .certification_probe import (
+    wants_max_completion_tokens as wants_max_completion_tokens,
+)
 from .model_paths import is_openrouter_base_url
 
 if TYPE_CHECKING:
@@ -45,12 +53,7 @@ STATUS_FAIL = "fail"
 
 TICKS = {STATUS_OK: "☑️", STATUS_WARN: "⚠️", STATUS_FAIL: "❌"}
 
-# Bounded so a dead upstream fails the row rather than wedging the request.
-PROBE_TIMEOUT_SECONDS = 15.0
-
-# The cheapest request that still exercises the usage/cost path.
-PROBE_MAX_TOKENS = 1
-PROBE_PROMPT = "ping"
+PROBE_PROMPT = "Reply with the single word: ok"
 
 # ``calculate_cost`` demands a reservation ceiling; any value at or above the
 # real charge behaves identically.
@@ -128,12 +131,12 @@ CHECKLIST_GOALS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     (
         "caching",
-        "Prompt caching — cache hits reported and billed at the cache rate",
+        "Prompt caching — hits reported and cached cost calculation verified",
         ("cache.reported", "cache.billing"),
     ),
     (
         "margin",
-        "Margin — node charge covers the upstream's cost",
+        "Pricing target — token estimate covers the fee-adjusted target",
         ("cost.margin",),
     ),
 )
@@ -166,7 +169,7 @@ def build_checklist(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 @dataclass
 class ProbeResult:
-    """Raw outcome of the two live HTTP calls a probe makes."""
+    """Outcome of model discovery and the bounded completion attempts."""
 
     base_url: str
     models_url: str
@@ -180,19 +183,11 @@ class ProbeResult:
     chat_payload: dict[str, Any] | None = None
     chat_error: str | None = None
     chat_latency_ms: float | None = None
-    # ``max_completion_tokens`` once the upstream rejected ``max_tokens``.
     token_limit_field: str = "max_tokens"
-
-
-def wants_max_completion_tokens(status: int | None, payload: Any) -> bool:
-    """Whether a 400 names ``max_completion_tokens`` as the field to use.
-
-    OpenAI's o-series and gpt-5 reject ``max_tokens`` on chat completions with
-    "Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens'".
-    """
-    if status != 400 or payload is None:
-        return False
-    return "max_completion_tokens" in json.dumps(payload, default=str)
+    token_limit: int = PROBE_MAX_TOKENS
+    chat_attempts: list[dict[str, Any]] = field(default_factory=list)
+    provider_type: str | None = None
+    completion_skip_reason: str | None = None
 
 
 @dataclass
@@ -269,12 +264,11 @@ async def probe_upstream(
     upstream: "BaseUpstreamProvider | None" = None,
     model: "Model | None" = None,
 ) -> ProbeResult:
-    """Call the upstream's ``/models`` and a one-token completion.
+    """Discover models and probe supported chat APIs with bounded correction.
 
-    A completion refused with a 400 naming ``max_completion_tokens`` is
-    retried once with that field (OpenAI o-series, gpt-5). Each HTTP call,
-    including its body read, has an elapsed-time deadline. A transport
-    failure is a ``fail`` row, not a failed admin request.
+    Each HTTP call, including its body read, has an elapsed-time deadline.
+    Transport failures are rows, not failed admin requests. Native System One
+    inference is deliberately unverified until a supported fixture exists.
     """
     shape = probe_shape(base_url, api_key, upstream, model)
     result = ProbeResult(
@@ -282,7 +276,14 @@ async def probe_upstream(
         models_url=shape.models_url,
         chat_url=shape.chat_url,
         endpoint_tag=endpoint_tag,
+        provider_type=upstream.provider_type if upstream is not None else None,
     )
+    if result.provider_type == "typesafe":
+        result.completion_skip_reason = (
+            "Not evaluated — TypeSafe uses native /v1/systemone, not chat "
+            "completions. No supported native inference fixture is configured; "
+            "usage, billing and cache behavior remain unverified."
+        )
     headers = shape.headers
 
     owns_client = client is None
@@ -313,22 +314,11 @@ async def probe_upstream(
             result.models_error = f"{type(exc).__name__}: {exc}"
             result.models_latency_ms = round((time.monotonic() - started) * 1000, 2)
 
-        if not model_id:
+        if not model_id or result.completion_skip_reason:
             return result
         await _probe_chat(
             client, result, model_id, shape, timeout, upstream, model, "max_tokens"
         )
-        if wants_max_completion_tokens(result.chat_status, result.chat_payload):
-            await _probe_chat(
-                client,
-                result,
-                model_id,
-                shape,
-                timeout,
-                upstream,
-                model,
-                "max_completion_tokens",
-            )
     finally:
         if owns_client:
             await client.aclose()
@@ -346,7 +336,7 @@ async def _probe_chat(
     model: "Model | None",
     token_field: str,
 ) -> None:
-    """Send the one-token completion and record its outcome on ``result``."""
+    """Record the effective provider-shaped field, budget and every attempt."""
     request_body: dict[str, Any] = {
         "model": model_id,
         "messages": [{"role": "user", "content": PROBE_PROMPT}],
@@ -358,35 +348,21 @@ async def _probe_chat(
             "order": [result.endpoint_tag],
             "allow_fallbacks": False,
         }
-    result.token_limit_field = token_field
-    result.chat_status = None
-    result.chat_payload = None
-    result.chat_error = None
-    started = time.monotonic()
-    try:
-        async with asyncio.timeout(timeout):
-            response = await client.post(
-                result.chat_url,
-                json=shape_body(request_body, upstream, model),
-                headers=shape.headers,
-                params=shape.chat_params,
-            )
-        result.chat_status = response.status_code
-        result.chat_latency_ms = round((time.monotonic() - started) * 1000, 2)
-        try:
-            payload = response.json()
-        except Exception as exc:  # noqa: BLE001 - any decode failure is the signal
-            result.chat_error = f"{type(exc).__name__}: {exc}"
-        else:
-            if isinstance(payload, dict):
-                result.chat_payload = payload
-            else:
-                result.chat_error = (
-                    f"expected a JSON object, got {type(payload).__name__}"
-                )
-    except Exception as exc:  # noqa: BLE001 - transport failure is a row status
-        result.chat_error = f"{type(exc).__name__}: {exc}"
-        result.chat_latency_ms = round((time.monotonic() - started) * 1000, 2)
+    outcome = await send_completion(
+        client,
+        result.chat_url,
+        shape_body(request_body, upstream, model),
+        shape.headers,
+        shape.chat_params,
+        timeout,
+    )
+    result.token_limit_field = outcome.token_limit_field
+    result.token_limit = outcome.token_limit
+    result.chat_status = outcome.status
+    result.chat_payload = outcome.payload
+    result.chat_error = outcome.error
+    result.chat_latency_ms = outcome.latency_ms
+    result.chat_attempts = outcome.attempts
 
 
 # Row builders are pure: the network lives only in ``probe_upstream`` and
@@ -473,13 +449,16 @@ def models_payload_row(probe: ProbeResult) -> dict[str, Any]:
             {"url": probe.models_url, "error": probe.models_error},
         )
 
-    data = payload.get("data")
+    data_key, id_key = (
+        ("models", "name") if probe.provider_type == "typesafe" else ("data", "id")
+    )
+    data = payload.get(data_key)
     if not isinstance(data, list):
         return certification_row(
             "endpoint.models_payload",
             STATUS_FAIL,
             "Models payload has the expected shape",
-            f'Expected a top-level "data" list, got {type(data).__name__}.',
+            f'Expected a top-level "{data_key}" list, got {type(data).__name__}.',
             {
                 "url": probe.models_url,
                 "top_level_keys": sorted(payload.keys()),
@@ -487,9 +466,9 @@ def models_payload_row(probe: ProbeResult) -> dict[str, Any]:
         )
 
     ids = [
-        item["id"]
+        item[id_key]
         for item in data
-        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]
+        if isinstance(item, dict) and isinstance(item.get(id_key), str) and item[id_key]
     ]
     evidence: dict[str, Any] = {
         "url": probe.models_url,
@@ -502,15 +481,15 @@ def models_payload_row(probe: ProbeResult) -> dict[str, Any]:
             "endpoint.models_payload",
             STATUS_FAIL,
             "Models payload has the expected shape",
-            f'The "data" list carries no entry with a non-empty string "id" '
-            f"({len(data)} entries).",
+            f'The "{data_key}" list carries no entry with a non-empty string '
+            f'"{id_key}" ({len(data)} entries).',
             evidence,
         )
     return certification_row(
         "endpoint.models_payload",
         STATUS_OK,
         "Models payload has the expected shape",
-        f"{len(ids)} of {len(data)} entries carry a string id.",
+        f"{len(ids)} of {len(data)} entries carry a string {id_key}.",
         evidence,
     )
 
@@ -518,14 +497,25 @@ def models_payload_row(probe: ProbeResult) -> dict[str, Any]:
 def usage_capture_row(probe: ProbeResult) -> dict[str, Any]:
     """Check a completion comes back with token usage the node can bill on.
 
-    A missing ``usage`` object means the node has nothing to price and the
-    request settles for free. Broken, but still usable, so ``warn``.
+    Missing upstream usage is a coverage gap. The proxy can estimate usage
+    before settlement; this direct probe does not exercise that fallback.
     """
     evidence: dict[str, Any] = {
         "url": probe.chat_url,
         "status_code": probe.chat_status,
         "latency_ms": probe.chat_latency_ms,
+        "token_limit_field": probe.token_limit_field,
+        "token_limit": probe.token_limit,
+        "attempts": probe.chat_attempts,
     }
+    if probe.completion_skip_reason:
+        return certification_row(
+            "usage.capture",
+            STATUS_WARN,
+            "Token usage captured from a completion",
+            probe.completion_skip_reason,
+            evidence,
+        )
     if probe.chat_status is None:
         evidence["error"] = probe.chat_error
         return certification_row(
@@ -536,13 +526,17 @@ def usage_capture_row(probe: ProbeResult) -> dict[str, Any]:
             evidence,
         )
     if not 200 <= probe.chat_status < 300:
-        evidence["body"] = _truncate(probe.chat_payload)
+        evidence["body"] = (
+            probe.chat_attempts[-1]["body"]
+            if probe.chat_attempts
+            else _truncate(probe.chat_payload)
+        )
         return certification_row(
             "usage.capture",
             STATUS_FAIL,
             "Token usage captured from a completion",
             f"{probe.chat_url} answered {probe.chat_status} for a "
-            f"{PROBE_MAX_TOKENS}-token probe.",
+            f"{probe.token_limit}-token probe ({probe.token_limit_field}).",
             evidence,
         )
     if probe.chat_payload is None or not isinstance(probe.chat_payload, dict):
@@ -576,8 +570,9 @@ def usage_capture_row(probe: ProbeResult) -> dict[str, Any]:
             "usage.capture",
             STATUS_WARN,
             "Token usage captured from a completion",
-            'The completion carried no "usage" object, so the node has no '
-            "token counts to bill on and the request would settle as (0+0).",
+            'The completion carried no "usage" object. The proxy may estimate '
+            "missing usage before settlement; this probe does not verify that "
+            "fallback or the resulting client debit.",
             evidence,
         )
     evidence["input_tokens"] = normalized.input_tokens
@@ -782,8 +777,8 @@ def cost_prompt_completion_row(
             "cost.prompt_completion",
             STATUS_FAIL,
             "Prompt and completion cost calculated",
-            f"The expected charge could not be derived from the configured "
-            f"pricing: {type(exc).__name__}: {exc}.",
+            f"The expected charge could not be derived from the selected "
+            f"billing basis: {type(exc).__name__}: {exc}.",
             evidence,
         )
 
@@ -826,12 +821,17 @@ def cost_prompt_completion_row(
     ):
         mismatches.append(f"input {actual_input} != {expected_input}")
 
+    basis_label = (
+        "upstream-reported USD converted with the provider fee and exchange rate"
+        if basis == "upstream_reported_usd"
+        else "configured token pricing"
+    )
     if mismatches:
         return certification_row(
             "cost.prompt_completion",
             STATUS_FAIL,
             "Prompt and completion cost calculated",
-            "The computed charge disagrees with the configured pricing: "
+            f"The computed charge disagrees with {basis_label}: "
             + "; ".join(mismatches)
             + ".",
             evidence,
@@ -840,10 +840,10 @@ def cost_prompt_completion_row(
         "cost.prompt_completion",
         STATUS_OK,
         "Prompt and completion cost calculated",
-        f"Charged {actual_total} msats ({actual_input} input + "
+        f"Calculated {actual_total} msats ({actual_input} input + "
         f"{actual_output} output) for {usage.input_tokens} prompt and "
-        f"{usage.output_tokens} completion tokens, matching the configured "
-        f"pricing.",
+        f"{usage.output_tokens} completion tokens, matching {basis_label}. "
+        "This is a calculation, not a measured client debit.",
         evidence,
     )
 
@@ -901,8 +901,27 @@ async def run_live_checks(
         ),
     ]
 
+    from .certification_cache import run_cache_checks, skipped_cache_rows
+
+    if probe.completion_skip_reason:
+        rows.append(
+            certification_row(
+                "cost.prompt_completion",
+                STATUS_WARN,
+                "Prompt and completion cost calculated",
+                probe.completion_skip_reason,
+                {},
+            )
+        )
+        rows.extend(skipped_cache_rows(probe.completion_skip_reason))
+        return rows
+
     cost_data: Any = None
-    if probe.chat_payload is not None and probe.chat_status is not None:
+    if (
+        probe.chat_payload is not None
+        and probe.chat_status is not None
+        and 200 <= probe.chat_status < 300
+    ):
         try:
             cost_data = await calculate_cost(
                 probe.chat_payload,
@@ -939,8 +958,6 @@ async def run_live_checks(
         )
     )
 
-    from .certification_cache import run_cache_checks, skipped_cache_rows
-
     if not check_cache:
         rows.extend(skipped_cache_rows("Skipped — cache checks disabled."))
     elif (
@@ -973,6 +990,7 @@ async def run_live_checks(
                 endpoint_tag=endpoint_tag,
                 upstream=upstream,
                 token_limit_field=probe.token_limit_field,
+                token_limit=probe.token_limit,
             )
         )
     return rows
