@@ -272,7 +272,8 @@ export function ProviderCertificationSetupPanel({
                 )}
                 {mode === 'all' && (
                   <p className='text-muted-foreground text-xs'>
-                    All {paths.length} paths will run in parallel.
+                    All {paths.length} paths will run one after another, each
+                    with its own probe calls.
                   </p>
                 )}
               </>

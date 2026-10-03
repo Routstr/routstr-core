@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -1245,7 +1246,14 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="Upstream base URL (repeatable), e.g. https://api.example.com/v1",
     )
-    parser.add_argument("--key", default="", help="Bearer API key for the upstream")
+    parser.add_argument(
+        "--key",
+        default=os.environ.get("ROUTSTR_CERTIFY_KEY", ""),
+        help=(
+            "Bearer API key for the upstream (defaults to $ROUTSTR_CERTIFY_KEY; "
+            "prefer the env var so the key stays out of shell history and ps)"
+        ),
+    )
     parser.add_argument(
         "--model",
         default=None,

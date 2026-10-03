@@ -340,6 +340,21 @@ async def providers() -> RedirectResponse:
 
 UI_DIST_PATH = Path(__file__).parent.parent.parent / "ui_out"
 
+# Every `ui/app/**/page.tsx` route needs an entry, or a direct load 404s.
+UI_PAGES = (
+    "dashboard",
+    "login",
+    "model",
+    "providers",
+    "providers/certification",
+    "settings",
+    "transactions",
+    "balances",
+    "logs",
+    "usage",
+    "unauthorized",
+)
+
 if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     logger.info(f"Serving static UI from {UI_DIST_PATH}")
 
@@ -362,18 +377,6 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     # with a slash (e.g. `/login/`). The proxy router catches `/{path:path}`
     # before FastAPI's `redirect_slashes` logic can normalize the URL, so we
     # must register both the with-slash and without-slash variants here.
-    UI_PAGES = (
-        "dashboard",
-        "login",
-        "model",
-        "providers",
-        "settings",
-        "transactions",
-        "balances",
-        "logs",
-        "usage",
-        "unauthorized",
-    )
 
     def _register_ui_page(name: str) -> None:
         page_dir = UI_DIST_PATH / name
