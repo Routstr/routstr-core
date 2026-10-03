@@ -3,7 +3,7 @@ import json
 import random
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel as V2BaseModel
 from pydantic.v1 import BaseModel, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -804,13 +804,19 @@ async def model_paths_for_model(model_id: str) -> dict:
     return result
 
 
-@models_router.get("/v1/models")
-@models_router.get("/v1/models/", include_in_schema=False)
-@models_router.get("/models")
-@models_router.get("/models/", include_in_schema=False)
-async def models(session: AsyncSession = Depends(get_session)) -> dict:
+@models_router.get("/v1/models", response_model=None)
+@models_router.get("/v1/models/", include_in_schema=False, response_model=None)
+@models_router.get("/models", response_model=None)
+@models_router.get("/models/", include_in_schema=False, response_model=None)
+async def models(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> dict | Response:
     """Get all available models from all providers with database overrides applied."""
-    from ..proxy import get_unique_models
+    from ..proxy import get_unique_models, is_warming_up, models_warming_up_response
+
+    # An empty list here reads as "this node serves nothing"; tell clients to retry.
+    if is_warming_up():
+        return models_warming_up_response(request)
 
     items = get_unique_models()
     data = []

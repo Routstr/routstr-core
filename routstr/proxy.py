@@ -25,6 +25,7 @@ from .core.db import (
 )
 from .core.error_scope import (
     ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_NODE,
     ERROR_SCOPE_UPSTREAM,
     UPSTREAM_ERROR_STATUS,
     UPSTREAM_UNAVAILABLE,
@@ -62,7 +63,13 @@ from .upstream.request_correction import correct_request, extract_error_message
 logger = get_logger(__name__)
 
 MODEL_PATH_HEADER = "x-routstr-model-path"
+MODELS_WARMING_UP = "MODELS_WARMING_UP"
+WARMING_UP_RETRY_AFTER_SECONDS = 2
 proxy_router = APIRouter()
+
+# Startup loads providers in the background, so until that first load finishes
+# an unknown model may just not be loaded yet.
+_warming_up = False
 
 _upstreams: list[BaseUpstreamProvider] = []
 _provider_map: dict[
@@ -80,10 +87,36 @@ async def _finish_read_transaction(session: AsyncSession) -> None:
 
 async def initialize_upstreams() -> None:
     """Initialize upstream providers from database during application startup."""
-    global _upstreams
-    _upstreams = await init_upstreams()
-    logger.info(f"Initialized {len(_upstreams)} upstream providers")
-    await refresh_model_maps()
+    global _upstreams, _warming_up
+    try:
+        _upstreams = await init_upstreams()
+        logger.info(f"Initialized {len(_upstreams)} upstream providers")
+        await refresh_model_maps()
+    finally:
+        _warming_up = False
+
+
+def mark_warming_up() -> None:
+    """Answer unknown models with a retryable 503 until initialize_upstreams() ends."""
+    global _warming_up
+    _warming_up = True
+
+
+def is_warming_up() -> bool:
+    return _warming_up
+
+
+def models_warming_up_response(request: Request) -> Response:
+    response = create_error_response(
+        "service_unavailable",
+        "Models are still loading, retry shortly",
+        503,
+        request=request,
+        code=MODELS_WARMING_UP,
+        error_scope=ERROR_SCOPE_NODE,
+    )
+    response.headers["Retry-After"] = str(WARMING_UP_RETRY_AFTER_SECONDS)
+    return response
 
 
 async def reinitialize_upstreams() -> None:
@@ -650,6 +683,8 @@ async def _proxy(
     candidates = get_candidates(model_id)
 
     if not candidates:
+        if is_warming_up():
+            return models_warming_up_response(request)
         return create_error_response(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
         )
