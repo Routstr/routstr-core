@@ -196,7 +196,11 @@ async def test_model_test_endpoint_admin_uses_allowed_upstream_path(
             return None
 
         async def post(
-            self, url: str, json: dict[str, Any], headers: dict[str, str]
+            self,
+            url: str,
+            json: dict[str, Any],
+            headers: dict[str, str],
+            params: dict[str, str] | None = None,
         ) -> MockResponse:
             assert url == "https://api.example.com/v1/chat/completions"
             assert json["model"] == "upstream-model-a"
@@ -204,7 +208,11 @@ async def test_model_test_endpoint_admin_uses_allowed_upstream_path(
             return MockResponse()
 
     try:
-        with patch("httpx.AsyncClient", return_value=MockAsyncClient()):
+        # No live upstream instance: the plain OpenAI-compatible fallback.
+        with (
+            patch("httpx.AsyncClient", return_value=MockAsyncClient()),
+            patch("routstr.proxy.get_upstreams", return_value=[]),
+        ):
             response = await integration_client.post(
                 "/api/models/test",
                 json={
