@@ -861,15 +861,14 @@ async def run_live_checks(
     check_cache: bool = True,
     endpoint_tag: str | None = None,
     upstream: "BaseUpstreamProvider | None" = None,
-    advertised_model: "Model | None" = None,
 ) -> list[dict[str, Any]]:
     """Probe one upstream and build the live/derived rows.
 
     ``check_cache`` adds the prompt-cache and margin rows, which cost two or
     three more completions against a long prompt. ``upstream`` shapes the
     probes like the proxy's own requests; without it they assume a plain
-    OpenAI-compatible base URL. ``advertised_model`` carries a pinned path's
-    own endpoint rates for the margin row to compare against ``model``'s.
+    OpenAI-compatible base URL. On a pinned endpoint ``model`` carries that
+    endpoint's own rates, as the proxy bills it.
     """
     probe = await probe_upstream(
         base_url,
@@ -973,7 +972,6 @@ async def run_live_checks(
                 pricing_known=pricing_known,
                 endpoint_tag=endpoint_tag,
                 upstream=upstream,
-                advertised_model=advertised_model,
                 token_limit_field=probe.token_limit_field,
             )
         )

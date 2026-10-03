@@ -1724,14 +1724,12 @@ async def certify_upstream_provider(
                 status_code=503,
                 detail="sats/USD price is not initialized yet; retry shortly",
             )
-        # The proxy reserves and token-bills a pinned request with the model's
-        # own pricing, so the cost rows use it too; the path's advertised
-        # endpoint rates are only compared against it in the margin row.
-        advertised_model = None
+        # The proxy reserves and token-bills a pinned endpoint at that
+        # endpoint's own rates, so the cost rows price it the same way.
         if selected_path is not None:
             from ..upstream.model_paths import apply_model_path_pricing
 
-            advertised_model = apply_model_path_pricing(
+            model_obj = apply_model_path_pricing(
                 model_obj,
                 selected_path,
                 provider.provider_fee,
@@ -1750,7 +1748,6 @@ async def certify_upstream_provider(
             check_cache=payload.check_cache,
             endpoint_tag=endpoint_tag,
             upstream=upstream_obj,
-            advertised_model=advertised_model,
         )
 
     rows = pricing_rows + live_rows

@@ -899,14 +899,17 @@ def apply_model_path_pricing(
 
     Direct paths already use the provider model cache and therefore carry the
     same pricing as ``model``. OpenRouter endpoint rows instead contain raw,
-    endpoint-specific USD rates; certification compares them against the
-    model's own pricing, which the proxy reserves and token-bills with.
+    endpoint-specific USD rates and limits, which can differ from the model's
+    default listing; OpenRouter charges the endpoint that serves the request,
+    so the proxy reserves and token-bills a pinned endpoint with them, using
+    the same limits ``/v1/models/paths`` quotes its max cost from.
     """
     if row.endpoint_tag is None:
         return model
 
     from ..payment.models import (
         Pricing,
+        TopProvider,
         _calculate_usd_max_costs,
         _update_model_sats_pricing,
         backfill_cache_pricing,
@@ -925,7 +928,16 @@ def apply_model_path_pricing(
         pricing = Pricing.parse_obj(
             {key: float(value) * provider_fee for key, value in pricing.dict().items()}
         )
-        priced = model.copy(update={"pricing": pricing, "sats_pricing": None})
+        update: dict[str, Any] = {"pricing": pricing, "sats_pricing": None}
+        context_length = metadata.get("context_length")
+        max_completion_tokens = metadata.get("max_completion_tokens")
+        if context_length or max_completion_tokens:
+            update["context_length"] = context_length or model.context_length
+            update["top_provider"] = TopProvider(
+                context_length=context_length,
+                max_completion_tokens=max_completion_tokens,
+            )
+        priced = model.copy(update=update)
         (
             pricing.max_prompt_cost,
             pricing.max_completion_cost,
@@ -934,7 +946,7 @@ def apply_model_path_pricing(
         return _update_model_sats_pricing(priced, sats_to_usd)
     except Exception as exc:
         logger.warning(
-            "Could not apply model-path pricing for certification",
+            "Could not apply model-path pricing",
             extra={"model_id": model.id, "path": row.path, "error": str(exc)},
         )
         return model

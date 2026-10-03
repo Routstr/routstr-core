@@ -333,47 +333,6 @@ class TestCostMarginRow:
 
         assert row["status"] == STATUS_OK
 
-    def test_pinned_path_fails_when_billed_pricing_misses_cost(self) -> None:
-        """The path's endpoint rates cover the cost but the model pricing the
-        proxy actually bills with does not: the margin must fail."""
-        payload = _payload({"prompt_tokens": 5, "completion_tokens": 1, "cost": 4e-6})
-        row = cost_margin_row(
-            model=_model(),
-            payloads=[payload],
-            provider_fee=1.0,
-            sats_to_usd=SATS_USD,
-            advertised_model=_model(prompt=1e-6, completion=2e-6),
-        )
-        assert row["status"] == STATUS_FAIL
-        sample = row["evidence"]["samples"][0]
-        assert sample["advertised_msats"] >= sample["upstream_msats_with_fee"]
-        assert sample["configured_msats"] < sample["upstream_msats_with_fee"]
-
-    def test_pinned_path_warns_when_advertised_rates_differ(self) -> None:
-        payload = _payload({"prompt_tokens": 5, "completion_tokens": 1, "cost": 9e-7})
-        row = cost_margin_row(
-            model=_model(),
-            payloads=[payload],
-            provider_fee=1.0,
-            sats_to_usd=SATS_USD,
-            advertised_model=_model(prompt=1e-6, completion=2e-6),
-        )
-        assert row["status"] == STATUS_WARN
-        assert "advertises different endpoint rates" in row["detail"]
-
-    def test_pinned_path_ok_when_advertised_rates_match(self) -> None:
-        payload = _payload({"prompt_tokens": 5, "completion_tokens": 1, "cost": 9e-7})
-        row = cost_margin_row(
-            model=_model(),
-            payloads=[payload],
-            provider_fee=1.0,
-            sats_to_usd=SATS_USD,
-            advertised_model=_model(),
-        )
-        assert row["status"] == STATUS_OK
-        sample = row["evidence"]["samples"][0]
-        assert sample["advertised_msats"] == sample["configured_msats"]
-
     def test_warn_when_pricing_unknown(self) -> None:
         payload = _payload({"prompt_tokens": 5, "completion_tokens": 1, "cost": 9e-7})
         row = cost_margin_row(
