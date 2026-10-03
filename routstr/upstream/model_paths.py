@@ -23,6 +23,7 @@ import json
 import random
 import time
 from collections.abc import Iterable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -144,6 +145,14 @@ class ModelPathSelector:
     model_id: str
     endpoint_tag: str | None = None
     provider_id: int | None = None
+
+
+# Endpoint tag the current request is pinned to, set by the proxy once the
+# selector is resolved. Response stamping reads it to name the serving
+# provider when the upstream omits it; ``None`` for unpinned requests.
+pinned_endpoint_context: ContextVar[str | None] = ContextVar(
+    "pinned_endpoint_tag", default=None
+)
 
 
 def decode_model_path(path: str) -> ModelPathSelector | None:

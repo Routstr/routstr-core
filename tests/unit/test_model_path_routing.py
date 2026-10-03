@@ -15,7 +15,11 @@ from routstr.core.error_scope import (
     ERROR_SCOPE_UPSTREAM,
     UPSTREAM_UNAVAILABLE,
 )
-from routstr.upstream.model_paths import decode_model_path, encode_model_path
+from routstr.upstream.model_paths import (
+    decode_model_path,
+    encode_model_path,
+    pinned_endpoint_context,
+)
 
 from .proxy_test_utils import mock_request_stream, patch_proxy_session
 
@@ -287,6 +291,39 @@ async def test_endpoint_tag_pins_the_upstream_subprovider() -> None:
         "order": ["deepinfra/fp8"],
         "allow_fallbacks": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_endpoint_tag_is_exposed_to_response_stamping() -> None:
+    """The pin is visible while the upstream handles the request, so response
+    stamping can name the endpoint; the next unpinned request sees none."""
+    upstream = _make_upstream(1)
+    upstream.base_url = "https://openrouter.ai/api/v1"
+    seen: list[str | None] = []
+
+    async def forward(*args: Any, **kwargs: Any) -> Any:
+        seen.append(pinned_endpoint_context.get())
+        return MagicMock(status_code=200, body=b"{}")
+
+    upstream.forward_request = AsyncMock(side_effect=forward)
+    pinned = _make_request(
+        {
+            "authorization": "Bearer sk-mpkey",
+            "x-routstr-model-path": encode_model_path(
+                upstream.base_url, MODEL_ID, "deepinfra/fp8"
+            ),
+        },
+        json.dumps({"model": MODEL_ID}).encode(),
+    )
+    unpinned = _make_request(
+        {"authorization": "Bearer sk-mpkey"},
+        json.dumps({"model": MODEL_ID}).encode(),
+    )
+
+    await _run_proxy(pinned, [(MagicMock(), upstream)])
+    await _run_proxy(unpinned, [(MagicMock(), upstream)])
+
+    assert seen == ["deepinfra/fp8", None]
 
 
 @pytest.mark.asyncio
