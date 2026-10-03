@@ -481,29 +481,4 @@ export class ModelService {
       throw error;
     }
   }
-
-  // Test model through proxy to avoid CORS issues
-  static async testModel(
-    modelId: string,
-    endpointType: string,
-    requestData: unknown
-  ): Promise<{
-    success: boolean;
-    data?: unknown;
-    error?: string;
-    status_code?: number;
-  }> {
-    const response = await apiClient.post<{
-      success: boolean;
-      data?: unknown;
-      error?: string;
-      status_code?: number;
-    }>('/api/models/test', {
-      model_id: modelId,
-      endpoint_type: endpointType,
-      request_data: requestData,
-    });
-
-    return response;
-  }
 }
