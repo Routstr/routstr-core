@@ -346,8 +346,10 @@ def _build_model_from_row(
     )
     top_provider_dict = json.loads(row.top_provider) if row.top_provider else None
 
+    # Rows written before the admin edge normalized rates can still carry
+    # numeric strings (``"0"``); compare as floats so the clamp cannot raise.
     if isinstance(pricing, dict) and float(pricing.get("request", 0.0)) <= 0.0:
-        pricing["request"] = max(pricing.get("request", 0.0), 0.0)
+        pricing["request"] = 0.0
 
     parsed_pricing = Pricing.parse_obj(pricing)
 

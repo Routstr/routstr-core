@@ -492,9 +492,11 @@ class ModelCreate(BaseModel):
         negative or ``NaN``/``inf`` value is truthy and reads back as a real
         price, so the model could be enabled and bill a nonsensical amount.
         Surfacing a 422 reports the client bug as a client bug instead of
-        persisting it. Numeric strings (``"0.000005"``) stay valid, and so does
-        an omitted auxiliary rate — the stored JSON accepts both.
+        persisting it. Numeric strings (``"0.000005"``) stay valid and are
+        stored as the number they spell, so the read path never meets a string
+        rate; an omitted auxiliary rate is valid too.
         """
+        normalized = dict(value)
         for field in BILLABLE_PRICING_FIELDS:
             if field not in value:
                 # ``dict.get`` cannot tell this from an explicit ``null``, so
@@ -507,12 +509,14 @@ class ModelCreate(BaseModel):
             # The shared coercion also absorbs the OverflowError an oversized
             # integer raises, which pydantic does not convert into a validation
             # error — unhandled it escaped as a 500 for a bad client value.
-            if coerce_rate(value[field]) is None:
+            rate = coerce_rate(value[field])
+            if rate is None:
                 raise ValueError(
                     f"{field} must be a finite, non-negative number, "
                     f"got {value[field]!r}"
                 )
-        return value
+            normalized[field] = rate
+        return normalized
 
 
 def _normalize_forwarded_model_id(value: str | None) -> str | None:
