@@ -934,9 +934,12 @@ def apply_model_path_pricing(
             if not key.startswith("max_")
         }
         if floor is not None:
+            floor_rates = _effective_cache_rates(
+                {key: float(getattr(floor, key)) for key in rates}
+            )
             rates = {
-                key: max(value, float(getattr(floor, key)))
-                for key, value in rates.items()
+                key: max(value, floor_rates[key])
+                for key, value in _effective_cache_rates(rates).items()
             }
         pricing = Pricing.parse_obj(rates)
         update: dict[str, Any] = {"pricing": pricing, "sats_pricing": None}
@@ -961,6 +964,20 @@ def apply_model_path_pricing(
             extra={"model_id": model.id, "path": row.path, "error": str(exc)},
         )
         return model
+
+
+def _effective_cache_rates(rates: dict[str, float]) -> dict[str, float]:
+    """Spell out cache rates settlement reads as "bill at the prompt rate".
+
+    A zero cache rate is billed at the prompt rate, so a per-rate ``max``
+    must compare those prompt rates, not the zeros.
+    """
+    return {
+        key: value
+        if value > 0 or key not in ("input_cache_read", "input_cache_write")
+        else rates["prompt"]
+        for key, value in rates.items()
+    }
 
 
 async def price_pinned_endpoint(

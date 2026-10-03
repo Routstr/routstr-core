@@ -853,7 +853,9 @@ _SATS_USD = 0.001
 _ENDPOINT_PRICING = {"prompt": 2e-6, "completion": 4e-6}
 
 
-def _priced_model(prompt: float = 1e-6, completion: float = 2e-6) -> Any:
+def _priced_model(
+    prompt: float = 1e-6, completion: float = 2e-6, cache_read: float = 0.0
+) -> Any:
     from routstr.payment.models import (
         Architecture,
         Model,
@@ -875,7 +877,9 @@ def _priced_model(prompt: float = 1e-6, completion: float = 2e-6) -> Any:
             tokenizer="unknown",
             instruct_type=None,
         ),
-        pricing=Pricing(prompt=prompt, completion=completion),
+        pricing=Pricing(
+            prompt=prompt, completion=completion, input_cache_read=cache_read
+        ),
     )
     (
         model.pricing.max_prompt_cost,
@@ -888,6 +892,7 @@ def _priced_model(prompt: float = 1e-6, completion: float = 2e-6) -> Any:
 def _endpoint_row(
     model_id: str = MODEL_ID,
     endpoint_tag: str = "deepinfra/fp8",
+    pricing: dict[str, float] | None = None,
     **limits: int,
 ) -> Any:
     from routstr.core.db import ModelPathRow
@@ -899,7 +904,7 @@ def _endpoint_row(
         provider_type="openrouter",
         endpoint_tag=endpoint_tag,
         model_metadata=json.dumps(
-            {"id": model_id, "pricing": _ENDPOINT_PRICING, **limits}
+            {"id": model_id, "pricing": pricing or _ENDPOINT_PRICING, **limits}
         ),
         upstream_provider_id=1,
     )
@@ -1042,3 +1047,42 @@ async def test_endpoint_pin_never_bills_below_an_operator_override(
         )
 
     assert (priced.pricing.prompt, priced.pricing.completion) == pytest.approx(expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override", "endpoint", "expected_cache_read"),
+    [
+        # The override has no cache rate, so its cache reads bill at its
+        # prompt rate; the endpoint's cheaper cache rate must not undercut it.
+        (
+            (2e-6, 8e-6, 0.0),
+            {"prompt": 1e-6, "completion": 2e-6, "input_cache_read": 1e-7},
+            2e-6,
+        ),
+        # The endpoint has no cache rate, so it charges its prompt rate; the
+        # override's cheaper cache rate must not bill below that cost.
+        ((1e-6, 2e-6, 1e-8), {"prompt": 2e-6, "completion": 4e-6}, 2e-6),
+    ],
+    ids=["override-without-cache-rate", "endpoint-without-cache-rate"],
+)
+async def test_override_floor_compares_effective_cache_rates(
+    override: tuple[float, float, float],
+    endpoint: dict[str, float],
+    expected_cache_read: float,
+) -> None:
+    """A zero cache rate is billed at the prompt rate, so the floor compares
+    those effective rates rather than the zeros."""
+    from routstr.core.db import ModelRow
+
+    with patch("routstr.payment.price.SATS_USD_PRICE", _SATS_USD):
+        priced = await proxy_module._price_pinned_endpoint(
+            _session_with_rows(
+                [_endpoint_row(pricing=endpoint)], override=MagicMock(spec=ModelRow)
+            ),
+            _endpoint_selector(),
+            _priced_model(*override),
+            _openrouter_upstream(),
+        )
+
+    assert priced.pricing.input_cache_read == pytest.approx(expected_cache_read)
