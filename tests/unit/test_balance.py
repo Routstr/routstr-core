@@ -244,7 +244,7 @@ def test_cashu_transaction_source_can_be_apikey() -> None:
 def _make_api_key(
     balance: int = 5000,
     refund_currency: str | None = "sat",
-    refund_mint_url: str | None = "https://mint.example.com",
+    refund_mint_url: str | None = None,
     refund_address: str | None = None,
 ) -> ApiKey:
     key = ApiKey(hashed_key="testhash")

@@ -75,14 +75,10 @@ _FOREIGN_FAILURE_EXCEPTIONS: tuple[type[BaseException], ...] = (
 )
 
 
-def swap_enabled() -> bool:
-    return settings.foreign_mint_policy.strip().lower() == "swap"
-
-
 def refund_destination_mint(key: ApiKey) -> str | None:
-    """The user's own mint to refund to, when it is foreign and swaps are on."""
+    """Return the user's own mint when a refund needs a reverse swap."""
     mint = key.refund_mint_url
-    if not mint or not swap_enabled() or resolve_trusted_source_mint(mint):
+    if not mint or resolve_trusted_source_mint(mint):
         return None
     return mint
 
@@ -319,8 +315,6 @@ async def swap_in_and_credit(
     ``ValueError``) and ``SwapPendingError`` once the melt was dispatched but
     not confirmed.
     """
-    if not swap_enabled():
-        raise ForeignMintSwapError("Foreign-mint swaps are disabled on this node")
     token_obj = deserialize_token_from_string(cashu_token)
     source_mint = str(token_obj.mint)
     if resolve_trusted_source_mint(source_mint) is not None:

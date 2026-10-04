@@ -173,14 +173,11 @@ trusted.
 
 #### Tokens from other mints
 
-By default a token issued by a mint outside this list is refused offline with
-`cashu_untrusted_source_mint`; the node never contacts a mint it does not trust.
-
-`FOREIGN_MINT_POLICY=swap` lets `/v1/wallet/topup` accept such tokens by
-melting them over Lightning into the primary mint. Bearer and X-Cashu payments
-still refuse foreign mints (those paths run on every request and must not wait
-on a third-party mint). Refunds of a key funded this way are swapped back to the
-user's own mint, net of fees. Safeguards when enabled:
+`/v1/wallet/topup` accepts tokens issued by mints outside this list by melting
+them over Lightning into the primary mint. Bearer and X-Cashu payments still
+refuse foreign mints (those paths run on every request and must not wait on a
+third-party mint). Refunds of a key funded this way are swapped back to the
+user's own mint, net of fees. Safeguards:
 
 - The token's mint URL must be HTTPS to a public address.
 - Calls to the foreign mint get one attempt with a short deadline and share a
@@ -258,7 +255,6 @@ Use environment variables for:
 | `MINT_OPERATION_TIMEOUT_SECONDS` | Per-attempt timeout for mint network calls | `30` |
 | `MINT_MAX_CONCURRENCY` | Concurrent operations allowed per mint (`0` disables the limit) | `4` |
 | `MINT_RETRY_MAX_ATTEMPTS` | Retries after a timeout or HTTP 429 (`0` disables retries) | `3` |
-| `FOREIGN_MINT_POLICY` | `reject` refuses top-up tokens from unconfigured mints; `swap` melts them into the primary mint (see above) | `reject` |
 | `FOREIGN_MINT_OPERATION_TIMEOUT_SECONDS` | Single-attempt deadline for calls to an unconfigured mint | `5` |
 | `FOREIGN_MINT_MAX_CONCURRENCY` | Process-wide cap on in-flight calls to unconfigured mints | `4` |
 | `SWAP_RECONCILE_INTERVAL_SECONDS` | How often unfinished swaps are re-checked against their mints | `60` |

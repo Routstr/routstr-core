@@ -20,10 +20,9 @@ from .core.db import (
 )
 from .core.logging import get_logger
 from .core.settings import settings
-from .foreign_mint_swap import swap_enabled, swap_in_and_credit
+from .foreign_mint_swap import swap_in_and_credit
 from .lightning import lightning_router
 from .wallet import (
-    UntrustedSourceMintError,
     classify_redemption_error,
     credit_balance,
     is_trusted_source_mint,
@@ -187,8 +186,6 @@ async def topup_wallet_endpoint(
     )
     try:
         if source_mint != "unknown" and not is_trusted_source_mint(source_mint):
-            if not swap_enabled():
-                raise UntrustedSourceMintError(f"Untrusted source mint: {source_mint}")
             # Top-up is the only entry point that swaps: the caller is already
             # waiting on a long operation here, unlike bearer auth or X-Cashu.
             amount_msats = await swap_in_and_credit(cashu_token, billing_key, session)

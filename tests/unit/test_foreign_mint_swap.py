@@ -62,7 +62,6 @@ async def engine(
     monkeypatch.setattr(settings, "primary_mint", PRIMARY)
     monkeypatch.setattr(settings, "primary_mint_unit", "sat")
     monkeypatch.setattr(settings, "cashu_mints", [PRIMARY])
-    monkeypatch.setattr(settings, "foreign_mint_policy", "swap")
     monkeypatch.setattr(settings, "foreign_mint_operation_timeout_seconds", 0.2)
     monkeypatch.setattr(settings, "foreign_mint_max_concurrency", 4)
     monkeypatch.setattr(fms, "_foreign_slots", None)
@@ -224,23 +223,7 @@ def _mint_recovered() -> None:
     MintRateGuard._guards.clear()
 
 
-# --- policy and budget ------------------------------------------------------
-
-
-def test_swap_is_off_by_default() -> None:
-    from routstr.core.settings import Settings
-
-    assert Settings.__fields__["foreign_mint_policy"].default == "reject"
-
-
-@pytest.mark.asyncio
-async def test_swap_in_refused_when_policy_is_reject(engine: AsyncEngine) -> None:
-    settings.foreign_mint_policy = "reject"
-    key = ApiKey(hashed_key=KEY_HASH)
-    with patch.object(fms, "deserialize_token_from_string") as parse:
-        with pytest.raises(ForeignMintSwapError):
-            await fms.swap_in_and_credit("cashuA", key, Mock())
-    parse.assert_not_called()
+# --- foreign-mint budget ---------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -619,9 +602,7 @@ async def test_reconciler_leaves_fresh_rows_alone(
 # --- refund back to the user's mint -------------------------------------------
 
 
-def test_refund_destination_requires_foreign_mint_and_swap_policy(
-    engine: AsyncEngine,
-) -> None:
+def test_refund_destination_requires_foreign_mint(engine: AsyncEngine) -> None:
     foreign_key = ApiKey(hashed_key=KEY_HASH, refund_mint_url=FOREIGN)
     assert fms.refund_destination_mint(foreign_key) == FOREIGN
     assert fms.refund_destination_mint(ApiKey(hashed_key=KEY_HASH)) is None
@@ -631,8 +612,6 @@ def test_refund_destination_requires_foreign_mint_and_swap_policy(
         )
         is None
     )
-    settings.foreign_mint_policy = "reject"
-    assert fms.refund_destination_mint(foreign_key) is None
 
 
 async def _open_cashu_refund(session: AsyncSession, key: ApiKey) -> Refund:
