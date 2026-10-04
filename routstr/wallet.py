@@ -24,7 +24,6 @@ from sqlmodel import col, select, update
 from .cashu_compat import install_cashu_httpx_shim
 from .checkstate import filter_unspent_proofs
 from .core import db, get_logger
-from .core.db import store_cashu_transaction_with_retry as store_cashu_transaction
 from .core.settings import settings
 from .mint import (
     MINT_TRANSPORT_EXCEPTIONS,
@@ -208,6 +207,30 @@ class UntrustedSourceMintError(ValueError):
     """The token names a mint outside primary_mint/cashu_mints."""
 
 
+class ForeignMintSwapError(ValueError):
+    """A cross-mint swap was refused before any proof was spent.
+
+    The token is still fully usable by its holder: fees exceeded its value, the
+    unit is unsupported, or the issuing mint rejected the quote.
+    """
+
+
+class ForeignMintUnavailableError(MintConnectionError):
+    """The issuing mint did not answer within the foreign-mint budget.
+
+    Nothing was spent. Unlike trusted mints there is no retry: the sender, not
+    the operator, picked this mint.
+    """
+
+
+class SwapPendingError(Exception):
+    """The swap's Lightning leg was dispatched but its outcome is not yet known.
+
+    The token must not be retried: its proofs may already be spent. The journal
+    row keeps the quote ids and the reconciler credits or fails it later.
+    """
+
+
 class TokenConsumedError(Exception):
     """A failure that happened AFTER the token's proofs were spent (melt
     succeeded, or redemption already returned) — e.g. minting on the primary
@@ -313,6 +336,28 @@ def classify_redemption_error(
             400,
             "Cashu token was issued by a mint this node does not accept",
             "cashu_untrusted_source_mint",
+        )
+    if isinstance(error, SwapPendingError):
+        return (
+            "swap_pending",
+            409,
+            "Cross-mint swap was dispatched and is awaiting confirmation; do not "
+            "resend this token, the balance is credited once the mint confirms",
+            "cashu_swap_pending",
+        )
+    if isinstance(error, ForeignMintSwapError):
+        return (
+            "mint_error",
+            422,
+            "Cashu token cannot be swapped into this node's mint; nothing was spent",
+            "cashu_foreign_mint_swap_failed",
+        )
+    if isinstance(error, ForeignMintUnavailableError):
+        return (
+            "mint_unreachable",
+            503,
+            "The mint that issued this Cashu token did not answer in time; retry later",
+            "cashu_source_mint_unreachable",
         )
     if is_mint_rate_limited(error):
         return (
@@ -1090,97 +1135,18 @@ async def _credit_balance_locked(
             if isinstance(key.refund_currency, str)
             else None,
         )
-        original_amount = amount
-        original_unit = unit
         logger.info(
             "credit_balance: Token redeemed successfully",
             extra={"amount": amount, "unit": unit, "mint_url": mint_url},
         )
-
-        if unit == "sat":
-            amount = _sats_to_msats(amount)
-            logger.info(
-                "credit_balance: Converted to msat", extra={"amount_msat": amount}
-            )
-
-        # Guard against zero/negative redemptions (empty or dust tokens, or
-        # swap-to-primary-mint amounts that net to <= 0 after fees). Raising here
-        # — before the UPDATE/commit below — leaves any freshly-created, still
-        # uncommitted ApiKey row to be rolled back when the request session
-        # closes, instead of persisting an orphan key with balance 0.
-        if amount <= 0:
-            logger.error(
-                "credit_balance: Redeemed amount is zero or negative; refusing to credit",
-                extra={"amount": amount, "unit": unit, "mint_url": mint_url},
-            )
-            raise ValueError(
-                f"Redeemed token amount must be positive, got {amount} msats"
-            )
-
-        logger.info(
-            "credit_balance: Updating balance",
-            extra={"old_balance": key.balance, "credit_amount": amount},
-        )
-
-        # The token is already redeemed (spent) here, so any crediting failure
-        # is post-redemption and non-retryable — surface it as TokenConsumedError
-        # (a key that vanished mid-flight, or an unexpected DB fault), never a
-        # retryable/token-error taxonomy.
-        try:
-            # Atomic UPDATE to prevent race conditions during concurrent topups.
-            updates: dict[str, object] = {
-                "balance": db.ApiKey.balance + amount,
-            }
-            # Legacy keys may predate refund provenance. Pin them to the
-            # destination used for this credit before exposing the balance.
-            if key.refund_mint_url is None:
-                updates["refund_mint_url"] = mint_url
-            if key.refund_currency is None:
-                updates["refund_currency"] = unit
-            stmt = (
-                update(db.ApiKey)
-                .where(col(db.ApiKey.hashed_key) == key.hashed_key)
-                .values(**updates)
-            )
-            result = await session.exec(stmt)  # type: ignore[call-overload]
-            # If pruning removed this key after redemption, do not commit a no-op
-            # balance update and pretend the top-up succeeded.
-            if (getattr(result, "rowcount", 0) or 0) == 0:
-                raise TokenConsumedError(
-                    "Token redeemed but the API key disappeared before the "
-                    "credit could be recorded"
-                )
-            await session.commit()
-            await session.refresh(key)
-            # refresh() starts a read transaction; release it before the
-            # transaction-history write opens its own session below.
-            await session.commit()
-        except TokenConsumedError:
-            raise
-        except Exception as db_error:
-            raise TokenConsumedError(
-                "Token redeemed but crediting the balance failed"
-            ) from db_error
-
-        logger.info(
-            "credit_balance: Balance updated successfully",
-            extra={"new_balance": key.balance},
-        )
-
-        await store_cashu_transaction(
-            token=cashu_token,
-            amount=original_amount,
-            unit=original_unit,
+        return await _apply_credit_locked(
+            key,
+            session,
+            amount=amount,
+            unit=unit,
             mint_url=mint_url,
-            typ="in",
-            source="apikey",
-            api_key_hashed_key=key.hashed_key,
+            token=cashu_token,
         )
-        logger.debug(
-            "Cashu token successfully redeemed and stored",
-            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
-        )
-        return amount
     except Exception as e:
         classification = classify_redemption_error(e)
         expected_codes = {
@@ -1204,6 +1170,104 @@ async def _credit_balance_locked(
             },
         )
         raise
+
+
+async def _apply_credit_locked(
+    key: db.ApiKey,
+    session: db.AsyncSession,
+    *,
+    amount: int,
+    unit: str,
+    mint_url: str,
+    token: str,
+    refund_mint_url: str | None = None,
+    swap_id: str | None = None,
+) -> int:
+    """Atomically credit a redeemed amount and record its ledger row.
+
+    ``amount`` is in ``unit``. ``refund_mint_url`` overrides the mint pinned as
+    the key's refund destination when the key has none yet. When ``swap_id`` is
+    present, the same transaction also claims the swap's ``minted`` state, so
+    reconciliation can never apply one minted quote twice.
+    """
+    original_amount = amount
+    if unit == "sat":
+        amount = _sats_to_msats(amount)
+        logger.info("credit_balance: Converted to msat", extra={"amount_msat": amount})
+
+    if amount <= 0:
+        logger.error(
+            "credit_balance: Redeemed amount is zero or negative; refusing to credit",
+            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
+        )
+        raise ValueError(f"Redeemed token amount must be positive, got {amount} msats")
+
+    logger.info(
+        "credit_balance: Updating balance",
+        extra={"old_balance": key.balance, "credit_amount": amount},
+    )
+
+    try:
+        updates: dict[str, object] = {"balance": db.ApiKey.balance + amount}
+        if key.refund_mint_url is None:
+            updates["refund_mint_url"] = refund_mint_url or mint_url
+        if key.refund_currency is None:
+            updates["refund_currency"] = unit
+        result = await session.exec(  # type: ignore[call-overload]
+            update(db.ApiKey)
+            .where(col(db.ApiKey.hashed_key) == key.hashed_key)
+            .values(**updates)
+        )
+        if (getattr(result, "rowcount", 0) or 0) == 0:
+            raise TokenConsumedError(
+                "Token redeemed but the API key disappeared before the "
+                "credit could be recorded"
+            )
+
+        if swap_id is not None:
+            claimed = await session.exec(  # type: ignore[call-overload]
+                update(db.CashuSwap)
+                .where(col(db.CashuSwap.id) == swap_id)
+                .where(col(db.CashuSwap.status) == "minted")
+                .values(status="credited", error=None, updated_at=int(time.time()))
+            )
+            if (getattr(claimed, "rowcount", 0) or 0) != 1:
+                raise TokenConsumedError(
+                    "Swapped funds were already credited or their journal vanished"
+                )
+
+        session.add(
+            db.CashuTransaction(
+                token=token,
+                amount=original_amount,
+                unit=unit,
+                mint_url=mint_url,
+                type="in",
+                source="apikey",
+                api_key_hashed_key=key.hashed_key,
+            )
+        )
+        await session.flush()
+        await session.refresh(key)
+        await session.commit()
+    except TokenConsumedError:
+        await session.rollback()
+        raise
+    except Exception as db_error:
+        await session.rollback()
+        raise TokenConsumedError(
+            "Token redeemed but crediting the balance failed"
+        ) from db_error
+
+    logger.info(
+        "credit_balance: Balance updated successfully",
+        extra={"new_balance": key.balance},
+    )
+    logger.debug(
+        "Cashu token successfully redeemed and stored",
+        extra={"amount": amount, "unit": unit, "mint_url": mint_url},
+    )
+    return amount
 
 
 _wallets: dict[str, Wallet] = {}

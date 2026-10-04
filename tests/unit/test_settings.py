@@ -1,6 +1,9 @@
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic.v1 import ValidationError
@@ -61,6 +64,29 @@ def test_payout_settings_have_sensible_defaults() -> None:
     s = Settings()
     assert s.min_payout_sat == 210
     assert s.payout_interval_seconds == 900
+
+
+def test_foreign_mint_policy_rejects_typos() -> None:
+    bad_policy: Any = "swpa"
+    with pytest.raises(ValidationError):
+        Settings(foreign_mint_policy=bad_policy)
+
+
+def test_cashu_import_cannot_override_operator_environment() -> None:
+    env = dict(os.environ)
+    env["CASHU_MINTS"] = "https://mint.operator.example"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, routstr; print(os.environ['CASHU_MINTS'])",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.stdout.splitlines()[-1] == "https://mint.operator.example"
 
 
 def test_database_pool_defaults_provide_concurrency_headroom() -> None:

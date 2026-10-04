@@ -6,7 +6,7 @@ import os
 import secrets
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from pydantic.v1 import BaseModel, BaseSettings, Field
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -100,6 +100,26 @@ class Settings(BaseSettings):
     mint_max_concurrency: int = Field(default=4, ge=0, env="MINT_MAX_CONCURRENCY")
     # Max retries when a mint returns 429 or times out (exponential backoff).
     mint_retry_max_attempts: int = Field(default=3, ge=0, env="MINT_RETRY_MAX_ATTEMPTS")
+    # What to do with a top-up token issued by a mint outside primary_mint /
+    # cashu_mints. "reject" refuses it offline. "swap" melts it over Lightning
+    # into the primary mint (and refunds back the same way) under a separate,
+    # short budget so a hostile or dead mint can never hold wallet state.
+    foreign_mint_policy: Literal["reject", "swap"] = Field(
+        default="reject", env="FOREIGN_MINT_POLICY"
+    )
+    # Single-attempt deadline for any call to a mint the operator did not
+    # configure. No retries: the sender chose that mint, not the operator.
+    foreign_mint_operation_timeout_seconds: float = Field(
+        default=5.0, gt=0, env="FOREIGN_MINT_OPERATION_TIMEOUT_SECONDS"
+    )
+    # Process-wide cap on in-flight foreign-mint calls across all such mints, so
+    # rotating hostnames cannot multiply the per-mint budget.
+    foreign_mint_max_concurrency: int = Field(
+        default=4, ge=1, env="FOREIGN_MINT_MAX_CONCURRENCY"
+    )
+    swap_reconcile_interval_seconds: int = Field(
+        default=60, gt=0, env="SWAP_RECONCILE_INTERVAL_SECONDS"
+    )
 
     # Pricing
     # Default behavior: derive pricing from MODELS

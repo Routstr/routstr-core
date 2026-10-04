@@ -762,8 +762,8 @@ async def test_credit_balance() -> None:
             "routstr.wallet.recieve_token",
             return_value=(1000, "sat", "http://mint:3338"),
         ):
-            with patch("routstr.wallet.store_cashu_transaction", AsyncMock()):
-                amount = await credit_balance(token_str, mock_key, mock_session)
+            mock_session.add = Mock()
+            amount = await credit_balance(token_str, mock_key, mock_session)
             assert amount == 1000000  # converted to msat
             assert mock_key.balance == 6000000  # Should be updated after refresh
             # Verify atomic operations were used
@@ -784,12 +784,9 @@ async def test_concurrent_duplicate_token_credits_exactly_once() -> None:
             ValueError("Mint Error: proofs already spent (Code: 11001)"),
         ]
     )
-    store = AsyncMock()
+    session.add = Mock()
 
-    with (
-        patch("routstr.wallet.recieve_token", receive),
-        patch("routstr.wallet.store_cashu_transaction", store),
-    ):
+    with patch("routstr.wallet.recieve_token", receive):
         results = await asyncio.gather(
             credit_balance("cashuAduplicate", key, session),
             credit_balance("cashuAduplicate", key, session),
@@ -801,7 +798,7 @@ async def test_concurrent_duplicate_token_credits_exactly_once() -> None:
     classified = classify_redemption_error(failure)
     assert classified is not None and classified[3] == "cashu_token_already_spent"
     assert session.exec.await_count == 1
-    store.assert_awaited_once()
+    assert session.add.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -819,9 +816,9 @@ async def test_credit_balance_redeems_on_token_mint_not_key_mint() -> None:
     mock_session.exec.return_value.rowcount = 1
     receive = AsyncMock(return_value=(1000, "sat", key_mint))
 
+    mock_session.add = Mock()
     with patch("routstr.wallet.recieve_token", receive):
-        with patch("routstr.wallet.store_cashu_transaction", AsyncMock()):
-            await credit_balance("cashuAtoken", mock_key, mock_session)
+        await credit_balance("cashuAtoken", mock_key, mock_session)
 
     receive.assert_awaited_once_with("cashuAtoken", destination_unit="sat")
 
@@ -969,36 +966,41 @@ async def test_credit_balance_msat_unit_not_converted() -> None:
             "routstr.wallet.recieve_token",
             return_value=(1_000_000, "msat", "http://mint:3338"),
         ):
-            with patch("routstr.wallet.store_cashu_transaction", AsyncMock()):
-                amount = await credit_balance("cashuAtest", mock_key, mock_session)
+            mock_session.add = Mock()
+            amount = await credit_balance("cashuAtest", mock_key, mock_session)
 
     assert amount == 1_000_000
     assert mock_session.commit.called
 
 
 @pytest.mark.asyncio
-async def test_credit_balance_propagates_audit_store_failure_after_credit() -> None:
-    """A final transaction-history failure propagates after committing credit."""
-    mock_key = Mock()
-    mock_key.balance = 0
-    mock_key.hashed_key = "test_hash"
+async def test_credit_balance_rolls_back_when_audit_row_cannot_flush() -> None:
+    """Balance and history stay atomic when the ledger write fails."""
+    mock_key = Mock(
+        balance=0,
+        hashed_key="test_hash",
+        refund_mint_url=None,
+        refund_currency=None,
+    )
     mock_session = AsyncMock()
+    mock_session.exec.return_value.rowcount = 1
+    mock_session.add = Mock()
+    mock_session.flush.side_effect = Exception("history table locked")
 
     from routstr.core.settings import settings
 
-    with patch.object(settings, "cashu_mints", ["http://mint:3338"]):
-        with patch(
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch(
             "routstr.wallet.recieve_token",
             return_value=(1000, "sat", "http://mint:3338"),
-        ):
-            with patch(
-                "routstr.wallet.store_cashu_transaction",
-                side_effect=Exception("history table locked"),
-            ):
-                with pytest.raises(Exception, match="history table locked"):
-                    await credit_balance("cashuAtest", mock_key, mock_session)
+        ),
+        pytest.raises(Exception, match="crediting the balance failed"),
+    ):
+        await credit_balance("cashuAtest", mock_key, mock_session)
 
-    assert mock_session.commit.called
+    mock_session.commit.assert_not_awaited()
+    mock_session.rollback.assert_awaited_once()
 
 
 # --- Mint-unreachable classification (is_mint_connection_error) ---------------

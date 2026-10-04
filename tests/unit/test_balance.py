@@ -481,27 +481,25 @@ async def test_credit_balance_stores_apikey_transaction_history() -> None:
     session.exec = AsyncMock(return_value=_update_result(1))
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
+    session.flush = AsyncMock()
     session.refresh = AsyncMock()
 
-    with (
-        patch(
-            "routstr.wallet.recieve_token",
-            AsyncMock(return_value=(100, "sat", "https://mint.example")),
-        ),
-        patch("routstr.wallet.store_cashu_transaction", AsyncMock()) as mock_store,
+    with patch(
+        "routstr.wallet.recieve_token",
+        AsyncMock(return_value=(100, "sat", "https://mint.example")),
     ):
         amount = await credit_balance("cashuAtopup_token", key, session)
 
     assert amount == 100_000
-    mock_store.assert_awaited_once()
-    call_kwargs = mock_store.call_args.kwargs
-    assert call_kwargs["typ"] == "in"
-    assert call_kwargs["source"] == "apikey"
-    assert call_kwargs["api_key_hashed_key"] == key.hashed_key
-    assert call_kwargs["amount"] == 100
-    assert call_kwargs["unit"] == "sat"
-    assert call_kwargs["token"] == "cashuAtopup_token"
-    assert call_kwargs["mint_url"] == "https://mint.example"
+    stored = session.add.call_args.args[0]
+    assert isinstance(stored, CashuTransaction)
+    assert stored.type == "in"
+    assert stored.source == "apikey"
+    assert stored.api_key_hashed_key == key.hashed_key
+    assert stored.amount == 100
+    assert stored.unit == "sat"
+    assert stored.token == "cashuAtopup_token"
+    assert stored.mint_url == "https://mint.example"
 
 
 @pytest.mark.asyncio

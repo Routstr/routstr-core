@@ -171,6 +171,30 @@ Setting `CASHU_MINTS` (env) or editing the list in the dashboard replaces this
 default entirely. An explicitly empty value leaves only the primary mint
 trusted.
 
+#### Tokens from other mints
+
+By default a token issued by a mint outside this list is refused offline with
+`cashu_untrusted_source_mint`; the node never contacts a mint it does not trust.
+
+`FOREIGN_MINT_POLICY=swap` lets `/v1/wallet/topup` accept such tokens by
+melting them over Lightning into the primary mint. Bearer and X-Cashu payments
+still refuse foreign mints (those paths run on every request and must not wait
+on a third-party mint). Refunds of a key funded this way are swapped back to the
+user's own mint, net of fees. Safeguards when enabled:
+
+- The token's mint URL must be HTTPS to a public address.
+- Calls to the foreign mint get one attempt with a short deadline and share a
+  process-wide concurrency cap, so a dead or hostile mint can only stall its own
+  swap. They never run while the wallet lock is held.
+- Fees are quoted before anything is spent; a token that cannot cover them is
+  refused with `cashu_foreign_mint_swap_failed` and stays spendable.
+- Every swap is journaled in `cashu_swaps` before the Lightning leg. A timeout
+  answers `cashu_swap_pending`; a background reconciler credits or fails the row
+  once the mint confirms the outcome.
+
+Lightning routing fees and the mint's input fees are deducted from the amount
+credited (and from the refund). Leftover fee reserve stays on the foreign mint.
+
 ### Lightning Withdrawals
 
 Automatic profit withdrawal:
@@ -234,6 +258,10 @@ Use environment variables for:
 | `MINT_OPERATION_TIMEOUT_SECONDS` | Per-attempt timeout for mint network calls | `30` |
 | `MINT_MAX_CONCURRENCY` | Concurrent operations allowed per mint (`0` disables the limit) | `4` |
 | `MINT_RETRY_MAX_ATTEMPTS` | Retries after a timeout or HTTP 429 (`0` disables retries) | `3` |
+| `FOREIGN_MINT_POLICY` | `reject` refuses top-up tokens from unconfigured mints; `swap` melts them into the primary mint (see above) | `reject` |
+| `FOREIGN_MINT_OPERATION_TIMEOUT_SECONDS` | Single-attempt deadline for calls to an unconfigured mint | `5` |
+| `FOREIGN_MINT_MAX_CONCURRENCY` | Process-wide cap on in-flight calls to unconfigured mints | `4` |
+| `SWAP_RECONCILE_INTERVAL_SECONDS` | How often unfinished swaps are re-checked against their mints | `60` |
 | `RECEIVE_LN_ADDRESS` | Lightning address for withdrawals | —                                    |
 | `MIN_PAYOUT_SAT`     | Min payout balance in sats (applies to all mints) | `210`                |
 | `MAX_PAYOUT_SAT`     | Maximum gross budget per periodic payout in sats, including fees (all mints) | `250000`             |

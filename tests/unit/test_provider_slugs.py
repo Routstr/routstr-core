@@ -14,6 +14,24 @@ from routstr.core.provider_slugs import (
 from routstr.upstream.helpers import _seed_providers_from_settings
 
 
+def _isolate_provider_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for env_key in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GROQ_API_KEY",
+        "PERPLEXITY_API_KEY",
+        "FIREWORKS_API_KEY",
+        "XAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "TINFOIL_API_KEY",
+        "TYPESAFE_API_KEY",
+        "OLLAMA_BASE_URL",
+        "OLLAMA_API_KEY",
+    ):
+        monkeypatch.delenv(env_key, raising=False)
+
+
 @pytest.mark.asyncio
 async def test_allocate_unique_provider_slug_is_deterministic_with_suffixes() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -81,6 +99,7 @@ async def test_seed_providers_from_settings_sets_deterministic_slug(
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
+    _isolate_provider_environment(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "seeded-openai-key")
 
     class SettingsStub:
@@ -108,6 +127,7 @@ async def test_seed_providers_from_settings_keeps_slug_stable_on_reseed(
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
+    _isolate_provider_environment(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "seeded-openai-key")
 
     class SettingsStub:
