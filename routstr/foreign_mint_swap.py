@@ -357,7 +357,7 @@ async def swap_in_and_credit(
     if resolve_trusted_source_mint(source_mint) is not None:
         raise ValueError("Token is from a trusted mint; redeem it directly")
     source_unit = str(token_obj.unit)
-    dest_unit = key.refund_currency or source_unit
+    dest_unit = settings.primary_mint_unit
     dest_mint = _trusted_swap_destination()
     if source_unit not in _UNITS or dest_unit not in _UNITS:
         raise ForeignMintSwapError("Unsupported token unit for swap")
