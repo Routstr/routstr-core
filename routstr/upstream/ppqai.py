@@ -124,6 +124,10 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
     provider_type = "ppqai"
     default_base_url = "https://api.ppq.ai"
     platform_url = "https://ppq.ai/api-docs"
+    # PPQ.AI's private enclave lives under ``/private/v1/...`` and the base URL
+    # carries no version prefix, so the EHBP target re-adds the whole prefix.
+    # (EHBP is currently disabled for this provider — see ``supports_ehbp``.)
+    ehbp_path_prefix = "private/v1"
     IGNORED_MODEL_IDS: list[str] = ["auto"]
     # PPQ.AI has a private encrypted endpoint, but this proxy currently has no
     # provider-attested usage extractor/model binding for it. Keep EHBP disabled
@@ -170,7 +174,10 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         Routstr, so PPQ.AI also needs X-Private-Model for routing/billing.
         """
         return EHBPForwardingTarget(
-            url=f"{self.base_url.rstrip('/')}/private/{path.lstrip('/')}",
+            url=(
+                f"{self.base_url.rstrip('/')}/"
+                f"{self.build_ehbp_request_path(path, model_obj)}"
+            ),
             headers={"X-Private-Model": model_obj.forwarded_model_id or model_obj.id},
         )
 
