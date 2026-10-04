@@ -540,6 +540,46 @@ async def test_minted_swap_credit_is_atomic_and_cannot_repeat(
 
 
 @pytest.mark.asyncio
+async def test_stale_melted_worker_cannot_reset_and_credit_swap_twice(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    key = await _make_key(session)
+    swap = CashuSwap(
+        direction="in",
+        status="melted",
+        api_key_hashed_key=key.hashed_key,
+        token="cashuAstalemelted",
+        token_hash="stale-melted",
+        source_mint=FOREIGN,
+        source_unit="sat",
+        source_amount=1000,
+        destination_mint=PRIMARY,
+        destination_unit="sat",
+        destination_amount=998,
+        mint_quote_id="mint-998",
+        melt_quote_id="melt-998",
+    )
+    await fms._save(swap)
+    async with AsyncSession(session.bind, expire_on_commit=False) as stale_session:
+        stale_swap = await stale_session.get(CashuSwap, swap.id)
+    assert stale_swap is not None
+
+    foreign = _ForeignWallet()
+    primary = _PrimaryWallet()
+    async with _swap_env(foreign, primary, _token()):
+        first = await fms._finish_swap_in(swap, key=key, session=session)
+        second = await fms._finish_swap_in(stale_swap, key=key, session=session)
+
+    assert first == second == 998_000
+    await session.refresh(key)
+    assert key.balance == 998_000
+    rows = list((await session.exec(select(CashuTransaction))).all())
+    assert len(rows) == 1
+    (stored,) = await _swap_rows(session)
+    assert stored.status == "credited"
+
+
+@pytest.mark.asyncio
 async def test_mint_recovery_reuses_proofs_tagged_with_quote() -> None:
     proof = SimpleNamespace(amount=998, reserved=False, mint_id="mint-998")
     mint = AsyncMock(side_effect=AssertionError("must not mint the quote twice"))

@@ -239,6 +239,30 @@ async def _update(swap: CashuSwap, **values: Any) -> None:
         setattr(swap, name, value)
 
 
+async def _transition_status(
+    swap: CashuSwap, expected: str, status: str, **values: Any
+) -> bool:
+    values.update(status=status, updated_at=int(time.time()))
+    async with db.create_session() as session:
+        result = await session.exec(  # type: ignore[call-overload]
+            update(CashuSwap)
+            .where(col(CashuSwap.id) == swap.id)
+            .where(col(CashuSwap.status) == expected)
+            .values(**values)
+        )
+        await session.commit()
+    transitioned = (getattr(result, "rowcount", 0) or 0) == 1
+    if transitioned:
+        for name, value in values.items():
+            setattr(swap, name, value)
+    return transitioned
+
+
+async def _load_swap(swap_id: str) -> CashuSwap | None:
+    async with db.create_session() as session:
+        return await session.get(CashuSwap, swap_id)
+
+
 async def _prior_swap_for_token(token_hash: str) -> CashuSwap | None:
     async with db.create_session() as session:
         result = await session.exec(
@@ -549,6 +573,11 @@ async def _finish_swap_in(
     session: AsyncSession | None = None,
 ) -> int:
     """Mint on the trusted destination and credit the key, under the guard."""
+    started_melted = swap.status == "melted"
+
+    def credited_msats() -> int:
+        return swap.destination_amount * (1000 if swap.destination_unit == "sat" else 1)
+
     async with wallet_operation_guard():
         if swap.status == "melted":
             dest_wallet = await get_wallet(swap.destination_mint, swap.destination_unit)
@@ -574,24 +603,50 @@ async def _finish_swap_in(
                 raise SwapPendingError(
                     "Destination mint failed; retrying later"
                 ) from error
-            await _update(swap, status="minted", error=None)
+            transitioned = await _transition_status(
+                swap, "melted", "minted", error=None
+            )
+            if not transitioned:
+                stored = await _load_swap(swap.id)
+                if stored is not None and stored.status == "credited":
+                    return credited_msats()
+                if stored is None or stored.status != "minted":
+                    status = stored.status if stored is not None else "missing"
+                    raise SwapPendingError(f"Swap is {status}")
+                swap.status = "minted"
+                swap.error = stored.error
 
         if swap.status != "minted":
             raise SwapPendingError(f"Swap is {swap.status}")
 
-        if session is None or key is None:
-            async with db.create_session() as own_session:
-                own_key = await own_session.get(ApiKey, swap.api_key_hashed_key)
-                if own_key is None:
-                    await _update(swap, status="failed", error="api key missing")
-                    logger.critical(
-                        "Swapped funds have no API key to credit",
-                        extra={"swap_id": swap.id, "amount": swap.destination_amount},
+        try:
+            if session is None or key is None:
+                async with db.create_session() as own_session:
+                    own_key = await own_session.get(ApiKey, swap.api_key_hashed_key)
+                    if own_key is None:
+                        await _update(swap, status="failed", error="api key missing")
+                        logger.critical(
+                            "Swapped funds have no API key to credit",
+                            extra={
+                                "swap_id": swap.id,
+                                "amount": swap.destination_amount,
+                            },
+                        )
+                        raise TokenConsumedError("API key vanished before swap credit")
+                    credited = await _apply_credit_locked(
+                        own_key,
+                        own_session,
+                        amount=swap.destination_amount,
+                        unit=swap.destination_unit,
+                        mint_url=swap.destination_mint,
+                        token=str(swap.token),
+                        refund_mint_url=swap.source_mint,
+                        swap_id=swap.id,
                     )
-                    raise TokenConsumedError("API key vanished before swap credit")
+            else:
                 credited = await _apply_credit_locked(
-                    own_key,
-                    own_session,
+                    key,
+                    session,
                     amount=swap.destination_amount,
                     unit=swap.destination_unit,
                     mint_url=swap.destination_mint,
@@ -599,17 +654,12 @@ async def _finish_swap_in(
                     refund_mint_url=swap.source_mint,
                     swap_id=swap.id,
                 )
-        else:
-            credited = await _apply_credit_locked(
-                key,
-                session,
-                amount=swap.destination_amount,
-                unit=swap.destination_unit,
-                mint_url=swap.destination_mint,
-                token=str(swap.token),
-                refund_mint_url=swap.source_mint,
-                swap_id=swap.id,
-            )
+        except TokenConsumedError:
+            if started_melted:
+                stored = await _load_swap(swap.id)
+                if stored is not None and stored.status == "credited":
+                    return credited_msats()
+            raise
         swap.status = "credited"
         swap.error = None
         logger.info(
