@@ -1054,6 +1054,15 @@ def token_mint_url(token: str, fallback: str | None = None) -> str:
         return fallback
 
 
+def preferred_trusted_mint() -> str:
+    """Return the first configured trusted mint in operator priority order."""
+    for mint_url in settings.cashu_mints:
+        candidate = mint_url.strip()
+        if candidate:
+            return candidate
+    raise ValueError("No trusted mint is configured")
+
+
 async def find_trusted_mint_with_funds(
     amount: int,
     unit: str,

@@ -59,6 +59,7 @@ from .wallet import (
     _wallet_operation_depth,
     get_proofs_per_mint_and_unit,
     get_wallet,
+    preferred_trusted_mint,
     resolve_trusted_source_mint,
     wallet_operation_guard,
 )
@@ -283,7 +284,7 @@ def _raise_for_prior_swap(prior: CashuSwap) -> None:
     raise ValueError("Cashu token already spent")
 
 
-# --- inbound: foreign token -> primary mint -> API key credit -------------
+# --- inbound: foreign token -> trusted mint -> API key credit -------------
 
 
 async def _load_foreign_proofs(wallet: Wallet, token_obj: Token) -> list[Proof]:
@@ -329,10 +330,22 @@ async def _quote_pair(
     return mint_quote, melt_quote
 
 
+def _trusted_swap_destination() -> str:
+    try:
+        return preferred_trusted_mint()
+    except ValueError as error:
+        raise ForeignMintSwapError(
+            "No trusted destination mint is configured"
+        ) from error
+
+
 async def swap_in_and_credit(
     cashu_token: str, key: ApiKey, session: AsyncSession
 ) -> int:
-    """Melt a foreign-mint token into the primary mint and credit ``key``.
+    """Melt a foreign-mint token into a trusted mint and credit ``key``.
+
+    The first configured ``CASHU_MINTS`` entry is the deterministic destination;
+    list order is the operator's priority order.
 
     Returns the credited msats. Raises before anything is spent for every
     refusal (``ForeignMintSwapError``, ``ForeignMintUnavailableError``,
@@ -344,9 +357,9 @@ async def swap_in_and_credit(
     if resolve_trusted_source_mint(source_mint) is not None:
         raise ValueError("Token is from a trusted mint; redeem it directly")
     source_unit = str(token_obj.unit)
-    dest_unit = settings.primary_mint_unit
-    dest_mint = settings.primary_mint
-    if source_unit not in _UNITS or dest_unit not in _UNITS or not dest_mint:
+    dest_unit = key.refund_currency or source_unit
+    dest_mint = _trusted_swap_destination()
+    if source_unit not in _UNITS or dest_unit not in _UNITS:
         raise ForeignMintSwapError("Unsupported token unit for swap")
     if key.refund_currency is not None and key.refund_currency != dest_unit:
         raise ValueError(
@@ -675,7 +688,7 @@ async def _finish_swap_in(
         return credited
 
 
-# --- outbound: primary mint -> user's mint (refund) -------------------------
+# --- outbound: trusted mint -> user's mint (refund) -------------------------
 
 
 async def swap_out_for_refund(
@@ -683,8 +696,8 @@ async def swap_out_for_refund(
 ) -> bool:
     """Pay a refund as a token on the user's own (foreign) mint.
 
-    Owner proofs on the primary mint pay a mint quote on the user's mint; the
-    user receives the net amount after the Lightning fee reserve and input
+    Owner proofs on the preferred trusted mint pay a mint quote on the user's
+    mint; the user receives the net amount after the Lightning fee reserve and input
     fees. The ``Refund`` claim carries the melt quote so the existing refund
     reconciler can hold or release the balance; the swap row carries the rest.
     """
@@ -693,7 +706,7 @@ async def swap_out_for_refund(
 
     unit = refund.unit
     amount = refund.amount_msats // 1000 if unit == "sat" else refund.amount_msats
-    primary = settings.primary_mint
+    source_mint = _trusted_swap_destination()
     try:
         await assert_public_https_origin(destination_mint)
     except BlockedDestinationError as error:
@@ -711,14 +724,14 @@ async def swap_out_for_refund(
         except Exception as error:
             raise ForeignMintSwapError("Refund mint has no active keyset") from error
 
-        source_wallet = await get_wallet(primary, unit)
+        source_wallet = await get_wallet(source_mint, unit)
         async with wallet_operation_guard():
             await source_wallet.load_proofs(reload=True)
             proofs = get_proofs_per_mint_and_unit(
-                source_wallet, primary, unit, not_reserved=True
+                source_wallet, source_mint, unit, not_reserved=True
             )
             if sum(p.amount for p in proofs) < amount:
-                raise ValueError("Primary mint balance cannot cover this refund")
+                raise ValueError("Trusted mint balance cannot cover this refund")
             selection, _ = await source_wallet.select_to_send(
                 proofs, amount, set_reserved=False, include_fees=True
             )
@@ -733,7 +746,7 @@ async def swap_out_for_refund(
             melt_quote = await run_mint_operation(
                 lambda: source_wallet.melt_quote(mint_quote.request),
                 op_name="refund_swap_melt_quote",
-                mint_url=primary,
+                mint_url=source_mint,
                 retry_timeouts=False,
             )
             return mint_quote, melt_quote
@@ -752,7 +765,7 @@ async def swap_out_for_refund(
             status="melting",
             api_key_hashed_key=refund.api_key_hashed_key,
             refund_id=refund.id,
-            source_mint=primary,
+            source_mint=source_mint,
             source_unit=unit,
             source_amount=amount,
             destination_mint=destination_mint,
@@ -764,15 +777,20 @@ async def swap_out_for_refund(
             melt_quote_id=melt_quote.quote,
         )
         await _save(swap)
-        await refund_module.record_quote(refund, melt_quote.quote, primary)
+        await refund_module.record_quote(refund, melt_quote.quote, source_mint)
 
         async with wallet_operation_guard():
             await source_wallet.load_proofs(reload=True)
             proofs = get_proofs_per_mint_and_unit(
-                source_wallet, primary, unit, not_reserved=True
+                source_wallet, source_mint, unit, not_reserved=True
             )
             plan = Bolt11PaymentPlan(
-                mint_quote.request, source_wallet, proofs, melt_quote, primary, unit
+                mint_quote.request,
+                source_wallet,
+                proofs,
+                melt_quote,
+                source_mint,
+                unit,
             )
             try:
                 await _execute_bolt11_payment(plan)

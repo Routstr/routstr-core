@@ -32,6 +32,8 @@ from .payment.lnurl import (
 from .wallet import (
     check_bolt11_payment_status,
     is_mint_connection_error,
+    preferred_trusted_mint,
+    resolve_trusted_source_mint,
     send_to_lnurl,
     send_token,
     token_mint_url,
@@ -54,11 +56,13 @@ def refund_mint(key: ApiKey) -> str:
     """Trusted mint the payout is drawn from.
 
     A foreign refund mint (a key funded by a swapped-in token) is paid from the
-    primary mint and swapped back; see :func:`swap_destination`.
+    first configured trusted mint and swapped back; see :func:`swap_destination`.
     """
-    if key.refund_mint_url and key.refund_mint_url in settings.cashu_mints:
-        return key.refund_mint_url
-    return settings.primary_mint
+    if key.refund_mint_url:
+        trusted_source = resolve_trusted_source_mint(key.refund_mint_url)
+        if trusted_source is not None:
+            return trusted_source
+    return preferred_trusted_mint()
 
 
 def swap_destination(key: ApiKey, method: str) -> str | None:

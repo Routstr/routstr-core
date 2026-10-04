@@ -637,9 +637,9 @@ class CashuSwap(SQLModel, table=True):  # type: ignore
     """Journal of one cross-mint swap, written before any Lightning payment.
 
     ``in`` swaps melt a token from a mint the operator does not trust into the
-    primary mint and credit an API key. ``out`` swaps melt owner proofs on the
-    primary mint to issue a refund token on the user's own mint. Every money
-    movement is recorded here first so a crash or timeout leaves a row the
+    preferred trusted mint and credit an API key. ``out`` swaps melt owner
+    proofs on that trusted mint to issue a refund token on the user's own mint.
+    Every money movement is recorded here first so a crash or timeout leaves a row the
     reconciler can finish or fail, never an unknown balance.
     """
 

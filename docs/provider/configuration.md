@@ -168,16 +168,18 @@ A fresh node ships with two mints preconfigured:
 - `https://mint.cubabitcoin.org`
 
 Setting `CASHU_MINTS` (env) or editing the list in the dashboard replaces this
-default entirely. An explicitly empty value leaves only the primary mint
-trusted.
+default entirely. List order is significant: automatic foreign-mint swaps use
+the first configured trusted mint. With an empty list, foreign top-ups are
+rejected before any token proofs are spent.
 
 #### Tokens from other mints
 
 `/v1/wallet/topup` accepts tokens issued by mints outside this list by melting
-them over Lightning into the primary mint. Bearer and X-Cashu payments still
-refuse foreign mints (those paths run on every request and must not wait on a
-third-party mint). Refunds of a key funded this way are swapped back to the
-user's own mint, net of fees. Safeguards:
+them over Lightning into the first configured trusted mint. Bearer and X-Cashu
+payments still refuse foreign mints (those paths run on every request and must
+not wait on a third-party mint). Refunds of a key funded this way are paid from
+the same preferred trusted mint and swapped back to the user's own mint, net of
+fees. Safeguards:
 
 - The token's mint URL must be HTTPS to a public address.
 - Calls to the foreign mint get one attempt with a short deadline and share a

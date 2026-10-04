@@ -34,7 +34,9 @@ from routstr.wallet import (
     wallet_operation_guard,
 )
 
-PRIMARY = "https://primary.example"
+PRIMARY = "https://trusted-first.example"
+SECONDARY = "https://trusted-second.example"
+LEGACY_PRIMARY = "https://legacy-primary.example"
 FOREIGN = "https://foreign.example"
 KEY_HASH = "a" * 64
 
@@ -59,9 +61,9 @@ async def engine(
     monkeypatch.setattr(db, "create_session", create_session)
     monkeypatch.setattr(refund_module, "create_session", create_session)
     monkeypatch.setattr(wallet, "_WALLET_OPERATION_LOCK", tmp_path / "op.lock")
-    monkeypatch.setattr(settings, "primary_mint", PRIMARY)
+    monkeypatch.setattr(settings, "primary_mint", LEGACY_PRIMARY)
     monkeypatch.setattr(settings, "primary_mint_unit", "sat")
-    monkeypatch.setattr(settings, "cashu_mints", [PRIMARY])
+    monkeypatch.setattr(settings, "cashu_mints", [PRIMARY, SECONDARY])
     monkeypatch.setattr(settings, "foreign_mint_operation_timeout_seconds", 0.2)
     monkeypatch.setattr(settings, "foreign_mint_max_concurrency", 4)
     monkeypatch.setattr(fms, "_foreign_slots", None)
@@ -329,6 +331,24 @@ async def test_swap_in_rejects_non_https_mint_before_any_contact(
     ):
         with pytest.raises(ForeignMintSwapError):
             await fms.swap_in_and_credit("cashuAhttp", key, session)
+    get_wallet.assert_not_awaited()
+    assert await _swap_rows(session) == []
+
+
+@pytest.mark.asyncio
+async def test_swap_in_requires_a_configured_trusted_destination(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    settings.cashu_mints = []
+    key = await _make_key(session)
+    get_wallet = AsyncMock()
+    with (
+        patch.object(fms, "deserialize_token_from_string", return_value=_token()),
+        patch.object(fms, "assert_public_https_origin", AsyncMock()),
+        patch.object(fms, "get_wallet", get_wallet),
+    ):
+        with pytest.raises(ForeignMintSwapError, match="trusted destination"):
+            await fms.swap_in_and_credit("cashuAnodestination", key, session)
     get_wallet.assert_not_awaited()
     assert await _swap_rows(session) == []
 
