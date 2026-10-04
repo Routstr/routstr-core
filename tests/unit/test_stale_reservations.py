@@ -377,7 +377,9 @@ async def test_refund_rejects_recent_reservation(session: AsyncSession) -> None:
             )
 
     assert exc_info.value.status_code == 400
-    error = exc_info.value.detail["error"]
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    error = detail["error"]
     assert error["code"] == "refund_ongoing_requests"
     assert "ongoing requests" in error["message"]
 
