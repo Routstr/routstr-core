@@ -58,6 +58,7 @@ from .wallet import (
     _execute_bolt11_payment,
     _wallet_operation_depth,
     get_proofs_per_mint_and_unit,
+    get_supported_mint_units,
     get_wallet,
     preferred_trusted_mint,
     resolve_trusted_source_mint,
@@ -339,6 +340,35 @@ def _trusted_swap_destination() -> str:
         ) from error
 
 
+async def _trusted_mint_unit(
+    mint_url: str,
+    *,
+    liability_unit: str | None,
+    source_unit: str,
+    bolt11_operation: str,
+) -> str:
+    supported = [
+        unit
+        for unit in await get_supported_mint_units(
+            mint_url, bolt11_operation=bolt11_operation
+        )
+        if unit in _UNITS
+    ]
+    if liability_unit is not None:
+        if liability_unit not in supported:
+            raise ValueError(
+                "Trusted mint does not support the API key liability unit: "
+                f"{liability_unit}"
+            )
+        return liability_unit
+    for candidate in (source_unit, "sat", "msat"):
+        if candidate in supported:
+            return candidate
+    raise ForeignMintSwapError(
+        "Trusted destination mint has no supported Bolt11 sat or msat unit"
+    )
+
+
 async def swap_in_and_credit(
     cashu_token: str, key: ApiKey, session: AsyncSession
 ) -> int:
@@ -357,20 +387,20 @@ async def swap_in_and_credit(
     if resolve_trusted_source_mint(source_mint) is not None:
         raise ValueError("Token is from a trusted mint; redeem it directly")
     source_unit = str(token_obj.unit)
-    dest_unit = settings.primary_mint_unit
-    dest_mint = _trusted_swap_destination()
-    if source_unit not in _UNITS or dest_unit not in _UNITS:
+    if source_unit not in _UNITS:
         raise ForeignMintSwapError("Unsupported token unit for swap")
-    if key.refund_currency is not None and key.refund_currency != dest_unit:
-        raise ValueError(
-            "Cashu token unit does not match the API key liability unit: "
-            f"expected {key.refund_currency}, got {dest_unit}"
-        )
     try:
         await assert_public_https_origin(source_mint)
     except BlockedDestinationError as error:
         raise ForeignMintSwapError(str(error)) from error
 
+    dest_mint = _trusted_swap_destination()
+    dest_unit = await _trusted_mint_unit(
+        dest_mint,
+        liability_unit=key.refund_currency,
+        source_unit=source_unit,
+        bolt11_operation="mint",
+    )
     token_hash = hashlib.sha256(cashu_token.encode()).hexdigest()
     prior = await _prior_swap_for_token(token_hash)
     if prior is not None:
@@ -707,6 +737,12 @@ async def swap_out_for_refund(
     unit = refund.unit
     amount = refund.amount_msats // 1000 if unit == "sat" else refund.amount_msats
     source_mint = _trusted_swap_destination()
+    await _trusted_mint_unit(
+        source_mint,
+        liability_unit=unit,
+        source_unit=unit,
+        bolt11_operation="melt",
+    )
     try:
         await assert_public_https_origin(destination_mint)
     except BlockedDestinationError as error:

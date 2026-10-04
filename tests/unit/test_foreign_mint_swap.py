@@ -93,9 +93,11 @@ def _proof(amount: int) -> SimpleNamespace:
     return SimpleNamespace(amount=amount, reserved=False, secret=f"s{amount}", id="k")
 
 
-def _token(amount: int = 1000, mint: str = FOREIGN) -> SimpleNamespace:
+def _token(
+    amount: int = 1000, mint: str = FOREIGN, unit: str = "sat"
+) -> SimpleNamespace:
     return SimpleNamespace(
-        mint=mint, unit="sat", amount=amount, keysets=["k"], proofs=[_proof(amount)]
+        mint=mint, unit=unit, amount=amount, keysets=["k"], proofs=[_proof(amount)]
     )
 
 
@@ -183,6 +185,7 @@ async def _swap_env(
     foreign: _ForeignWallet,
     primary: _PrimaryWallet,
     token: SimpleNamespace,
+    supported_units: list[str] | None = None,
 ) -> AsyncGenerator[None, None]:
     wallets = {FOREIGN: foreign, PRIMARY: primary}
 
@@ -196,6 +199,11 @@ async def _swap_env(
         patch.object(fms, "deserialize_token_from_string", return_value=token),
         patch.object(fms, "assert_public_https_origin", AsyncMock()),
         patch.object(fms, "get_wallet", get_wallet),
+        patch.object(
+            fms,
+            "get_supported_mint_units",
+            AsyncMock(return_value=supported_units or ["sat"]),
+        ),
         patch.object(fms, "run_mint_operation", run_mint_operation),
         patch.object(
             fms,
@@ -333,6 +341,42 @@ async def test_swap_in_rejects_non_https_mint_before_any_contact(
             await fms.swap_in_and_credit("cashuAhttp", key, session)
     get_wallet.assert_not_awaited()
     assert await _swap_rows(session) == []
+
+
+@pytest.mark.asyncio
+async def test_trusted_mint_unit_prefers_existing_liability_then_source() -> None:
+    supported = AsyncMock(return_value=["sat", "msat"])
+    with patch.object(fms, "get_supported_mint_units", supported):
+        existing = await fms._trusted_mint_unit(
+            PRIMARY,
+            liability_unit="msat",
+            source_unit="sat",
+            bolt11_operation="mint",
+        )
+        new_key = await fms._trusted_mint_unit(
+            PRIMARY,
+            liability_unit=None,
+            source_unit="sat",
+            bolt11_operation="mint",
+        )
+
+    assert existing == "msat"
+    assert new_key == "sat"
+    supported.assert_awaited_with(PRIMARY, bolt11_operation="mint")
+
+
+@pytest.mark.asyncio
+async def test_trusted_mint_unit_rejects_unsupported_liability() -> None:
+    with patch.object(
+        fms, "get_supported_mint_units", AsyncMock(return_value=["sat"])
+    ):
+        with pytest.raises(ValueError, match="liability unit"):
+            await fms._trusted_mint_unit(
+                PRIMARY,
+                liability_unit="msat",
+                source_unit="sat",
+                bolt11_operation="melt",
+            )
 
 
 @pytest.mark.asyncio

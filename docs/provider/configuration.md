@@ -169,7 +169,11 @@ A fresh node ships with two mints preconfigured:
 
 Setting `CASHU_MINTS` (env) or editing the list in the dashboard replaces this
 default entirely. List order is significant: automatic foreign-mint swaps use
-the first configured trusted mint. With an empty list, foreign top-ups are
+the first configured trusted mint. Core discovers that mint's active units from
+its keysets and, when advertised, filters them through its enabled NUT-04/NUT-05
+Bolt11 methods. For an existing key, its liability unit must remain supported;
+for a new key, Core prefers the foreign token's unit, then `sat`, then `msat`.
+With an empty trusted-mint list or no compatible unit, foreign top-ups are
 rejected before any token proofs are spent.
 
 #### Tokens from other mints

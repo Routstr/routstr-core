@@ -179,7 +179,6 @@ async def topup_wallet_endpoint(
         extra={
             "event": "cashu_topup_started",
             "source_mint": source_mint,
-            "primary_mint": settings.primary_mint,
             "trusted_mints": settings.cashu_mints,
             "key_hash": billing_key.hashed_key[:8],
         },
@@ -201,7 +200,6 @@ async def topup_wallet_endpoint(
                 extra={
                     "event": "cashu_topup_failed",
                     "source_mint": source_mint,
-                    "primary_mint": settings.primary_mint,
                     "trusted_mints": settings.cashu_mints,
                     "error_chain": _error_chain(e),
                 },
@@ -213,7 +211,6 @@ async def topup_wallet_endpoint(
             extra={
                 "event": "cashu_topup_failed",
                 "source_mint": source_mint,
-                "primary_mint": settings.primary_mint,
                 "trusted_mints": settings.cashu_mints,
                 "status_code": status_code,
                 "error_type": error_type,

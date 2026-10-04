@@ -1402,22 +1402,62 @@ _BALANCE_FETCH_RETRY_SECONDS = 60.0
 _MINT_UNITS_CACHE_SECONDS = 300.0
 _balance_fetch_failures: dict[tuple[str, str], tuple[float, str, str]] = {}
 _balance_fetch_locks: dict[str, asyncio.Lock] = {}
-_mint_supported_units: dict[str, tuple[float, list[str]]] = {}
+_mint_supported_units: dict[tuple[str, str | None], tuple[float, list[str]]] = {}
 
 
-async def _get_supported_mint_units(mint_url: str) -> list[str]:
+def _bolt11_units(wallet: Wallet, nut_number: int) -> set[str] | None:
+    mint_info = wallet.mint_info
+    nuts = mint_info.nuts if mint_info is not None else None
+    nut = (nuts.get(nut_number) or nuts.get(str(nut_number))) if nuts else None
+    if not isinstance(nut, dict) or "methods" not in nut:
+        return None
+    if nut.get("disabled") is True:
+        return set()
+    methods = nut.get("methods")
+    if not isinstance(methods, list):
+        return set()
+    return {
+        str(method.get("unit"))
+        for method in methods
+        if isinstance(method, dict)
+        and method.get("method") == "bolt11"
+        and method.get("unit")
+        and method.get("disabled") is not True
+    }
+
+
+async def get_supported_mint_units(
+    mint_url: str, *, bolt11_operation: str | None = None
+) -> list[str]:
+    """Discover active units without activating a unit-specific wallet."""
+    if bolt11_operation not in (None, "mint", "melt"):
+        raise ValueError(f"Unsupported Bolt11 operation: {bolt11_operation}")
+    cache_key = (mint_url, bolt11_operation)
     now = time.monotonic()
-    cached = _mint_supported_units.get(mint_url)
+    cached = _mint_supported_units.get(cache_key)
     if cached is not None and now < cached[0]:
         return cached[1]
 
-    # A metadata load populates Cashu's shared keyset cache for all units.
-    wallet = await get_wallet(
-        mint_url,
-        settings.primary_mint_unit,
-        retry_on_rate_limit=False,
-        load_proofs=False,
-    )
+    # Wallet construction requires a unit, but keyset discovery does not. Avoid
+    # load_mint(), which activates that bootstrap unit before we know the mint's
+    # supported units.
+    wallet = await get_wallet(mint_url, "sat", load=False)
+    lock = _mint_metadata_load_locks.setdefault(mint_url, asyncio.Lock())
+    async with lock:
+        await run_mint_operation(
+            wallet.load_mint_keysets,
+            op_name="discover_mint_keysets",
+            mint_url=mint_url,
+            retry_on_rate_limit=False,
+        )
+        if bolt11_operation is not None:
+            await run_mint_operation(
+                lambda: wallet.load_mint_info(reload=True),
+                op_name="discover_mint_info",
+                mint_url=mint_url,
+                retry_on_rate_limit=False,
+            )
+
     keysets = await get_cashu_keysets(mint_url=wallet.url, db=wallet.db)
     units: list[str] = []
     for keyset in keysets:
@@ -1426,16 +1466,27 @@ async def _get_supported_mint_units(mint_url: str) -> list[str]:
         unit = keyset.unit if isinstance(keyset.unit, str) else keyset.unit.name
         if unit and unit not in units:
             units.append(unit)
-    if not units:
-        units = [settings.primary_mint_unit]
-    elif settings.primary_mint_unit in units:
-        units.remove(settings.primary_mint_unit)
-        units.insert(0, settings.primary_mint_unit)
 
-    _mint_supported_units[mint_url] = (
+    if bolt11_operation is not None:
+        nut_number = 4 if bolt11_operation == "mint" else 5
+        bolt11_units = _bolt11_units(wallet, nut_number)
+        if bolt11_units is not None:
+            units = [unit for unit in units if unit in bolt11_units]
+
+    _mint_supported_units[cache_key] = (
         time.monotonic() + _MINT_UNITS_CACHE_SECONDS,
         units,
     )
+    return units
+
+
+async def _get_supported_mint_units(mint_url: str) -> list[str]:
+    units = await get_supported_mint_units(mint_url)
+    if not units:
+        return [settings.primary_mint_unit]
+    if settings.primary_mint_unit in units:
+        units = [settings.primary_mint_unit, *units]
+        units = list(dict.fromkeys(units))
     return units
 
 
