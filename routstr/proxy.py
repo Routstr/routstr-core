@@ -581,23 +581,23 @@ async def _proxy(
                 request=request,
             )
         model_id = request.query_params.get("model", "")
-        candidates = (
+        venice_candidates = (
             [
                 (model, upstream)
-                for model, upstream in get_candidates(model_id)
+                for model, upstream in (get_candidates(model_id) or [])
                 if upstream.provider_type == "venice" and upstream in _upstreams
             ]
             if model_id
             else []
         )
-        if not candidates:
+        if not venice_candidates:
             return create_error_response(
                 "invalid_request",
                 "No Venice upstream for the requested model",
                 404,
                 request=request,
             )
-        model, upstream = candidates[0]
+        model, upstream = venice_candidates[0]
         params = [(k, v) for k, v in request.query_params.multi_items() if k != "model"]
         params.append(("model", upstream.transform_model_name(model.id)))
 

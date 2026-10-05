@@ -14,7 +14,9 @@ from routstr import proxy
     "path",
     ["tee/attestation", "tee/signature", "v1/tee/attestation/", "v1/tee/signature/"],
 )
-async def test_venice_metadata_uses_model_candidate_and_native_id(monkeypatch, path):
+async def test_venice_metadata_uses_model_candidate_and_native_id(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
     venice = MagicMock(provider_type="venice")
     venice.prepare_headers.return_value = {}
     venice.transform_model_name.return_value = "native-model"
@@ -48,11 +50,16 @@ async def test_venice_metadata_uses_model_candidate_and_native_id(monkeypatch, p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", ["missing", ""])
-async def test_signature_requires_known_venice_model(monkeypatch, model):
+@pytest.mark.parametrize("missing_mapping", [True, False])
+async def test_signature_requires_known_venice_model(
+    monkeypatch: pytest.MonkeyPatch, model: str, missing_mapping: bool
+) -> None:
     tinfoil = MagicMock(provider_type="tinfoil")
     tinfoil.forward_get_request = AsyncMock()
     monkeypatch.setattr(proxy, "_upstreams", [tinfoil])
-    monkeypatch.setattr(proxy, "get_candidates", lambda _: [])
+    monkeypatch.setattr(
+        proxy, "get_candidates", lambda _: None if missing_mapping else []
+    )
     app = FastAPI()
     app.include_router(proxy.proxy_router)
     async with AsyncClient(
