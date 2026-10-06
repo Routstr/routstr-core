@@ -1,6 +1,6 @@
 # Deployment
 
-Start with the [private quickstart](quickstart.md). This guide is for an operator who has rotated the bootstrap password, configured an upstream, and decided to publish the node. For agent-assisted setup use [llms.txt](../../llms.txt). The original `compose.yml` is a separate stack that exposes port 8000 on all interfaces and starts Tor; do not switch to it by running bare `docker compose up` during this workflow.
+Start with the [private quickstart](quickstart.md). This guide is for an operator who has rotated the bootstrap password, configured an upstream, and decided to publish the node. For agent-assisted setup use [llms.txt](https://github.com/Routstr/routstr-core/blob/main/llms.txt). The original `compose.yml` is a separate stack that exposes port 8000 on all interfaces and starts Tor; do not switch to it by running bare `docker compose up` during this workflow.
 
 ## Prepare a durable host
 

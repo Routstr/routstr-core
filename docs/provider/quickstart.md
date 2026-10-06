@@ -15,7 +15,7 @@ cd routstr-core
 python3 scripts/node_setup.py start
 ```
 
-The command copies `.env.example` to `.env` (0600) only if absent, builds the UI and API, and waits up to three minutes for the local API. The first build itself may take longer. `compose.node.yml` binds only `127.0.0.1:8000`, starts no Tor service, and disables automatic Nostr identity generation and analytics publication. Use this file for all subsequent Compose operations (`docker compose -f compose.node.yml ...`); plain `docker compose up` selects the **different public/Tor stack**.
+The command copies `.env.example` to `.env` (0600) only if absent, builds the UI and API, and waits up to three minutes for the local API. The first build itself may take longer. `compose.node.yml` binds only loopback, starts no Tor service, and disables automatic Nostr identity generation and analytics publication. If port 8000 belongs to another service, use `python3 scripts/node_setup.py start --port 18080` (choose a free port), then use `check --port 18080`, `http://127.0.0.1:18080/admin/`, and `ROUTSTR_NODE_PORT=18080 docker compose -f compose.node.yml ...` for later Compose operations. Never stop an unrelated service to free the port. Plain `docker compose up` selects the **different public/Tor stack**.
 
 On a remote server, forward port 8000 from your own computer:
 
@@ -45,4 +45,4 @@ Before making the node public, back up `keys.db` (including any SQLite sidecars)
 
 A production acceptance test also needs an operator-approved, small paid non-streaming and streaming inference request, accounting/reconciliation, and a tested backup/restore. Do not mark the node production-ready based only on `/v1/info` or `/v1/models`.
 
-Agents should follow the separate [operator instructions](../../llms.txt); an agent cannot complete login, funding, or public exposure without the operator's approval.
+Agents should follow the separate [operator instructions](https://github.com/Routstr/routstr-core/blob/main/llms.txt); an agent cannot complete login, funding, or public exposure without the operator's approval.

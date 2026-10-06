@@ -58,6 +58,7 @@ first. Rotate the initial admin password before deliberately publishing a node.
 ```bash
 git clone https://github.com/Routstr/routstr-core.git
 cd routstr-core
+# For production, check out a reviewed release tag first.
 python3 scripts/node_setup.py start
 ```
 

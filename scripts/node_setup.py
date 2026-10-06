@@ -4,7 +4,6 @@
 import argparse
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
@@ -13,9 +12,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LOCAL_URL = "http://127.0.0.1:8000"
+DEFAULT_PORT = 8000
 COMPOSE = ("docker", "compose", "-f", "compose.node.yml")
 
 
@@ -72,7 +72,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("start", "check"))
     parser.add_argument("--public-url", help="HTTPS origin to check from this machine (check only)")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="loopback host port (default: 8000)")
     args = parser.parse_args()
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    local_url = f"http://127.0.0.1:{args.port}"
     if args.public_url and args.action != "check":
         parser.error("--public-url requires check")
     if args.action == "start":
@@ -80,22 +84,23 @@ def main() -> int:
             raise RuntimeError("Docker Compose is required")
         if prepare_env(ROOT):
             print("Created .env with owner-only permissions. Review it before public deployment.")
-        subprocess.run([*COMPOSE, "config", "--quiet"], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
-        subprocess.run([*COMPOSE, "up", "-d", "--build"], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
+        compose_env = {**os.environ, "ROUTSTR_NODE_PORT": str(args.port)}
+        subprocess.run([*COMPOSE, "config", "--quiet"], cwd=ROOT, env=compose_env, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run([*COMPOSE, "up", "-d", "--build"], cwd=ROOT, env=compose_env, check=True, stdout=subprocess.DEVNULL)
         deadline = time.monotonic() + 180
         while True:
             try:
-                name, count = probe(LOCAL_URL)
+                name, count = probe(local_url)
                 break
             except (OSError, ValueError, RuntimeError, KeyError):
                 if time.monotonic() >= deadline:
                     raise RuntimeError("Node did not become ready in 180s; inspect container status privately") from None
                 time.sleep(3)
-        print(f"Private node ready: {name}; {count} models. Open {LOCAL_URL}/admin/ locally or use an SSH tunnel.")
+        print(f"Private node ready: {name}; {count} models. Open {local_url}/admin/ locally or use an SSH tunnel.")
         print("The operator must retrieve the first-run password privately from Docker logs and rotate it in Settings → Admin Settings.")
-        print("Then add an upstream at Providers, configure payout/pricing, and run 'python3 scripts/node_setup.py check'.")
+        print(f"Then add an upstream at Providers, configure payout/pricing, and run 'python3 scripts/node_setup.py check --port {args.port}'.")
     else:
-        url = public_url(args.public_url) if args.public_url else LOCAL_URL
+        url = public_url(args.public_url) if args.public_url else local_url
         name, count = probe(url)
         print(f"Node reachable at {url}: {name}; {count} public models.")
         if count == 0:
