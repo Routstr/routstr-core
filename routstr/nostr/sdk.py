@@ -28,6 +28,17 @@ def parse_keypair(secret_key: str) -> tuple[str, str]:
     return keys.secret_key().to_hex(), keys.public_key().to_hex()
 
 
+def generate_keypair() -> tuple[str, str]:
+    """Generate a fresh Nostr identity as ``(nsec, npub)`` (both bech32).
+
+    Used to self-provision a node identity on first boot so a fresh deployment
+    can announce itself without an operator pasting an nsec. The caller owns
+    persisting the secret; this function never logs or stores it.
+    """
+    keys = Keys.generate()
+    return keys.secret_key().to_bech32(), keys.public_key().to_bech32()
+
+
 def create_signed_event(
     secret_key_hex: str,
     *,

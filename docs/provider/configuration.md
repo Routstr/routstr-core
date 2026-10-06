@@ -202,6 +202,9 @@ Announce your node on the network:
 | **Relays** | Relays to publish announcements      |
 | **Share Analytics** | Publish aggregate usage stats to Nostr |
 
+To avoid configuring an identity by hand, set `AUTO_GENERATE_NSEC=true` and the
+node creates one on first boot (see [Discovery](discovery.md)).
+
 See [Discovery](discovery.md) for details.
 
 ---
@@ -228,6 +231,7 @@ Use environment variables for:
 | `DESCRIPTION`        | Node description                  | `A Routstr Node`                     |
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
 | `NSEC`               | Legacy seed for the Nostr private key (otherwise set from the admin UI) | —                |
+| `AUTO_GENERATE_NSEC` | Generate a Nostr identity on first boot when none is configured (the generated nsec is logged once to back up; a provided `NSEC` wins) | `false` |
 | `ENABLE_ANALYTICS_SHARING` | Enable usage analytics sharing to Nostr | `true`                         |
 | `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin,https://mint.cubabitcoin.org` |
 | `MINT_OPERATION_CONCURRENCY` | Concurrent mint/unit balance reads | `4` |
