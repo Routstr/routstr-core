@@ -709,7 +709,15 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
                 }
             )
             model_dict["tlsn"] = (
-                {"mode": "proxy", "upstream_hosts": hosts} if hosts else False
+                {
+                    "mode": "proxy",
+                    "upstream_hosts": hosts,
+                    # Channel-B endpoint the SDK verifier dials.
+                    "proverd_ws": settings.tlsn_proverd_url.replace("http", "ws", 1).rstrip("/")
+                    + "/ws",
+                }
+                if hosts
+                else False
             )
         data.append(model_dict)
     return {"data": data}
