@@ -685,10 +685,31 @@ async def model_paths_for_model(model_id: str) -> dict:
 @models_router.get("/models/", include_in_schema=False)
 async def models(session: AsyncSession = Depends(get_session)) -> dict:
     """Get all available models from all providers with database overrides applied."""
-    from ..proxy import get_unique_models
+    from urllib.parse import urlsplit
+
+    from ..core.settings import settings
+    from ..proxy import get_provider_for_model, get_unique_models
 
     items = get_unique_models()
+    tlsn_enabled = bool(settings.tlsn_proverd_url)
     data = []
     for model in items:
-        data.append(model.dict())
+        model_dict = model.dict()
+        if tlsn_enabled:
+            # Advertise TLSN verifiability: proxy mode plus the upstream
+            # hosts the verifier should expect to relay to. Nested routstr
+            # upstreams are not verifiable (design doc decision 4).
+            providers = get_provider_for_model(model.id) or []
+            hosts = sorted(
+                {
+                    host
+                    for p in providers
+                    if p.provider_type != "routstr"
+                    and (host := urlsplit(p.base_url).hostname)
+                }
+            )
+            model_dict["tlsn"] = (
+                {"mode": "proxy", "upstream_hosts": hosts} if hosts else False
+            )
+        data.append(model_dict)
     return {"data": data}

@@ -626,6 +626,10 @@ class BaseUpstreamProvider:
             "key-expiry-time",
             "x-cashu",
             "x-routstr-model-path",
+            # TLSN verified-mode control headers: consumed by routstr-core,
+            # never forwarded upstream.
+            "x-routstr-verify",
+            "x-routstr-tlsn-session",
         ]:
             if headers.pop(header, None) is not None:
                 removed_headers.append(header)
@@ -3321,6 +3325,32 @@ class BaseUpstreamProvider:
                 "key_hash": key.hashed_key[:8] + "...",
             },
         )
+
+        # TLSN verified mode: route the upstream call through proverd
+        # (Proxy-TLS prover sidecar) instead of a direct httpx connection.
+        # Byte-passthrough + header-only cost metadata; see tlsn_verified.py.
+        from .tlsn_verified import (
+            forward_verified_via_proverd,
+            verified_mode_requested,
+        )
+
+        if verified_mode_requested(request):
+            return await forward_verified_via_proverd(
+                provider=self,
+                request=request,
+                path=path,
+                headers=headers,
+                request_body=transformed_body
+                if transformed_body is not None
+                else request_body,
+                key=key,
+                max_cost_for_model=max_cost_for_model,
+                session=session,
+                model_obj=model_obj,
+                reservation_snapshot=reservation_snapshot,
+                url=url,
+                original_model_id=original_model_id,
+            )
 
         response: httpx.Response | None = None
         response_handoff = ResponseHandoff()

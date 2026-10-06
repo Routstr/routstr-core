@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     upstream_cooldown_seconds: float = Field(
         default=30.0, ge=0, env="UPSTREAM_COOLDOWN_SECONDS"
     )
+    # TLSN verified mode: base URL of the proverd sidecar (e.g.
+    # http://127.0.0.1:7047). Empty disables verified mode entirely —
+    # requests asking for it then fail loud with 400.
+    tlsn_proverd_url: str = Field(default="", env="TLSN_PROVERD_URL")
 
     # Node info
     name: str = Field(default="ARoutstrNode", env="NAME")
