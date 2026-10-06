@@ -1,132 +1,48 @@
-# Quick Start
+# Run a provider node
 
-Start earning Bitcoin by selling AI access in under 5 minutes.
+A Routstr node connects to an upstream AI provider and accepts Cashu payments for inference. First boot is **private**: a working API is not yet a configured or publicly reachable provider.
 
-## What You'll Build
+## Before you start
 
-A **Routstr Provider Node** acts as a gateway that:
+You need a host with Docker and the Compose plugin, Python 3, enough space to build the dashboard, and an upstream API key. Keep the checkout on persistent storage. For a remote host, use an SSH tunnel to reach its private dashboard. Do not paste passwords, API keys, wallet proofs or startup logs into an agent chat.
 
-1. **Connects** to upstream AI providers (OpenAI, Anthropic, OpenRouter, etc.)
-2. **Accepts** Bitcoin payments via Cashu eCash
-3. **Serves** AI requests to clients on the network
-
-You bring the API keys, Routstr handles the billing, payments, and client management.
-
-!!! tip "Future: Node-to-Node Routing"
-In future versions, you'll be able to run a node that connects to other Routstr nodes—eliminating the need to configure upstream providers yourself. For now, you'll need your own API credentials.
-
----
-
-## Prerequisites
-
-- [Docker](https://docs.docker.com/get-docker/) installed
-- API credentials from at least one AI provider (OpenAI, Anthropic, OpenRouter, etc.)
-
----
-
-## 1. Prepare Configuration
-
-Create a `.env` file in the root of the project to store your secrets:
+## 1. Start privately
 
 ```bash
-# Encrypts node secrets at rest. Optional — if unset, the node generates a key on
-# first start and prints it once (back it up).
-ROUTSTR_SECRET_KEY=
-
-# Node Identity
-NAME="My AI Node"
-DESCRIPTION="Fast access to models"
-
-# Lightning Payouts
-RECEIVE_LN_ADDRESS=yourname@wallet.com
-
+git clone https://github.com/Routstr/routstr-core.git
+cd routstr-core
+# For a production node, check out a reviewed release tag before the next step.
+python3 scripts/node_setup.py start
 ```
 
-The admin password is generated and logged once on first start (read it from the
-logs to sign in). Your Nostr identity (`nsec`) is handled for you: the bundled
-compose stack sets `AUTO_GENERATE_NSEC=true`, so the node creates an identity on
-first boot and announces itself — no dashboard step needed. The generated `nsec`
-is printed once at startup (back it up) and stored encrypted in the database.
-(`ADMIN_PASSWORD` / `NSEC` are still read once as a legacy seed for existing
-deployments, and a provided `NSEC` always wins over auto-generation.)
+The command copies `.env.example` to `.env` (0600) only if absent, builds the UI and API, and waits up to three minutes for the local API. The first build itself may take longer. `compose.node.yml` binds only `127.0.0.1:8000`, starts no Tor service, and disables automatic Nostr identity generation and analytics publication. Use this file for all subsequent Compose operations (`docker compose -f compose.node.yml ...`); plain `docker compose up` selects the **different public/Tor stack**.
 
-## 2. Start the Node
-
-The recommended way to run Routstr is using Docker Compose, which handles the node, the UI, and optional services like Tor.
+On a remote server, forward port 8000 from your own computer:
 
 ```bash
-docker compose up -d
+ssh -L 8000:127.0.0.1:8000 user@your-server
 ```
 
-Verify it's running:
+Open <http://127.0.0.1:8000/admin/> in that computer's browser.
+
+## 2. Secure the admin login
+
+The server generates a bootstrap password once. **The operator** reads it privately in a trusted terminal using `docker compose -f compose.node.yml logs routstr`, enters it in the dashboard, then immediately changes it in **Settings → Admin Settings → Change Admin Password**. Do not capture those logs in automated output. If the password is lost, run `docker compose -f compose.node.yml exec routstr /.venv/bin/python scripts/reset_admin_password.py --regenerate` privately and rotate it again.
+
+## 3. Configure service
+
+In **Providers**, choose **Add Provider**, select the upstream type, enter its correct base URL and API key, review the provider fee, and save. Check that the provider is enabled and its model list has enabled models. In **Settings → Admin Settings**, review node name, payout Lightning address and pricing before accepting paid traffic. A saved payout address is not a tested payout.
 
 ```bash
-curl http://localhost:8000/v1/info
+python3 scripts/node_setup.py check
 ```
 
-### Build from Source (Optional)
+A successful check reports a nonzero **public model count**. Zero models means the API is running but setup is incomplete. This check proves discovery only: it does not test payments, streaming, actual upstream requests, refunds or payout.
 
-If you've cloned the repository and want to build the images yourself:
+## 4. Publish deliberately
 
-```bash
-docker compose build
-docker compose up -d
-```
+Before making the node public, back up `keys.db` (including any SQLite sidecars), `routstr_secret.key`, `.wallet/` and `.env` while all writers are stopped. Verify a restore offline; the database and encryption key must remain together. Rotate the admin password first, put HTTPS and a firewall/reverse proxy in front of the loopback port, set the public URL, and decide explicitly whether to enable Nostr discovery and analytics. See [deployment](deployment.md). From **outside** the server, run `python3 scripts/node_setup.py check --public-url https://node.example` to verify certificate, info and models.
 
----
+A production acceptance test also needs an operator-approved, small paid non-streaming and streaming inference request, accounting/reconciliation, and a tested backup/restore. Do not mark the node production-ready based only on `/v1/info` or `/v1/models`.
 
-## 3. Configure via Dashboard
-
-Open the **Admin Dashboard** at [http://localhost:8000/admin/](http://localhost:8000/admin/).
-
-!!! note "Login"
-On first start the node generates an admin password and logs it once — read it from the container logs to sign in. You can change it afterwards from **Settings** → **Security**.
-
-### Connect Your AI Providers
-
-1. Navigate to **Settings** → **Upstream**
-2. Enter your upstream URL (e.g., `https://api.openai.com/v1`)
-3. Enter your API key
-4. Save
-
-### Set Your Profit Margin
-
-1. Go to **Settings** → **Pricing**
-2. Configure your markup (default is 10%)
-3. Optionally set a fixed price per request instead
-
-### Secure the Dashboard
-
-1. Go to **Settings** → **Admin**
-2. Set a strong password
-3. Save and re-login
-
----
-
-## 3. Start Earning
-
-Once configured, your node is live. Clients pay you in Bitcoin (via Cashu tokens) for every AI request.
-
-### Monitor Your Earnings
-
-The dashboard shows:
-
-- **Total Wallet**: All Bitcoin held by your node
-- **User Balances**: Funds belonging to active client sessions
-- **Your Balance**: Your profit (`Total - User Balances`)
-
-### Withdraw Profits
-
-1. Go to **Withdraw** in the dashboard
-2. Select amount and mint
-3. Generate a Cashu token
-4. Redeem to your Lightning wallet
-
----
-
-## Next Steps
-
-- **[Deployment](deployment.md)**: Production setup with Docker Compose and Tor
-- **[Dashboard Guide](dashboard.md)**: Full reference for all dashboard features
-- **[Pricing](pricing.md)**: Configure pricing strategies and per-model overrides
-- **[Discovery](discovery.md)**: Announce your node on Nostr for clients to find you
+Agents should follow the separate [operator instructions](../../llms.txt); an agent cannot complete login, funding, or public exposure without the operator's approval.

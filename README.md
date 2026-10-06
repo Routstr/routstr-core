@@ -51,68 +51,19 @@ curl https://api.routstr.com/v1/chat/completions \
 
 ## Quick Start (Docker)
 
-If you are a node runner, the recommended way to start Routstr Core is to clone
-the repository at the latest release and run it with Docker Compose:
+Start a private node with Docker Compose, then follow the
+[provider quickstart](docs/provider/quickstart.md). Agents: read [llms.txt](llms.txt)
+first. Rotate the initial admin password before deliberately publishing a node.
 
-1. **Clone the latest release**:
-   ```bash
-   git clone https://github.com/Routstr/routstr-core.git
-   cd routstr-core
-   git checkout v0.4.7   # current release — see https://github.com/Routstr/routstr-core/releases/latest
-   ```
+```bash
+git clone https://github.com/Routstr/routstr-core.git
+cd routstr-core
+python3 scripts/node_setup.py start
+```
 
-   Docker Compose builds the node and the admin dashboard from source, so there
-   is no image to pull.
-
-2. **Prepare your `.env`**:
-   ```bash
-   cp .env.example .env
-   ```
-
-   Then edit it with your details:
-   ```bash
-   # Optional: encrypts node secrets at rest. If unset, the node generates a key
-   # on first start, writes it to routstr_secret.key, and prints it once — back
-   # up that file. Set it explicitly to manage the key yourself (recommended in
-   # production).
-   ROUTSTR_SECRET_KEY=<generated-key>
-   NAME="My AI Node"
-   DESCRIPTION="Fast access to models"
-   RECEIVE_LN_ADDRESS=yourname@wallet.com
-   ```
-
-   Your Nostr identity (`nsec`) is handled automatically: `compose.yml` sets
-   `AUTO_GENERATE_NSEC=true`, so on first start the node creates one, prints it
-   once to back up, and stores it encrypted in the database. Set `NSEC` in `.env`
-   only to import a specific identity (it's read once as a legacy seed and always
-   wins over auto-generation).
-
-   If you don't set one, a key is generated and printed on first start — save it
-   somewhere safe (losing it makes previously encrypted secrets unreadable). To
-   supply your own, generate it once and keep it stable:
-   ```bash
-   uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-   ```
-
-3. **Start the services**:
-   ```bash
-   docker compose up -d
-   ```
-
-   The first start builds both images (the dashboard build takes a few minutes).
-
-4. **Get your admin password**:
-   On first start the node generates an admin password and logs it once with the
-   `/admin` URL. Read it from the logs:
-   ```bash
-   docker compose logs routstr | grep -i admin
-   ```
-   (Lost it? Reset with `docker compose exec routstr /.venv/bin/python scripts/reset_admin_password.py --regenerate`.)
-
-5. **Configure**:
-   Open [http://localhost:8000/admin/](http://localhost:8000/admin/) to connect your AI providers and set pricing.
-
-For full instructions, see the **[Provider Quick Start Guide](https://docs.routstr.com/provider/quickstart/)**.
+This binds the API to `127.0.0.1:8000` and disables discovery during setup.
+See the [deployment guide](docs/provider/deployment.md) for production exposure
+and backups.
 
 ## Development
 

@@ -31,6 +31,7 @@ relay-data
 relay-data
 
 compose.override.yml
+compose.analytics.yml
 
 # Coverage
 .coverage
