@@ -281,13 +281,12 @@ def _resolve_ehbp_target_url(
     otherwise the header is ignored so callers cannot redirect other providers
     or leak upstream API keys.
 
-    Only the *host* is taken from the override: the path comes from
-    ``target_url``, which the provider built through
+    The provider builds the request path through
     :meth:`~routstr.upstream.base.BaseUpstreamProvider.build_ehbp_request_path`.
-    Appending the caller's raw path here instead would re-introduce the
-    spelling the provider just normalized away, so a client that posts to
-    ``/chat/completions`` would reach the enclave's unversioned (404) route
-    even though the default target was built correctly.
+    The override supplies the host and optional base path. If that base path
+    already ends in ``/v1``, do not append the provider's version twice.
+    Appending the caller's raw path instead would lose the provider's prefix
+    for clients that post to ``/chat/completions``.
     """
     override_header = (
         profile.client_target_url_header if profile else _ENCLAVE_URL_HEADER
@@ -325,7 +324,10 @@ def _resolve_ehbp_target_url(
             status_code=400,
         )
 
-    return f"{validated_base_url}{urlsplit(target_url).path}"
+    target_path = urlsplit(target_url).path
+    if validated_base_url.endswith("/v1") and target_path.startswith("/v1/"):
+        target_path = target_path[3:]
+    return f"{validated_base_url}{target_path}"
 
 
 def _validated_confidential_target_url(

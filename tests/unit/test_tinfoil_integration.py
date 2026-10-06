@@ -226,6 +226,26 @@ class TestResolveEhbpTargetUrl:
         )
         assert result == "https://router-0.tinfoil.sh/v1/chat/completions"
 
+    @pytest.mark.parametrize("path", ["chat/completions", "v1/chat/completions"])
+    @pytest.mark.parametrize(
+        ("enclave_base", "expected_url"),
+        [
+            ("https://router-0.tinfoil.sh/v1", "https://router-0.tinfoil.sh/v1/chat/completions"),
+            ("https://router-0.tinfoil.sh/gateway/v1/", "https://router-0.tinfoil.sh/gateway/v1/chat/completions"),
+            ("https://router-0.tinfoil.sh/gateway", "https://router-0.tinfoil.sh/gateway/v1/chat/completions"),
+        ],
+    )
+    def test_override_with_base_path_does_not_duplicate_version(
+        self, path: str, enclave_base: str, expected_url: str
+    ) -> None:
+        provider = TinfoilUpstreamProvider(api_key="test")
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-deepseek-v4-1-flash"
+        target = provider.get_ehbp_forwarding_target(path, model_obj)
+        assert _resolve_ehbp_target_url(
+            target.url, {"X-Tinfoil-Enclave-Url": enclave_base}, "tinfoil"
+        ) == expected_url
+
     def test_override_lowercase_header_for_tinfoil(self) -> None:
         result = _resolve_ehbp_target_url(
             "https://default.example.com/v1/chat/completions",
