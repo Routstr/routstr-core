@@ -99,20 +99,45 @@ answer `500` with **no** `X-Routstr-Error-Scope` header.
 
 ### Authentication Errors
 
-#### Invalid API Key
+#### Invalid API Key (malformed credential)
+
+Returned when the `Authorization` value is neither an `sk-...` API key nor a
+`cashu...` token.
 
 ```json
 {
   "error": {
-    "type": "authentication_failed",
-    "message": "Invalid API key provided",
+    "type": "invalid_request_error",
+    "message": "Invalid API key format. Expected an 'sk-...' API key or a 'cashu...' token.",
     "code": "invalid_api_key"
   }
 }
 ```
 
 **Status:** 401  
-**Resolution:** Check API key format and validity
+**Resolution:** Send a well-formed credential. The node logs the received
+preview and length (`Invalid API key format: preview=… length=…`) to distinguish
+a typo from a wrong-shaped header.
+
+#### API Key Not Found (`sk-` key unknown to this node)
+
+Returned when the credential starts with `sk-` and this node has no record of
+it — for example a key minted by a different Routstr node, or one removed
+by key pruning. This is *not* a formatting problem.
+
+```json
+{
+  "error": {
+    "type": "invalid_request_error",
+    "message": "Key not found. Deposit first via /v1/wallet/create to get a key on this node.",
+    "code": "key_not_found"
+  }
+}
+```
+
+**Status:** 401  
+**Resolution:** Create or fund a key on *this* node via `POST /v1/wallet/create`.
+Keys are node-local; an `sk-` key issued by another node is not accepted here.
 
 #### Expired API Key
 
