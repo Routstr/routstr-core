@@ -82,6 +82,23 @@ def test_cashu_import_cannot_override_operator_environment() -> None:
     assert result.stdout.splitlines()[-1] == "https://mint.operator.example"
 
 
+def test_import_preserves_environment_added_by_dependencies() -> None:
+    env = dict(os.environ)
+    env.pop("TIKTOKEN_CACHE_DIR", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, routstr; print(bool(os.environ.get('TIKTOKEN_CACHE_DIR')))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.stdout.splitlines()[-1] == "True"
+
+
 def test_database_pool_defaults_provide_concurrency_headroom() -> None:
     s = Settings()
     assert s.database_pool_size == 10

@@ -30,8 +30,10 @@ from .payment.lnurl import (
     get_lnurl_data,
 )
 from .wallet import (
+    SWAP_BUSY_RETRY_AFTER_SECONDS,
     check_bolt11_payment_status,
     is_mint_connection_error,
+    is_swap_busy,
     preferred_trusted_mint,
     resolve_trusted_source_mint,
     send_to_lnurl,
@@ -65,13 +67,15 @@ def refund_mint(key: ApiKey) -> str:
     return preferred_trusted_mint()
 
 
-def swap_destination(key: ApiKey, method: str) -> str | None:
+async def swap_destination(
+    key: ApiKey, method: str, session: AsyncSession
+) -> str | None:
     """The user's own mint to swap a Cashu refund to, if that applies."""
     from .foreign_mint_swap import refund_destination_mint
 
     if method != "cashu":
         return None
-    return refund_destination_mint(key)
+    return await refund_destination_mint(key, session)
 
 
 async def validate_lightning_destination(destination: str) -> None:
@@ -107,7 +111,7 @@ async def open_claim(
     if destination is None:
         # A cashu refund to the user's own foreign mint records that mint as
         # the destination; the payout is still drawn from a trusted mint.
-        destination = swap_destination(key, method)
+        destination = await swap_destination(key, method, session)
     refund = Refund(
         api_key_hashed_key=key.hashed_key,
         method=method,
@@ -508,6 +512,13 @@ async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
                 "mint_url": refund.mint_url,
             },
         )
+        if is_swap_busy(e):
+            raise HTTPException(
+                status_code=503,
+                detail="Another swap against the refund mint is in progress; "
+                "balance unchanged, retry in a few seconds.",
+                headers={"Retry-After": str(SWAP_BUSY_RETRY_AFTER_SECONDS)},
+            )
         if is_mint_connection_error(e):
             raise HTTPException(status_code=503, detail="Mint service unavailable")
         raise HTTPException(status_code=500, detail="Refund failed")

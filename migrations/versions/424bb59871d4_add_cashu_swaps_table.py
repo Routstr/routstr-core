@@ -1,8 +1,8 @@
 """add cashu_swaps table
 
-Revision ID: b7e2c4d9f1a3
+Revision ID: 424bb59871d4
 Revises: a73d19b6c204
-Create Date: 2026-10-04
+Create Date: 2026-10-06
 
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 import sqlmodel
 from alembic import op
 
-revision = "b7e2c4d9f1a3"
+revision = "424bb59871d4"
 down_revision = "a73d19b6c204"
 branch_labels = None
 depends_on = None
@@ -42,6 +42,7 @@ def upgrade() -> None:
         sa.Column("mint_quote_id", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column("melt_quote_id", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column("token", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("change_token", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column("error", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column("claimed_at", sa.Integer(), nullable=True),
         sa.Column("created_at", sa.Integer(), nullable=False),

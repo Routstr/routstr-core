@@ -161,7 +161,7 @@ async def topup_wallet_endpoint(
     topup_request: TopupRequest | None = None,
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
-) -> dict[str, int]:
+) -> dict[str, int | str]:
     billing_key = key
 
     if topup_request is not None:
@@ -183,11 +183,19 @@ async def topup_wallet_endpoint(
             "key_hash": billing_key.hashed_key[:8],
         },
     )
+    response: dict[str, int | str] = {}
     try:
         if source_mint != "unknown" and not is_trusted_source_mint(source_mint):
             # Top-up is the only entry point that swaps: the caller is already
             # waiting on a long operation here, unlike bearer auth or X-Cashu.
-            amount_msats = await swap_in_and_credit(cashu_token, billing_key, session)
+            swap_result = await swap_in_and_credit(cashu_token, billing_key, session)
+            amount_msats = swap_result.credited_msats
+            if swap_result.change_token:
+                response.update(
+                    change_token=swap_result.change_token,
+                    change_amount=swap_result.change_amount,
+                    change_unit=str(swap_result.change_unit),
+                )
         else:
             amount_msats = await credit_balance(cashu_token, billing_key, session)
     except Exception as e:
@@ -229,7 +237,8 @@ async def topup_wallet_endpoint(
             "key_hash": billing_key.hashed_key[:8],
         },
     )
-    return {"msats": amount_msats}
+    response["msats"] = amount_msats
+    return response
 
 
 async def _lookup_key_no_create(

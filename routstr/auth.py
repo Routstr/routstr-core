@@ -34,6 +34,7 @@ from .redemption_cache import (
     redemption_negative_cache,
 )
 from .wallet import (
+    SWAP_BUSY_RETRY_AFTER_SECONDS,
     classify_redemption_error,
     credit_balance,
     deserialize_token_from_string,
@@ -124,6 +125,11 @@ def redemption_error_to_http_exception(error: Exception) -> HTTPException:
                 "code": error_code,
             }
         },
+        headers=(
+            {"Retry-After": str(SWAP_BUSY_RETRY_AFTER_SECONDS)}
+            if error_code == "cashu_swap_busy"
+            else None
+        ),
     )
 
 

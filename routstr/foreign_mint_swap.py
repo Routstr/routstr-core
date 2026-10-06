@@ -25,9 +25,10 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Awaitable, Callable
 
-from cashu.core.base import MeltQuote, MintQuote, Proof, Token
+from cashu.core.base import MeltQuote, MintQuote, Proof, Token, TokenV3, TokenV3Token
 from cashu.wallet.helpers import deserialize_token_from_string
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select, update
@@ -48,6 +49,7 @@ from .wallet import (
     Bolt11PaymentAmbiguous,
     Bolt11PaymentNotAttempted,
     Bolt11PaymentPlan,
+    ForeignMintBusyError,
     ForeignMintSwapError,
     ForeignMintUnavailableError,
     SwapPendingError,
@@ -57,11 +59,13 @@ from .wallet import (
     _check_bolt11_payment_status_locked,
     _execute_bolt11_payment,
     _wallet_operation_depth,
+    find_trusted_mint_with_funds,
     get_proofs_per_mint_and_unit,
     get_supported_mint_units,
     get_wallet,
     preferred_trusted_mint,
     resolve_trusted_source_mint,
+    select_melt_inputs,
     wallet_operation_guard,
 )
 
@@ -77,12 +81,20 @@ _FOREIGN_FAILURE_EXCEPTIONS: tuple[type[BaseException], ...] = (
 )
 
 
-def refund_destination_mint(key: ApiKey) -> str | None:
-    """Return the user's own mint when a refund needs a reverse swap."""
+async def refund_destination_mint(key: ApiKey, session: AsyncSession) -> str | None:
+    """Return the foreign mint that originally funded this key, if any."""
     mint = key.refund_mint_url
     if not mint or resolve_trusted_source_mint(mint):
         return None
-    return mint
+    credited_swap = await session.exec(
+        select(CashuSwap.id)
+        .where(CashuSwap.direction == "in")
+        .where(CashuSwap.status == "credited")
+        .where(CashuSwap.api_key_hashed_key == key.hashed_key)
+        .where(CashuSwap.source_mint == mint)
+        .limit(1)
+    )
+    return mint if credited_swap.first() is not None else None
 
 
 # --- foreign-mint budget ---------------------------------------------------
@@ -135,7 +147,7 @@ async def foreign_mint_lock(mint_url: str) -> AsyncGenerator[None, None]:
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise ForeignMintUnavailableError(
+                    raise ForeignMintBusyError(
                         "Another swap against this mint is still in progress"
                     ) from None
                 await asyncio.sleep(0.05)
@@ -147,7 +159,12 @@ async def foreign_mint_lock(mint_url: str) -> AsyncGenerator[None, None]:
 
 
 async def run_foreign_mint_operation(
-    factory: Callable[[], Awaitable[Any]], *, mint_url: str, op_name: str
+    factory: Callable[[], Awaitable[Any]],
+    *,
+    mint_url: str,
+    op_name: str,
+    timeout: float | None = None,
+    cooldown_on_timeout: bool = True,
 ) -> Any:
     """One bounded attempt against a mint the operator did not configure.
 
@@ -160,16 +177,18 @@ async def run_foreign_mint_operation(
         raise ForeignMintUnavailableError("Issuing mint is cooling down")
     slots = _slots()
     if slots.locked():
-        raise ForeignMintUnavailableError("Foreign-mint budget exhausted; retry later")
+        raise ForeignMintBusyError("Foreign-mint budget exhausted; retry later")
     await slots.acquire()
     try:
         return await asyncio.wait_for(
-            factory(), timeout=settings.foreign_mint_operation_timeout_seconds
+            factory(),
+            timeout=timeout or settings.foreign_mint_operation_timeout_seconds,
         )
     except _FOREIGN_FAILURE_EXCEPTIONS as error:
-        MintRateGuard.get(mint_url).apply_cooldown(
-            MINT_TRANSPORT_COOLDOWN_SECONDS, reason="transport"
-        )
+        if cooldown_on_timeout or not isinstance(error, asyncio.TimeoutError):
+            MintRateGuard.get(mint_url).apply_cooldown(
+                MINT_TRANSPORT_COOLDOWN_SECONDS, reason="transport"
+            )
         logger.warning(
             "Foreign mint operation failed",
             extra={
@@ -219,6 +238,27 @@ def _state_name(response: object) -> str:
     if raw is None:
         return "paid" if getattr(response, "paid", None) is True else ""
     return str(raw).lower().rsplit(".", 1)[-1]
+
+
+@dataclass(frozen=True)
+class SwapInResult:
+    credited_msats: int
+    change_token: str | None = None
+    change_amount: int = 0
+    change_unit: str | None = None
+
+
+async def _melt_change_token(
+    wallet: Wallet, before: set[str], *, mint_url: str, unit: str
+) -> tuple[str | None, int]:
+    change = [proof for proof in wallet.proofs if proof.secret not in before]
+    if not change:
+        return None, 0
+    await wallet.set_reserved_for_send(change, reserved=True)
+    token = TokenV3(
+        token=[TokenV3Token(mint=mint_url, proofs=change)], _unit=unit
+    ).serialize()
+    return token, sum(proof.amount for proof in change)
 
 
 # --- journal ----------------------------------------------------------------
@@ -371,13 +411,15 @@ async def _trusted_mint_unit(
 
 async def swap_in_and_credit(
     cashu_token: str, key: ApiKey, session: AsyncSession
-) -> int:
+) -> SwapInResult:
     """Melt a foreign-mint token into a trusted mint and credit ``key``.
 
     The first configured ``CASHU_MINTS`` entry is the deterministic destination;
     list order is the operator's priority order.
 
-    Returns the credited msats. Raises before anything is spent for every
+    Returns the credited msats and any unused fee reserve as a source-mint
+    change token, which is also kept on the swap row. Raises before anything
+    is spent for every
     refusal (``ForeignMintSwapError``, ``ForeignMintUnavailableError``,
     ``ValueError``) and ``SwapPendingError`` once the melt was dispatched but
     not confirmed.
@@ -490,6 +532,7 @@ async def swap_in_and_credit(
             },
         )
 
+        proofs_before_melt = {proof.secret for proof in source_wallet.proofs}
         try:
             response = await run_foreign_mint_operation(
                 lambda: source_wallet.melt(
@@ -500,6 +543,8 @@ async def swap_in_and_credit(
                 ),
                 mint_url=source_mint,
                 op_name="swap_melt",
+                timeout=settings.foreign_mint_melt_timeout_seconds,
+                cooldown_on_timeout=False,
             )
         except ForeignMintUnavailableError as error:
             # Dispatched, outcome unknown: the Lightning payment may still land.
@@ -507,7 +552,7 @@ async def swap_in_and_credit(
             raise SwapPendingError("Source melt outcome unknown") from error
         except Exception as error:
             if _melt_definitively_failed(error) or _melt_rejected_inputs(error):
-                await _update(swap, status="failed", error=str(error))
+                await _update(swap, status="failed", token_hash=None, error=str(error))
                 raise ForeignMintSwapError(
                     "Issuing mint refused the Lightning payment"
                 ) from error
@@ -519,14 +564,42 @@ async def swap_in_and_credit(
 
         state = _state_name(response)
         if state == "unpaid":
-            await _update(swap, status="failed", error="melt reported unpaid")
+            await _update(
+                swap,
+                status="failed",
+                token_hash=None,
+                error="melt reported unpaid",
+            )
             raise ForeignMintSwapError("Issuing mint did not pay the swap invoice")
         if state != "paid":
             await _update(swap, status="ambiguous", error=f"melt state {state!r}")
             raise SwapPendingError("Source melt is still pending")
-        await _update(swap, status="melted", error=None)
+        change_token, change_amount = await _melt_change_token(
+            source_wallet,
+            proofs_before_melt,
+            mint_url=source_mint,
+            unit=source_unit,
+        )
+        await _update(swap, status="melted", change_token=change_token, error=None)
+        if change_token:
+            logger.info(
+                "Cross-mint swap stored melt change",
+                extra={
+                    "event": "cashu_swap_change_stored",
+                    "swap_id": swap.id,
+                    "source_mint": source_mint,
+                    "change_amount": change_amount,
+                    "unit": source_unit,
+                },
+            )
 
-    return await _finish_swap_in(swap, key=key, session=session)
+    credited_msats = await _finish_swap_in(swap, key=key, session=session)
+    return SwapInResult(
+        credited_msats=credited_msats,
+        change_token=change_token,
+        change_amount=change_amount,
+        change_unit=source_unit if change_token else None,
+    )
 
 
 async def _mint_with_recovery(
@@ -736,7 +809,13 @@ async def swap_out_for_refund(
 
     unit = refund.unit
     amount = refund.amount_msats // 1000 if unit == "sat" else refund.amount_msats
-    source_mint = _trusted_swap_destination()
+    async with wallet_operation_guard():
+        source_mint = await find_trusted_mint_with_funds(
+            amount,
+            unit,
+            _trusted_swap_destination(),
+            force_reload=True,
+        )
     await _trusted_mint_unit(
         source_mint,
         liability_unit=unit,
@@ -768,10 +847,8 @@ async def swap_out_for_refund(
             )
             if sum(p.amount for p in proofs) < amount:
                 raise ValueError("Trusted mint balance cannot cover this refund")
-            selection, _ = await source_wallet.select_to_send(
-                proofs, amount, set_reserved=False, include_fees=True
-            )
-            input_fees = source_wallet.get_fees_for_proofs(selection)
+            selection = source_wallet.coinselect(proofs, amount, include_fees=True)
+            input_fees = source_wallet.get_fees_for_proofs(selection or proofs)
 
         async def quotes(mint_amount: int) -> tuple[MintQuote, MeltQuote]:
             mint_quote = await run_foreign_mint_operation(
@@ -789,12 +866,36 @@ async def swap_out_for_refund(
 
         mint_quote, melt_quote = await quotes(amount)
         net = amount - melt_quote.fee_reserve - input_fees
-        if net <= 0:
-            raise ForeignMintSwapError("Refund amount does not cover swap fees")
-        if net < amount:
-            mint_quote, melt_quote = await quotes(net)
-            if melt_quote.amount + melt_quote.fee_reserve + input_fees > amount:
+        # Price input fees from the exact proofs the melt will spend: an earlier
+        # estimate can miss the fees of a larger offline selection, and the
+        # mint then rejects the melt as underfunded.
+        for _ in range(5):
+            if net <= 0:
                 raise ForeignMintSwapError("Refund amount does not cover swap fees")
+            mint_quote, melt_quote = await quotes(net)
+            async with wallet_operation_guard():
+                await source_wallet.load_proofs(reload=True)
+                proofs = get_proofs_per_mint_and_unit(
+                    source_wallet, source_mint, unit, not_reserved=True
+                )
+                try:
+                    melt_proofs = await select_melt_inputs(
+                        source_wallet,
+                        proofs,
+                        melt_quote.amount + melt_quote.fee_reserve,
+                    )
+                except Exception:
+                    # The pool cannot fund this quote plus its input fees.
+                    net -= 1
+                    continue
+            spent = sum(p.amount for p in melt_proofs)
+            if spent <= amount:
+                break
+            net -= spent - amount
+        else:
+            raise ForeignMintSwapError("Refund amount does not cover swap fees")
+        input_fees = spent - melt_quote.amount - melt_quote.fee_reserve
+        melt_secrets = {p.secret for p in melt_proofs}
 
         swap = CashuSwap(
             direction="out",
@@ -820,6 +921,9 @@ async def swap_out_for_refund(
             proofs = get_proofs_per_mint_and_unit(
                 source_wallet, source_mint, unit, not_reserved=True
             )
+            selected = [p for p in proofs if p.secret in melt_secrets]
+            if sum(p.amount for p in selected) == spent:
+                proofs = selected
             plan = Bolt11PaymentPlan(
                 mint_quote.request,
                 source_wallet,
@@ -834,6 +938,15 @@ async def swap_out_for_refund(
                 await _update(swap, status="failed", error=str(error))
                 raise MeltUnpaidError(str(error)) from error
             except Bolt11PaymentAmbiguous as error:
+                # A melt the mint answered with a refusal is not ambiguous; once
+                # the mint also reports the quote unpaid, release the balance now.
+                if (
+                    _melt_rejected_inputs(error) or _melt_definitively_failed(error)
+                ) and await _check_bolt11_payment_status_locked(
+                    source_mint, unit, melt_quote.quote
+                ) == "unpaid":
+                    await _update(swap, status="failed", error=str(error))
+                    raise MeltUnpaidError(str(error)) from error
                 await _update(swap, status="ambiguous", error=str(error))
                 await refund_module.hold(session, refund, melt_quote.quote)
                 raise MeltOutcomeAmbiguousError(str(error)) from error
@@ -918,7 +1031,12 @@ async def _reconcile_in(swap: CashuSwap, now: int) -> None:
             await _update(swap, status="melted", error=None)
         elif state == "unpaid":
             # The mint says it never paid, so the sender still holds the proofs.
-            await _update(swap, status="failed", error="melt unpaid at the mint")
+            await _update(
+                swap,
+                status="failed",
+                token_hash=None,
+                error="melt unpaid at the mint",
+            )
             return
         else:
             logger.warning(
@@ -1028,7 +1146,7 @@ async def reconcile_swaps_once() -> None:
                 exc_info=True,
             )
         finally:
-            await _update(swap, claimed_at=None)
+            await _update(swap, claimed_at=None, updated_at=swap.updated_at)
 
 
 async def periodic_swap_reconcile() -> None:

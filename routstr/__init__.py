@@ -10,7 +10,6 @@ _environment_before_import = dict(os.environ)
 try:
     from .core.main import app as fastapi_app
 finally:
-    os.environ.clear()
     os.environ.update(_environment_before_import)
     del _environment_before_import
 

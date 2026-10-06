@@ -223,6 +223,13 @@ class ForeignMintUnavailableError(MintConnectionError):
     """
 
 
+class ForeignMintBusyError(ForeignMintUnavailableError):
+    """Another swap holds this foreign mint's slot. Nothing was spent; retry."""
+
+
+SWAP_BUSY_RETRY_AFTER_SECONDS = 5
+
+
 class SwapPendingError(Exception):
     """The swap's Lightning leg was dispatched but its outcome is not yet known.
 
@@ -265,6 +272,10 @@ def is_mint_timeout(error: BaseException) -> bool:
         if isinstance(current, _MINT_TIMEOUT_EXCEPTIONS):
             return True
     return False
+
+
+def is_swap_busy(error: BaseException) -> bool:
+    return any(isinstance(e, ForeignMintBusyError) for e in _exception_chain(error))
 
 
 def is_source_mint_connection_error(error: BaseException) -> bool:
@@ -351,6 +362,14 @@ def classify_redemption_error(
             422,
             "Cashu token cannot be swapped into this node's mint; nothing was spent",
             "cashu_foreign_mint_swap_failed",
+        )
+    if isinstance(error, ForeignMintBusyError):
+        return (
+            "swap_busy",
+            503,
+            "Another swap against this token's mint is in progress; nothing was "
+            "spent, retry in a few seconds",
+            "cashu_swap_busy",
         )
     if isinstance(error, ForeignMintUnavailableError):
         return (
@@ -923,15 +942,36 @@ async def execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, str
         return await _execute_bolt11_payment(plan)
 
 
+async def select_melt_inputs(
+    wallet: Wallet, proofs: list[Proof], needed: int
+) -> list[Proof]:
+    """Select proofs covering ``needed`` plus the input fee the mint will charge.
+
+    cashu's coinselect sums fractional per-proof fees and only checks the bare
+    amount, so it can return a selection the mint rejects as underfunded.
+    """
+    target = needed
+    for _ in range(3):
+        selected, _ = await wallet.select_to_send(
+            proofs, target, set_reserved=False, include_fees=True
+        )
+        shortfall = (
+            needed
+            + wallet.get_fees_for_proofs(selected)
+            - sum(proof.amount for proof in selected)
+        )
+        if shortfall <= 0:
+            return selected
+        target += shortfall
+    raise ValueError("Coin selection cannot cover the melt and its input fees")
+
+
 async def _execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, str]:
     # Select unreserved, mirroring send_token: a selection failure must not
     # strand proofs that were never handed to the mint.
     try:
-        selected, _ = await plan.wallet.select_to_send(
-            plan.proofs,
-            plan.quote.amount + plan.quote.fee_reserve,
-            set_reserved=False,
-            include_fees=True,
+        selected = await select_melt_inputs(
+            plan.wallet, plan.proofs, plan.quote.amount + plan.quote.fee_reserve
         )
     except Exception as e:
         raise Bolt11PaymentNotAttempted(f"Coin selection failed: {e}") from e
@@ -2002,6 +2042,8 @@ async def _refund_sweep_once(cutoff: int) -> None:
         refunds = results.all()
 
     for refund in refunds:
+        if refund.mint_url and resolve_trusted_source_mint(refund.mint_url) is None:
+            continue
         reclaimed_stale_claim = refund.sweep_started_at is not None
         claim_started_at = int(time.time())
         claimed = await _set_refund_sweep_state(

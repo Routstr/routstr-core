@@ -25,6 +25,7 @@ from routstr.wallet import (
     is_mint_connection_error,
     prepare_bolt11_payment,
     recieve_token,
+    select_melt_inputs,
     send,
     send_token,
     send_token_from_owner_locked,
@@ -1154,6 +1155,38 @@ async def test_credit_balance_db_transport_error_is_token_consumed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_select_melt_inputs_widens_an_underfunded_selection() -> None:
+    small = [MagicMock(amount=1) for _ in range(30)]
+    wallet = MagicMock()
+    # Like cashu's coinselect: covers the amount but not the rounded-up fee.
+    wallet.select_to_send = AsyncMock(
+        side_effect=lambda proofs, amount, **kwargs: (proofs[:amount], 0)
+    )
+    wallet.get_fees_for_proofs = Mock(side_effect=lambda proofs: -(-len(proofs) // 10))
+
+    selected = await select_melt_inputs(wallet, small, 20)
+
+    assert sum(p.amount for p in selected) == 23
+    assert [c.args[1] for c in wallet.select_to_send.await_args_list] == [20, 22, 23]
+
+
+@pytest.mark.asyncio
+async def test_execute_bolt11_payment_refuses_a_selection_short_of_input_fees() -> None:
+    plan = MagicMock()
+    plan.proofs = [MagicMock(amount=110)]
+    plan.quote.amount = 100
+    plan.quote.fee_reserve = 10
+    plan.wallet.select_to_send = AsyncMock(return_value=(plan.proofs, 0))
+    plan.wallet.get_fees_for_proofs = Mock(return_value=1)
+    plan.wallet.melt = AsyncMock()
+
+    with pytest.raises(Bolt11PaymentNotAttempted):
+        await execute_bolt11_payment(plan)
+
+    plan.wallet.melt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_execute_bolt11_payment_rejects_unpaid_melt_state() -> None:
     plan = MagicMock()
     plan.proofs = [MagicMock(amount=110)]
@@ -1162,6 +1195,7 @@ async def test_execute_bolt11_payment_rejects_unpaid_melt_state() -> None:
     plan.quote.quote = "quote-1"
     plan.invoice = "lnbc-invoice"
     plan.wallet.select_to_send = AsyncMock(return_value=(plan.proofs, 0))
+    plan.wallet.get_fees_for_proofs = Mock(return_value=0)
     plan.wallet.set_reserved_for_send = AsyncMock()
     plan.wallet.melt = AsyncMock(return_value=MagicMock(state="UNPAID", change=[]))
 
@@ -1183,6 +1217,7 @@ async def test_execute_bolt11_payment_accepts_legacy_paid_response() -> None:
     plan.mint_url = "https://mint.test"
     plan.unit = "sat"
     plan.wallet.select_to_send = AsyncMock(return_value=(plan.proofs, 0))
+    plan.wallet.get_fees_for_proofs = Mock(return_value=0)
     plan.wallet.set_reserved_for_send = AsyncMock()
     plan.wallet.melt = AsyncMock(
         return_value=MagicMock(state=None, paid=True, change=[])
@@ -1204,6 +1239,7 @@ async def test_execute_bolt11_payment_keeps_proofs_reserved_when_melt_errors() -
     plan.quote.quote = "quote-1"
     plan.invoice = "lnbc-invoice"
     plan.wallet.select_to_send = AsyncMock(return_value=(plan.proofs, 0))
+    plan.wallet.get_fees_for_proofs = Mock(return_value=0)
     plan.wallet.set_reserved_for_send = AsyncMock()
     plan.wallet.set_reserved_for_melt = AsyncMock()
     plan.wallet.melt = AsyncMock(side_effect=TimeoutError("no answer"))
@@ -1365,6 +1401,7 @@ async def test_execute_bolt11_payment_rereserves_when_cancelled() -> None:
     plan.invoice = "lnbc-invoice"
     plan.mint_url = "https://mint.test"
     plan.wallet.select_to_send = AsyncMock(return_value=(plan.proofs, 0))
+    plan.wallet.get_fees_for_proofs = Mock(return_value=0)
     plan.wallet.set_reserved_for_send = AsyncMock()
     plan.wallet.set_reserved_for_melt = AsyncMock()
     plan.wallet.melt = AsyncMock(side_effect=asyncio.CancelledError())

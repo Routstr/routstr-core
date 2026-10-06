@@ -675,6 +675,10 @@ class CashuSwap(SQLModel, table=True):  # type: ignore
     mint_quote_id: str | None = Field(default=None)
     melt_quote_id: str | None = Field(default=None)
     token: str | None = Field(default=None, description="Issued token (out swaps)")
+    change_token: str | None = Field(
+        default=None,
+        description="Unused inbound melt fee reserve returned on the source mint",
+    )
     error: str | None = Field(default=None)
     claimed_at: int | None = Field(default=None, description="Reconciler lease")
     created_at: int = Field(default_factory=lambda: int(time.time()))

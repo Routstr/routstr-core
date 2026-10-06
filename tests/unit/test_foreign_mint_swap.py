@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from cashu.core.base import MeltQuoteState
+from cashu.core.base import MeltQuoteState, Proof
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -27,6 +27,7 @@ from routstr.mint import MintRateGuard, mint_cooldown_remaining
 from routstr.payment.lnurl import MeltOutcomeAmbiguousError
 from routstr.wallet import (
     Bolt11PaymentAmbiguous,
+    ForeignMintBusyError,
     ForeignMintSwapError,
     ForeignMintUnavailableError,
     SwapPendingError,
@@ -65,6 +66,7 @@ async def engine(
     monkeypatch.setattr(settings, "primary_mint_unit", "sat")
     monkeypatch.setattr(settings, "cashu_mints", [PRIMARY, SECONDARY])
     monkeypatch.setattr(settings, "foreign_mint_operation_timeout_seconds", 0.2)
+    monkeypatch.setattr(settings, "foreign_mint_melt_timeout_seconds", 0.2)
     monkeypatch.setattr(settings, "foreign_mint_max_concurrency", 4)
     monkeypatch.setattr(fms, "_foreign_slots", None)
     MintRateGuard._guards.clear()
@@ -104,9 +106,15 @@ def _token(
 class _ForeignWallet:
     """Fake wallet for the sender's mint; records that the guard was not held."""
 
-    def __init__(self, fee_reserve: int = 5, melt_state: Any = MeltQuoteState.paid):
+    def __init__(
+        self,
+        fee_reserve: int = 5,
+        melt_state: Any = MeltQuoteState.paid,
+        change_amount: int = 0,
+    ):
         self.fee_reserve = fee_reserve
         self.melt_state = melt_state
+        self.change_amount = change_amount
         self.guard_depth_seen: list[int] = []
         self.load_mint_keysets = AsyncMock(side_effect=self._observe)
         self.activate_keyset = AsyncMock()
@@ -143,6 +151,15 @@ class _ForeignWallet:
             raise self.melt_state
         if self.melt_state == "hang":
             await asyncio.sleep(5)
+        if self.melt_state == MeltQuoteState.paid and self.change_amount:
+            self.proofs.append(
+                Proof(
+                    id="00" * 8,
+                    amount=self.change_amount,
+                    secret="melt-change",
+                    C="02" + "11" * 32,
+                )
+            )
         return SimpleNamespace(state=self.melt_state)
 
     async def _request_mint(self, amount: int, memo: str | None = None) -> Any:
@@ -164,6 +181,7 @@ class _PrimaryWallet:
         self.available_balance = SimpleNamespace(amount=0)
         self.keysets: dict[str, Any] = {}
         self.select_to_send = AsyncMock(side_effect=self._select)
+        self.coinselect = Mock(side_effect=lambda proofs, amount, **kwargs: proofs)
         self.get_fees_for_proofs = Mock(return_value=0)
         self.melt_quote = AsyncMock(side_effect=self._melt_quote)
 
@@ -187,7 +205,7 @@ async def _swap_env(
     token: SimpleNamespace,
     supported_units: list[str] | None = None,
 ) -> AsyncGenerator[None, None]:
-    wallets = {FOREIGN: foreign, PRIMARY: primary}
+    wallets = {FOREIGN: foreign, PRIMARY: primary, SECONDARY: primary}
 
     async def get_wallet(mint_url: str, unit: str = "sat", **kwargs: Any) -> Any:
         return wallets[mint_url]
@@ -207,6 +225,11 @@ async def _swap_env(
         patch.object(fms, "run_mint_operation", run_mint_operation),
         patch.object(
             fms,
+            "find_trusted_mint_with_funds",
+            AsyncMock(return_value=PRIMARY),
+        ),
+        patch.object(
+            fms,
             "get_proofs_per_mint_and_unit",
             lambda w, m, u, not_reserved=False: list(w.proofs),
         ),
@@ -214,11 +237,16 @@ async def _swap_env(
         yield
 
 
-async def _swap_rows(session: AsyncSession) -> list[CashuSwap]:
+async def _swap_rows(
+    session: AsyncSession, direction: str | None = None
+) -> list[CashuSwap]:
     # Rows are written through other sessions; read with a fresh one so the
     # test session's identity map cannot serve stale copies.
     async with AsyncSession(session.bind, expire_on_commit=False) as fresh:
-        return list((await fresh.exec(select(CashuSwap))).all())
+        query = select(CashuSwap)
+        if direction is not None:
+            query = query.where(CashuSwap.direction == direction)
+        return list((await fresh.exec(query)).all())
 
 
 async def _refund_row(session: AsyncSession, refund_id: str) -> Refund:
@@ -260,6 +288,31 @@ async def test_foreign_operation_is_single_attempt_with_cooldown(
 
 
 @pytest.mark.asyncio
+async def test_foreign_melt_timeout_does_not_cool_the_mint(
+    engine: AsyncEngine,
+) -> None:
+    async def slow() -> None:
+        await asyncio.sleep(5)
+
+    with pytest.raises(ForeignMintUnavailableError):
+        await fms.run_foreign_mint_operation(
+            slow,
+            mint_url=FOREIGN,
+            op_name="swap_melt",
+            timeout=0.01,
+            cooldown_on_timeout=False,
+        )
+
+    assert mint_cooldown_remaining(FOREIGN) == 0
+    assert (
+        await fms.run_foreign_mint_operation(
+            AsyncMock(return_value="ok"), mint_url=FOREIGN, op_name="next"
+        )
+        == "ok"
+    )
+
+
+@pytest.mark.asyncio
 async def test_foreign_operation_refuses_to_run_under_wallet_guard(
     engine: AsyncEngine,
 ) -> None:
@@ -292,7 +345,7 @@ async def test_foreign_budget_is_global_and_fails_fast(engine: AsyncEngine) -> N
         other_mint_called = True
 
     # A different hostname does not get its own budget.
-    with pytest.raises(ForeignMintUnavailableError):
+    with pytest.raises(ForeignMintBusyError):
         await fms.run_foreign_mint_operation(
             other, mint_url="https://other.example", op_name="o"
         )
@@ -313,7 +366,7 @@ async def test_foreign_mint_lock_waits_bounded(engine: AsyncEngine) -> None:
 
     holder = asyncio.create_task(hold())
     await entered.wait()
-    with pytest.raises(ForeignMintUnavailableError):
+    with pytest.raises(ForeignMintBusyError):
         async with fms.foreign_mint_lock(FOREIGN):
             pass
     release.set()
@@ -367,9 +420,7 @@ async def test_trusted_mint_unit_prefers_existing_liability_then_source() -> Non
 
 @pytest.mark.asyncio
 async def test_trusted_mint_unit_rejects_unsupported_liability() -> None:
-    with patch.object(
-        fms, "get_supported_mint_units", AsyncMock(return_value=["sat"])
-    ):
+    with patch.object(fms, "get_supported_mint_units", AsyncMock(return_value=["sat"])):
         with pytest.raises(ValueError, match="liability unit"):
             await fms._trusted_mint_unit(
                 PRIMARY,
@@ -402,13 +453,14 @@ async def test_swap_in_happy_path_credits_net_and_pins_refund_mint(
     engine: AsyncEngine, session: AsyncSession
 ) -> None:
     key = await _make_key(session)
-    foreign = _ForeignWallet(fee_reserve=5)
+    foreign = _ForeignWallet(fee_reserve=5, change_amount=3)
     primary = _PrimaryWallet()
     async with _swap_env(foreign, primary, _token(1000)):
         credited = await fms.swap_in_and_credit("cashuAswap", key, session)
 
     # 1000 sat token, 1 sat input fee, 5 sat fee reserve -> 994 sat minted.
-    assert credited == 994_000
+    assert credited.credited_msats == 994_000
+    assert (credited.change_amount, credited.change_unit) == (3, "sat")
     assert [c.args[0] for c in primary.request_mint.await_args_list] == [999, 994]
     foreign.melt.assert_awaited_once()
     assert foreign.melt.await_args is not None
@@ -427,6 +479,11 @@ async def test_swap_in_happy_path_credits_net_and_pins_refund_mint(
         994,
     )
     assert row.fee_reserve == 5 and row.input_fees == 1
+    assert row.change_token is not None
+    assert row.change_token == credited.change_token
+    change = fms.deserialize_token_from_string(row.change_token)
+    assert (change.mint, change.unit, change.amount) == (FOREIGN, "sat", 3)
+    foreign.set_reserved_for_send.assert_awaited_once()
     ledger = (await session.exec(select(CashuTransaction))).all()
     assert [(t.type, t.amount, t.mint_url) for t in ledger] == [("in", 994, PRIMARY)]
 
@@ -445,7 +502,8 @@ async def test_swap_in_accepts_proofs_from_rotated_keysets(
     async with _swap_env(foreign, primary, token):
         credited = await fms.swap_in_and_credit("cashuArotated", key, session)
 
-    assert credited == 998_000
+    assert credited.credited_msats == 998_000
+    assert credited.change_token is None
     foreign.get_fees_for_proofs.assert_called_once_with(token.proofs)
     assert foreign.melt.await_count == 1
 
@@ -529,6 +587,28 @@ async def test_swap_in_mint_refusal_fails_without_consuming_token(
             await fms.swap_in_and_credit("cashuArefused", key, session)
     (row,) = await _swap_rows(session)
     assert row.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_definitive_melt_failure_allows_same_token_to_be_retried(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    key = await _make_key(session)
+    foreign = _ForeignWallet(melt_state=Exception("Could not pay invoice."))
+    primary = _PrimaryWallet()
+    async with _swap_env(foreign, primary, _token(1000)):
+        with pytest.raises(ForeignMintSwapError):
+            await fms.swap_in_and_credit("cashuAretry", key, session)
+        foreign.melt_state = MeltQuoteState.paid
+        credited = await fms.swap_in_and_credit("cashuAretry", key, session)
+
+    assert credited.credited_msats == 994_000
+    rows = await _swap_rows(session)
+    assert [(row.status, row.token_hash) for row in rows] == [
+        ("failed", None),
+        ("credited", fms.hashlib.sha256(b"cashuAretry").hexdigest()),
+    ]
+    assert foreign.melt.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -699,29 +779,85 @@ async def test_reconciler_leaves_fresh_rows_alone(
     async with _swap_env(foreign, primary, _token(1000)):
         with pytest.raises(SwapPendingError):
             await fms.swap_in_and_credit("cashuAfresh", key, session)
+        (created,) = await _swap_rows(session)
         await fms.reconcile_swaps_once()
-    foreign.get_melt_quote.assert_not_awaited()
+        (still_fresh,) = await _swap_rows(session)
+        assert still_fresh.updated_at == created.updated_at
+
+        _mint_recovered()
+        with patch.object(
+            fms.time,
+            "time",
+            return_value=created.updated_at + settings.refund_claim_timeout_seconds + 1,
+        ):
+            await fms.reconcile_swaps_once()
+    foreign.get_melt_quote.assert_awaited_once()
 
 
 # --- refund back to the user's mint -------------------------------------------
 
 
-def test_refund_destination_requires_foreign_mint(engine: AsyncEngine) -> None:
-    foreign_key = ApiKey(hashed_key=KEY_HASH, refund_mint_url=FOREIGN)
-    assert fms.refund_destination_mint(foreign_key) == FOREIGN
-    assert fms.refund_destination_mint(ApiKey(hashed_key=KEY_HASH)) is None
+@pytest.mark.asyncio
+async def test_refund_destination_requires_a_credited_foreign_swap(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    foreign_key = await _make_key(session, refund_mint_url=FOREIGN)
+    assert await fms.refund_destination_mint(foreign_key, session) is None
+    await fms._save(
+        CashuSwap(
+            direction="in",
+            status="credited",
+            api_key_hashed_key=foreign_key.hashed_key,
+            source_mint=FOREIGN,
+            source_unit="sat",
+            source_amount=100,
+            destination_mint=PRIMARY,
+            destination_unit="sat",
+            destination_amount=99,
+        )
+    )
+    assert await fms.refund_destination_mint(foreign_key, session) == FOREIGN
     assert (
-        fms.refund_destination_mint(
-            ApiKey(hashed_key=KEY_HASH, refund_mint_url=PRIMARY)
+        await fms.refund_destination_mint(
+            ApiKey(hashed_key="b" * 64, refund_mint_url=PRIMARY), session
         )
         is None
     )
 
 
 async def _open_cashu_refund(session: AsyncSession, key: ApiKey) -> Refund:
+    if key.refund_mint_url == FOREIGN:
+        await fms._save(
+            CashuSwap(
+                direction="in",
+                status="credited",
+                api_key_hashed_key=key.hashed_key,
+                source_mint=FOREIGN,
+                source_unit="sat",
+                source_amount=1000,
+                destination_mint=PRIMARY,
+                destination_unit="sat",
+                destination_amount=999,
+            )
+        )
     return await refund_module.open_claim(
         session, key, method="cashu", destination=None
     )
+
+
+@pytest.mark.asyncio
+async def test_open_claim_ignores_a_deconfigured_mint_without_swap_provenance(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    removed = "https://removed.example"
+    key = await _make_key(session, balance=1_000_000, refund_mint_url=removed)
+
+    claim = await refund_module.open_claim(
+        session, key, method="cashu", destination=None
+    )
+
+    assert claim.destination is None
+    assert claim.mint_url == PRIMARY
 
 
 @pytest.mark.asyncio
@@ -772,13 +908,43 @@ async def test_refund_swaps_back_to_users_mint_net_of_fees(
         "cashuBrefund",
         FOREIGN,
     )
-    (row,) = await _swap_rows(session)
+    (row,) = await _swap_rows(session, "out")
     assert (row.direction, row.status, row.destination_amount) == (
         "out",
         "settled",
         998,
     )
     assert row.refund_id == claim.id
+
+
+@pytest.mark.asyncio
+async def test_refund_swap_uses_another_trusted_mint_when_first_is_short(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    key = await _make_key(session, balance=1_000_000, refund_mint_url=FOREIGN)
+    claim = await _open_cashu_refund(session, key)
+    foreign = _ForeignWallet()
+    secondary = _PrimaryWallet(fee_reserve=2)
+    execute = AsyncMock(return_value=(998, SECONDARY, "sat"))
+    async with _swap_env(foreign, secondary, _token()):
+        with (
+            patch.object(
+                fms,
+                "find_trusted_mint_with_funds",
+                AsyncMock(return_value=SECONDARY),
+            ) as find_mint,
+            patch.object(fms, "_execute_bolt11_payment", execute),
+            patch.object(
+                refund_module,
+                "deserialize_token_from_string",
+                return_value=SimpleNamespace(amount=998, unit="sat"),
+            ),
+        ):
+            await refund_module.execute(session, claim)
+
+    find_mint.assert_awaited_once_with(1000, "sat", PRIMARY, force_reload=True)
+    assert execute.await_args is not None
+    assert execute.await_args.args[0].mint_url == SECONDARY
 
 
 @pytest.mark.asyncio
@@ -807,7 +973,7 @@ async def test_reconciler_settles_a_persisted_issued_refund(
 
     refreshed = await _refund_row(session, claim.id)
     assert (refreshed.status, refreshed.token) == ("paid", "cashuBpersisted")
-    (stored,) = await _swap_rows(session)
+    (stored,) = await _swap_rows(session, "out")
     assert stored.status == "settled" and stored.claimed_at is None
     record.assert_awaited_once()
 
@@ -829,7 +995,145 @@ async def test_refund_swap_ambiguous_melt_withholds_balance(
     foreign.mint.assert_not_awaited()
     refreshed = await _refund_row(session, claim.id)
     assert (refreshed.status, refreshed.quote_id) == ("ambiguous", "melt-998")
-    (row,) = await _swap_rows(session)
+    (row,) = await _swap_rows(session, "out")
+    assert row.status == "ambiguous"
+    await session.refresh(key)
+    assert key.balance == 0
+
+
+@pytest.mark.asyncio
+async def test_refund_swap_prices_input_fees_from_the_melt_selection(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    key = await _make_key(session, balance=1_000_000, refund_mint_url=FOREIGN)
+    claim = await _open_cashu_refund(session, key)
+    foreign = _ForeignWallet()
+    primary = _PrimaryWallet(fee_reserve=2)
+
+    # The offline estimate sees no fee; the selection the melt really spends
+    # costs 3 sat of input fees, so the first quote overshoots the liability.
+    async def select(proofs: Any, amount: int, **kwargs: Any) -> Any:
+        chosen = _proof(amount + 3)
+        primary.proofs.append(chosen)
+        return [chosen], 0
+
+    primary.select_to_send = AsyncMock(side_effect=select)
+    execute = AsyncMock(return_value=(995, PRIMARY, "sat"))
+    async with _swap_env(foreign, primary, _token()):
+        with (
+            patch.object(fms, "_execute_bolt11_payment", execute),
+            patch.object(
+                refund_module,
+                "deserialize_token_from_string",
+                return_value=SimpleNamespace(amount=995, unit="sat"),
+            ),
+        ):
+            await refund_module.execute(session, claim)
+
+    assert [c.args[0] for c in foreign.request_mint.await_args_list] == [
+        1000,
+        998,
+        995,
+    ]
+    assert execute.await_args is not None
+    plan = execute.await_args.args[0]
+    assert plan.quote.quote == "melt-995"
+    assert sum(p.amount for p in plan.proofs) == 1000
+    (row,) = await _swap_rows(session, "out")
+    assert (row.status, row.destination_amount, row.input_fees) == (
+        "settled",
+        995,
+        3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_refund_swap_busy_mint_restores_balance_with_retry_after(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    key = await _make_key(session, balance=1_000_000, refund_mint_url=FOREIGN)
+    claim = await _open_cashu_refund(session, key)
+
+    @asynccontextmanager
+    async def busy(mint_url: str) -> AsyncGenerator[None, None]:
+        raise ForeignMintBusyError("Another swap against this mint is in progress")
+        yield
+
+    async with _swap_env(_ForeignWallet(), _PrimaryWallet(fee_reserve=2), _token()):
+        with patch.object(fms, "foreign_mint_lock", busy):
+            with pytest.raises(Exception) as exc_info:
+                await refund_module.execute(session, claim)
+
+    error = exc_info.value
+    assert getattr(error, "status_code", None) == 503
+    assert getattr(error, "headers", None) == {
+        "Retry-After": str(wallet.SWAP_BUSY_RETRY_AFTER_SECONDS)
+    }
+    assert await _swap_rows(session, "out") == []
+    await session.refresh(key)
+    assert key.balance == 1_000_000
+
+
+@pytest.mark.asyncio
+async def test_refund_swap_rejected_melt_restores_balance_now(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    key = await _make_key(session, balance=1_000_000, refund_mint_url=FOREIGN)
+    claim = await _open_cashu_refund(session, key)
+    foreign = _ForeignWallet()
+    primary = _PrimaryWallet(fee_reserve=2)
+    execute = AsyncMock(
+        side_effect=Bolt11PaymentAmbiguous(
+            "Cashu melt did not return: could not pay invoice: Mint Error: not "
+            "enough inputs provided for melt. Provided: 124, needed: 138 "
+            "(Code: 11000)"
+        )
+    )
+    status = AsyncMock(return_value="unpaid")
+    async with _swap_env(foreign, primary, _token()):
+        with (
+            patch.object(fms, "_execute_bolt11_payment", execute),
+            patch.object(fms, "_check_bolt11_payment_status_locked", status),
+        ):
+            with pytest.raises(Exception) as exc_info:
+                await refund_module.execute(session, claim)
+
+    assert getattr(exc_info.value, "status_code", None) == 503
+    status.assert_awaited_once_with(PRIMARY, "sat", "melt-998")
+    foreign.mint.assert_not_awaited()
+    (row,) = await _swap_rows(session, "out")
+    assert row.status == "failed"
+    await session.refresh(key)
+    assert key.balance == 1_000_000
+
+
+@pytest.mark.asyncio
+async def test_refund_swap_rejection_stays_held_unless_mint_confirms_unpaid(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    key = await _make_key(session, balance=1_000_000, refund_mint_url=FOREIGN)
+    claim = await _open_cashu_refund(session, key)
+    foreign = _ForeignWallet()
+    primary = _PrimaryWallet(fee_reserve=2)
+    execute = AsyncMock(
+        side_effect=Bolt11PaymentAmbiguous(
+            "Cashu melt did not return: not enough inputs provided (Code: 11000)"
+        )
+    )
+    async with _swap_env(foreign, primary, _token()):
+        with (
+            patch.object(fms, "_execute_bolt11_payment", execute),
+            patch.object(
+                fms,
+                "_check_bolt11_payment_status_locked",
+                AsyncMock(return_value="pending"),
+            ),
+        ):
+            with pytest.raises(Exception) as exc_info:
+                await refund_module.execute(session, claim)
+
+    assert getattr(exc_info.value, "status_code", None) == 502
+    (row,) = await _swap_rows(session, "out")
     assert row.status == "ambiguous"
     await session.refresh(key)
     assert key.balance == 0
@@ -848,7 +1152,7 @@ async def test_refund_swap_reconciler_finishes_after_melt_paid(
         with patch.object(fms, "_execute_bolt11_payment", execute):
             with pytest.raises(Exception):
                 await refund_module.execute(session, claim)
-        (row,) = await _swap_rows(session)
+        (row,) = await _swap_rows(session, "out")
         await fms._update(row, updated_at=int(time.time()) - 10_000)
         with patch.object(
             fms, "_check_bolt11_payment_status_locked", AsyncMock(return_value="paid")
@@ -858,7 +1162,7 @@ async def test_refund_swap_reconciler_finishes_after_melt_paid(
     foreign.mint.assert_awaited_once_with(998, quote_id="mint-998")
     refreshed = await _refund_row(session, claim.id)
     assert (refreshed.status, refreshed.token) == ("paid", "cashuBrefund")
-    (row,) = await _swap_rows(session)
+    (row,) = await _swap_rows(session, "out")
     assert row.status == "settled"
 
 
@@ -875,7 +1179,7 @@ async def test_refund_swap_reconciler_releases_balance_when_unpaid(
         with patch.object(fms, "_execute_bolt11_payment", execute):
             with pytest.raises(Exception):
                 await refund_module.execute(session, claim)
-        (row,) = await _swap_rows(session)
+        (row,) = await _swap_rows(session, "out")
         await fms._update(row, updated_at=int(time.time()) - 10_000)
         with patch.object(
             fms, "_check_bolt11_payment_status_locked", AsyncMock(return_value="unpaid")
@@ -887,7 +1191,7 @@ async def test_refund_swap_reconciler_releases_balance_when_unpaid(
     assert refreshed.status == "failed"
     await session.refresh(key)
     assert key.balance == 1_000_000
-    (row,) = await _swap_rows(session)
+    (row,) = await _swap_rows(session, "out")
     assert row.status == "failed"
 
 

@@ -196,6 +196,7 @@ granularity) on any of them.
 | `untrusted_mint` | 400 | `cashu_untrusted_source_mint` | No | The token was issued by a mint this node does not accept. Bearer and X-Cashu payments always answer this for a foreign mint; `/v1/wallet/topup` swaps foreign tokens into the first configured trusted mint. |
 | `mint_error` | 422 | `cashu_foreign_mint_swap_failed` | No | Top-up only: the foreign token could not be swapped into a trusted mint (none is configured, fees exceed its value, the unit is unsupported, the mint URL is not public HTTPS, or a mint refused the payment). Nothing was spent; the token is still yours. |
 | `swap_pending` | 409 | `cashu_swap_pending` | No | Top-up only: the swap's Lightning payment was dispatched but the issuing mint has not confirmed it. Do **not** resend the token (its proofs may be spent). The balance is credited automatically once the payment is confirmed; poll `/v1/wallet/info`. |
+| `swap_busy` | 503 | `cashu_swap_busy` | **Yes** | Top-up only: another swap against the same issuing mint is in progress. Nothing was spent; resend the same token after the `Retry-After` delay. |
 | `mint_unreachable` | 503 | `cashu_source_mint_unreachable` | **Yes** | The mint that issued the token could not be reached; it cannot be redeemed at another mint. |
 | `mint_rate_limited` | 503 | `cashu_mint_rate_limited` | **Yes** | The mint rate-limited the request; retry after the cooldown. |
 | `mint_timeout` | 503 | `cashu_mint_timeout` | **Yes** | The mint did not respond in time; retry later. |

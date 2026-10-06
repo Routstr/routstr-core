@@ -105,6 +105,11 @@ class Settings(BaseSettings):
     foreign_mint_operation_timeout_seconds: float = Field(
         default=5.0, gt=0, env="FOREIGN_MINT_OPERATION_TIMEOUT_SECONDS"
     )
+    # Lightning settlement is not a normal mint round-trip. Give foreign-mint
+    # melts a longer deadline without cooling the entire mint on timeout.
+    foreign_mint_melt_timeout_seconds: float = Field(
+        default=60.0, gt=0, env="FOREIGN_MINT_MELT_TIMEOUT_SECONDS"
+    )
     # Process-wide cap on in-flight foreign-mint calls across all such mints, so
     # rotating hostnames cannot multiply the per-mint budget.
     foreign_mint_max_concurrency: int = Field(
