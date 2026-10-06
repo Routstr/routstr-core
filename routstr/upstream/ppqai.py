@@ -107,6 +107,8 @@ class PPQAIModelPricing(BaseModel):
     api: Optional[dict[str, float]] = None
     input_per_1M_tokens: Optional[float] = Field(None, alias="input_per_1M_tokens")
     output_per_1M_tokens: Optional[float] = Field(None, alias="output_per_1M_tokens")
+    cache_read_per_1M_tokens: Optional[float] = None
+    cache_write_per_1M_tokens: Optional[float] = None
 
 
 class PPQAIModel(BaseModel):
@@ -245,9 +247,22 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                         )
                         continue
                     assert input_price is not None and output_price is not None
+                    # A missing or invalid cache rate stays 0, which bills
+                    # cached tokens at the prompt rate.
+                    cache_read, cache_write = (
+                        rate / 1_000_000
+                        if rate is not None and math.isfinite(rate) and rate >= 0
+                        else 0.0
+                        for rate in (
+                            ppqai_model.pricing.cache_read_per_1M_tokens,
+                            ppqai_model.pricing.cache_write_per_1M_tokens,
+                        )
+                    )
                     pricing = Pricing(
                         prompt=input_price / 1_000_000,
                         completion=output_price / 1_000_000,
+                        input_cache_read=cache_read,
+                        input_cache_write=cache_write,
                     )
                     or_model = next(
                         (

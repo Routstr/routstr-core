@@ -36,9 +36,6 @@ from .certification_probe import (
     PROBE_TIMEOUT_SECONDS,
     send_completion,
 )
-from .certification_probe import (
-    wants_max_completion_tokens as wants_max_completion_tokens,
-)
 from .model_paths import is_openrouter_base_url
 
 if TYPE_CHECKING:

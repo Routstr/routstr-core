@@ -76,6 +76,57 @@ async def test_ppq_does_not_inherit_other_provider_cache_or_request_rates() -> N
     assert model.pricing == Pricing(prompt=4e-6, completion=8e-6)
 
 
+@pytest.mark.parametrize("matched", [True, False])
+@pytest.mark.asyncio
+async def test_ppq_uses_its_own_published_cache_rates(matched: bool) -> None:
+    # Pricing block as GET https://api.ppq.ai/models returned it on 2026-10-06.
+    (model,) = await _fetch(
+        [
+            _entry(
+                "vendor/model",
+                {
+                    "type": "per_token",
+                    "currency": "USD",
+                    "input_per_1M_tokens": 1.055,
+                    "output_per_1M_tokens": 5.275,
+                    "cache_read_per_1M_tokens": 0.1055,
+                    "cache_write_per_1M_tokens": 1.31875,
+                },
+            )
+        ],
+        metadata=None if matched else [],
+    )
+    assert model.pricing.dict() == pytest.approx(
+        Pricing(
+            prompt=1.055e-6,
+            completion=5.275e-6,
+            input_cache_read=0.1055e-6,
+            input_cache_write=1.31875e-6,
+        ).dict()
+    )
+
+
+@pytest.mark.parametrize("cache_read", [None, -1.0, float("nan")])
+@pytest.mark.asyncio
+async def test_ppq_missing_or_invalid_cache_rate_stays_zero(
+    cache_read: float | None,
+) -> None:
+    (model,) = await _fetch(
+        [
+            _entry(
+                "vendor/model",
+                {
+                    "input_per_1M_tokens": 1.0,
+                    "output_per_1M_tokens": 2.0,
+                    "cache_read_per_1M_tokens": cache_read,
+                    "cache_write_per_1M_tokens": None,
+                },
+            )
+        ]
+    )
+    assert model.pricing == Pricing(prompt=1e-6, completion=2e-6)
+
+
 @pytest.mark.asyncio
 async def test_ppq_alias_matches_emit_first_stable_id_once() -> None:
     models = await _fetch(

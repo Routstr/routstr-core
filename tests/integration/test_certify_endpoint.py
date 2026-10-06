@@ -835,11 +835,11 @@ async def test_certify_explicit_discovered_model_without_override(
     pricing_rows = [row for row in rows if row["id"].startswith("pricing.")]
     assert len(pricing_rows) == 4
     assert all(row["evidence"]["checked"] == 0 for row in pricing_rows)
-    assert all(row["status"] == "warn" for row in pricing_rows)
+    assert all(row["status"] == "ok" for row in pricing_rows)
     pricing_goal = next(
         goal for goal in resp.json()["checklist"] if goal["goal"] == "pricing_v1_models"
     )
-    assert pricing_goal["status"] == "warn"
+    assert pricing_goal["status"] == "ok"
 
 
 @pytest.mark.integration

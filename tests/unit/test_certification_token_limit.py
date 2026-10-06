@@ -16,8 +16,8 @@ from routstr.upstream.certification import (
     PROBE_MAX_TOKENS,
     STATUS_OK,
     certify_upstream_url,
-    wants_max_completion_tokens,
 )
+from routstr.upstream.certification_probe import wants_max_completion_tokens
 
 OPENAI_REJECTION = {
     "error": {

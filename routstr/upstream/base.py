@@ -53,6 +53,7 @@ from ..payment.models import (
     Pricing,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
+    allows_cache_pricing_backfill,
     backfill_cache_pricing,
     list_models,
 )
@@ -5699,12 +5700,6 @@ class BaseUpstreamProvider:
                 code=error_code,
             )
 
-    @property
-    def allow_cache_pricing_backfill(self) -> bool:
-        from ..payment.models import allows_cache_pricing_backfill
-
-        return allows_cache_pricing_backfill(self.provider_type)
-
     def _apply_provider_fee_to_model(self, model: Model) -> Model:
         """Apply provider fee to model's USD pricing and calculate max costs.
 
@@ -5719,7 +5714,7 @@ class BaseUpstreamProvider:
         """
         base_pricing = (
             backfill_cache_pricing(model.id, model.pricing)
-            if self.allow_cache_pricing_backfill
+            if allows_cache_pricing_backfill(self.provider_type)
             else model.pricing
         )
         adjusted_pricing = Pricing.parse_obj(

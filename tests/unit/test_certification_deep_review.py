@@ -175,7 +175,8 @@ def test_short_usd_basis_is_not_called_configured_pricing() -> None:
     assert "matching the configured" not in row["detail"]
 
 
-def test_no_evaluated_models_warns_all_pricing_rows() -> None:
+def test_provider_without_model_rows_keeps_pricing_rows_ok() -> None:
+    """Served prices come straight from the catalog when no rows exist."""
     from routstr.core.admin import (
         _report_row_cache_rate,
         _report_row_enabled_models_served,
@@ -192,19 +193,12 @@ def test_no_evaluated_models_warns_all_pricing_rows() -> None:
             _report_row_served_matches_configured,
         )
     ]
-    for row in rows:
-        assert row["status"] == "warn"
-        evidence = row["evidence"]
-        assert isinstance(evidence, dict)
-        assert evidence["checked"] == 0
-        detail = row["detail"]
-        assert isinstance(detail, str)
-        assert "Not evaluated" in detail
+    assert [row["status"] for row in rows] == ["ok"] * 4
     assert (
         next(c for c in build_checklist(rows) if c["goal"] == "pricing_v1_models")[
             "status"
         ]
-        == "warn"
+        == "ok"
     )
 
 
