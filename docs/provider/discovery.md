@@ -22,6 +22,19 @@ configured. Note that `HTTP_URL` defaults to `http://localhost:8000`, which is n
 reachable endpoint: a node with the default value and no onion address has nothing to
 advertise and will not publish until one is set.
 
+### Automatic identity (no manual nsec)
+
+Setting `AUTO_GENERATE_NSEC=true` makes the node create its own Nostr identity on
+first boot when none is configured — no dashboard step required. The bundled
+`compose.yml` enables this by default, so a fresh stack starts announcing as soon
+as it has a reachable endpoint (the Tor service supplies one automatically).
+
+The generated `nsec` is printed once at startup and stored encrypted at rest. Copy
+it somewhere safe: it is the node's identity, and losing the database without that
+backup loses it. A node that already has an identity — a provided `NSEC` seed or an
+nsec saved in the dashboard — is never regenerated, and an identity you intentionally
+clear in the dashboard stays cleared.
+
 ---
 
 ## Configuration
@@ -35,6 +48,9 @@ Configure discovery in **Dashboard** → **Settings** → **Nostr**.
 | **Npub** | Your node's public identity (clients use this to verify your node) |
 | **Nsec** | Your node's private key (used to sign advertisements) |
 | **Relays** | Where to publish your announcements |
+
+These can be set by hand, or skipped entirely by letting the node generate its own
+identity with `AUTO_GENERATE_NSEC=true` (see above).
 
 ### Default Relays
 

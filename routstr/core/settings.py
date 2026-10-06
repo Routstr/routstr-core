@@ -241,6 +241,11 @@ class Settings(BaseSettings):
     # Discovery
     relays: list[str] = Field(default_factory=list, env="RELAYS")
     enable_analytics_sharing: bool = Field(default=True, env="ENABLE_ANALYTICS_SHARING")
+    # Self-provision a Nostr identity on first boot when none is configured, so a
+    # fresh node can announce itself without an operator pasting an nsec. Off by
+    # default (an identity is the node's reputation and should normally be an
+    # explicit, backed-up choice); the bundled compose stack turns it on.
+    auto_generate_nsec: bool = Field(default=False, env="AUTO_GENERATE_NSEC")
 
 
 def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -288,6 +293,9 @@ ENV_ONLY_FIELDS = frozenset(
         "upstream_max_connections",
         "upstream_pool_timeout",
         "upstream_read_timeout",
+        # Boot-time provisioning switch: read before the DB is available and
+        # must not be toggled from the persisted settings blob.
+        "auto_generate_nsec",
     }
 )
 
@@ -731,6 +739,47 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
             secret.nsec_state = NsecState.encrypted
             settings.nsec = legacy_nsec
             changed = True
+        elif settings.auto_generate_nsec:
+            # Self-provision an identity so a fresh node can announce itself with
+            # no manual setup. Claim the empty legacy slot atomically (same
+            # reason as the admin password): a racing worker must not generate a
+            # second, different identity and overwrite the winner's.
+            from ..nostr.sdk import generate_keypair
+
+            generated_nsec, generated_npub = generate_keypair()
+            claim_stmt = (
+                update(Secret)
+                .where(col(Secret.id) == 1)
+                .where(col(Secret.nsec_state) == NsecState.legacy)
+                .where(col(Secret.encrypted_nsec).is_(None))
+                .values(
+                    encrypted_nsec=vault.encrypt(generated_nsec),
+                    nsec_state=NsecState.encrypted,
+                    updated_at=int(time.time()),
+                )
+            )
+            result = await db_session.exec(claim_stmt)  # type: ignore[call-overload]
+            await db_session.commit()
+            await db_session.refresh(secret)
+            if result.rowcount == 1:
+                settings.nsec = generated_nsec
+                settings.npub = generated_npub
+                # Print to stdout rather than the logger, like the generated
+                # admin password: the operator must see the nsec once to back it
+                # up, but it must not land in the on-disk log files.
+                print(
+                    "No Nostr identity configured; generated one (shown only "
+                    "now — back it up):\n"
+                    f"  npub: {generated_npub}\n"
+                    f"  nsec: {generated_nsec}\n"
+                    "The nsec is stored encrypted in the database; losing the "
+                    "database without this backup loses the node's identity.",
+                    flush=True,
+                )
+            elif secret.encrypted_nsec:
+                # Lost the race: adopt whatever the winner stored so this worker
+                # holds the same identity instead of an empty one.
+                settings.nsec = vault.decrypt(secret.encrypted_nsec)
 
     # Derive npub from whatever nsec we now hold, if not already known.
     if settings.nsec and not settings.npub:
