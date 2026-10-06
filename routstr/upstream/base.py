@@ -126,6 +126,12 @@ def _published_cost(cost_data: CostMetadata) -> dict[str, Any]:
     return cost
 
 
+def _headers_for_rewritten_body(headers: httpx.Headers) -> dict[str, str]:
+    """Upstream headers minus framing, which no longer matches a rewritten body."""
+    framing = {"transfer-encoding", "content-encoding", "content-length"}
+    return {k: v for k, v in headers.items() if k.lower() not in framing}
+
+
 def _inject_cost_response_headers(
     headers: dict[str, str], cost_data: CostMetadata
 ) -> None:
@@ -4410,12 +4416,7 @@ class BaseUpstreamProvider:
                     media_type="application/json",
                 )
 
-            response_headers = dict(response.headers)
-            if "transfer-encoding" in response_headers:
-                del response_headers["transfer-encoding"]
-            if "content-encoding" in response_headers:
-                del response_headers["content-encoding"]
-
+            response_headers = _headers_for_rewritten_body(response.headers)
             _inject_cost_response_headers(response_headers, cost_data)
 
             if unit == "msat":
@@ -4617,6 +4618,11 @@ class BaseUpstreamProvider:
             Response or StreamingResponse with refund if applicable
         """
         completion_path = _openai_completion_path(path)
+        # Same URL as the API-key path, so provider overrides (Ollama /v1,
+        # Azure deployments) apply.
+        url = self.build_request_url(
+            self.normalize_request_path(path, model_obj), model_obj
+        )
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
 
@@ -4651,8 +4657,6 @@ class BaseUpstreamProvider:
                 mint=mint,
                 request_id=getattr(request.state, "request_id", None),
             )
-
-        url = f"{self.base_url}/{path}"
 
         transformed_body = self.prepare_request_body(
             request_body,
@@ -4967,10 +4971,11 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse with refund if applicable
         """
+        url = self.build_request_url(
+            self.normalize_request_path(path, model_obj), model_obj
+        )
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
 
         if request_body is None:
             request_body = await request.body()
@@ -5467,12 +5472,7 @@ class BaseUpstreamProvider:
                     media_type="application/json",
                 )
 
-            response_headers = dict(response.headers)
-            if "transfer-encoding" in response_headers:
-                del response_headers["transfer-encoding"]
-            if "content-encoding" in response_headers:
-                del response_headers["content-encoding"]
-
+            response_headers = _headers_for_rewritten_body(response.headers)
             _inject_cost_response_headers(response_headers, cost_data)
 
             if unit == "msat":

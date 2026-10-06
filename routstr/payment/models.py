@@ -144,6 +144,16 @@ class Model(BaseModel):
         return data
 
 
+DECISIONS_MODALITY = "decisions"
+
+
+def is_decision_model(model: Model | None) -> bool:
+    """True only for an explicit mark; providers default models to ``text``."""
+    if model is None:
+        return False
+    return DECISIONS_MODALITY in model.architecture.output_modalities
+
+
 def litellm_cost_entry(model_id: str) -> dict | None:
     """Look up ``model_id`` in litellm's bundled cost map.
 

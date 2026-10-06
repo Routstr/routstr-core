@@ -41,7 +41,7 @@ from .payment.helpers import (
     create_upstream_error_response,
     get_max_cost_for_model,
 )
-from .payment.models import Model
+from .payment.models import Model, is_decision_model
 from .upstream import BaseUpstreamProvider
 from .upstream.cooldown import (
     candidate_model_identity,
@@ -347,6 +347,20 @@ def _canonical_api_path(path: str) -> str:
     if core.startswith("v1/"):
         core = core[len("v1/") :]
     return core
+
+
+_DECISION_ROUTE = "systemone"
+
+
+def _route_accepts_model(path: str, model: Model) -> bool:
+    """Confine decision models to ``systemone``.
+
+    Unmarked models pass everywhere: OpenRouter and mixed upstreams list Jev as
+    ``text``.
+    """
+    if not is_decision_model(model):
+        return True
+    return _canonical_api_path(path) == _DECISION_ROUTE
 
 
 def _parse_extra_allowed_endpoints(raw: str) -> dict[str, frozenset[str]]:
@@ -762,6 +776,20 @@ async def _proxy(
                 400,
                 request=request,
             )
+
+    routable = [
+        (model, upstream)
+        for model, upstream in candidates
+        if _route_accepts_model(path, model)
+    ]
+    if not routable:
+        return create_error_response(
+            "unsupported_request",
+            f"Model '{model_id}' is a decision model; call it on /v1/{_DECISION_ROUTE}",
+            400,
+            request=request,
+        )
+    candidates = routable
 
     # A provider that just failed this model repeatedly is skipped while some
     # other candidate can serve it. An explicit route is never rerouted.

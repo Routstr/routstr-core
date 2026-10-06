@@ -21,6 +21,8 @@ from typing import Any
 
 import litellm
 from fastapi.responses import Response
+from litellm.constants import DEFAULT_IMAGE_TOKEN_COUNT
+from litellm.litellm_core_utils.token_counter import calculate_img_tokens
 
 from ..core import get_logger
 from ..payment.helpers import (
@@ -168,6 +170,61 @@ def _generated_text(value: object) -> list[str]:
     return parts
 
 
+def _is_decision_request(body: dict[str, Any]) -> bool:
+    return (
+        isinstance(body.get("questions"), (dict, list))
+        and "messages" not in body
+        and "input" not in body
+    )
+
+
+def decision_image_tokens(image: object) -> int:
+    """litellm's high-detail tile count for one base64 image.
+
+    URLs are never passed on: litellm would fetch them from the node.
+    """
+    if not isinstance(image, str):
+        return DEFAULT_IMAGE_TOKEN_COUNT
+    data = image.strip()
+    if not data or data.lower().startswith(("http://", "https://")):
+        return DEFAULT_IMAGE_TOKEN_COUNT
+    if not data.startswith("data:"):
+        # litellm sniffs the real format from the bytes.
+        data = f"data:image/png;base64,{data}"
+    try:
+        return int(calculate_img_tokens(data, mode="high"))
+    except Exception:
+        return DEFAULT_IMAGE_TOKEN_COUNT
+
+
+def _estimate_decision_input_tokens(body: dict[str, Any]) -> int:
+    """Text tokens plus per-image tiles; base64 counted as text overbills ~50x."""
+    images = body.get("images")
+    if isinstance(images, str):
+        images = [images]
+    image_tokens = (
+        sum(decision_image_tokens(image) for image in images)
+        if isinstance(images, list)
+        else 0
+    )
+    text_body = {key: value for key, value in body.items() if key != "images"}
+    return estimate_prompt_tokens(text_body) + image_tokens
+
+
+def _is_input_only_response(response_data: object) -> bool:
+    """Decision and embedding responses, which never carry generated text."""
+    if not isinstance(response_data, dict):
+        return False
+    if isinstance(response_data.get("answers"), (dict, list)):
+        return True
+    data = response_data.get("data")
+    return (
+        response_data.get("object") == "list"
+        and isinstance(data, list)
+        and any(isinstance(item, dict) and "embedding" in item for item in data)
+    )
+
+
 class MissingUsageEstimator:
     """Estimate billable usage when an upstream omits its usage trailer.
 
@@ -180,9 +237,14 @@ class MissingUsageEstimator:
         self.model_name = _model_name(model_obj, self.body)
         self._output_parts: list[str] = []
         self._input_tokens: int | None = None
+        self._input_only = _is_decision_request(self.body)
 
     def _estimate_input_tokens(self) -> int:
         if self._input_tokens is not None:
+            return self._input_tokens
+        if _is_decision_request(self.body):
+            # litellm counts only messages, so {state, questions} would be ~0.
+            self._input_tokens = _estimate_decision_input_tokens(self.body)
             return self._input_tokens
         try:
             self._input_tokens = _count_with_litellm(
@@ -220,11 +282,13 @@ class MissingUsageEstimator:
                 # Responses API ``*.done`` events repeat text already streamed
                 # via ``*.delta`` events; counting both would double-bill.
                 return
+        if _is_input_only_response(response_data):
+            self._input_only = True
         self._output_parts.extend(_generated_text(response_data))
 
     def estimated_usage(self, model: str | None = None) -> dict[str, Any] | None:
-        """Local usage estimate, or None when the upstream generated no text."""
-        if not self.output_text:
+        """Local usage estimate, or None when a text upstream generated nothing."""
+        if not self.output_text and not self._input_only:
             return None
         return self.response_data(model)["usage"]
 
