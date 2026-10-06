@@ -252,6 +252,38 @@ async def hold(
     await session.commit()
 
 
+# Machine-readable reasons a refund cannot proceed. Clients act on these
+# codes, so they must not be reworded: `no_balance_to_refund` proves the key
+# holds nothing and its local copy can be dropped, while
+# `refund_ongoing_requests` is a transient race whose balance is still there.
+REFUND_NO_BALANCE = "no_balance_to_refund"
+REFUND_BALANCE_TOO_SMALL = "balance_too_small_to_refund"
+REFUND_ONGOING_REQUESTS = "refund_ongoing_requests"
+
+
+def refund_failure_error(
+    message: str, code: str, status_code: int = 400
+) -> HTTPException:
+    """A refund refusal carrying a structured `code`, not a bare `detail` string.
+
+    These used to be plain-string 400s, which are indistinguishable to a
+    client: the SDK could not tell "No balance to refund" (the key is dead,
+    drop it) from "Cannot refund key. There are ongoing requests for this api
+    key." (a transient race, keep the key). It kept every key and re-swept it
+    forever, re-reading the same 400 every five minutes.
+    """
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "code": code,
+            }
+        },
+    )
+
+
 def refund_in_progress_error(refund: Refund | None = None) -> HTTPException:
     """The 409 raised when a key already has an unresolved refund claim."""
     stuck = refund is not None and refund.status == "stuck"

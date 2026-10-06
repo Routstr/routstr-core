@@ -384,9 +384,9 @@ async def refund_wallet_endpoint(
         )
         await session.refresh(key)
         if key.reserved_balance > 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot refund key. There are ongoing requests for this api key.",
+            raise refund.refund_failure_error(
+                "Cannot refund key. There are ongoing requests for this api key.",
+                refund.REFUND_ONGOING_REQUESTS,
             )
         logger.warning(
             "refund_wallet_endpoint: released stale reservation before refund",
@@ -401,9 +401,13 @@ async def refund_wallet_endpoint(
     remaining_balance = refund.amount_in_unit(remaining_balance_msats, unit)
 
     if remaining_balance_msats > 0 and remaining_balance <= 0:
-        raise HTTPException(status_code=400, detail="Balance too small to refund")
+        raise refund.refund_failure_error(
+            "Balance too small to refund", refund.REFUND_BALANCE_TOO_SMALL
+        )
     elif remaining_balance <= 0:
-        raise HTTPException(status_code=400, detail="No balance to refund")
+        raise refund.refund_failure_error(
+            "No balance to refund", refund.REFUND_NO_BALANCE
+        )
 
     requested = refund_request.lightning_address if refund_request else None
     destination = requested or key.refund_address
