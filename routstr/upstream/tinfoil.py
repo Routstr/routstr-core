@@ -67,6 +67,13 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
     default_base_url = "https://inference.tinfoil.sh"
     platform_url = "https://docs.tinfoil.sh"
     supports_ehbp = True
+    # Tinfoil's router serves only its versioned API surface (``/v1/...``), and
+    # unlike most providers its base URL does not carry the prefix —
+    # ``fetch_models`` adds ``/v1`` explicitly for ``GET /v1/models``. The EHBP
+    # target must re-add it: a client that posts to ``/chat/completions``
+    # otherwise reaches ``https://inference.tinfoil.sh/chat/completions`` and
+    # gets a 404 ("Not found.") from the router.
+    ehbp_path_prefix = "v1"
     confidential_inference_profile = ConfidentialInferenceProfile(
         usage_response_header=_RESPONSE_USAGE_HEADER,
         client_target_url_header=_ENCLAVE_URL_HEADER,
@@ -191,7 +198,10 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
         sends it (see ``routstr/upstream/ehbp.py``).
         """
         return EHBPForwardingTarget(
-            url=f"{self.base_url.rstrip('/')}/{path.lstrip('/')}",
+            url=(
+                f"{self.base_url.rstrip('/')}/"
+                f"{self.build_ehbp_request_path(path, model_obj)}"
+            ),
             headers={"X-Tinfoil-Request-Usage-Metrics": "true"},
             profile=self.confidential_inference_profile,
         )

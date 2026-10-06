@@ -699,6 +699,32 @@ class BaseUpstreamProvider:
         clean_path = path.lstrip("/")
         return f"{self.get_request_base_url(path, model_obj)}/{clean_path}"
 
+    # Path segment the enclave expects between its base URL and the API path.
+    # Providers whose ``default_base_url`` already carries a version prefix
+    # (openai, groq, fireworks, ...) leave this empty: ``normalize_request_path``
+    # strips the client's ``v1/`` and the base URL re-adds its own. EHBP
+    # providers whose base URL does not carry one (tinfoil, ppqai) set it, so a
+    # client that spells the endpoint without ``v1/`` — which the node accepts
+    # as an equivalent spelling (``_canonical_api_path``) — still reaches the
+    # enclave's versioned route instead of a 404.
+    ehbp_path_prefix: str = ""
+
+    def build_ehbp_request_path(self, path: str, model_obj: Model | None = None) -> str:
+        """Build the EHBP forwarding path, restoring the provider's version prefix.
+
+        The node accepts an API endpoint with or without a leading ``v1/``, so
+        the client's spelling carries no information about what the upstream
+        serves. Normalize it away with the same hook the non-EHBP forwarding
+        path uses, then re-add this provider's prefix: only the provider knows
+        whether its enclave serves ``/v1/...``, ``/private/v1/...``, or an
+        unversioned path.
+        """
+        clean_path = self.normalize_request_path(path, model_obj).lstrip("/")
+        prefix = self.ehbp_path_prefix.strip("/")
+        if not prefix:
+            return clean_path
+        return f"{prefix}/{clean_path}"
+
     def prepare_responses_request_body(
         self, body: bytes | None, model_obj: Model
     ) -> bytes | None:
