@@ -53,6 +53,7 @@ from ..payment.models import (
     Pricing,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
+    allows_cache_pricing_backfill,
     backfill_cache_pricing,
     list_models,
 )
@@ -5728,9 +5729,8 @@ class BaseUpstreamProvider:
     def _apply_provider_fee_to_model(self, model: Model) -> Model:
         """Apply provider fee to model's USD pricing and calculate max costs.
 
-        Cache rates missing from the upstream pricing feed are backfilled from
-        litellm's cost map first, so they carry the provider fee like every
-        other price component.
+        Providers with native price catalogs can disable generic cache-rate
+        backfill to avoid treating another provider's rates as their own.
 
         Args:
             model: Model object to update
@@ -5738,7 +5738,11 @@ class BaseUpstreamProvider:
         Returns:
             Model with provider fee applied to pricing and max costs calculated
         """
-        base_pricing = backfill_cache_pricing(model.id, model.pricing)
+        base_pricing = (
+            backfill_cache_pricing(model.id, model.pricing)
+            if allows_cache_pricing_backfill(self.provider_type)
+            else model.pricing
+        )
         adjusted_pricing = Pricing.parse_obj(
             {k: v * self.provider_fee for k, v in base_pricing.dict().items()}
         )

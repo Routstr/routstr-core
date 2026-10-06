@@ -617,7 +617,10 @@ async def upsert_provider_model(
     await refresh_model_maps()
     await _refresh_provider_model_paths(provider_pk)
     return _row_to_model(
-        row, apply_provider_fee=True, provider_fee=provider.provider_fee
+        row,
+        apply_provider_fee=True,
+        provider_fee=provider.provider_fee,
+        provider_type=provider.provider_type,
     ).dict()  # type: ignore
 
 
@@ -653,7 +656,10 @@ async def get_provider_model(provider_id: str, model_id: str) -> dict[str, objec
         # is not a usable number must be shown as it is, not encoded as `null`.
         return json_compliant(  # type: ignore[return-value]
             _row_to_model(
-                row, apply_provider_fee=False, provider_fee=provider.provider_fee
+                row,
+                apply_provider_fee=False,
+                provider_fee=provider.provider_fee,
+                provider_type=provider.provider_type,
             ).dict()
         )
 
@@ -1311,7 +1317,10 @@ def _evaluate_model_row(
 ) -> _ModelEvaluation:
     try:
         configured: Model | None = _build_model_from_row(
-            row, apply_provider_fee=True, provider_fee=provider.provider_fee
+            row,
+            apply_provider_fee=True,
+            provider_fee=provider.provider_fee,
+            provider_type=provider.provider_type,
         )
         build_error = None
     except Exception as exc:
@@ -1346,13 +1355,17 @@ def _aggregate_row(
     empty_detail: str,
     ok_detail: str,
     flagged_detail: str,
+    empty_status: str = "ok",
 ) -> dict[str, object]:
     """The ok/fail(-or-warn) shape every pricing row shares: examine
     ``checked`` items, flag some of them as a problem, report the count.
     """
     evidence: dict[str, object] = {"checked": checked, "flagged": list(flagged)}
     if checked == 0:
-        return _report_row(row_id, "ok", title, empty_detail, evidence)
+        detail = (
+            empty_detail if empty_status == "ok" else f"Not evaluated — {empty_detail}"
+        )
+        return _report_row(row_id, empty_status, title, detail, evidence)
     if flagged:
         return _report_row(row_id, fail_status, title, flagged_detail, evidence)
     return _report_row(row_id, "ok", title, ok_detail, evidence)
@@ -1469,6 +1482,8 @@ def _report_row_cache_rate(
         checked,
         unknown,
         fail_status="warn",
+        # Enabled rows that are all unserved leave no cache rate verified.
+        empty_status="warn" if evaluations else "ok",
         empty_detail="No served models to check.",
         ok_detail=(
             f"All {checked} served models have known cache-read and cache-write rates."
@@ -1542,8 +1557,9 @@ async def certify_upstream_provider(
     Unlike the read-only ``GET …/report``, this probes the upstream over the
     network and runs the node's cost engine on the real response. It never
     enters the billing path, so it costs nothing from the node's wallet. Its
-    upstream spend is a one-token completion, plus two or three one-token
-    completions on a ~4.4k-token prompt when ``check_cache`` is set.
+    upstream spend is one short completion, plus two or three completions on a
+    ~4.4k-token prompt when ``check_cache`` is set. Each completion starts at 32
+    output tokens and retries only on a recognized limit error, up to 2048.
 
     Returns the read-only report's four ``pricing.*`` rows (re-derived here so
     the certification is self-contained), the live rows from
@@ -1735,9 +1751,9 @@ async def certify_upstream_provider(
                 provider.provider_fee,
                 sats_to_usd,
             )
-        # The timeout applies per upstream call. The run makes up to six
-        # calls (models, two short probes after a max_completion_tokens retry,
-        # three cache probes), so the request can stay open for six times it.
+        # The timeout applies per upstream call. Worst case is 21 calls: models,
+        # plus up to five attempts for each of the short probe and the three
+        # cache probes (one field correction and the 32/128/512/2048 budgets).
         live_rows = await run_live_checks(
             provider.base_url,
             provider.api_key,
