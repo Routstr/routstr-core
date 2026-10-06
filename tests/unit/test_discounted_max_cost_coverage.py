@@ -71,12 +71,14 @@ def _worst_case_msats(body: dict, max_tokens: int) -> int:
     )
 
 
-async def _reserve(model: Model, body: dict) -> tuple[int, int]:
+async def _reserve(
+    model: Model, body: dict, tolerance_percentage: float = 0
+) -> tuple[int, int]:
     assert model.sats_pricing is not None
     max_cost = int(model.sats_pricing.max_cost * 1000)
     with (
         patch.object(settings, "fixed_pricing", False),
-        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "tolerance_percentage", tolerance_percentage),
         patch.object(settings, "min_request_msat", 1),
     ):
         return await calculate_discounted_max_cost(max_cost, body, model), max_cost
@@ -121,6 +123,16 @@ async def test_reservation_covers_prompt_plus_requested_completion(
     needed = min(max_cost, _worst_case_msats(body, 100_000))
     # Per-term flooring may leave the existing discount a msat or two above.
     assert needed <= reserved <= needed + 2
+
+
+@pytest.mark.parametrize("tolerance_percentage", [1, 10])
+@pytest.mark.asyncio
+async def test_tolerance_does_not_lower_the_floor(
+    tolerance_percentage: float,
+) -> None:
+    body = _body(100_000)
+    reserved, max_cost = await _reserve(_model(), body, tolerance_percentage)
+    assert reserved >= min(max_cost, _worst_case_msats(body, 100_000))
 
 
 @pytest.mark.asyncio
