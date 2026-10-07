@@ -89,7 +89,7 @@ python3 scripts/node_setup.py check --public-url https://node.example
 - Use `docker compose -f compose.node.yml ...` for every later Compose command.
   Plain `docker compose up` selects the **different** public/Tor stack.
 - `start` also mints a long-lived CLI token and writes `~/.routstr/config.json`
-  (mode `0600`) so the
+  (mode `0600`; an existing config for another node is left untouched) so the
   [Routstr CLI](https://github.com/routstr/routstr-cli) can operate the node
   (`routstr instruct`, `routstr providers list`, ...). The token is full node
   admin; revoke it in **Settings → CLI Tokens** when done (`--no-cli-token`

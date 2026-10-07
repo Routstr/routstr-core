@@ -375,8 +375,9 @@ def _start(args: argparse.Namespace, local_url: str) -> int:
     if existing_node_url and existing_node_url != node_url:
         print(
             f"Warning: {args.cli_config} already points the Routstr CLI at "
-            f"{existing_node_url}; left it unchanged and created no token. Pass "
-            "--cli-config PATH to configure this node separately.",
+            f"{existing_node_url}; left it unchanged and created no token. To keep "
+            "both, pass --cli-config DIR/.routstr/config.json and run the CLI "
+            "as HOME=DIR routstr ...",
             file=sys.stderr,
         )
     elif not args.no_cli_token:
@@ -420,7 +421,7 @@ def _start(args: argparse.Namespace, local_url: str) -> int:
     )
     admin_url = public_origin or local_url
     print(
-        f"Phase 3 — dashboard: {admin_url}/admin/ — rotate the admin password, "
+        f"Phase 3 — dashboard: {admin_url}/admin — rotate the admin password, "
         "add an upstream, review payout/pricing."
     )
     check_hint = "python3 scripts/node_setup.py check"

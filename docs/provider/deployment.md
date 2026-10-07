@@ -115,7 +115,8 @@ python3 scripts/node_setup.py start --private
   identity, then waits up to three minutes for `/v1/info` and `/v1/models` on the
   loopback port (the first build itself can take longer). Public mode publishes
   the listing; private mode publishes nothing.
-- mints a long-lived **CLI token** and writes `~/.routstr/config.json` (0600) so
+- mints a long-lived **CLI token** and writes `~/.routstr/config.json` (0600;
+  left untouched if it already points at another node) so
   the [Routstr CLI](https://github.com/routstr/routstr-cli) can operate the node;
   `--no-cli-token` skips it. The token is full node admin — revoke it in
   **Settings → CLI Tokens** when you are done.
@@ -129,13 +130,13 @@ python3 scripts/node_setup.py check --port 18080
 ROUTSTR_NODE_PORT=18080 docker compose -f compose.node.yml logs routstr
 ```
 
-The dashboard is then at `http://127.0.0.1:18080/admin/`. In public mode, point
+The dashboard is then at `http://127.0.0.1:18080/admin`. In public mode, point
 the reverse proxy at that port instead of `8000`.
 
 ### Administer a Remote Host over SSH
 
 The private stack is only reachable from the host itself. From your own computer,
-forward the port and open <http://127.0.0.1:8000/admin/> in your local browser:
+forward the port and open <http://127.0.0.1:8000/admin> in your local browser:
 
 ```bash
 ssh -L 8000:127.0.0.1:8000 user@your-server
@@ -258,7 +259,7 @@ so everything Routstr persists stays in the directory you cloned:
 | `keys.db` | SQLite database (settings, API keys, sessions) |
 | `keys.db-wal`, `keys.db-shm` | SQLite sidecar files, when present — part of the database |
 | `routstr_secret.key` | Auto-generated master key, written beside the database when `ROUTSTR_SECRET_KEY` is unset (or wherever `ROUTSTR_SECRET_KEY_FILE` points) |
-| `.wallet/` | Cashu wallet data (your Bitcoin!) |
+| `.wallet/` | Cashu wallet data (your Bitcoin!); created the first time the node handles ecash |
 | `.env` | Node configuration and any seeded secrets |
 | `logs/` | Node logs |
 
@@ -284,13 +285,16 @@ so everything Routstr persists stays in the directory you cloned:
 
 ### Admin Password Recovery
 
-Lost the admin password? Regenerate it from a private terminal, then rotate it
-again in **Settings → Admin Settings**:
+Lost the admin password? Clear it from a private terminal and restart the node;
+the restart generates and logs a new one-time password (the API is briefly
+unavailable). Then rotate it again in **Settings → Admin Settings**:
 
 ```bash
 docker compose exec routstr /.venv/bin/python scripts/reset_admin_password.py --regenerate
+docker compose restart routstr
 # private stack:
 docker compose -f compose.node.yml exec routstr /.venv/bin/python scripts/reset_admin_password.py --regenerate
+docker compose -f compose.node.yml restart routstr
 ```
 
 ---
@@ -345,10 +349,11 @@ only steps 1–2 remain; when you started in **private mode** (or with
    routed — keep the node port on loopback (`compose.node.yml` does this; with
    `compose.yml`, firewall port `8000`). Restrict administrative endpoints to
    trusted clients at the proxy where you can.
-4. In **Settings → Admin Settings**, set **HTTP URL** to the real public HTTPS
+4. Decide explicitly whether the node should be discoverable on Nostr (see
+   [Discovery](discovery.md)) and whether to share analytics. Setting the URL in
+   the next step publishes the listing immediately.
+5. In **Settings → Admin Settings**, set **HTTP URL** to the real public HTTPS
    origin — the node publishes its listing as soon as it is set.
-5. Decide explicitly whether to enable Nostr discovery (see
-   [Discovery](discovery.md)) and analytics sharing.
 
 From **another machine** with a checkout of the repository, verify the public
 endpoint (normal hostname and certificate checks apply):

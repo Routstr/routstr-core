@@ -65,13 +65,13 @@ that port for `check`, the dashboard URL, the reverse proxy and later
 public mode — publishes the listing. It also mints a long-lived CLI token and
 writes it to `~/.routstr/config.json` (0600) for the Routstr CLI; skip that with
 `--no-cli-token`. If that file already points at another node, `start` leaves it
-alone and creates no token; pass `--cli-config PATH` for a separate config. A running API with zero models is **not configured**.
+alone and creates no token (see the Routstr CLI section below). A running API with zero models is **not configured**.
 
 ### Phase 2 — Back up (operator, before configuring)
 
 The master key and identity exist as soon as the node boots. Have the operator
 copy `routstr_secret.key`, `keys.db` (with any `-wal`/`-shm` sidecars), `.wallet/`
-and `.env` into an encrypted off-host backup, with a tested isolated restore. The
+(created on first ecash activity, so absent on a fresh node) and `.env` into an encrypted off-host backup, with a tested isolated restore. The
 master key decrypts the `nsec` stored in `keys.db`; keep them together:
 
 ```bash
@@ -82,8 +82,8 @@ Do not ingest the revealed `nsec` or any logs into the agent context.
 
 ### Phase 3 — Dashboard (operator)
 
-Hand the operator the dashboard address (`https://node.example/admin/` in public
-mode, or `http://127.0.0.1:8000/admin/` over an SSH tunnel). Have them read the
+Hand the operator the dashboard address (`https://node.example/admin` in public
+mode, or `http://127.0.0.1:8000/admin` over an SSH tunnel). Have them read the
 generated password privately from
 `docker compose -f compose.node.yml logs routstr`, log in, and immediately rotate
 it in Settings → Admin Settings. Then add the upstream in Providers, enable at
@@ -110,7 +110,10 @@ without these checks.
 
 The setup writes a long-lived admin token to `~/.routstr/config.json` (0600), so
 the [Routstr CLI](https://github.com/routstr/routstr-cli) is ready to operate the
-node:
+node. If that file already pointed at another node, `start` left it alone and
+minted no token. The CLI only reads `$HOME/.routstr/config.json`, so re-run `start`
+with `--cli-config /some/dir/.routstr/config.json` and run the CLI as
+`HOME=/some/dir routstr …`:
 
 ```bash
 git clone https://github.com/routstr/routstr-cli.git

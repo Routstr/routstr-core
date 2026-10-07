@@ -20,7 +20,8 @@ admin password. The phases below cover the whole path.
 - A host with Docker and the Compose plugin, Python 3, and enough space to build
   the dashboard. Keep the checkout on persistent storage — it holds your
   database, key and wallet.
-- An upstream API key (OpenAI, Anthropic, OpenRouter, …).
+- An upstream API key (OpenAI, Anthropic, OpenRouter, …) to serve models. The node
+  boots without one, but reports zero models until an upstream is configured.
 - **Public mode only**: a subdomain with a valid TLS certificate and a reverse
   proxy forwarding it to `127.0.0.1:8000`, **plus a rule restricting `/admin`**
   (IP allowlist or basic auth) — the bootstrap password is live from first boot.
@@ -153,7 +154,7 @@ Forward the loopback port from your own computer and open the dashboard there:
 
 ```bash
 ssh -L 8000:127.0.0.1:8000 user@your-server
-# then browse http://127.0.0.1:8000/admin/
+# then browse http://127.0.0.1:8000/admin
 ```
 
 ---
@@ -167,7 +168,8 @@ quiesced for a consistent copy, and copy:
 - **`routstr_secret.key`** — encrypts node secrets at rest, including the `nsec`
   in `keys.db`. Lose it and the stored `nsec` cannot be decrypted;
 - **`keys.db`** (plus any `keys.db-wal` / `keys.db-shm` sidecars);
-- **`.wallet/`** — your Bitcoin;
+- **`.wallet/`** — your Bitcoin. It is created the first time the node handles
+  ecash, so a fresh node has none yet; include it in every backup once it exists;
 - **`.env`** — node configuration.
 
 Reveal the `nsec` to store beside the key:
@@ -185,8 +187,8 @@ backup, and verify an isolated restore. See
 
 ## Phase 3 — Configure via the dashboard
 
-Open the dashboard at `https://node.example/admin/` (public) or
-`http://127.0.0.1:8000/admin/` (private/tunnel), and read the one-time bootstrap
+Open the dashboard at `https://node.example/admin` (public) or
+`http://127.0.0.1:8000/admin` (private/tunnel), and read the one-time bootstrap
 password in a private terminal:
 
 ```bash
@@ -206,11 +208,14 @@ Don't capture those logs in automated output.
 4. **Review** node name, payout address, mints and relays in
    **Settings → Admin Settings**.
 
-Lost the password? Regenerate it in a private terminal and rotate it again:
+Lost the password? Clear it in a private terminal, then restart the node; the
+restart generates and logs a new one-time password (the API is briefly
+unavailable). Read it as above and rotate it again:
 
 ```bash
 docker compose -f compose.node.yml exec routstr \
   /.venv/bin/python scripts/reset_admin_password.py --regenerate
+docker compose -f compose.node.yml restart routstr
 ```
 
 Never delete volumes or wallet state to fix a login problem.
@@ -219,7 +224,12 @@ Never delete volumes or wallet state to fix a login problem.
 
 `start` already minted a long-lived token and wrote it to
 `~/.routstr/config.json`, so the [Routstr CLI](https://github.com/routstr/routstr-cli)
-works with no further setup:
+works with no further setup.
+
+If `~/.routstr/config.json` already pointed at another node, `start` left it
+alone and minted no token. The CLI only reads `$HOME/.routstr/config.json`, so to
+keep both, re-run `start` with `--cli-config /some/dir/.routstr/config.json` and
+run the CLI as `HOME=/some/dir routstr …`.
 
 ```bash
 git clone https://github.com/routstr/routstr-cli.git
