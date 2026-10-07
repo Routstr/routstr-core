@@ -25,6 +25,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORT = 8000
 COMPOSE = ("docker", "compose", "-f", "compose.node.yml")
+# The node saves these on first boot; afterwards the saved value wins over .env.
+SAVED_SETTING_KEYS = ("RECEIVE_LN_ADDRESS", "MIN_PAYOUT_SAT", "PAYOUT_INTERVAL_SECONDS")
 
 
 def _env_value(text: str, key: str) -> str | None:
@@ -288,7 +290,8 @@ def _start(args: argparse.Namespace, local_url: str) -> int:
     if args.payout_interval is not None:
         overrides["PAYOUT_INTERVAL_SECONDS"] = str(args.payout_interval)
 
-    if prepare_env(ROOT, overrides):
+    env_created = prepare_env(ROOT, overrides)
+    if env_created:
         print("Created .env with owner-only permissions. Review it before public deployment.")
 
     compose_env = {**os.environ, "ROUTSTR_NODE_PORT": str(args.port)}
@@ -313,6 +316,16 @@ def _start(args: argparse.Namespace, local_url: str) -> int:
 
     if public_origin:
         try:
+            advertised = get_json(local_url + "/v1/info").get("http_url")
+        except (OSError, ValueError, RuntimeError):
+            advertised = public_origin
+        if advertised != public_origin:
+            print(
+                f"Warning: the node advertises {advertised!r}, not {public_origin}; "
+                "a URL saved in Settings wins over .env. Change it in the dashboard.",
+                file=sys.stderr,
+            )
+        try:
             pub_name, pub_count = probe(public_origin)
             print(f"Public endpoint OK: {public_origin} → {pub_name}; {pub_count} models.")
             if pub_count == 0:
@@ -330,6 +343,14 @@ def _start(args: argparse.Namespace, local_url: str) -> int:
         print(
             "Private mode: the node is loopback-only and has published nothing. "
             "Set a public HTTP URL later to go live."
+        )
+
+    if not env_created and any(key in overrides for key in SAVED_SETTING_KEYS):
+        print(
+            "Note: payout settings were written to .env, but a node that has booted "
+            "before keeps its saved values. Check them in Settings and change them "
+            "there if they differ.",
+            file=sys.stderr,
         )
 
     if args.ln_address and not payout_verified:
@@ -360,10 +381,14 @@ def _start(args: argparse.Namespace, local_url: str) -> int:
             ValueError,
             RuntimeError,
         ) as exc:
+            reason = type(exc).__name__
+            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+                # The last stderr line names the failure (e.g. ModuleNotFoundError);
+                # it never contains the token, which only goes to stdout.
+                reason = exc.stderr.strip().splitlines()[-1][:200]
             print(
-                "Warning: could not create a CLI token automatically "
-                f"({type(exc).__name__}); create one from the dashboard "
-                "(Settings → CLI Tokens).",
+                f"Warning: could not create a CLI token automatically ({reason}); "
+                "create one from the dashboard (Settings → CLI Tokens).",
                 file=sys.stderr,
             )
 

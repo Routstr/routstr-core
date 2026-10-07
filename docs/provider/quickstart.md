@@ -126,6 +126,11 @@ The payout address is validated at setup (a `user@host` address is resolved to
 `/.well-known/lnurlp/…`), but **saved is not tested** — verify an actual payout
 in Phase 4.
 
+The payout flags take effect on the node's **first** boot. The node saves its
+settings then, and saved values win over `.env` afterwards, so re-running
+`start` with different payout flags only updates `.env`. Change payout settings
+on a running node under **Settings** in the dashboard.
+
 !!! tip "Payouts are optional at boot"
     A node can accept payments with no payout address; the payout loop simply
     idles. Set one whenever you are ready to withdraw.

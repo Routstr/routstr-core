@@ -18,6 +18,12 @@ spec.loader.exec_module(node_setup)
 
 
 class NodeSetupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Never reach a real node on this host; tests that care override this.
+        advertised = patch.object(node_setup, "get_json", return_value={"http_url": "https://node.example"})
+        advertised.start()
+        self.addCleanup(advertised.stop)
+
     def test_env_created_once_with_private_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -182,6 +188,46 @@ class NodeSetupTests(unittest.TestCase):
                                     self.assertEqual(node_setup.main(), 0)
                                 self.assertEqual(probe.call_args_list[1].args[0], "https://node.example")
                                 self.assertIn("did not serve /v1/info yet", stderr.getvalue())
+
+    def test_public_start_warns_when_saved_url_wins(self) -> None:
+        argv = ["node_setup.py", "start", "--public-url", "https://node.example", "--no-cli-token"]
+        with patch.object(sys, "argv", argv):
+            with patch.object(node_setup.shutil, "which", return_value="/usr/bin/docker"):
+                with patch.object(node_setup, "preflight_origin"):
+                    with patch.object(node_setup, "prepare_env", return_value=False):
+                        with patch.object(node_setup.subprocess, "run"):
+                            with patch.object(node_setup, "probe", return_value=("Node", 1)):
+                                with patch.object(node_setup, "get_json", return_value={"http_url": "https://old.example"}):
+                                    with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                                        self.assertEqual(node_setup.main(), 0)
+        self.assertIn("'https://old.example'", stderr.getvalue())
+
+    def test_rerun_with_payout_flags_points_at_saved_settings(self) -> None:
+        argv = ["node_setup.py", "start", "--private", "--no-cli-token", "--min-payout-sat", "500"]
+        for env_created, expect_note in ((False, True), (True, False)):
+            with self.subTest(env_created=env_created), patch.object(sys, "argv", argv):
+                with patch.object(node_setup.shutil, "which", return_value="/usr/bin/docker"):
+                    with patch.object(node_setup, "prepare_env", return_value=env_created):
+                        with patch.object(node_setup.subprocess, "run"):
+                            with patch.object(node_setup, "probe", return_value=("Node", 0)):
+                                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                                    self.assertEqual(node_setup.main(), 0)
+                self.assertEqual("keeps its saved values" in stderr.getvalue(), expect_note)
+
+    def test_cli_token_failure_names_the_cause(self) -> None:
+        failure = node_setup.subprocess.CalledProcessError(
+            1, ["docker"], stderr="Traceback ...\nModuleNotFoundError: No module named 'routstr'\n"
+        )
+        argv = ["node_setup.py", "start", "--private", "--cli-config", "/nonexistent/config.json"]
+        with patch.object(sys, "argv", argv):
+            with patch.object(node_setup.shutil, "which", return_value="/usr/bin/docker"):
+                with patch.object(node_setup, "prepare_env", return_value=False):
+                    with patch.object(node_setup.subprocess, "run"):
+                        with patch.object(node_setup, "_create_cli_token", side_effect=failure):
+                            with patch.object(node_setup, "probe", return_value=("Node", 0)):
+                                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                                    self.assertEqual(node_setup.main(), 0)
+        self.assertIn("No module named 'routstr'", stderr.getvalue())
 
     def test_preflight_rejects_dead_origin(self) -> None:
         with patch.object(node_setup.urllib.request, "urlopen", side_effect=urllib.error.URLError("no dns")):
