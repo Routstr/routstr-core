@@ -64,7 +64,8 @@ that port for `check`, the dashboard URL, the reverse proxy and later
 `/v1/info` and `/v1/models`, generates the master key and Nostr identity, and — in
 public mode — publishes the listing. It also mints a long-lived CLI token and
 writes it to `~/.routstr/config.json` (0600) for the Routstr CLI; skip that with
-`--no-cli-token`. A running API with zero models is **not configured**.
+`--no-cli-token`. If that file already points at another node, `start` leaves it
+alone and creates no token; pass `--cli-config PATH` for a separate config. A running API with zero models is **not configured**.
 
 ### Phase 2 — Back up (operator, before configuring)
 

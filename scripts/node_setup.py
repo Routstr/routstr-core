@@ -240,6 +240,16 @@ def _create_cli_token(
     return lines[-1]
 
 
+def _configured_node_url(path: Path) -> str | None:
+    """Return the node URL an existing CLI config points at, if any."""
+    try:
+        loaded = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    url = loaded.get("node_url") if isinstance(loaded, dict) else None
+    return url if isinstance(url, str) and url else None
+
+
 def _write_cli_config(path: Path, node_url: str, token: str) -> None:
     """Merge the node URL and token into the Routstr CLI config (mode 0600)."""
     data: dict[str, Any] = {}
@@ -360,8 +370,16 @@ def _start(args: argparse.Namespace, local_url: str) -> int:
             file=sys.stderr,
         )
 
-    if not args.no_cli_token:
-        node_url = public_origin or local_url
+    node_url = public_origin or local_url
+    existing_node_url = None if args.no_cli_token else _configured_node_url(args.cli_config)
+    if existing_node_url and existing_node_url != node_url:
+        print(
+            f"Warning: {args.cli_config} already points the Routstr CLI at "
+            f"{existing_node_url}; left it unchanged and created no token. Pass "
+            "--cli-config PATH to configure this node separately.",
+            file=sys.stderr,
+        )
+    elif not args.no_cli_token:
         try:
             token = _create_cli_token(
                 compose_env, args.cli_token_name, args.cli_token_expires_in_days

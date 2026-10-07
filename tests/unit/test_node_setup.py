@@ -282,6 +282,24 @@ class NodeSetupTests(unittest.TestCase):
                                 mint.assert_not_called()
             self.assertFalse(config.exists())
 
+    def test_start_keeps_cli_config_for_another_node(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "config.json"
+            original = json.dumps({"node_url": "http://127.0.0.1:8011", "token": "theirs"})
+            config.write_text(original)
+            argv = ["node_setup.py", "start", "--private", "--cli-config", str(config)]
+            with patch.object(sys, "argv", argv):
+                with patch.object(node_setup.shutil, "which", return_value="/usr/bin/docker"):
+                    with patch.object(node_setup, "prepare_env", return_value=False):
+                        with patch.object(node_setup.subprocess, "run"):
+                            with patch.object(node_setup, "_create_cli_token") as mint:
+                                with patch.object(node_setup, "probe", return_value=("Node", 0)):
+                                    with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                                        self.assertEqual(node_setup.main(), 0)
+                                mint.assert_not_called()
+            self.assertEqual(config.read_text(), original)
+            self.assertIn("http://127.0.0.1:8011", stderr.getvalue())
+
     def test_write_cli_config_merges_and_chmods(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             config = Path(folder) / "cfg" / "config.json"

@@ -95,7 +95,8 @@ python3 scripts/node_setup.py start \
 - waits up to three minutes for the local API, then **publishes the kind `38421`
   listing on its first announce pass** and prints the remaining phases;
 - mints a long-lived **CLI token** and writes it to `~/.routstr/config.json`
-  (mode `0600`) so the [Routstr CLI](https://github.com/routstr/routstr-cli) works
+  (mode `0600`; left untouched, with no token minted, if it already points at
+  another node) so the [Routstr CLI](https://github.com/routstr/routstr-cli) works
   immediately. The token is full node admin — see
   [Connect the Routstr CLI](#connect-the-routstr-cli). Opt out with
   `--no-cli-token`.
