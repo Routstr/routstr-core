@@ -15,7 +15,7 @@ spec.loader.exec_module(node_setup)
 
 
 class NodeSetupTests(unittest.TestCase):
-    def test_env_created_once_with_private_permissions(self):
+    def test_env_created_once_with_private_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / ".env.example").write_text("# example\n")
@@ -32,13 +32,13 @@ class NodeSetupTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 node_setup.prepare_env(root)
 
-    def test_public_origin_only(self):
+    def test_public_origin_only(self) -> None:
         self.assertEqual(node_setup.public_url("https://node.example/"), "https://node.example")
         for value in ("http://node.example", "https://name:pass@node.example", "https://node.example/admin", "https://node.example/?token=x"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 node_setup.public_url(value)
 
-    def test_probe_distinguishes_reachable_from_configured(self):
+    def test_probe_distinguishes_reachable_from_configured(self) -> None:
         with patch.object(node_setup, "get_json", side_effect=[{"name": "Node"}, {"data": []}]):
             self.assertEqual(node_setup.probe("http://127.0.0.1:8000"), ("Node", 0))
         with patch.object(node_setup, "get_json", side_effect=[{"name": "Node"}, {"data": [{"id": "model"}]}]):
@@ -47,7 +47,7 @@ class NodeSetupTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 node_setup.probe("http://127.0.0.1:8000")
 
-    def test_check_requires_models(self):
+    def test_check_requires_models(self) -> None:
         with patch.object(sys, "argv", ["node_setup.py", "check", "--port", "18080"]):
             with patch.object(node_setup, "probe", return_value=("Node", 0)) as probe:
                 self.assertEqual(node_setup.main(), 2)
@@ -55,7 +55,7 @@ class NodeSetupTests(unittest.TestCase):
             with patch.object(node_setup, "probe", return_value=("Node", 1)):
                 self.assertEqual(node_setup.main(), 0)
 
-    def test_start_passes_selected_port_to_compose(self):
+    def test_start_passes_selected_port_to_compose(self) -> None:
         with patch.object(sys, "argv", ["node_setup.py", "start", "--port", "18080"]):
             with patch.object(node_setup.shutil, "which", return_value="/usr/bin/docker"):
                 with patch.object(node_setup, "prepare_env", return_value=False):
@@ -66,7 +66,7 @@ class NodeSetupTests(unittest.TestCase):
                             self.assertEqual(run.call_count, 2)
                             self.assertTrue(all(call.kwargs["env"]["ROUTSTR_NODE_PORT"] == "18080" for call in run.call_args_list))
 
-    def test_first_boot_compose_is_private(self):
+    def test_first_boot_compose_is_private(self) -> None:
         config = (SCRIPT.parent.parent / "compose.node.yml").read_text()
         self.assertIn('"127.0.0.1:${ROUTSTR_NODE_PORT:-8000}:8000"', config)
         self.assertIn('AUTO_GENERATE_NSEC: "false"', config)

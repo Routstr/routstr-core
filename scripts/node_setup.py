@@ -43,7 +43,7 @@ def prepare_env(root: Path) -> bool:
 def get_json(url: str) -> dict:
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *args, **kwargs):
+        def redirect_request(self, *args: object, **kwargs: object) -> None:
             return None
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=5) as response:
         if response.status != 200:
