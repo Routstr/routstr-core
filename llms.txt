@@ -1,0 +1,148 @@
+# Routstr provider node — instructions for an operator's agent
+
+Goal: help an operator set up a Routstr node without exposing the bootstrap admin
+password or assuming that a running API is a working provider. This file is a
+standalone entry point for agents without an existing checkout. The commands,
+Compose file and detailed human steps live in the checked-out repository; read
+`docs/provider/quickstart.md` and `docs/provider/deployment.md` after cloning.
+
+## Boundaries
+
+- Ask for approval of the target host, release tag, upstream type, public domain,
+  spending limit, Nostr publication and payout settings before those actions. A
+  local-only trial needs no domain or funded wallet.
+- The operator enters admin passwords, upstream keys, Cashu credentials and Nostr
+  secrets in their own trusted terminal/dashboard. Use an SSH tunnel to administer
+  a remote node. Never put secrets in chat, shell arguments, Git, captured logs or
+  generated reports. A clean agent session may validate the workflow without
+  seeing any credential.
+- Never run bare `docker compose up`: stock `compose.yml` publishes port 8000 on
+  all interfaces and starts Tor. Every Compose operation in this workflow uses
+  `-f compose.node.yml`.
+- Stop at a human authentication, funding or external-publication gate. Report the
+  blocker, not a fabricated success.
+
+## Default flow (public mode)
+
+The default assumes the operator already has a subdomain with HTTPS and a reverse
+proxy forwarding to `127.0.0.1:8000`. The node then publishes its Nostr listing on
+first boot. If there is no public URL yet, use private mode and publish later.
+
+### Phase 0 — Host
+
+Confirm Docker with the Compose plugin, Python 3, available disk and durable
+storage. Ask the operator to select a reviewed release tag; for testing the
+current development branch, explicitly label it as unreviewed. Clone
+`https://github.com/Routstr/routstr-core.git`, check out that ref, and inspect the
+quickstart and deployment guide before running commands. Reuse an existing
+checkout and state; do not overwrite `.env` or recreate a wallet.
+
+For public mode, verify **before** starting that DNS, TLS and a reverse proxy
+forward `https://<domain>` to `127.0.0.1:8000`, and that `/admin` is restricted at
+the proxy. If any of that is missing, prefer private mode.
+
+### Phase 1 — Start
+
+Check that the loopback port is free, then run (public):
+
+```bash
+python3 scripts/node_setup.py start --public-url https://node.example --ln-address user@wallet.example
+```
+
+or private (nothing published):
+
+```bash
+python3 scripts/node_setup.py start --private
+```
+
+If another service owns port 8000, keep it untouched and pass `--port 18080`; use
+that port for `check`, the dashboard URL, the reverse proxy and later
+`ROUTSTR_NODE_PORT=18080 docker compose -f compose.node.yml …` commands.
+
+`start` prepares `.env` (never clobbering existing values), starts
+`compose.node.yml` (loopback only, no Tor, analytics off on first boot), waits for the local
+`/v1/info` and `/v1/models`, generates the master key and Nostr identity, and — in
+public mode — publishes the listing. It also mints a long-lived CLI token and
+writes it to `~/.routstr/config.json` (0600) for the Routstr CLI; skip that with
+`--no-cli-token`. If that file already points at another node, `start` leaves it
+alone and creates no token (see the Routstr CLI section below). A running API with zero models is **not configured**.
+
+### Phase 2 — Back up (operator, before configuring)
+
+The master key and identity exist as soon as the node boots. Have the operator
+copy `routstr_secret.key`, `keys.db` (with any `-wal`/`-shm` sidecars), `.wallet/`
+(created on first ecash activity, so absent on a fresh node) and `.env` into an encrypted off-host backup, with a tested isolated restore. The
+master key decrypts the `nsec` stored in `keys.db`; keep them together:
+
+```bash
+docker compose -f compose.node.yml exec routstr /.venv/bin/python scripts/reveal_nsec.py
+```
+
+Do not ingest the revealed `nsec` or any logs into the agent context.
+
+### Phase 3 — Dashboard (operator)
+
+Hand the operator the dashboard address (`https://node.example/admin` in public
+mode, or `http://127.0.0.1:8000/admin` over an SSH tunnel). Have them read the
+generated password privately from
+`docker compose -f compose.node.yml logs routstr`, log in, and immediately rotate
+it in Settings → Admin Settings. Then add the upstream in Providers, enable at
+least one routable model, and review pricing, payout address, mints and relays.
+
+### Phase 4 — Verify and accept
+
+```bash
+python3 scripts/node_setup.py check --public-url https://node.example
+```
+
+Require exit code 0 and a nonzero public model count (exit code 2 means the API is
+running but not configured). If it fails, diagnose without printing provider
+records or secrets. This proves discovery only — it is **not** a paid-inference
+test.
+
+With explicit approval of model, mint, prompt and spending limit, have the
+operator run small paid non-streaming and streaming inference tests with a funded
+client credential (not an admin token). Verify completion, accounting, upstream
+serving, refund status and payout separately. Do not claim production acceptance
+without these checks.
+
+## Routstr CLI
+
+The setup writes a long-lived admin token to `~/.routstr/config.json` (0600), so
+the [Routstr CLI](https://github.com/routstr/routstr-cli) is ready to operate the
+node. If that file already pointed at another node, `start` left it alone and
+minted no token. The CLI only reads `$HOME/.routstr/config.json`, so re-run `start`
+with `--cli-config /some/dir/.routstr/config.json` and run the CLI as
+`HOME=/some/dir routstr …`:
+
+```bash
+git clone https://github.com/routstr/routstr-cli.git
+cd routstr-cli && bun install
+
+routstr instruct          # canonical agent guide for this node
+routstr schema            # full command tree as JSON
+routstr status
+routstr providers list
+routstr providers add openrouter --api-key <key> --base-url https://openrouter.ai/api/v1
+```
+
+The token is **full node admin**. Give each agent its own named, expiring token
+and revoke it when done (**Settings → CLI Tokens**, or
+`DELETE /admin/api/cli-tokens/{id}`). On a different machine, configure the CLI
+with `routstr init --node-url <url> --token <token>`. Mint another token with
+`docker compose -f compose.node.yml exec routstr /.venv/bin/python scripts/create_cli_token.py --name agent`.
+Never paste the token, or the generated admin password, into a chat.
+
+## Private mode (no public URL yet)
+
+Everything above holds, except `HTTP_URL` is unset: the node is loopback-only and
+publishes nothing. Administer it over an SSH tunnel, and promote it later by
+setting the public **HTTP URL** in the dashboard (the listing is then published
+automatically). Approve publication with the operator before doing so.
+
+## Handoff
+
+Report ref/version, private/public reachability, whether password rotation was
+confirmed (never the password), model count, backup/restore and paid-inference
+verification status, and remaining blockers. "Local API ready" and "production
+accepted" are separate outcomes. Never paste raw Docker logs or admin responses.
