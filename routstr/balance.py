@@ -20,10 +20,12 @@ from .core.db import (
 )
 from .core.logging import get_logger
 from .core.settings import settings
+from .foreign_mint_swap import swap_in_and_credit
 from .lightning import lightning_router
 from .wallet import (
     classify_redemption_error,
     credit_balance,
+    is_trusted_source_mint,
     recieve_token,
     token_mint_url,
 )
@@ -159,7 +161,7 @@ async def topup_wallet_endpoint(
     topup_request: TopupRequest | None = None,
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
-) -> dict[str, int]:
+) -> dict[str, int | str]:
     billing_key = key
 
     if topup_request is not None:
@@ -177,13 +179,25 @@ async def topup_wallet_endpoint(
         extra={
             "event": "cashu_topup_started",
             "source_mint": source_mint,
-            "primary_mint": settings.primary_mint,
             "trusted_mints": settings.cashu_mints,
             "key_hash": billing_key.hashed_key[:8],
         },
     )
+    response: dict[str, int | str] = {}
     try:
-        amount_msats = await credit_balance(cashu_token, billing_key, session)
+        if source_mint != "unknown" and not is_trusted_source_mint(source_mint):
+            # Top-up is the only entry point that swaps: the caller is already
+            # waiting on a long operation here, unlike bearer auth or X-Cashu.
+            swap_result = await swap_in_and_credit(cashu_token, billing_key, session)
+            amount_msats = swap_result.credited_msats
+            if swap_result.change_token:
+                response.update(
+                    change_token=swap_result.change_token,
+                    change_amount=swap_result.change_amount,
+                    change_unit=str(swap_result.change_unit),
+                )
+        else:
+            amount_msats = await credit_balance(cashu_token, billing_key, session)
     except Exception as e:
         # Shared taxonomy so top-up matches the bearer/X-Cashu paths (503 for an
         # unreachable mint, 422 for fee/swap failures, 400 for token faults).
@@ -194,7 +208,6 @@ async def topup_wallet_endpoint(
                 extra={
                     "event": "cashu_topup_failed",
                     "source_mint": source_mint,
-                    "primary_mint": settings.primary_mint,
                     "trusted_mints": settings.cashu_mints,
                     "error_chain": _error_chain(e),
                 },
@@ -206,7 +219,6 @@ async def topup_wallet_endpoint(
             extra={
                 "event": "cashu_topup_failed",
                 "source_mint": source_mint,
-                "primary_mint": settings.primary_mint,
                 "trusted_mints": settings.cashu_mints,
                 "status_code": status_code,
                 "error_type": error_type,
@@ -225,7 +237,8 @@ async def topup_wallet_endpoint(
             "key_hash": billing_key.hashed_key[:8],
         },
     )
-    return {"msats": amount_msats}
+    response["msats"] = amount_msats
+    return response
 
 
 async def _lookup_key_no_create(

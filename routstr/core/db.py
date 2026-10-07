@@ -628,6 +628,63 @@ class Refund(SQLModel, table=True):  # type: ignore
     updated_at: int = Field(default_factory=lambda: int(time.time()))
 
 
+# Swap rows the reconciler still owns: the melt was dispatched and its outcome
+# or follow-up (mint, credit, token issue) is not final.
+SWAP_OPEN_STATUSES = ("melting", "ambiguous", "melted", "minted", "issued")
+
+
+class CashuSwap(SQLModel, table=True):  # type: ignore
+    """Journal of one cross-mint swap, written before any Lightning payment.
+
+    ``in`` swaps melt a token from a mint the operator does not trust into the
+    preferred trusted mint and credit an API key. ``out`` swaps melt owner
+    proofs on that trusted mint to issue a refund token on the user's own mint.
+    Every money movement is recorded here first so a crash or timeout leaves a row the
+    reconciler can finish or fail, never an unknown balance.
+    """
+
+    __tablename__ = "cashu_swaps"
+
+    id: str = Field(primary_key=True, default_factory=lambda: uuid.uuid4().hex)
+    direction: str = Field(description="in (token -> primary) or out (refund)")
+    status: str = Field(
+        default="melting",
+        index=True,
+        description=(
+            "melting, ambiguous, melted, minted, credited, issued, settled, failed"
+        ),
+    )
+    api_key_hashed_key: str | None = Field(
+        default=None, foreign_key="api_keys.hashed_key", index=True
+    )
+    refund_id: str | None = Field(default=None, index=True)
+    token_hash: str | None = Field(
+        default=None,
+        index=True,
+        unique=True,
+        description="sha256 of the incoming token",
+    )
+    source_mint: str = Field()
+    source_unit: str = Field()
+    source_amount: int = Field(description="Gross amount leaving the source mint")
+    destination_mint: str = Field()
+    destination_unit: str = Field()
+    destination_amount: int = Field(description="Net amount minted at the destination")
+    fee_reserve: int = Field(default=0)
+    input_fees: int = Field(default=0)
+    mint_quote_id: str | None = Field(default=None)
+    melt_quote_id: str | None = Field(default=None)
+    token: str | None = Field(default=None, description="Issued token (out swaps)")
+    change_token: str | None = Field(
+        default=None,
+        description="Unused inbound melt fee reserve returned on the source mint",
+    )
+    error: str | None = Field(default=None)
+    claimed_at: int | None = Field(default=None, description="Reconciler lease")
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    updated_at: int = Field(default_factory=lambda: int(time.time()))
+
+
 async def store_cashu_transaction(
     token: str,
     amount: int,
