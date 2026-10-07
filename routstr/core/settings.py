@@ -782,16 +782,16 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
             if result.rowcount == 1:
                 settings.nsec = generated_nsec
                 settings.npub = generated_npub
-                # Print to stdout rather than the logger, like the generated
-                # admin password: the operator must see the nsec once to back it
-                # up, but it must not land in the on-disk log files.
+                # Announce only the public identity. stdout is captured by
+                # `docker compose logs`, so the nsec must never be echoed there;
+                # the operator retrieves it on demand with
+                # scripts/reveal_nsec.py (which needs ROUTSTR_SECRET_KEY).
                 print(
-                    "No Nostr identity configured; generated one (shown only "
-                    "now — back it up):\n"
+                    "No Nostr identity configured; generated one and stored it "
+                    "encrypted in the database.\n"
                     f"  npub: {generated_npub}\n"
-                    f"  nsec: {generated_nsec}\n"
-                    "The nsec is stored encrypted in the database; losing the "
-                    "database without this backup loses the node's identity.",
+                    "Retrieve the nsec later with scripts/reveal_nsec.py "
+                    "(requires ROUTSTR_SECRET_KEY).",
                     flush=True,
                 )
             elif secret.encrypted_nsec:

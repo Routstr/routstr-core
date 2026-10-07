@@ -29,11 +29,12 @@ first boot when none is configured — no dashboard step required. The bundled
 `compose.yml` enables this by default, so a fresh stack starts announcing as soon
 as it has a reachable endpoint (the Tor service supplies one automatically).
 
-The generated `nsec` is printed once at startup and stored encrypted at rest. Copy
-it somewhere safe: it is the node's identity, and losing the database without that
-backup loses it. A node that already has an identity — a provided `NSEC` seed or an
-nsec saved in the dashboard — is never regenerated, and an identity you intentionally
-clear in the dashboard stays cleared.
+Only the generated `npub` is logged at startup; the `nsec` is stored encrypted at
+rest and never printed. Retrieve it when you need to back it up with
+`python scripts/reveal_nsec.py` (requires `ROUTSTR_SECRET_KEY`). It is the node's
+identity: back up the database and the master key together. A node that already has
+an identity — a provided `NSEC` seed or an nsec saved in the dashboard — is never
+regenerated, and an identity you intentionally clear in the dashboard stays cleared.
 
 ---
 

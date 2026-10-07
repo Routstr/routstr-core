@@ -229,8 +229,9 @@ async def test_auto_generates_nsec_when_enabled(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # A fresh node with no configured identity and AUTO_GENERATE_NSEC on should
-    # provision one itself: stored encrypted, live in memory, npub derived, and
-    # shown once to the operator so it can be backed up.
+    # provision one itself: stored encrypted, live in memory, and announced by
+    # its npub. The nsec itself must never reach stdout (captured by
+    # `docker compose logs`); it is retrieved on demand via the reveal script.
     monkeypatch.setattr(settings, "auto_generate_nsec", True)
 
     await bootstrap_secrets(integration_session)
@@ -245,8 +246,8 @@ async def test_auto_generates_nsec_when_enabled(
     assert settings.npub == derive_npub_from_nsec(generated)
 
     out = capsys.readouterr().out
-    assert generated in out  # the one-time backup copy
     assert settings.npub in out
+    assert generated not in out
 
 
 @pytest.mark.asyncio

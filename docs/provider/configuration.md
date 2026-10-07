@@ -268,7 +268,7 @@ Use environment variables for:
 | `DESCRIPTION`        | Node description                  | `A Routstr Node`                     |
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
 | `NSEC`               | Legacy seed for the Nostr private key (otherwise set from the admin UI) | —                |
-| `AUTO_GENERATE_NSEC` | Generate a Nostr identity on first boot when none is configured (the generated nsec is logged once to back up; a provided `NSEC` wins) | `false` |
+| `AUTO_GENERATE_NSEC` | Generate a Nostr identity on first boot when none is configured (stored encrypted, never printed; retrieve it with `scripts/reveal_nsec.py`; a provided `NSEC` wins) | `false` |
 | `ENABLE_ANALYTICS_SHARING` | Enable usage analytics sharing to Nostr | `true`                         |
 | `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin,https://mint.cubabitcoin.org` |
 | `MINT_OPERATION_CONCURRENCY` | Concurrent mint/unit balance reads | `4` |
