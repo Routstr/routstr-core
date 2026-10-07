@@ -1,6 +1,7 @@
 """Offline contracts for the first-run node workflow."""
 
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -175,8 +176,12 @@ class NodeSetupTests(unittest.TestCase):
                 with patch.object(node_setup, "preflight_origin"):
                     with patch.object(node_setup, "prepare_env", return_value=False):
                         with patch.object(node_setup.subprocess, "run"):
-                            with patch.object(node_setup, "probe", return_value=("Node", 1)):
-                                self.assertEqual(node_setup.main(), 0)
+                            local_ok_public_down = [("Node", 1), urllib.error.URLError("down")]
+                            with patch.object(node_setup, "probe", side_effect=local_ok_public_down) as probe:
+                                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                                    self.assertEqual(node_setup.main(), 0)
+                                self.assertEqual(probe.call_args_list[1].args[0], "https://node.example")
+                                self.assertIn("did not serve /v1/info yet", stderr.getvalue())
 
     def test_preflight_rejects_dead_origin(self) -> None:
         with patch.object(node_setup.urllib.request, "urlopen", side_effect=urllib.error.URLError("no dns")):
