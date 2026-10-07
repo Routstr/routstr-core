@@ -367,8 +367,8 @@ def classify_redemption_error(
         return (
             "swap_busy",
             503,
-            "Another swap against this token's mint is in progress; nothing was "
-            "spent, retry in a few seconds",
+            "Cross-mint swaps are busy (this token's mint or the node-wide "
+            "limit); nothing was spent, retry in a few seconds",
             "cashu_swap_busy",
         )
     if isinstance(error, ForeignMintUnavailableError):

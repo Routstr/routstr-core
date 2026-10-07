@@ -205,7 +205,8 @@ credited (and from the refund). Following Cashu NUT-08 wallet behavior, any
 unused inbound fee reserve is returned in the top-up response as
 `change_token`, with `change_amount` and `change_unit`, and kept on the swap
 row (`cashu_swaps.change_token`). The caller should store that token because it
-remains redeemable on the foreign mint.
+remains redeemable on the foreign mint. Change is only returned on an immediate
+200; swaps the reconciler finishes later do not build or return change.
 
 ### Lightning Withdrawals
 

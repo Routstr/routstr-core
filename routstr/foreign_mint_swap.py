@@ -9,8 +9,9 @@ three things apart that were mixed before:
   client-supplied URL.
 * **Foreign-mint I/O** runs outside ``wallet_operation_guard`` under its own
   budget: one attempt, a short deadline, a process-wide concurrency cap and a
-  per-mint file lock. A dead or hostile mint can stall its own swap, nothing
-  else.
+  per-mint file lock. A dead or hostile mint stalls its own swap and, while
+  its melts hold global slots, other foreign-mint swaps (refused with a
+  retryable busy error); trusted-mint top-ups are never affected.
 * **Wallet mutation** (minting on a trusted mint, crediting a key) runs under
   the guard as before, but only after the Lightning leg has settled.
 
@@ -546,6 +547,12 @@ async def swap_in_and_credit(
                 timeout=settings.foreign_mint_melt_timeout_seconds,
                 cooldown_on_timeout=False,
             )
+        except ForeignMintBusyError:
+            # Refused before dispatch: the melt never reached the mint.
+            await _update(
+                swap, status="failed", token_hash=None, error="foreign-mint budget busy"
+            )
+            raise
         except ForeignMintUnavailableError as error:
             # Dispatched, outcome unknown: the Lightning payment may still land.
             await _update(swap, status="ambiguous", error=str(error))
@@ -1121,7 +1128,18 @@ async def reconcile_swaps_once() -> None:
                 col(CashuSwap.claimed_at).is_(None)
                 | (col(CashuSwap.claimed_at) < cutoff)
             )
-            .order_by(col(CashuSwap.created_at))
+            # Melts are only queried once they age past the cutoff; younger
+            # rows must not take batch slots from rows that are due.
+            .where(
+                col(CashuSwap.status).not_in(("melting", "ambiguous"))
+                | (col(CashuSwap.updated_at) <= cutoff)
+            )
+            # Least recently attempted first: rows that never resolve cannot
+            # keep newer rows out of the batch.
+            .order_by(
+                col(CashuSwap.claimed_at).asc().nulls_first(),
+                col(CashuSwap.created_at),
+            )
             .limit(RECONCILE_BATCH_LIMIT)
         )
         stale = list(result.all())
@@ -1146,7 +1164,10 @@ async def reconcile_swaps_once() -> None:
                 exc_info=True,
             )
         finally:
-            await _update(swap, claimed_at=None, updated_at=swap.updated_at)
+            # A row that stays open keeps its lease stamp as its last attempt,
+            # which the batch orders by, so it rotates behind newer rows.
+            if swap.status not in SWAP_OPEN_STATUSES:
+                await _update(swap, claimed_at=None, updated_at=swap.updated_at)
 
 
 async def periodic_swap_reconcile() -> None:

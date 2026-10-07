@@ -585,7 +585,9 @@ the caller instead of being retained by the node:
 ```
 
 Store `change_token`; it remains redeemable on the mint that issued the input
-token. The change fields are omitted when the mint returns no change.
+token. The change fields are omitted when the mint returns no change. Change is
+only returned when the swap completes within the request (HTTP 200); a swap
+that answers 409 and is finished later by the node does not return change.
 
 ### Refund Balance
 

@@ -612,6 +612,34 @@ async def test_definitive_melt_failure_allows_same_token_to_be_retried(
 
 
 @pytest.mark.asyncio
+async def test_swap_in_busy_melt_slot_fails_without_consuming_token(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    key = await _make_key(session)
+    foreign = _ForeignWallet()
+    primary = _PrimaryWallet()
+    real_run = fms.run_foreign_mint_operation
+
+    async def slots_full_at_melt(factory: Any, **kwargs: Any) -> Any:
+        if kwargs["op_name"] == "swap_melt":
+            raise ForeignMintBusyError("Foreign-mint budget exhausted; retry later")
+        return await real_run(factory, **kwargs)
+
+    async with _swap_env(foreign, primary, _token(1000)):
+        with patch.object(fms, "run_foreign_mint_operation", slots_full_at_melt):
+            with pytest.raises(ForeignMintBusyError):
+                await fms.swap_in_and_credit("cashuAbusy", key, session)
+        foreign.melt.assert_not_awaited()
+        (row,) = await _swap_rows(session)
+        assert (row.status, row.token_hash) == ("failed", None)
+
+        credited = await fms.swap_in_and_credit("cashuAbusy", key, session)
+
+    assert credited.credited_msats == 994_000
+    foreign.melt.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_swap_in_rejects_replayed_token(
     engine: AsyncEngine, session: AsyncSession
 ) -> None:
@@ -792,6 +820,56 @@ async def test_reconciler_leaves_fresh_rows_alone(
         ):
             await fms.reconcile_swaps_once()
     foreign.get_melt_quote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reconciler_rotates_past_rows_that_never_resolve(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    key = await _make_key(session)
+    old = int(time.time()) - 10_000
+    for index, quote in enumerate(("stuck-1", "stuck-2", "paid")):
+        await fms._save(
+            CashuSwap(
+                direction="in",
+                status="ambiguous",
+                api_key_hashed_key=key.hashed_key,
+                token=f"cashuA{quote}",
+                token_hash=quote,
+                source_mint=FOREIGN,
+                source_unit="sat",
+                source_amount=1000,
+                destination_mint=PRIMARY,
+                destination_unit="sat",
+                destination_amount=994,
+                mint_quote_id=f"mint-{quote}",
+                melt_quote_id=f"melt-{quote}",
+                created_at=old + index,
+                updated_at=old,
+            )
+        )
+    foreign = _ForeignWallet()
+    foreign.get_melt_quote.side_effect = lambda quote_id: SimpleNamespace(
+        state=MeltQuoteState.paid if quote_id == "melt-paid" else MeltQuoteState.pending
+    )
+    primary = _PrimaryWallet()
+    async with _swap_env(foreign, primary, _token()):
+        with patch.object(fms, "RECONCILE_BATCH_LIMIT", 2):
+            await fms.reconcile_swaps_once()
+            await fms.reconcile_swaps_once()
+
+    assert [call.args[0] for call in foreign.get_melt_quote.await_args_list] == [
+        "melt-stuck-1",
+        "melt-stuck-2",
+        "melt-paid",
+    ]
+    await session.refresh(key)
+    assert key.balance == 994_000
+    rows = {row.token_hash: row for row in await _swap_rows(session)}
+    assert rows["paid"].status == "credited"
+    assert rows["paid"].claimed_at is None
+    assert rows["stuck-1"].status == "ambiguous"
+    assert rows["stuck-1"].claimed_at is not None
 
 
 # --- refund back to the user's mint -------------------------------------------
