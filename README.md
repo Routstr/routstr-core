@@ -88,6 +88,12 @@ python3 scripts/node_setup.py check --public-url https://node.example
 - Port 8000 taken? Pass `--port 18080` and point the proxy at it.
 - Use `docker compose -f compose.node.yml ...` for every later Compose command.
   Plain `docker compose up` selects the **different** public/Tor stack.
+- `start` also mints a long-lived CLI token and writes `~/.routstr/config.json`
+  (mode `0600`) so the
+  [Routstr CLI](https://github.com/routstr/routstr-cli) can operate the node
+  (`routstr instruct`, `routstr providers list`, ...). The token is full node
+  admin; revoke it in **Settings → CLI Tokens** when done (`--no-cli-token`
+  skips creation).
 
 See the [provider quickstart](docs/provider/quickstart.md) and the
 [deployment guide](docs/provider/deployment.md) for publishing, backups and

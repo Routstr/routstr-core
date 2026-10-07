@@ -206,6 +206,56 @@ def preflight_origin(origin: str) -> None:
         ) from exc
 
 
+def _create_cli_token(
+    compose_env: dict[str, str], name: str, expires_in_days: int | None
+) -> str:
+    """Mint a long-lived CLI token inside the running container."""
+    command = [
+        *COMPOSE,
+        "exec",
+        "-T",
+        "routstr",
+        "/.venv/bin/python",
+        "scripts/create_cli_token.py",
+        "--name",
+        name,
+        "--print-token",
+        "--replace",
+    ]
+    if expires_in_days is not None:
+        command += ["--expires-in-days", str(expires_in_days)]
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        env=compose_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError("create_cli_token.py produced no token")
+    return lines[-1]
+
+
+def _write_cli_config(path: Path, node_url: str, token: str) -> None:
+    """Merge the node URL and token into the Routstr CLI config (mode 0600)."""
+    data: dict[str, Any] = {}
+    try:
+        loaded = json.loads(path.read_text())
+        if isinstance(loaded, dict):
+            data = loaded
+    except (OSError, ValueError):
+        data = {}
+    data["node_url"] = node_url
+    data["token"] = token
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(json.dumps(data, indent=2) + "\n")
+    os.chmod(path, 0o600)
+
+
 def _wait_ready(local_url: str, timeout: float = 180.0) -> tuple[str, int]:
     deadline = time.monotonic() + timeout
     while True:
@@ -289,6 +339,34 @@ def _start(args: argparse.Namespace, local_url: str) -> int:
             file=sys.stderr,
         )
 
+    if not args.no_cli_token:
+        node_url = public_origin or local_url
+        try:
+            token = _create_cli_token(
+                compose_env, args.cli_token_name, args.cli_token_expires_in_days
+            )
+            _write_cli_config(args.cli_config, node_url, token)
+            print(
+                f"CLI configured: {args.cli_config} → {node_url} "
+                f"(token '{args.cli_token_name}')."
+            )
+            print(
+                "  This token is full node admin; revoke it in Settings → CLI Tokens "
+                "when you are done."
+            )
+        except (
+            subprocess.CalledProcessError,
+            OSError,
+            ValueError,
+            RuntimeError,
+        ) as exc:
+            print(
+                "Warning: could not create a CLI token automatically "
+                f"({type(exc).__name__}); create one from the dashboard "
+                "(Settings → CLI Tokens).",
+                file=sys.stderr,
+            )
+
     print(
         "Phase 2 — back up before configuring: routstr_secret.key, keys.db and "
         ".wallet/. The key decrypts the nsec stored in keys.db."
@@ -349,6 +427,27 @@ def main() -> int:
     parser.add_argument(
         "--port", type=int, default=DEFAULT_PORT, help="loopback host port (default: 8000)"
     )
+    parser.add_argument(
+        "--no-cli-token",
+        action="store_true",
+        help="do not create a long-lived CLI token or write the CLI config",
+    )
+    parser.add_argument(
+        "--cli-token-name",
+        default="node_setup",
+        help="name for the generated CLI token (default: node_setup)",
+    )
+    parser.add_argument(
+        "--cli-token-expires-in-days",
+        type=int,
+        help="expire the generated CLI token after N days (default: never)",
+    )
+    parser.add_argument(
+        "--cli-config",
+        type=Path,
+        default=Path.home() / ".routstr" / "config.json",
+        help="where to write the Routstr CLI config",
+    )
     args = parser.parse_args()
 
     if not 1 <= args.port <= 65535:
@@ -357,8 +456,18 @@ def main() -> int:
         parser.error("--min-payout-sat must be positive")
     if args.payout_interval is not None and args.payout_interval <= 0:
         parser.error("--payout-interval must be positive")
+    if (
+        args.cli_token_expires_in_days is not None
+        and args.cli_token_expires_in_days <= 0
+    ):
+        parser.error("--cli-token-expires-in-days must be positive")
     if args.action == "check" and (
-        args.private or args.ln_address or args.min_payout_sat or args.payout_interval
+        args.private
+        or args.ln_address
+        or args.min_payout_sat
+        or args.payout_interval
+        or args.no_cli_token
+        or args.cli_token_expires_in_days
     ):
         parser.error("check accepts only --public-url and --port")
     if args.action == "start" and args.private and args.public_url:

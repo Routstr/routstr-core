@@ -1,6 +1,7 @@
 """Offline contracts for the first-run node workflow."""
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -130,7 +131,7 @@ class NodeSetupTests(unittest.TestCase):
                 node_setup.main()
 
     def test_private_start_passes_selected_port_to_compose(self) -> None:
-        with patch.object(sys, "argv", ["node_setup.py", "start", "--private", "--port", "18080"]):
+        with patch.object(sys, "argv", ["node_setup.py", "start", "--private", "--no-cli-token", "--port", "18080"]):
             with patch.object(node_setup.shutil, "which", return_value="/usr/bin/docker"):
                 with patch.object(node_setup, "prepare_env", return_value=False) as prepare:
                     with patch.object(node_setup.subprocess, "run") as run:
@@ -147,6 +148,7 @@ class NodeSetupTests(unittest.TestCase):
             "start",
             "--public-url",
             "https://node.example/",
+            "--no-cli-token",
             "--ln-address",
             "me@wallet.example",
             "--min-payout-sat",
@@ -168,7 +170,7 @@ class NodeSetupTests(unittest.TestCase):
                                     self.assertEqual(probe.call_args_list[0].args[0], "http://127.0.0.1:8000")
 
     def test_public_start_does_not_block_on_unreachable_origin(self) -> None:
-        with patch.object(sys, "argv", ["node_setup.py", "start", "--public-url", "https://node.example"]):
+        with patch.object(sys, "argv", ["node_setup.py", "start", "--public-url", "https://node.example", "--no-cli-token"]):
             with patch.object(node_setup.shutil, "which", return_value="/usr/bin/docker"):
                 with patch.object(node_setup, "preflight_origin"):
                     with patch.object(node_setup, "prepare_env", return_value=False):
@@ -180,6 +182,65 @@ class NodeSetupTests(unittest.TestCase):
         with patch.object(node_setup.urllib.request, "urlopen", side_effect=urllib.error.URLError("no dns")):
             with self.assertRaises(RuntimeError):
                 node_setup.preflight_origin("https://node.example")
+
+    def test_public_start_writes_cli_config(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / ".routstr" / "config.json"
+            argv = [
+                "node_setup.py",
+                "start",
+                "--public-url",
+                "https://node.example",
+                "--cli-config",
+                str(config),
+            ]
+            with patch.object(sys, "argv", argv):
+                with patch.object(node_setup.shutil, "which", return_value="/usr/bin/docker"):
+                    with patch.object(node_setup, "preflight_origin"):
+                        with patch.object(node_setup, "prepare_env", return_value=False):
+                            with patch.object(node_setup.subprocess, "run"):
+                                with patch.object(node_setup, "_create_cli_token", return_value="secret-token") as mint:
+                                    with patch.object(node_setup, "probe", return_value=("Node", 1)):
+                                        self.assertEqual(node_setup.main(), 0)
+                                    mint.assert_called_once()
+            data = json.loads(config.read_text())
+            self.assertEqual(data["token"], "secret-token")
+            self.assertEqual(data["node_url"], "https://node.example")
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_start_skips_cli_token_with_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "config.json"
+            argv = [
+                "node_setup.py",
+                "start",
+                "--private",
+                "--no-cli-token",
+                "--cli-config",
+                str(config),
+            ]
+            with patch.object(sys, "argv", argv):
+                with patch.object(node_setup.shutil, "which", return_value="/usr/bin/docker"):
+                    with patch.object(node_setup, "prepare_env", return_value=False):
+                        with patch.object(node_setup.subprocess, "run"):
+                            with patch.object(node_setup, "_create_cli_token") as mint:
+                                with patch.object(node_setup, "probe", return_value=("Node", 0)):
+                                    self.assertEqual(node_setup.main(), 0)
+                                mint.assert_not_called()
+            self.assertFalse(config.exists())
+
+    def test_write_cli_config_merges_and_chmods(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "cfg" / "config.json"
+            config.parent.mkdir(parents=True)
+            config.write_text(json.dumps({"keep": "me", "node_url": "http://old"}))
+            node_setup._write_cli_config(config, "https://node.example", "tok")
+            data = json.loads(config.read_text())
+            self.assertEqual(
+                data,
+                {"keep": "me", "node_url": "https://node.example", "token": "tok"},
+            )
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
 
     def test_first_boot_compose_is_loopback_with_auto_identity(self) -> None:
         config = (SCRIPT.parent.parent / "compose.node.yml").read_text()

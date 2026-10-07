@@ -93,7 +93,12 @@ python3 scripts/node_setup.py start \
 - **auto-generates the node's secrets** — the master key `routstr_secret.key` and
   the Nostr `nsec` (stored encrypted, never printed; only its `npub` is logged);
 - waits up to three minutes for the local API, then **publishes the kind `38421`
-  listing on its first announce pass** and prints the remaining phases.
+  listing on its first announce pass** and prints the remaining phases;
+- mints a long-lived **CLI token** and writes it to `~/.routstr/config.json`
+  (mode `0600`) so the [Routstr CLI](https://github.com/routstr/routstr-cli) works
+  immediately. The token is full node admin — see
+  [Connect the Routstr CLI](#connect-the-routstr-cli). Opt out with
+  `--no-cli-token`.
 
 **Private mode (opt-out):**
 
@@ -112,6 +117,10 @@ nothing**. Set a public URL in the dashboard later to go live.
 | `--ln-address ADDR` | payout Lightning address (`user@host`, `lnurl1…`, or an `https://` LNURL-pay URL) |
 | `--min-payout-sat N` | minimum payout balance in sats (default `210`) |
 | `--payout-interval N` | seconds between payout checks (default `900`) |
+| `--cli-config PATH` | where to write the CLI config (default `~/.routstr/config.json`) |
+| `--cli-token-name NAME` | label for the generated token (default `node_setup`) |
+| `--cli-token-expires-in-days N` | expire the CLI token after `N` days (default: never) |
+| `--no-cli-token` | skip creating the CLI token / CLI config |
 
 The payout address is validated at setup (a `user@host` address is resolved to
 `/.well-known/lnurlp/…`), but **saved is not tested** — verify an actual payout
@@ -199,6 +208,39 @@ docker compose -f compose.node.yml exec routstr \
 ```
 
 Never delete volumes or wallet state to fix a login problem.
+
+### Connect the Routstr CLI
+
+`start` already minted a long-lived token and wrote it to
+`~/.routstr/config.json`, so the [Routstr CLI](https://github.com/routstr/routstr-cli)
+works with no further setup:
+
+```bash
+git clone https://github.com/routstr/routstr-cli.git
+cd routstr-cli
+bun install
+
+routstr instruct        # canonical agent guide for this node
+routstr status
+routstr providers list
+routstr providers add openrouter --api-key sk-or-... --base-url https://openrouter.ai/api/v1
+```
+
+If the CLI runs on a **different machine** than the node, copy the token and
+configure it there instead:
+
+```bash
+routstr init --node-url https://node.example --token <token>
+```
+
+The token is full node admin. Revoke it in **Settings → CLI Tokens** (or
+`DELETE /admin/api/cli-tokens/{id}`) when you are done; give agents their own
+named, expiring token rather than sharing yours. To mint another one directly:
+
+```bash
+docker compose -f compose.node.yml exec routstr \
+  /.venv/bin/python scripts/create_cli_token.py --name agent
+```
 
 ---
 

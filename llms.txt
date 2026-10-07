@@ -62,8 +62,9 @@ that port for `check`, the dashboard URL, the reverse proxy and later
 `start` prepares `.env` (never clobbering existing values), starts
 `compose.node.yml` (loopback only, no Tor, analytics off), waits for the local
 `/v1/info` and `/v1/models`, generates the master key and Nostr identity, and — in
-public mode — publishes the listing. A running API with zero models is **not
-configured**.
+public mode — publishes the listing. It also mints a long-lived CLI token and
+writes it to `~/.routstr/config.json` (0600) for the Routstr CLI; skip that with
+`--no-cli-token`. A running API with zero models is **not configured**.
 
 ### Phase 2 — Back up (operator, before configuring)
 
@@ -103,6 +104,30 @@ operator run small paid non-streaming and streaming inference tests with a funde
 client credential (not an admin token). Verify completion, accounting, upstream
 serving, refund status and payout separately. Do not claim production acceptance
 without these checks.
+
+## Routstr CLI
+
+The setup writes a long-lived admin token to `~/.routstr/config.json` (0600), so
+the [Routstr CLI](https://github.com/routstr/routstr-cli) is ready to operate the
+node:
+
+```bash
+git clone https://github.com/routstr/routstr-cli.git
+cd routstr-cli && bun install
+
+routstr instruct          # canonical agent guide for this node
+routstr schema            # full command tree as JSON
+routstr status
+routstr providers list
+routstr providers add openrouter --api-key <key> --base-url https://openrouter.ai/api/v1
+```
+
+The token is **full node admin**. Give each agent its own named, expiring token
+and revoke it when done (**Settings → CLI Tokens**, or
+`DELETE /admin/api/cli-tokens/{id}`). On a different machine, configure the CLI
+with `routstr init --node-url <url> --token <token>`. Mint another token with
+`docker compose -f compose.node.yml exec routstr /.venv/bin/python scripts/create_cli_token.py --name agent`.
+Never paste the token, or the generated admin password, into a chat.
 
 ## Private mode (no public URL yet)
 

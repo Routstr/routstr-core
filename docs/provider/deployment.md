@@ -115,6 +115,10 @@ python3 scripts/node_setup.py start --private
   identity, then waits up to three minutes for `/v1/info` and `/v1/models` on the
   loopback port (the first build itself can take longer). Public mode publishes
   the listing; private mode publishes nothing.
+- mints a long-lived **CLI token** and writes `~/.routstr/config.json` (0600) so
+  the [Routstr CLI](https://github.com/routstr/routstr-cli) can operate the node;
+  `--no-cli-token` skips it. The token is full node admin — revoke it in
+  **Settings → CLI Tokens** when you are done.
 
 If port 8000 already belongs to another service, leave that service alone and
 pick a free port:
