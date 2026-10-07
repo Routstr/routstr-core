@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -18,11 +19,13 @@ from .core import get_logger
 from .core.db import (
     ApiKey,
     AsyncSession,
+    ModelPathRow,
     ModelRow,
     UpstreamProviderRow,
     create_session,
 )
 from .core.error_scope import (
+    ERROR_SCOPE_HEADER,
     ERROR_SCOPE_UPSTREAM,
     UPSTREAM_ERROR_STATUS,
     UPSTREAM_UNAVAILABLE,
@@ -40,10 +43,17 @@ from .payment.helpers import (
 )
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
+from .upstream.cooldown import (
+    candidate_model_identity,
+    is_cooling_down,
+    provider_identity,
+    record_failure,
+)
 from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
 from .upstream.model_paths import (
     ModelPathSelector,
+    apply_model_path_pricing,
     decode_model_path,
     is_openrouter_base_url,
     public_model_id,
@@ -116,8 +126,6 @@ def get_candidates(
     if candidates := _provider_map.get(model_id_lower):
         return candidates
 
-    import re
-
     base_model_id = re.sub(r"-\d{8}$", "", model_id_lower)
     if base_model_id != model_id_lower:
         if candidates := _provider_map.get(base_model_id):
@@ -149,6 +157,44 @@ def _candidate_for_selector(
             continue
         return model_obj, upstream
     return None
+
+
+async def _price_pinned_endpoint(
+    session: AsyncSession,
+    selector: ModelPathSelector,
+    model_obj: Model,
+    upstream: BaseUpstreamProvider,
+) -> Model:
+    """Reprice ``model_obj`` with the pinned endpoint's own rates.
+
+    An OpenRouter endpoint can cost more than the model's default listing, and
+    ``/v1/models/paths`` quotes that endpoint's price, so the reservation and
+    token billing must use it too. Without a stored path row or a sats price
+    the request keeps the model's default pricing.
+    """
+    from .payment import price as price_module
+
+    sats_to_usd = price_module.SATS_USD_PRICE
+    if upstream.db_id is None or not sats_to_usd:
+        return model_obj
+    rows = (
+        await session.exec(
+            select(ModelPathRow).where(
+                ModelPathRow.upstream_provider_id == upstream.db_id,
+                ModelPathRow.endpoint_tag == selector.endpoint_tag,
+            )
+        )
+    ).all()
+    row = next(
+        (r for r in rows if _model_ids_match(r.model_id, selector.model_id)), None
+    )
+    if row is None:
+        logger.warning(
+            "No stored path for pinned endpoint; billing the model's default pricing",
+            extra={"model": selector.model_id, "endpoint": selector.endpoint_tag},
+        )
+        return model_obj
+    return apply_model_path_pricing(model_obj, row, upstream.provider_fee, sats_to_usd)
 
 
 def get_model_instance(model_id: str) -> Model | None:
@@ -271,6 +317,10 @@ _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     "completions": frozenset({"POST"}),
     "responses": frozenset({"POST"}),
     "messages": frozenset({"POST"}),
+    # Anthropic token-counting subroute; the proxy's allowlist is exact, so the
+    # "messages" entry above does not carry it. Clients (Claude Code, the
+    # Anthropic SDKs) call it before every request.
+    "messages/count_tokens": frozenset({"POST"}),
     "embeddings": frozenset({"POST"}),
     # TypeSafe System One decision endpoint: POST {state, model, questions}
     # -> {answers, usage}. Non-streaming, JSON in/out; billed from the
@@ -404,6 +454,18 @@ def _forwarding_allowed(path: str, method: str) -> bool:
 # deterministic rejection that fails identically on the next attempt.
 _RETRYABLE_UPSTREAM_5XX = frozenset({502, 503, 504})
 _UPSTREAM_5XX_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def _counts_toward_cooldown(status_code: int) -> bool:
+    """Provider faults and timeouts only — not client errors or rate limits."""
+    return status_code >= 500 or status_code == UPSTREAM_ERROR_STATUS
+
+
+def _upstream_response_failure(response: Response) -> bool:
+    return (
+        _counts_toward_cooldown(response.status_code)
+        and response.headers.get(ERROR_SCOPE_HEADER) == ERROR_SCOPE_UPSTREAM
+    )
 
 
 def _attribute_request(
@@ -681,6 +743,12 @@ async def _proxy(
                 },
             }
             request_body = json.dumps(request_body_dict).encode()
+            candidates = [
+                (
+                    await _price_pinned_endpoint(session, selector, *pinned),
+                    pinned[1],
+                )
+            ]
 
     if is_ehbp:
         candidates = [
@@ -710,6 +778,20 @@ async def _proxy(
                 request=request,
             )
 
+    # A provider that just failed this model repeatedly is skipped while some
+    # other candidate can serve it. An explicit route is never rerouted.
+    if selector is None:
+        healthy = [
+            candidate
+            for candidate in candidates
+            if not is_cooling_down(
+                provider_identity(candidate[1]),
+                candidate_model_identity(candidate[0], model_id),
+            )
+        ]
+        if healthy:
+            candidates = healthy
+
     # Reserve/max-cost checks use the best-ranked candidate; the failover loop
     # below rebinds (model_obj, upstream) per candidate so forwarding and
     # settlement always use the model of the provider actually being tried.
@@ -737,7 +819,7 @@ async def _proxy(
                             model_id,
                         )
                         continue
-                    return await forward_ehbp_x_cashu_request(
+                    response = await forward_ehbp_x_cashu_request(
                         request=request,
                         x_cashu_token=x_cashu,
                         path=path,
@@ -746,7 +828,7 @@ async def _proxy(
                         upstream=upstream,
                     )
                 elif is_responses_api:
-                    return await upstream.handle_x_cashu_responses(
+                    response = await upstream.handle_x_cashu_responses(
                         request,
                         x_cashu,
                         path,
@@ -755,7 +837,7 @@ async def _proxy(
                         request_body=request_body,
                     )
                 else:
-                    return await upstream.handle_x_cashu(
+                    response = await upstream.handle_x_cashu(
                         request,
                         x_cashu,
                         path,
@@ -763,6 +845,12 @@ async def _proxy(
                         model_obj,
                         request_body=request_body,
                     )
+                if _upstream_response_failure(response):
+                    record_failure(
+                        provider_identity(upstream),
+                        candidate_model_identity(model_obj, model_id),
+                    )
+                return response
             except UpstreamError as e:
                 logger.warning(
                     "Upstream %s failed (x-cashu) for model=%s: %s",
@@ -775,6 +863,13 @@ async def _proxy(
                         "status_code": e.status_code,
                     },
                 )
+                if e.scope == ERROR_SCOPE_UPSTREAM and _counts_toward_cooldown(
+                    e.status_code
+                ):
+                    record_failure(
+                        provider_identity(upstream),
+                        candidate_model_identity(model_obj, model_id),
+                    )
                 if i == len(candidates) - 1:
                     last_error = e
                 continue
@@ -1045,6 +1140,11 @@ async def _proxy(
                 break
 
             if response.status_code != 200:
+                if _upstream_response_failure(response):
+                    record_failure(
+                        provider_identity(upstream),
+                        candidate_model_identity(model_obj, model_id),
+                    )
                 # 424 is an upstream failure re-reported by error_scope.
                 # 502/503 are upstream errors, 429 rate limits.
                 should_retry = response.status_code in [
@@ -1132,6 +1232,13 @@ async def _proxy(
             raise
 
         except UpstreamError as e:
+            if e.scope == ERROR_SCOPE_UPSTREAM and _counts_toward_cooldown(
+                e.status_code
+            ):
+                record_failure(
+                    provider_identity(upstream),
+                    candidate_model_identity(model_obj, model_id),
+                )
             logger.warning(
                 "Upstream %s failed for model=%s: %s",
                 upstream.provider_type,

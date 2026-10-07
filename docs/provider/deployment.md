@@ -87,6 +87,13 @@ RECEIVE_LN_ADDRESS=me@walletofsatoshi.com
 The admin password is generated and logged once on first start; set
 `ADMIN_PASSWORD` only as a legacy seed for an existing deployment.
 
+The Nostr identity is also automatic: `compose.yml` sets
+`AUTO_GENERATE_NSEC=true`, so the node creates an `nsec` on first boot and stores
+it encrypted. Only its `npub` is logged; retrieve the `nsec` with
+`python scripts/reveal_nsec.py` (requires `ROUTSTR_SECRET_KEY`). Set `NSEC` only
+to import a specific identity, or `AUTO_GENERATE_NSEC=false` to configure one
+from the dashboard instead.
+
 !!! note "Secret key persistence"
     If you leave `ROUTSTR_SECRET_KEY` unset, the node generates one and stores it
     as `routstr_secret.key` **next to your database**, so it persists alongside

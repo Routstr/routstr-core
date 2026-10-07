@@ -269,7 +269,6 @@ def _validated_tinfoil_enclave_base_url(enclave_url: str) -> str | None:
 
 def _resolve_ehbp_target_url(
     target_url: str,
-    path: str,
     headers: Mapping[str, str],
     provider_type: str | None = None,
     profile: "ConfidentialInferenceProfile | None" = None,
@@ -281,6 +280,13 @@ def _resolve_ehbp_target_url(
     opt in to client-supplied target overrides and constrain the destination;
     otherwise the header is ignored so callers cannot redirect other providers
     or leak upstream API keys.
+
+    The provider builds the request path through
+    :meth:`~routstr.upstream.base.BaseUpstreamProvider.build_ehbp_request_path`.
+    The override supplies the host and optional base path. If that base path
+    already ends in ``/v1``, do not append the provider's version twice.
+    Appending the caller's raw path instead would lose the provider's prefix
+    for clients that post to ``/chat/completions``.
     """
     override_header = (
         profile.client_target_url_header if profile else _ENCLAVE_URL_HEADER
@@ -318,7 +324,10 @@ def _resolve_ehbp_target_url(
             status_code=400,
         )
 
-    return f"{validated_base_url}/{path.lstrip('/')}"
+    target_path = urlsplit(target_url).path
+    if validated_base_url.endswith("/v1") and target_path.startswith("/v1/"):
+        target_path = target_path[3:]
+    return f"{validated_base_url}{target_path}"
 
 
 def _validated_confidential_target_url(
@@ -845,9 +854,7 @@ async def forward_ehbp_request(
 
     provider_type = getattr(upstream, "provider_type", "unknown")
     profile = target.profile or upstream.get_confidential_inference_profile()  # type: ignore[attr-defined]
-    target_url = _resolve_ehbp_target_url(
-        target.url, path, headers, provider_type, profile
-    )
+    target_url = _resolve_ehbp_target_url(target.url, headers, provider_type, profile)
     upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers, profile)
 
     # Merge query params into the target URL since forward_with_trailer
@@ -1128,7 +1135,7 @@ async def forward_ehbp_x_cashu_request(
         provider_type = getattr(upstream, "provider_type", "unknown")
         profile = target.profile or upstream.get_confidential_inference_profile()  # type: ignore[attr-defined]
         target_url = _resolve_ehbp_target_url(
-            target.url, path, headers, provider_type, profile
+            target.url, headers, provider_type, profile
         )
         upstream_headers = _prepare_ehbp_upstream_headers(
             headers, target.headers, profile

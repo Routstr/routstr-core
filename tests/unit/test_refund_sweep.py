@@ -129,6 +129,37 @@ async def test_refund_sweep_only_processes_expired_eligible_outgoing_tokens(
 
 
 @pytest.mark.asyncio
+async def test_refund_sweep_skips_tokens_from_untrusted_mints(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert(
+        session_factory,
+        CashuTransaction(
+            token="foreign",
+            amount=1,
+            unit="sat",
+            type="out",
+            mint_url="https://foreign.example",
+            created_at=800,
+        ),
+    )
+    receive = AsyncMock()
+    with (
+        patch("routstr.wallet.db.create_session", side_effect=session_factory),
+        patch("routstr.wallet.settings.refund_sweep_ttl_seconds", 100),
+        patch("routstr.wallet.time.time", return_value=1000),
+        patch("routstr.wallet.resolve_trusted_source_mint", return_value=None),
+        patch("routstr.wallet.recieve_token", receive),
+    ):
+        await refund_sweep_once()
+
+    receive.assert_not_awaited()
+    refund = (await _load(session_factory))["foreign"]
+    assert refund.swept is False
+    assert refund.sweep_started_at is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "collected", "claim_started_at"),
     [

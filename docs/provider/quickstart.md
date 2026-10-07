@@ -43,10 +43,14 @@ RECEIVE_LN_ADDRESS=yourname@wallet.com
 ```
 
 The admin password is generated and logged once on first start (read it from the
-logs to sign in), and your Nostr identity (`nsec`) is configured afterwards from
-the admin UI — both are stored encrypted in the database, not in `.env`.
-(`ADMIN_PASSWORD` / `NSEC` are still read once as a legacy seed for existing
-deployments.)
+logs to sign in). Your Nostr identity (`nsec`) is handled for you: the bundled
+compose stack sets `AUTO_GENERATE_NSEC=true`, so the node creates an identity on
+first boot and announces itself — no dashboard step needed. The `nsec` is stored
+encrypted in the database and never printed; only its `npub` is logged. Retrieve
+it when you need to back it up with `python scripts/reveal_nsec.py` (requires
+`ROUTSTR_SECRET_KEY`). (`ADMIN_PASSWORD` / `NSEC` are still read once as a legacy
+seed for existing deployments, and a provided `NSEC` always wins over
+auto-generation.)
 
 ## 2. Start the Node
 

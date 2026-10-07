@@ -81,9 +81,12 @@ the repository at the latest release and run it with Docker Compose:
    RECEIVE_LN_ADDRESS=yourname@wallet.com
    ```
 
-   Your Nostr identity (`nsec`) is not set in `.env` — configure it from the admin
-   UI after first start, where it's stored encrypted in the database. (`NSEC` in
-   `.env` is still read once as a legacy seed for existing deployments.)
+   Your Nostr identity (`nsec`) is handled automatically: `compose.yml` sets
+   `AUTO_GENERATE_NSEC=true`, so on first start the node creates one and stores
+   it encrypted in the database. Only its `npub` is logged; retrieve the `nsec`
+   later with `python scripts/reveal_nsec.py` (needs `ROUTSTR_SECRET_KEY`). Set
+   `NSEC` in `.env` only to import a specific identity (it's read once as a
+   legacy seed and always wins over auto-generation).
 
    If you don't set one, a key is generated and printed on first start — save it
    somewhere safe (losing it makes previously encrypted secrets unreadable). To

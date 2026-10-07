@@ -593,11 +593,26 @@ Authorization: Bearer sk-...
 
 ```json
 {
-  "balance": 18500,
-  "amount_added": 10000,
-  "currency": "sat"
+  "msats": 10000000
 }
 ```
+
+For a foreign-mint token, unused NUT-08 Lightning fee reserve is returned to
+the caller instead of being retained by the node:
+
+```json
+{
+  "msats": 994000,
+  "change_token": "cashuAeyJ0...",
+  "change_amount": 3,
+  "change_unit": "sat"
+}
+```
+
+Store `change_token`; it remains redeemable on the mint that issued the input
+token. The change fields are omitted when the mint returns no change. Change is
+only returned when the swap completes within the request (HTTP 200); a swap
+that answers 409 and is finished later by the node does not return change.
 
 ### Refund Balance
 
