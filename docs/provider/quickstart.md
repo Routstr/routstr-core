@@ -89,7 +89,7 @@ python3 scripts/node_setup.py start \
   blindly overwritten: a conflicting `HTTP_URL` is an error, and `NSEC` /
   `ONION_URL` are refused (manage those elsewhere);
 - builds and starts `compose.node.yml`: the API binds **`127.0.0.1` only**, there
-  is no Tor service, and analytics sharing is off;
+  is no Tor service, and analytics sharing starts off (change it later in Settings);
 - **auto-generates the node's secrets** — the master key `routstr_secret.key` and
   the Nostr `nsec` (stored encrypted, never printed; only its `npub` is logged);
 - waits up to three minutes for the local API, then **publishes the kind `38421`

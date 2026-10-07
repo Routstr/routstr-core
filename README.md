@@ -82,7 +82,7 @@ python3 scripts/node_setup.py check --public-url https://node.example
 ```
 
 - `compose.node.yml` binds the API to `127.0.0.1` only, starts no Tor service, and
-  keeps analytics off. Your reverse proxy fronts it.
+  starts with analytics off. Your reverse proxy fronts it.
 - Private mode (`python3 scripts/node_setup.py start --private`) keeps the node
   loopback-only and publishes nothing until you set a public URL later.
 - Port 8000 taken? Pass `--port 18080` and point the proxy at it.

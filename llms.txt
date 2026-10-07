@@ -60,7 +60,7 @@ that port for `check`, the dashboard URL, the reverse proxy and later
 `ROUTSTR_NODE_PORT=18080 docker compose -f compose.node.yml …` commands.
 
 `start` prepares `.env` (never clobbering existing values), starts
-`compose.node.yml` (loopback only, no Tor, analytics off), waits for the local
+`compose.node.yml` (loopback only, no Tor, analytics off on first boot), waits for the local
 `/v1/info` and `/v1/models`, generates the master key and Nostr identity, and — in
 public mode — publishes the listing. It also mints a long-lived CLI token and
 writes it to `~/.routstr/config.json` (0600) for the Routstr CLI; skip that with

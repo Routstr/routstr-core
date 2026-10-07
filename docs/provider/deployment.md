@@ -11,7 +11,7 @@ different configuration against the same data.
 | Port binding | `8000` on **all interfaces** | `127.0.0.1` only (`ROUTSTR_NODE_PORT`, default `8000`) |
 | Tor hidden service | Yes | No |
 | Nostr identity | Auto-generated (`AUTO_GENERATE_NSEC=true`) | Auto-generated (`AUTO_GENERATE_NSEC=true`); nothing is published until a public `HTTP_URL`/onion endpoint is set |
-| Analytics sharing | As configured | Forced off |
+| Analytics sharing | As configured | Off on first boot; change it in Settings |
 | Compose command | `docker compose …` | `docker compose -f compose.node.yml …` |
 
 `compose.node.yml` sits behind a reverse proxy and is **public by default**: pass
@@ -182,7 +182,7 @@ See [Production Acceptance](#production-acceptance).
 
 `compose.node.yml` brings up only **ui** and **routstr**. There is no Tor
 service, the node port is bound to `127.0.0.1`, `ENABLE_ANALYTICS_SHARING` is
-forced off, and `AUTO_GENERATE_NSEC=true` creates the identity on first boot —
+off on first boot, and `AUTO_GENERATE_NSEC=true` creates the identity on first boot —
 nothing is published until a public `HTTP_URL` (or onion endpoint) is set.
 
 ---
@@ -233,25 +233,16 @@ approved relays in the dashboard when you are ready to be listed.
     (keeping the key off the data volume), set `ROUTSTR_SECRET_KEY` from a
     secrets manager instead.
 
-### Opting In to Analytics with the Private Stack
+### Analytics Sharing on the Guided Stack
 
-`compose.node.yml` forces analytics sharing off. To opt in, create a local
-`compose.analytics.yml` (it is git-ignored):
+`compose.node.yml` starts the node with analytics sharing off. The first boot
+saves that value in the node's settings, and saved settings win over the
+environment on every later boot, so editing `ENABLE_ANALYTICS_SHARING` in `.env`
+or Compose has no effect afterwards. Turn it on or off under **Settings → Share
+Analytics** in the dashboard, and only with the operator's consent.
 
-```yaml
-services:
-  routstr:
-    environment:
-      ENABLE_ANALYTICS_SHARING: "true"
-```
-
-Then pass both files to this and every later Compose command:
-
-```bash
-docker compose -f compose.node.yml -f compose.analytics.yml up -d
-```
-
-Enable analytics sharing in the dashboard only with the operator's consent.
+Analytics publishing does not depend on `HTTP_URL`: once enabled, a node with a
+Nostr identity publishes usage snapshots to its relays even in private mode.
 
 See [Configuration](configuration.md) for all available options.
 
