@@ -11,16 +11,19 @@ request carries the exact JSON we sent; the credential value stays redacted;
 verified/cost headers are present.
 
 Requires prebuilt binaries (built once by the dev/harness):
-  proverd/target/debug/proverd
-  proverd/target/debug/examples/test_verifier
-  proverd/target/debug/examples/mock_upstream
-Skips cleanly when they are missing.
+  <proverd-repo>/target/debug/proverd
+  <proverd-repo>/target/debug/tlsn-verifier
+  <proverd-repo>/target/debug/examples/mock_upstream
+Resolved from PROVERD_BIN, TLSN_VERIFIER_BIN, MOCK_UPSTREAM_BIN,
+TLSN_FIXTURE_CA_PEM and TLSN_LAB_DIR, falling back to the development
+layout. Skips loudly when they are missing.
 """
 
 import asyncio
 import base64
 import json
 import socket
+import os
 import subprocess
 import tempfile
 import time
@@ -35,19 +38,36 @@ from routstr.core.settings import settings
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream.generic import GenericUpstreamProvider
 
-PROVABLE_AI = Path(__file__).resolve().parents[3]
-PROVERD_BIN = PROVABLE_AI / "proverd/target/debug/proverd"
-VERIFIER_BIN = PROVABLE_AI / "proverd/target/debug/examples/test_verifier"
-MOCK_BIN = PROVABLE_AI / "proverd/target/debug/examples/mock_upstream"
-ROOT_CA_PEM = PROVABLE_AI / "tlsn/crates/server-fixture/certs/src/tls/root_ca.crt"
+# Development layout: <provable-ai>/routstr-core/tests/integration/... — the
+# lab root is three levels up. Worktrees/harnesses set TLSN_LAB_DIR.
+LAB = Path(os.environ.get("TLSN_LAB_DIR", str(Path(__file__).resolve().parents[3])))
+PROVERD_BIN = Path(os.environ.get("PROVERD_BIN", LAB / "proverd/target/debug/proverd"))
+VERIFIER_BIN = Path(
+    os.environ.get("TLSN_VERIFIER_BIN", LAB / "proverd/target/debug/tlsn-verifier")
+)
+MOCK_BIN = Path(
+    os.environ.get(
+        "MOCK_UPSTREAM_BIN", LAB / "proverd/target/debug/examples/mock_upstream"
+    )
+)
+ROOT_CA_PEM = Path(
+    os.environ.get(
+        "TLSN_FIXTURE_CA_PEM",
+        LAB / "tlsn/crates/server-fixture/certs/src/tls/root_ca.crt",
+    )
+)
 SERVER_DOMAIN = "test-server.io"
 AUTH_TOKEN = "random_auth_token"
 
 BINARIES = [PROVERD_BIN, VERIFIER_BIN, MOCK_BIN, ROOT_CA_PEM]
 
+_MISSING = [str(p) for p in BINARIES if not p.exists()]
+if _MISSING:
+    print(f"[test_tlsn_verified_live] SKIPPING: missing {', '.join(_MISSING)}")
+
 pytestmark = pytest.mark.skipif(
-    not all(p.exists() for p in BINARIES),
-    reason="proverd/test_verifier/mock_upstream binaries not built",
+    bool(_MISSING),
+    reason=f"proverd/tlsn-verifier/mock_upstream not built (missing {_MISSING})",
 )
 
 MODEL = Model(
