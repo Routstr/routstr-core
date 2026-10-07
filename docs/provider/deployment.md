@@ -6,27 +6,33 @@ Routstr ships two Compose stacks. Pick one and use it for **every** Compose
 command on that node — they are separate stacks, so switching mid-setup starts a
 different configuration against the same data.
 
-| | `compose.yml` (standard) | `compose.node.yml` (private first run) |
+| | `compose.yml` (standard) | `compose.node.yml` (guided, loopback) |
 |---|---|---|
 | Port binding | `8000` on **all interfaces** | `127.0.0.1` only (`ROUTSTR_NODE_PORT`, default `8000`) |
 | Tor hidden service | Yes | No |
-| Nostr identity | Auto-generated (`AUTO_GENERATE_NSEC=true`) | Off until you configure one |
+| Nostr identity | Auto-generated (`AUTO_GENERATE_NSEC=true`) | Auto-generated (`AUTO_GENERATE_NSEC=true`); nothing is published until a public `HTTP_URL`/onion endpoint is set |
 | Analytics sharing | As configured | Forced off |
 | Compose command | `docker compose …` | `docker compose -f compose.node.yml …` |
 
-Use the standard stack for the [Quick Start](#quick-start-recommended) below. Use
-the [private first run](#private-first-run) when you want nothing reachable from
-outside the host until the admin password is rotated and an upstream is
-configured — for example on a public VPS, or when an agent is doing the setup
-(agents: read [llms.txt](https://github.com/Routstr/routstr-core/blob/main/llms.txt)
-first). Running bare `docker compose up` always selects the standard stack.
+`compose.node.yml` sits behind a reverse proxy and is **public by default**: pass
+a public URL to the setup script and the node publishes itself on first boot. Use
+`--private` instead when you want nothing reachable from outside the host until
+the admin password is rotated and an upstream is configured — for example on a
+public VPS, or when an agent is doing the setup (agents: read
+[llms.txt](https://github.com/Routstr/routstr-core/blob/main/llms.txt) first).
+Running bare `docker compose up` always selects the standard stack.
 
-## Quick Start (Recommended)
+## Quick Start (Standard Stack)
 
-The recommended way to run a provider node is to clone the repository at the
-**latest release** and start the stack with Docker Compose. Compose builds both
-the node and the admin dashboard from source, so there is no image to pull and no
-dashboard build to keep in sync with the node.
+For a new node the [guided first run](#guided-first-run) is the recommended path:
+it sets up the loopback stack behind your reverse proxy and publishes on first
+boot. The standard stack below is an alternative that bundles a Tor hidden
+service and can be started with plain `docker compose up`.
+
+The standard stack clones the repository at the **latest release** and starts it
+with Docker Compose. Compose builds both the node and the admin dashboard from
+source, so there is no image to pull and no dashboard build to keep in sync with
+the node.
 
 ```bash
 git clone https://github.com/Routstr/routstr-core.git
@@ -68,46 +74,59 @@ docker compose logs routstr | grep -i admin
 
 !!! warning "Port 8000 is public with the standard stack"
     `compose.yml` publishes port 8000 on every interface. On a host with a public
-    IP, firewall it (or use the [private first run](#private-first-run)) until you
+    IP, firewall it (or use the [guided first run](#guided-first-run)) until you
     have rotated the admin password.
 
 ---
 
-## Private First Run
+## Guided First Run
 
 `scripts/node_setup.py` starts `compose.node.yml` and checks that it came up. It
-needs Docker with the Compose plugin and Python 3 on the host.
+needs Docker with the Compose plugin and Python 3 on the host. The setup is
+**public by default** and expects DNS, TLS and a reverse proxy to already forward
+an HTTPS origin to `127.0.0.1:8000`; `--private` opts out.
 
 ```bash
 git clone https://github.com/Routstr/routstr-core.git
 cd routstr-core
 git checkout v0.4.7   # or the reviewed release tag you are deploying
 
-python3 scripts/node_setup.py start
+# Public (default): pre-flights DNS/TLS/proxy, then publishes on first boot
+python3 scripts/node_setup.py start \
+  --public-url https://node.example \
+  --ln-address you@wallet.com
+
+# Private: loopback only, nothing published until a public URL is set later
+python3 scripts/node_setup.py start --private
 ```
 
 `start`:
 
-- copies `.env.example` to `.env` with owner-only (`0600`) permissions **only if
-  `.env` does not exist** — an existing `.env` is never overwritten. Review it
-  before the first boot and never commit it;
-- refuses to run if an existing `.env` already sets `NSEC`, `HTTP_URL` or
-  `ONION_URL`, since that is a public configuration — follow the rest of this
-  guide instead;
-- builds and starts `compose.node.yml`, then waits up to three minutes for
-  `/v1/info` and `/v1/models` on the loopback port (the first build itself can
-  take longer).
+- **pre-flights** the public origin over HTTPS before starting, so the node never
+  advertises a dead endpoint;
+- creates `.env` from `.env.example` with owner-only (`0600`) permissions when it
+  does not exist, and only writes the keys it manages (`HTTP_URL`,
+  `RECEIVE_LN_ADDRESS`, `MIN_PAYOUT_SAT`, `PAYOUT_INTERVAL_SECONDS`). A
+  conflicting `HTTP_URL` is an error and `NSEC`/`ONION_URL` are refused, so an
+  operator edit is never silently clobbered. Review it and never commit it;
+- validates `--ln-address` (a `user@host` address is resolved to its LNURL-pay
+  endpoint) — a saved address is still not a *tested* payout;
+- builds and starts `compose.node.yml`, generates the master key and Nostr
+  identity, then waits up to three minutes for `/v1/info` and `/v1/models` on the
+  loopback port (the first build itself can take longer). Public mode publishes
+  the listing; private mode publishes nothing.
 
 If port 8000 already belongs to another service, leave that service alone and
 pick a free port:
 
 ```bash
-python3 scripts/node_setup.py start --port 18080
+python3 scripts/node_setup.py start --private --port 18080
 python3 scripts/node_setup.py check --port 18080
 ROUTSTR_NODE_PORT=18080 docker compose -f compose.node.yml logs routstr
 ```
 
-The dashboard is then at `http://127.0.0.1:18080/admin/`.
+The dashboard is then at `http://127.0.0.1:18080/admin/`. In public mode, point
+the reverse proxy at that port instead of `8000`.
 
 ### Administer a Remote Host over SSH
 
@@ -133,8 +152,8 @@ publish a node that still uses its bootstrap password.
 
 ### Check Readiness
 
-After adding an upstream under **Providers** (see the
-[Quick Start](quickstart.md#3-configure-via-dashboard)):
+After adding an upstream under **Providers** (see
+[Phase 3 of the Quick Start](quickstart.md)):
 
 ```bash
 python3 scripts/node_setup.py check
@@ -158,8 +177,9 @@ See [Production Acceptance](#production-acceptance).
    is needed. See [Tor Support](tor.md) for how to read your `.onion` address.
 
 `compose.node.yml` brings up only **ui** and **routstr**. There is no Tor
-service, the node port is bound to `127.0.0.1`, and `AUTO_GENERATE_NSEC` and
-`ENABLE_ANALYTICS_SHARING` are forced to `false`.
+service, the node port is bound to `127.0.0.1`, `ENABLE_ANALYTICS_SHARING` is
+forced off, and `AUTO_GENERATE_NSEC=true` creates the identity on first boot —
+nothing is published until a public `HTTP_URL` (or onion endpoint) is set.
 
 ---
 
@@ -198,9 +218,9 @@ it encrypted. Only its `npub` is logged; retrieve the `nsec` with
 specific identity, or `AUTO_GENERATE_NSEC=false` to configure one from the
 dashboard instead.
 
-With `compose.node.yml` no identity is generated: configure a dedicated Nostr
-identity and approved relays in the dashboard only when you want the node to be
-discoverable.
+With `compose.node.yml` the identity is generated automatically too; a node stays
+undiscoverable until a public `HTTP_URL` (or onion endpoint) is set. Configure
+approved relays in the dashboard when you are ready to be listed.
 
 !!! note "Secret key persistence"
     If you leave `ROUTSTR_SECRET_KEY` unset, the node generates one and stores it
@@ -317,7 +337,10 @@ If you started with `--port`, proxy to that port instead of `8000`.
 
 ### Publishing a Node
 
-Before you expose a node:
+Before you expose a node, promote it deliberately. In **public mode**
+(`node_setup.py start --public-url …`) the endpoint and listing already exist, so
+only steps 1–2 remain; when you started in **private mode** (or with
+`compose.yml`), work through all of them:
 
 1. Rotate the bootstrap admin password.
 2. Configure an upstream with enabled models, and confirm with
@@ -328,7 +351,7 @@ Before you expose a node:
    `compose.yml`, firewall port `8000`). Restrict administrative endpoints to
    trusted clients at the proxy where you can.
 4. In **Settings → Admin Settings**, set **HTTP URL** to the real public HTTPS
-   origin.
+   origin — the node publishes its listing as soon as it is set.
 5. Decide explicitly whether to enable Nostr discovery (see
    [Discovery](discovery.md)) and analytics sharing.
 

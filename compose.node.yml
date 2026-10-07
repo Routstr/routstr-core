@@ -1,5 +1,7 @@
-# First-run node stack. Keep the admin API on loopback until the operator
-# rotates the generated password and deliberately configures public access.
+# First-run node stack. The API always binds loopback behind an operator's
+# reverse proxy. Identity is generated automatically; whether the node is
+# published depends only on HTTP_URL — set it (public mode) or leave it unset
+# (private, nothing advertised until a URL is configured later).
 services:
   ui:
     env_file: .env
@@ -23,7 +25,9 @@ services:
       - ./ui_out:/app/ui_out:ro,z
     env_file: .env
     environment:
-      AUTO_GENERATE_NSEC: "false"
+      # Generate the Nostr identity on first boot; it is stored encrypted and
+      # nothing is published until a reachable HTTP_URL/onion endpoint exists.
+      AUTO_GENERATE_NSEC: "true"
       ENABLE_ANALYTICS_SHARING: "false"
     ports:
       - "127.0.0.1:${ROUTSTR_NODE_PORT:-8000}:8000"
