@@ -143,8 +143,10 @@ class NodeSetupTests(unittest.TestCase):
                 with patch.object(node_setup, "prepare_env", return_value=False) as prepare:
                     with patch.object(node_setup.subprocess, "run") as run:
                         with patch.object(node_setup, "probe", return_value=("Node", 0)) as probe:
-                            self.assertEqual(node_setup.main(), 0)
+                            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                                self.assertEqual(node_setup.main(), 0)
                             probe.assert_called_once_with("http://127.0.0.1:18080")
+                            self.assertIn("node_setup.py check --port 18080", stdout.getvalue())
                             self.assertEqual(prepare.call_args.args[1], {})
                             self.assertEqual(run.call_count, 2)
                             self.assertTrue(all(call.kwargs["env"]["ROUTSTR_NODE_PORT"] == "18080" for call in run.call_args_list))

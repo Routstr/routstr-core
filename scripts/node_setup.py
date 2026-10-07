@@ -405,11 +405,11 @@ def _start(args: argparse.Namespace, local_url: str) -> int:
         f"Phase 3 — dashboard: {admin_url}/admin/ — rotate the admin password, "
         "add an upstream, review payout/pricing."
     )
-    check_hint = (
-        f"python3 scripts/node_setup.py check --public-url {public_origin}"
-        if public_origin
-        else "python3 scripts/node_setup.py check"
-    )
+    check_hint = "python3 scripts/node_setup.py check"
+    if public_origin:
+        check_hint += f" --public-url {public_origin}"
+    elif args.port != DEFAULT_PORT:
+        check_hint += f" --port {args.port}"
     print(f"Phase 4 — verify: {check_hint}")
     return 0
 
