@@ -1,35 +1,400 @@
 # Deployment
 
-Start with the [private quickstart](quickstart.md). This guide is for an operator who has rotated the bootstrap password, configured an upstream, and decided to publish the node. For agent-assisted setup use [llms.txt](https://github.com/Routstr/routstr-core/blob/main/llms.txt). The original `compose.yml` is a separate stack that exposes port 8000 on all interfaces and starts Tor; do not switch to it by running bare `docker compose up` during this workflow.
+Production deployment guide for Routstr Provider nodes.
 
-## Prepare a durable host
+Routstr ships two Compose stacks. Pick one and use it for **every** Compose
+command on that node — they are separate stacks, so switching mid-setup starts a
+different configuration against the same data.
 
-Use Docker with the Compose plugin, Python 3 and persistent disk. Review a release tag before checkout; don't assume that a hard-coded tag in documentation is current. Run `python3 scripts/node_setup.py start` from the checkout. It creates `.env` with mode 0600 if absent and starts `compose.node.yml`, which only publishes `127.0.0.1:8000`. Review `.env` before the first boot; never commit it. First build may take a few minutes.
+| | `compose.yml` (standard) | `compose.node.yml` (private first run) |
+|---|---|---|
+| Port binding | `8000` on **all interfaces** | `127.0.0.1` only (`ROUTSTR_NODE_PORT`, default `8000`) |
+| Tor hidden service | Yes | No |
+| Nostr identity | Auto-generated (`AUTO_GENERATE_NSEC=true`) | Off until you configure one |
+| Analytics sharing | As configured | Forced off |
+| Compose command | `docker compose …` | `docker compose -f compose.node.yml …` |
 
-For a remote host, administer over an SSH tunnel. The temporary admin password appears once in the container's stdout. Read it in the **operator's private terminal**, rotate it immediately in **Settings → Admin Settings**, and do not relay startup logs through an agent. Do not publish a node with its bootstrap password intact.
+Use the standard stack for the [Quick Start](#quick-start-recommended) below. Use
+the [private first run](#private-first-run) when you want nothing reachable from
+outside the host until the admin password is rotated and an upstream is
+configured — for example on a public VPS, or when an agent is doing the setup
+(agents: read [llms.txt](https://github.com/Routstr/routstr-core/blob/main/llms.txt)
+first). Running bare `docker compose up` always selects the standard stack.
 
-## Publish intentionally
+## Quick Start (Recommended)
 
-Before exposure, configure and verify an upstream and its enabled models (`python3 scripts/node_setup.py check`), choose a public HTTPS domain, firewall the host, and run a reverse proxy on the same host. For example, after DNS and certificates are ready:
+The recommended way to run a provider node is to clone the repository at the
+**latest release** and start the stack with Docker Compose. Compose builds both
+the node and the admin dashboard from source, so there is no image to pull and no
+dashboard build to keep in sync with the node.
 
-```caddyfile
-node.example {
-    reverse_proxy 127.0.0.1:8000
+```bash
+git clone https://github.com/Routstr/routstr-core.git
+cd routstr-core
+
+# Check out a release (v0.4.7 is current — see the releases page for the newest tag)
+git checkout v0.4.7
+
+# Compose reads its configuration from .env
+cp .env.example .env
+
+docker compose up -d
+```
+
+Then open your node:
+- **API & Admin Dashboard**: <http://localhost:8000>
+- **Admin login**: the password is generated and logged once on first start
+
+```bash
+docker compose logs routstr | grep -i admin
+```
+
+!!! note "The first start takes a few minutes"
+    `docker compose up` builds both images locally, and the Next.js dashboard
+    build is the slow part. Later starts reuse the built images.
+
+!!! tip "Always tracking the newest release"
+    To check out whatever `releases/latest` currently points at, use:
+
+    ```bash
+    git clone https://github.com/Routstr/routstr-core.git
+    cd routstr-core
+    git checkout "$(curl -sSL -o /dev/null -w '%{url_effective}' \
+      https://github.com/Routstr/routstr-core/releases/latest | sed 's|.*/tag/||')"
+    ```
+
+    Omitting the `git checkout` entirely leaves you on `main` — newer, but not a
+    tested release.
+
+!!! warning "Port 8000 is public with the standard stack"
+    `compose.yml` publishes port 8000 on every interface. On a host with a public
+    IP, firewall it (or use the [private first run](#private-first-run)) until you
+    have rotated the admin password.
+
+---
+
+## Private First Run
+
+`scripts/node_setup.py` starts `compose.node.yml` and checks that it came up. It
+needs Docker with the Compose plugin and Python 3 on the host.
+
+```bash
+git clone https://github.com/Routstr/routstr-core.git
+cd routstr-core
+git checkout v0.4.7   # or the reviewed release tag you are deploying
+
+python3 scripts/node_setup.py start
+```
+
+`start`:
+
+- copies `.env.example` to `.env` with owner-only (`0600`) permissions **only if
+  `.env` does not exist** — an existing `.env` is never overwritten. Review it
+  before the first boot and never commit it;
+- refuses to run if an existing `.env` already sets `NSEC`, `HTTP_URL` or
+  `ONION_URL`, since that is a public configuration — follow the rest of this
+  guide instead;
+- builds and starts `compose.node.yml`, then waits up to three minutes for
+  `/v1/info` and `/v1/models` on the loopback port (the first build itself can
+  take longer).
+
+If port 8000 already belongs to another service, leave that service alone and
+pick a free port:
+
+```bash
+python3 scripts/node_setup.py start --port 18080
+python3 scripts/node_setup.py check --port 18080
+ROUTSTR_NODE_PORT=18080 docker compose -f compose.node.yml logs routstr
+```
+
+The dashboard is then at `http://127.0.0.1:18080/admin/`.
+
+### Administer a Remote Host over SSH
+
+The private stack is only reachable from the host itself. From your own computer,
+forward the port and open <http://127.0.0.1:8000/admin/> in your local browser:
+
+```bash
+ssh -L 8000:127.0.0.1:8000 user@your-server
+```
+
+### Rotate the Bootstrap Password
+
+The admin password is generated and printed once to the container's stdout. Read
+it yourself in a private terminal, sign in, and change it straight away in
+**Settings → Admin Settings → Change Admin Password**:
+
+```bash
+docker compose -f compose.node.yml logs routstr | grep -i admin
+```
+
+Don't relay those logs through an agent or paste them into a chat, and don't
+publish a node that still uses its bootstrap password.
+
+### Check Readiness
+
+After adding an upstream under **Providers** (see the
+[Quick Start](quickstart.md#3-configure-via-dashboard)):
+
+```bash
+python3 scripts/node_setup.py check
+```
+
+It prints the node name and public model count, and exits `2` when there are zero
+models — the API is up but setup is incomplete. A passing check proves discovery
+only: it does not test payments, streaming, upstream requests, refunds or payout.
+See [Production Acceptance](#production-acceptance).
+
+---
+
+## What Docker Compose Starts
+
+`compose.yml` brings up three services:
+
+1. **ui** — builds the Next.js admin dashboard and copies the result into the
+   shared `./ui_out` volume.
+2. **routstr** — the Python node, serving the API and the dashboard built above.
+3. **tor** — serves the node as a `.onion` hidden service, so no port forwarding
+   is needed. See [Tor Support](tor.md) for how to read your `.onion` address.
+
+`compose.node.yml` brings up only **ui** and **routstr**. There is no Tor
+service, the node port is bound to `127.0.0.1`, and `AUTO_GENERATE_NSEC` and
+`ENABLE_ANALYTICS_SHARING` are forced to `false`.
+
+---
+
+## Pre-Configuration (Optional)
+
+Everything can be configured from the dashboard after first start, but you can
+pre-configure a deployment by editing the `.env` file you created above:
+
+```bash
+# Upstream (optional — can also be set from the dashboard)
+UPSTREAM_BASE_URL=https://api.openai.com/v1
+UPSTREAM_API_KEY=sk-proj-...
+
+# Encrypts node secrets at rest. Optional — if unset, a key is generated next to
+# your database (on the same volume) and its file is named once for backup. Set
+# it explicitly to manage the key yourself.
+ROUTSTR_SECRET_KEY=
+
+# Node identity
+NAME=My Provider Node
+DESCRIPTION=Fast GPT-4 access via Lightning
+
+# Lightning withdrawals
+RECEIVE_LN_ADDRESS=me@walletofsatoshi.com
+```
+
+The admin password is generated and logged once on first start; set
+`ADMIN_PASSWORD` only as a legacy seed for an existing deployment.
+
+The Nostr identity is also automatic: `compose.yml` sets
+`AUTO_GENERATE_NSEC=true`, so the node creates an `nsec` on first boot and stores
+it encrypted. Only its `npub` is logged; retrieve the `nsec` with
+`docker compose exec routstr /.venv/bin/python scripts/reveal_nsec.py` (or
+`python scripts/reveal_nsec.py` from a source checkout; it requires
+`ROUTSTR_SECRET_KEY` or the persisted key file). Set `NSEC` only to import a
+specific identity, or `AUTO_GENERATE_NSEC=false` to configure one from the
+dashboard instead.
+
+With `compose.node.yml` no identity is generated: configure a dedicated Nostr
+identity and approved relays in the dashboard only when you want the node to be
+discoverable.
+
+!!! note "Secret key persistence"
+    If you leave `ROUTSTR_SECRET_KEY` unset, the node generates one and stores it
+    as `routstr_secret.key` **next to your database**, so it persists alongside
+    your data — just include that in your backups. For stronger isolation
+    (keeping the key off the data volume), set `ROUTSTR_SECRET_KEY` from a
+    secrets manager instead.
+
+### Opting In to Analytics with the Private Stack
+
+`compose.node.yml` forces analytics sharing off. To opt in, create a local
+`compose.analytics.yml` (it is git-ignored):
+
+```yaml
+services:
+  routstr:
+    environment:
+      ENABLE_ANALYTICS_SHARING: "true"
+```
+
+Then pass both files to this and every later Compose command:
+
+```bash
+docker compose -f compose.node.yml -f compose.analytics.yml up -d
+```
+
+Enable analytics sharing in the dashboard only with the operator's consent.
+
+See [Configuration](configuration.md) for all available options.
+
+---
+
+## Persistence
+
+With either Compose file the repository directory is mounted into the container,
+so everything Routstr persists stays in the directory you cloned:
+
+| Path | Contents |
+|------|----------|
+| `keys.db` | SQLite database (settings, API keys, sessions) |
+| `keys.db-wal`, `keys.db-shm` | SQLite sidecar files, when present — part of the database |
+| `routstr_secret.key` | Auto-generated master key, written beside the database when `ROUTSTR_SECRET_KEY` is unset (or wherever `ROUTSTR_SECRET_KEY_FILE` points) |
+| `.wallet/` | Cashu wallet data (your Bitcoin!) |
+| `.env` | Node configuration and any seeded secrets |
+| `logs/` | Node logs |
+
+!!! warning "Back Up Your Data"
+    Your cloned directory holds your wallet and your master key. Losing it means
+    losing funds. Back it up regularly — and don't delete the checkout to
+    "start fresh" without copying `keys.db`, `routstr_secret.key` and `.wallet/`
+    first.
+
+### Backup and Restore
+
+- **Back up with all writers stopped** (`docker compose stop`, or
+  `docker compose -f compose.node.yml stop`), or take a consistent backup of an
+  external database. Include `keys.db` with any `-wal`/`-shm` sidecars,
+  `routstr_secret.key` (or your secret-manager key), `.wallet/`, `.env`, the
+  Compose file(s) you use, and the node's Nostr identity.
+- **Keep the database and its encryption key together** in an encrypted,
+  off-host backup. Encrypted secrets can't be recovered without the original key.
+- **Test restores on an isolated host** with no relay publishing or payout
+  activity. Never run two copies of the same wallet at the same time.
+- **Never delete volumes or wallet state to fix a login problem.** Reset the
+  password instead (below).
+
+### Admin Password Recovery
+
+Lost the admin password? Regenerate it from a private terminal, then rotate it
+again in **Settings → Admin Settings**:
+
+```bash
+docker compose exec routstr /.venv/bin/python scripts/reset_admin_password.py --regenerate
+# private stack:
+docker compose -f compose.node.yml exec routstr /.venv/bin/python scripts/reset_admin_password.py --regenerate
+```
+
+---
+
+## Reverse Proxy (Optional)
+
+For custom domains and SSL, use a reverse proxy like Caddy or nginx.
+
+### Caddy Example
+
+```
+api.yournode.com {
+    reverse_proxy localhost:8000
 }
 ```
 
-Keep port 8000 loopback-only; only 443 should be publicly routed. Restrict administrative endpoints to trusted clients at the proxy when possible. In the admin settings, set the HTTP URL to the actual public HTTPS origin. Configure a dedicated Nostr identity and approved relays in the dashboard only when you want discovery. `compose.node.yml` disables automatic identity generation. Analytics is also forced off by default: to opt in, create a local `compose.analytics.yml` containing `services: {routstr: {environment: {ENABLE_ANALYTICS_SHARING: "true"}}}`, then use `docker compose -f compose.node.yml -f compose.analytics.yml up -d` and the same pair of files for subsequent operations. Enable analytics sharing in the dashboard only with operator consent. Keep the override and the node's `nsec` out of Git.
+### nginx Example
 
-From another machine, run `python3 scripts/node_setup.py check --public-url https://node.example` (the checkout must be present on that machine) and verify the expected node name and nonzero model count. Normal hostname and certificate verification are required. `/v1/info` is not a health or paid-inference test. Make a small, budget-approved Cashu-paid completion and streaming request before declaring production readiness; reconcile usage, upstream charges and refunds. Test payout separately.
+```nginx
+server {
+    listen 443 ssl;
+    server_name api.yournode.com;
+    
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+    
+    location / {
+        proxy_pass http://localhost:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
 
-## Persistence and recovery
+If you started with `--port`, proxy to that port instead of `8000`.
 
-This Compose file bind-mounts the checkout to `/app`. Back up the **whole** state with all writers stopped:
+### Publishing a Node
 
-- `keys.db` and any `keys.db-wal` / `keys.db-shm` sidecars (or a consistent external database backup);
-- `routstr_secret.key` (or the configured `ROUTSTR_SECRET_KEY_FILE` / secret-manager key);
-- `.wallet/`, `.env`, the Compose file and the node's Nostr identity.
+Before you expose a node:
 
-Keep encryption keys and their database together in an encrypted off-host backup. Verify restoration on an isolated host with no relay publishing or payout activity; never run two copies of the same wallet concurrently. For a lost password, run `docker compose -f compose.node.yml exec routstr /.venv/bin/python scripts/reset_admin_password.py --regenerate` privately. Never remove volumes or wallet state to fix an authentication problem.
+1. Rotate the bootstrap admin password.
+2. Configure an upstream with enabled models, and confirm with
+   `python3 scripts/node_setup.py check`.
+3. Choose a public HTTPS domain, set up DNS and certificates, firewall the host,
+   and run the reverse proxy **on the same host**. Only `443` should be publicly
+   routed — keep the node port on loopback (`compose.node.yml` does this; with
+   `compose.yml`, firewall port `8000`). Restrict administrative endpoints to
+   trusted clients at the proxy where you can.
+4. In **Settings → Admin Settings**, set **HTTP URL** to the real public HTTPS
+   origin.
+5. Decide explicitly whether to enable Nostr discovery (see
+   [Discovery](discovery.md)) and analytics sharing.
 
-Before updates: take and verify a consistent backup, record the current tag and image, review migrations/release notes, then rebuild with `docker compose -f compose.node.yml up -d --build`. Rollback across database migrations may require a matching database and wallet restore, not only an older image. Re-run local checks, external checks, and the approved paid-inference checks after an update.
+From **another machine** with a checkout of the repository, verify the public
+endpoint (normal hostname and certificate checks apply):
+
+```bash
+python3 scripts/node_setup.py check --public-url https://api.yournode.com
+```
+
+Confirm it reports the expected node name and a nonzero model count.
+
+### Production Acceptance
+
+`/v1/info` and `/v1/models` are not a health or paid-inference test. Before
+calling a node production-ready:
+
+- make a small, budget-approved Cashu-paid completion request, both
+  non-streaming and streaming, using a funded client credential (not an admin
+  token);
+- reconcile usage, upstream charges and refunds;
+- test payout separately;
+- verify a backup restore as described above.
+
+---
+
+## Updates
+
+Check out the new release and rebuild:
+
+```bash
+git fetch --tags
+git checkout v0.4.7   # or the tag you are moving to
+docker compose up -d --build
+# private stack:
+docker compose -f compose.node.yml up -d --build
+```
+
+`--build` is required: Compose reuses an existing image for a service unless you
+ask it to rebuild.
+
+!!! warning "Back up first"
+    Copy `keys.db`, `routstr_secret.key` and `.wallet/` before updating, and read
+    the release notes for the version you are moving to.
+
+Before updating, also record the current tag and image so you can return to them.
+Rolling back across a database migration may need the matching database and
+wallet restored from backup, not just an older image. After an update, re-run the
+local and public `node_setup.py check` and your approved paid-inference checks.
+
+---
+
+## Building Without Starting
+
+`docker compose up -d` already builds from source. To build the images
+explicitly without starting them:
+
+```bash
+docker compose build
+# private stack:
+docker compose -f compose.node.yml build
+```
+
+To build only the node image (the dashboard must already be built into
+`./ui_out`):
+
+```bash
+docker build -t routstr-node .
+```

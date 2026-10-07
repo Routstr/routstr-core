@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -61,6 +63,40 @@ def test_payout_settings_have_sensible_defaults() -> None:
     s = Settings()
     assert s.min_payout_sat == 210
     assert s.payout_interval_seconds == 900
+
+
+def test_cashu_import_cannot_override_operator_environment() -> None:
+    env = dict(os.environ)
+    env["CASHU_MINTS"] = "https://mint.operator.example"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, routstr; print(os.environ['CASHU_MINTS'])",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.stdout.splitlines()[-1] == "https://mint.operator.example"
+
+
+def test_import_preserves_environment_added_by_dependencies() -> None:
+    env = dict(os.environ)
+    env.pop("TIKTOKEN_CACHE_DIR", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, routstr; print(bool(os.environ.get('TIKTOKEN_CACHE_DIR')))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.stdout.splitlines()[-1] == "True"
 
 
 def test_database_pool_defaults_provide_concurrency_headroom() -> None:

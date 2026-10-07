@@ -100,6 +100,24 @@ class Settings(BaseSettings):
     mint_max_concurrency: int = Field(default=4, ge=0, env="MINT_MAX_CONCURRENCY")
     # Max retries when a mint returns 429 or times out (exponential backoff).
     mint_retry_max_attempts: int = Field(default=3, ge=0, env="MINT_RETRY_MAX_ATTEMPTS")
+    # Single-attempt deadline for any call to a mint the operator did not
+    # configure. No retries: the sender chose that mint, not the operator.
+    foreign_mint_operation_timeout_seconds: float = Field(
+        default=5.0, gt=0, env="FOREIGN_MINT_OPERATION_TIMEOUT_SECONDS"
+    )
+    # Lightning settlement is not a normal mint round-trip. Give foreign-mint
+    # melts a longer deadline without cooling the entire mint on timeout.
+    foreign_mint_melt_timeout_seconds: float = Field(
+        default=60.0, gt=0, env="FOREIGN_MINT_MELT_TIMEOUT_SECONDS"
+    )
+    # Process-wide cap on in-flight foreign-mint calls across all such mints, so
+    # rotating hostnames cannot multiply the per-mint budget.
+    foreign_mint_max_concurrency: int = Field(
+        default=4, ge=1, env="FOREIGN_MINT_MAX_CONCURRENCY"
+    )
+    swap_reconcile_interval_seconds: int = Field(
+        default=60, gt=0, env="SWAP_RECONCILE_INTERVAL_SECONDS"
+    )
 
     # Pricing
     # Default behavior: derive pricing from MODELS
@@ -764,16 +782,16 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
             if result.rowcount == 1:
                 settings.nsec = generated_nsec
                 settings.npub = generated_npub
-                # Print to stdout rather than the logger, like the generated
-                # admin password: the operator must see the nsec once to back it
-                # up, but it must not land in the on-disk log files.
+                # Announce only the public identity. stdout is captured by
+                # `docker compose logs`, so the nsec must never be echoed there;
+                # the operator retrieves it on demand with
+                # scripts/reveal_nsec.py (which needs ROUTSTR_SECRET_KEY).
                 print(
-                    "No Nostr identity configured; generated one (shown only "
-                    "now — back it up):\n"
+                    "No Nostr identity configured; generated one and stored it "
+                    "encrypted in the database.\n"
                     f"  npub: {generated_npub}\n"
-                    f"  nsec: {generated_nsec}\n"
-                    "The nsec is stored encrypted in the database; losing the "
-                    "database without this backup loses the node's identity.",
+                    "Retrieve the nsec later with scripts/reveal_nsec.py "
+                    "(requires ROUTSTR_SECRET_KEY).",
                     flush=True,
                 )
             elif secret.encrypted_nsec:
