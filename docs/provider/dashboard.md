@@ -2,7 +2,7 @@
 
 The Admin Dashboard is your command center for managing your Routstr provider node. Configure providers, monitor earnings, manage models, and withdraw profits—all from a web interface.
 
-**URL**: `http://your-node:8000/admin/`
+**URL**: `http://your-node:8000/admin`
 
 ---
 

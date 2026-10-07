@@ -326,6 +326,7 @@ _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     # -> {answers, usage}. Non-streaming, JSON in/out; billed from the
     # response's usage exactly like embeddings.
     "systemone": frozenset({"POST"}),
+    "decisions": frozenset({"POST"}),
     "models": frozenset({"GET"}),
     "attestation": frozenset({"GET"}),
     "tee/attestation": frozenset({"GET"}),
@@ -790,6 +791,20 @@ async def _proxy(
             request=request,
         )
     candidates = routable
+
+    if _canonical_api_path(path) == "decisions":
+        candidates = [
+            (model, upstream)
+            for model, upstream in candidates
+            if upstream.supports_decisions
+        ]
+        if not candidates:
+            return create_error_response(
+                "unsupported_request",
+                f"No Decisions-capable provider found for model '{model_id}'",
+                400,
+                request=request,
+            )
 
     # A provider that just failed this model repeatedly is skipped while some
     # other candidate can serve it. An explicit route is never rerouted.

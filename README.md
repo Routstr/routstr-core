@@ -51,66 +51,53 @@ curl https://api.routstr.com/v1/chat/completions \
 
 ## Quick Start (Docker)
 
-If you are a node runner, the recommended way to start Routstr Core is to clone
-the repository at the latest release and run it with Docker Compose:
+Start a provider node with the guided setup. The default assumes you already have
+a subdomain with HTTPS and a reverse proxy forwarding to `127.0.0.1:8000`, so the
+node publishes itself on Nostr as soon as it starts. Without a public URL yet, use
+`--private` and publish later. Agents: read [llms.txt](llms.txt) first, and rotate
+the bootstrap admin password before publishing.
 
-1. **Clone the latest release**:
-   ```bash
-   git clone https://github.com/Routstr/routstr-core.git
-   cd routstr-core
-   git checkout v0.4.7   # current release — see https://github.com/Routstr/routstr-core/releases/latest
-   ```
+```bash
+git clone https://github.com/Routstr/routstr-core.git
+cd routstr-core
+# production: check out a reviewed release tag
 
-   Docker Compose builds the node and the admin dashboard from source, so there
-   is no image to pull.
+# Phase 0: DNS + TLS + reverse proxy -> 127.0.0.1:8000, and restrict /admin
 
-2. **Prepare your `.env`**:
-   ```bash
-   cp .env.example .env
-   ```
+# Phase 1: start (public is the default)
+python3 scripts/node_setup.py start \
+  --public-url https://node.example \
+  --ln-address you@wallet.com
 
-   Then edit it with your details:
-   ```bash
-   # Optional: encrypts node secrets at rest. If unset, the node generates a key
-   # on first start, writes it to routstr_secret.key, and prints it once — back
-   # up that file. Set it explicitly to manage the key yourself (recommended in
-   # production).
-   ROUTSTR_SECRET_KEY=<generated-key>
-   NAME="My AI Node"
-   DESCRIPTION="Fast access to models"
-   RECEIVE_LN_ADDRESS=yourname@wallet.com
-   ```
+# Phase 2: back up before configuring
+#   routstr_secret.key, keys.db (+ -wal/-shm), .wallet/ and .env
+docker compose -f compose.node.yml exec routstr \
+  /.venv/bin/python scripts/reveal_nsec.py
 
-   Your Nostr identity (`nsec`) is not set in `.env` — configure it from the admin
-   UI after first start, where it's stored encrypted in the database. (`NSEC` in
-   `.env` is still read once as a legacy seed for existing deployments.)
+# Phase 3: dashboard - rotate the admin password, add an upstream, set pricing
+docker compose -f compose.node.yml logs routstr | grep -i admin
 
-   If you don't set one, a key is generated and printed on first start — save it
-   somewhere safe (losing it makes previously encrypted secrets unreadable). To
-   supply your own, generate it once and keep it stable:
-   ```bash
-   uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-   ```
+# Phase 4: verify
+python3 scripts/node_setup.py check --public-url https://node.example
+```
 
-3. **Start the services**:
-   ```bash
-   docker compose up -d
-   ```
+- `compose.node.yml` binds the API to `127.0.0.1` only, starts no Tor service, and
+  starts with analytics off. Your reverse proxy fronts it.
+- Private mode (`python3 scripts/node_setup.py start --private`) keeps the node
+  loopback-only and publishes nothing until you set a public URL later.
+- Port 8000 taken? Pass `--port 18080` and point the proxy at it.
+- Use `docker compose -f compose.node.yml ...` for every later Compose command.
+  Plain `docker compose up` selects the **different** public/Tor stack.
+- `start` also mints a long-lived CLI token and writes `~/.routstr/config.json`
+  (mode `0600`; an existing config for another node is left untouched) so the
+  [Routstr CLI](https://github.com/routstr/routstr-cli) can operate the node
+  (`routstr instruct`, `routstr providers list`, ...). The token is full node
+  admin; revoke it in **Settings → CLI Tokens** when done (`--no-cli-token`
+  skips creation).
 
-   The first start builds both images (the dashboard build takes a few minutes).
-
-4. **Get your admin password**:
-   On first start the node generates an admin password and logs it once with the
-   `/admin` URL. Read it from the logs:
-   ```bash
-   docker compose logs routstr | grep -i admin
-   ```
-   (Lost it? Reset with `docker compose exec routstr /.venv/bin/python scripts/reset_admin_password.py --regenerate`.)
-
-5. **Configure**:
-   Open [http://localhost:8000/admin/](http://localhost:8000/admin/) to connect your AI providers and set pricing.
-
-For full instructions, see the **[Provider Quick Start Guide](https://docs.routstr.com/provider/quickstart/)**.
+See the [provider quickstart](docs/provider/quickstart.md) and the
+[deployment guide](docs/provider/deployment.md) for publishing, backups and
+updates.
 
 ## Development
 

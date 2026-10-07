@@ -25,6 +25,7 @@ class OpenAIUpstreamProvider(BaseUpstreamProvider):
     provider_type = "openai"
     default_base_url = "https://api.openai.com/v1"
     platform_url = "https://platform.openai.com/api-keys"
+    supports_decisions = True
 
     def __init__(self, api_key: str, provider_fee: float = 1.01):
         super().__init__(

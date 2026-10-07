@@ -824,7 +824,9 @@ async def refresh_model_paths_periodically(
             break
 
 
-def _price_in_sats(model: dict[str, Any], provider_fee: float) -> None:
+def _price_in_sats(
+    model: dict[str, Any], provider_fee: float, provider_type: str | None = None
+) -> None:
     """Run a path's USD rates through the ``/v1/models`` pricing pipeline.
 
     Metadata copied from the provider model cache is already priced. OpenRouter
@@ -842,13 +844,16 @@ def _price_in_sats(model: dict[str, Any], provider_fee: float) -> None:
         TopProvider,
         _calculate_usd_max_costs,
         _update_model_sats_pricing,
+        allows_cache_pricing_backfill,
         backfill_cache_pricing,
     )
     from ..payment.price import sats_usd_price
 
     try:
         model_id = model.get("forwarded_model_id") or model["id"]
-        usd = backfill_cache_pricing(model_id, Pricing.parse_obj(pricing))
+        usd = Pricing.parse_obj(pricing)
+        if allows_cache_pricing_backfill(provider_type):
+            usd = backfill_cache_pricing(model_id, usd)
         usd = Pricing.parse_obj({k: v * provider_fee for k, v in usd.dict().items()})
         priced = Model(
             id=model_id,
@@ -921,10 +926,13 @@ def apply_model_path_pricing(
             metadata.get("pricing"), dict
         ):
             return model
-        pricing = backfill_cache_pricing(
-            model.forwarded_model_id or row.model_id,
-            Pricing.parse_obj(metadata["pricing"]),
-        )
+        from ..payment.models import allows_cache_pricing_backfill
+
+        pricing = Pricing.parse_obj(metadata["pricing"])
+        if allows_cache_pricing_backfill(row.provider_type):
+            pricing = backfill_cache_pricing(
+                model.forwarded_model_id or row.model_id, pricing
+            )
         pricing = Pricing.parse_obj(
             {key: float(value) * provider_fee for key, value in pricing.dict().items()}
         )
@@ -963,7 +971,7 @@ def _serialize_path(row: ModelPathRow, provider_fee: float) -> dict[str, Any]:
     if not isinstance(model, dict):
         model = {}
     model.setdefault("id", row.model_id)
-    _price_in_sats(model, provider_fee)
+    _price_in_sats(model, provider_fee, row.provider_type)
     return {
         "path": row.path,
         "provider": {

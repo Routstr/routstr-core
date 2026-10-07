@@ -326,8 +326,16 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
     return []
 
 
+def allows_cache_pricing_backfill(provider_type: str | None) -> bool:
+    return provider_type not in {"ppqai", "venice"}
+
+
 def _build_model_from_row(
-    row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
+    row: ModelRow,
+    apply_provider_fee: bool = False,
+    provider_fee: float = 1.01,
+    *,
+    provider_type: str | None = None,
 ) -> Model:
     """The deterministic USD view of a stored model row, before the sats conversion."""
     architecture = json.loads(row.architecture)
@@ -356,7 +364,8 @@ def _build_model_from_row(
     # forwarded_model_id="deepseek-v4-flash") would otherwise look up the alias
     # and miss the cache rate.
     pricing_model_id = getattr(row, "forwarded_model_id", None) or row.id
-    parsed_pricing = backfill_cache_pricing(pricing_model_id, parsed_pricing)
+    if allows_cache_pricing_backfill(provider_type):
+        parsed_pricing = backfill_cache_pricing(pricing_model_id, parsed_pricing)
 
     if apply_provider_fee:
         parsed_pricing = Pricing.parse_obj(
@@ -393,9 +402,15 @@ def _build_model_from_row(
 
 
 def _row_to_model(
-    row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
+    row: ModelRow,
+    apply_provider_fee: bool = False,
+    provider_fee: float = 1.01,
+    *,
+    provider_type: str | None = None,
 ) -> Model:
-    model = _build_model_from_row(row, apply_provider_fee, provider_fee)
+    model = _build_model_from_row(
+        row, apply_provider_fee, provider_fee, provider_type=provider_type
+    )
 
     try:
         sats_to_usd = sats_usd_price()
@@ -440,6 +455,9 @@ async def list_models(
                 provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
                 if r.upstream_provider_id in providers_by_id
                 else 1.01,
+                provider_type=providers_by_id[r.upstream_provider_id].provider_type
+                if r.upstream_provider_id in providers_by_id
+                else None,
             )
         except Exception as e:
             # Stored pricing/architecture is JSON from whatever wrote the row, so

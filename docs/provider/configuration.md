@@ -37,7 +37,7 @@ On first start the node generates an admin password and logs it once — read it
 
 ## Admin Dashboard (Primary)
 
-Access the dashboard at `/admin/` on your node.
+Access the dashboard at `/admin` on your node.
 
 ### Upstream Providers
 
@@ -168,8 +168,45 @@ A fresh node ships with two mints preconfigured:
 - `https://mint.cubabitcoin.org`
 
 Setting `CASHU_MINTS` (env) or editing the list in the dashboard replaces this
-default entirely. An explicitly empty value leaves only the primary mint
-trusted.
+default entirely. List order is significant: automatic foreign-mint swaps use
+the first configured trusted mint. Core discovers that mint's active units from
+its keysets and, when advertised, filters them through its enabled NUT-04/NUT-05
+Bolt11 methods. For an existing key, its liability unit must remain supported;
+for a new key, Core prefers the foreign token's unit, then `sat`, then `msat`.
+With an empty trusted-mint list or no compatible unit, foreign top-ups are
+rejected before any token proofs are spent.
+
+#### Tokens from other mints
+
+`/v1/wallet/topup` accepts tokens issued by mints outside this list by melting
+them over Lightning into the first configured trusted mint. Bearer and X-Cashu
+payments still refuse foreign mints (those paths run on every request and must
+not wait on a third-party mint). A key is refunded on the mint that first
+funded it: keys are always created with a trusted token or a Lightning
+invoice, so a later foreign top-up does not move that mint. Keys with no
+recorded mint that were first funded by a foreign top-up are refunded on that
+foreign mint, swapped back net of fees. Safeguards:
+
+- The token's mint URL must be HTTPS to a public address.
+- Calls to the foreign mint get one attempt with a short deadline and share a
+  process-wide concurrency cap, so a dead or hostile mint can only stall its own
+  swap. They never run while the wallet lock is held.
+- Swaps against the same foreign mint run one at a time. A request that finds
+  one already running answers `cashu_swap_busy` (503 with `Retry-After`);
+  nothing was spent, so the same token can be resent.
+- Fees are quoted before anything is spent; a token that cannot cover them is
+  refused with `cashu_foreign_mint_swap_failed` and stays spendable.
+- Every swap is journaled in `cashu_swaps` before the Lightning leg. A timeout
+  answers `cashu_swap_pending`; a background reconciler credits or fails the row
+  once the mint confirms the outcome.
+
+Lightning routing fees and the mint's input fees are deducted from the amount
+credited (and from the refund). Following Cashu NUT-08 wallet behavior, any
+unused inbound fee reserve is returned in the top-up response as
+`change_token`, with `change_amount` and `change_unit`, and kept on the swap
+row (`cashu_swaps.change_token`). The caller should store that token because it
+remains redeemable on the foreign mint. Change is only returned on an immediate
+200; swaps the reconciler finishes later do not build or return change.
 
 ### Lightning Withdrawals
 
@@ -202,6 +239,9 @@ Announce your node on the network:
 | **Relays** | Relays to publish announcements      |
 | **Share Analytics** | Publish aggregate usage stats to Nostr |
 
+To avoid configuring an identity by hand, set `AUTO_GENERATE_NSEC=true` and the
+node creates one on first boot (see [Discovery](discovery.md)).
+
 See [Discovery](discovery.md) for details.
 
 ---
@@ -228,12 +268,17 @@ Use environment variables for:
 | `DESCRIPTION`        | Node description                  | `A Routstr Node`                     |
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
 | `NSEC`               | Legacy seed for the Nostr private key (otherwise set from the admin UI) | —                |
+| `AUTO_GENERATE_NSEC` | Generate a Nostr identity on first boot when none is configured (stored encrypted, never printed; retrieve it with `scripts/reveal_nsec.py`; a provided `NSEC` wins) | `false` |
 | `ENABLE_ANALYTICS_SHARING` | Enable usage analytics sharing to Nostr | `true`                         |
 | `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin,https://mint.cubabitcoin.org` |
 | `MINT_OPERATION_CONCURRENCY` | Concurrent mint/unit balance reads | `4` |
 | `MINT_OPERATION_TIMEOUT_SECONDS` | Per-attempt timeout for mint network calls | `30` |
 | `MINT_MAX_CONCURRENCY` | Concurrent operations allowed per mint (`0` disables the limit) | `4` |
 | `MINT_RETRY_MAX_ATTEMPTS` | Retries after a timeout or HTTP 429 (`0` disables retries) | `3` |
+| `FOREIGN_MINT_OPERATION_TIMEOUT_SECONDS` | Single-attempt deadline for calls to an unconfigured mint | `5` |
+| `FOREIGN_MINT_MELT_TIMEOUT_SECONDS` | Deadline for a foreign mint to settle a Lightning melt; timeouts remain reconcilable and do not cool the mint | `60` |
+| `FOREIGN_MINT_MAX_CONCURRENCY` | Process-wide cap on in-flight calls to unconfigured mints | `4` |
+| `SWAP_RECONCILE_INTERVAL_SECONDS` | How often unfinished swaps are re-checked against their mints | `60` |
 | `RECEIVE_LN_ADDRESS` | Lightning address for withdrawals | —                                    |
 | `MIN_PAYOUT_SAT`     | Min payout balance in sats (applies to all mints) | `210`                |
 | `MAX_PAYOUT_SAT`     | Maximum gross budget per periodic payout in sats, including fees (all mints) | `250000`             |
