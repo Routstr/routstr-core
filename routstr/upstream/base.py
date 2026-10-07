@@ -315,7 +315,7 @@ def _openai_completion_path(path: str) -> str | None:
 def _x_cashu_path_has_settlement_handler(path: str) -> bool:
     canonical = path.rstrip("/")
     return _openai_completion_path(canonical) is not None or canonical.endswith(
-        ("embeddings", "messages", "messages/count_tokens", "systemone")
+        ("embeddings", "messages", "messages/count_tokens", "systemone", "decisions")
     )
 
 
@@ -338,6 +338,7 @@ class BaseUpstreamProvider:
     platform_url: str | None = None
 
     supports_anthropic_messages: bool = False
+    supports_decisions: bool = False
     # When None, the prefix is detected from `base_url` at dispatch time
     # (see `get_litellm_provider_prefix`). Subclasses set this to lock the
     # provider regardless of URL.
@@ -3408,6 +3409,7 @@ class BaseUpstreamProvider:
                 or path.endswith("messages")
                 or path.endswith("messages/count_tokens")
                 or path.endswith("systemone")
+                or path.endswith("decisions")
             ):
                 if path.endswith("messages"):
                     client_wants_streaming = False
