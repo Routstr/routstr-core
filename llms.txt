@@ -38,8 +38,11 @@ quickstart and deployment guide before running commands. Reuse an existing
 checkout and state; do not overwrite `.env` or recreate a wallet.
 
 For public mode, verify **before** starting that DNS, TLS and a reverse proxy
-forward `https://<domain>` to `127.0.0.1:8000`, and that `/admin` is restricted at
-the proxy. If any of that is missing, prefer private mode.
+forward `https://<domain>` to `127.0.0.1:8000`. If any of that is missing, prefer
+private mode. The dashboard is protected by the node's own admin password
+(scrypt-hashed); restricting `/admin` at the proxy (IP allowlist or basic auth) is
+an optional extra layer, not a setup requirement. What matters is that the
+operator reads the one-time bootstrap password and rotates it.
 
 ### Phase 1 — Start
 
