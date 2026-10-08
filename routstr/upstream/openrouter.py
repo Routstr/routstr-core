@@ -10,7 +10,6 @@ from .base import BaseUpstreamProvider, _reported_provider
 from .image_catalog import (
     attach_image_books,
     fetch_openrouter_image_books,
-    openrouter_book_from_pricing,
 )
 from .model_paths import public_provider_url
 
@@ -102,20 +101,24 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
         body = super().prepare_request_body(body, model_obj, include_stream_usage)
         if not body or not produces_images(model_obj):
             return body
-        # OpenRouter would otherwise re-route a failed generation to another
-        # provider on its side, which can buy twice for one settled response.
+        # Pin the endpoint the request was quoted on. OpenRouter would
+        # otherwise pick one with other prices, or re-route a failed
+        # generation to another provider, buying twice for one settlement.
         try:
             data = json.loads(body)
         except Exception:
             return body
         if not isinstance(data, dict):
             return body
-        routing = data.get("provider")
-        routing = dict(routing) if isinstance(routing, dict) else {}
-        if routing.get("allow_fallbacks") is False:
-            return body
-        routing["allow_fallbacks"] = False
-        data["provider"] = routing
+        book = model_obj.image_pricing
+        tag = book.endpoint_tag if book is not None else None
+        if tag:
+            data["provider"] = {"only": [tag], "allow_fallbacks": False}
+        else:
+            routing = data.get("provider")
+            routing = dict(routing) if isinstance(routing, dict) else {}
+            routing["allow_fallbacks"] = False
+            data["provider"] = routing
         return json.dumps(data).encode()
 
     @classmethod
@@ -142,10 +145,9 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
         """Fetch all OpenRouter models.
 
         Image models are priced from the Image API's per-endpoint billable
-        lines, which name the unit (image, megapixel or token) and any
-        resolution variants. When that listing is unavailable the catalog's
-        ``image_output`` token rate stands in. Either way the response's
-        ``usage.cost`` settles the charge.
+        lines. One with no endpoint whose prices bound a request, or whose
+        listing is unavailable, has no book and is not listed; the response's
+        ``usage.cost`` settles the charge on the endpoint it was pinned to.
         """
         models_data = await async_fetch_openrouter_models()
         models = [Model(**model) for model in models_data]  # type: ignore
@@ -161,18 +163,6 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
         books = await fetch_openrouter_image_books(
             image_ids, base_url=self.base_url, api_key=self.api_key
         )
-        for entry in models_data:
-            model_id = str(entry.get("id", ""))
-            pricing = entry.get("pricing")
-            if model_id in books or model_id not in image_ids:
-                continue
-            fallback = (
-                openrouter_book_from_pricing(pricing, model_id)
-                if isinstance(pricing, dict)
-                else None
-            )
-            if fallback is not None:
-                books[model_id] = fallback
         return attach_image_books(models, books, source="OpenRouter")
 
     async def get_balance(self) -> float | None:

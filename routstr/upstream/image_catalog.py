@@ -11,7 +11,7 @@ every image model the same way.
 from __future__ import annotations
 
 import asyncio
-import re
+import math
 from typing import Any
 
 import httpx
@@ -33,16 +33,11 @@ __all__ = [
     "fetch_openrouter_image_books",
     "openai_image_book",
     "openrouter_book_from_endpoints",
-    "openrouter_book_from_pricing",
     "static_image_book",
 ]
 
 OPENROUTER_IMAGE_API_TIMEOUT_SECONDS = 10.0
 _OPENROUTER_IMAGE_API_CONCURRENCY = 8
-
-# A token-metered model whose per-image token count is undocumented is
-# reserved at this many output tokens, past the dearest documented tier.
-_ESTIMATED_MAX_OUTPUT_IMAGE_TOKENS = 8_192
 
 # Megapixel-metered models are reserved at this class when the request and
 # the catalog both leave the output size open.
@@ -143,37 +138,6 @@ def openai_image_book(model_id: str, pricing: dict[str, Any]) -> ImagePricing | 
     )
 
 
-_RESOLUTION_TOKEN = re.compile(r"^\d+k$", re.IGNORECASE)
-
-
-def _split_variant(variant: Any) -> tuple[str | None, str | None]:
-    """An OpenRouter pricing ``variant`` as ``(resolution, quality)``.
-
-    Variants are ``2k``, ``low_1k``, ``medium_2k`` or a bare word such as
-    ``high_resolution``. Tokens shaped like a resolution class name one; the
-    rest, joined back, is the quality step.
-    """
-    if not isinstance(variant, str) or not variant:
-        return None, None
-    tokens = variant.split("_")
-    resolution = next((t.upper() for t in tokens if _RESOLUTION_TOKEN.match(t)), None)
-    rest = [t for t in tokens if not _RESOLUTION_TOKEN.match(t)]
-    quality = "_".join(rest).lower() if rest else None
-    return resolution, quality
-
-
-def _enum_values(supported: Any, name: str) -> list[str]:
-    if not isinstance(supported, dict):
-        return []
-    descriptor = supported.get(name)
-    if not isinstance(descriptor, dict):
-        return []
-    values = descriptor.get("values")
-    if not isinstance(values, list):
-        return []
-    return [str(v) for v in values]
-
-
 def _megapixel_tiers(
     megapixel_usd: float, resolutions: list[str]
 ) -> tuple[list[ImagePriceTier], float]:
@@ -194,178 +158,122 @@ def _megapixel_tiers(
     return tiers, max(t.usd for t in tiers)
 
 
+# OpenRouter lines that bound a request: a fixed price per output image, and
+# a per-image surcharge for each reference image.
+_REFERENCE_LINES = frozenset({"input_image", "input_reference"})
+# Input lines that may be listed at zero without making the price unbounded.
+_FREE_INPUT_LINES = frozenset(
+    {"input_text", "input_font", "input_image", "input_reference"}
+)
+
+
+def _rate(value: Any) -> float | None:
+    """A listed USD rate, or ``None`` if it is not a finite nonnegative number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        rate = float(value)
+    except (ValueError, OverflowError):
+        return None
+    if not math.isfinite(rate) or rate < 0:
+        return None
+    return rate
+
+
+def _quotable_endpoint_book(endpoint: dict[str, Any]) -> ImagePricing | None:
+    """The book of one endpoint, or ``None`` if its prices do not bound a request.
+
+    Token and megapixel lines depend on quantities the node cannot cap before
+    dispatch, and a billable line listed in two units is ambiguous. Variants
+    are alternatives that no request field reliably names, so the dearest one
+    is reserved.
+    """
+    lines = endpoint.get("pricing")
+    if not isinstance(lines, list) or not lines:
+        return None
+    units: dict[str, str] = {}
+    rates: dict[tuple[str, str], float] = {}
+    for line in lines:
+        if not isinstance(line, dict):
+            return None
+        billable, unit = line.get("billable"), line.get("unit")
+        rate = _rate(line.get("cost_usd"))
+        if not isinstance(billable, str) or not isinstance(unit, str) or rate is None:
+            return None
+        if units.setdefault(billable, unit) != unit:
+            return None
+        rates[(billable, unit)] = max(rates.get((billable, unit), 0.0), rate)
+
+    output_usd = 0.0
+    reference_usd = 0.0
+    for (billable, unit), rate in rates.items():
+        if billable == "output_image" and unit == "image":
+            output_usd = rate
+        elif billable in _REFERENCE_LINES and unit == "image":
+            reference_usd = max(reference_usd, rate)
+        elif rate > 0 or billable not in _FREE_INPUT_LINES:
+            return None
+    if output_usd <= 0:
+        return None
+
+    supported = endpoint.get("supported_parameters")
+    return ImagePricing(
+        max_usd=output_usd,
+        tiers=[ImagePriceTier(usd=output_usd)],
+        unit="image",
+        input_image_usd=reference_usd,
+        trust_upstream_cost=True,
+        parameters={
+            str(name): descriptor
+            for name, descriptor in supported.items()
+            if isinstance(descriptor, dict)
+        }
+        if isinstance(supported, dict)
+        else {},
+    )
+
+
 def openrouter_book_from_endpoints(
     payload: dict[str, Any], model_id: str
 ) -> ImagePricing | None:
-    """A book from ``GET /images/models/{id}/endpoints``.
+    """A book from ``GET /images/models/{id}/endpoints``, or ``None``.
 
-    Each endpoint lists billable lines ``{billable, unit, cost_usd, variant}``.
-    The dearest line per tier across endpoints is kept, since the router
-    picks the endpoint. A flat per-image line wins the unit over a megapixel
-    line, which wins over a token line; whichever it is, settlement trusts
-    the USD the response reports. An ``input_image`` line per image is the
-    reference-image surcharge.
+    Requests are quoted on ``endpoints``: one book per endpoint whose prices
+    bound a request, keyed by the ``provider_tag`` the request is pinned to.
+    A tag pins a provider, not a record, so a tag listed twice leaves the
+    price OpenRouter will charge ambiguous and neither record is quotable.
+    A model with no quotable endpoint has no book and is not listed. The
+    model-level book only carries the listed ceiling.
     """
     endpoints = payload.get("endpoints")
     if not isinstance(endpoints, list):
         return None
-
-    per_image: dict[tuple[str | None, str | None], float] = {}
-    megapixel_usd = 0.0
-    output_token_usd = 0.0
-    input_text_usd = 0.0
-    input_image_usd = 0.0
-    reference_usd = 0.0
-    resolutions: list[str] = []
-    qualities: list[str] = []
-
+    tags = [e.get("provider_tag") for e in endpoints if isinstance(e, dict)]
+    quotable: dict[str, ImagePricing] = {}
     for endpoint in endpoints:
         if not isinstance(endpoint, dict):
             continue
-        supported = endpoint.get("supported_parameters")
-        for value in _enum_values(supported, "resolution"):
-            if value.upper() not in resolutions:
-                resolutions.append(value.upper())
-        for value in _enum_values(supported, "quality"):
-            if value.lower() not in qualities:
-                qualities.append(value.lower())
-        lines = endpoint.get("pricing")
-        if not isinstance(lines, list):
+        tag = endpoint.get("provider_tag")
+        if not isinstance(tag, str) or not tag or tags.count(tag) != 1:
             continue
-        for line in lines:
-            if not isinstance(line, dict):
-                continue
-            billable = line.get("billable")
-            unit = line.get("unit")
-            usd = _float(line.get("cost_usd"))
-            if usd <= 0:
-                continue
-            if billable == "output_image":
-                if unit == "image":
-                    key = _split_variant(line.get("variant"))
-                    per_image[key] = max(per_image.get(key, 0.0), usd)
-                elif unit == "megapixel":
-                    megapixel_usd = max(megapixel_usd, usd)
-                elif unit == "token":
-                    output_token_usd = max(output_token_usd, usd)
-            elif billable == "input_text" and unit == "token":
-                input_text_usd = max(input_text_usd, usd)
-            elif billable == "input_image" and unit == "token":
-                input_image_usd = max(input_image_usd, usd)
-            elif billable == "input_image" and unit == "image":
-                reference_usd = max(reference_usd, usd)
-
-    if per_image:
-        tiers = [
-            ImagePriceTier(resolution=resolution, quality=quality, usd=usd)
-            for (resolution, quality), usd in per_image.items()
-        ]
-        untiered = per_image.get((None, None))
-        cheapest = _cheapest(per_image)
-        return ImagePricing(
-            max_usd=max(per_image.values()),
-            tiers=tiers,
-            # A single untiered price applies whatever the request asks for.
-            default_resolution=None if untiered is not None else cheapest[0],
-            default_quality=None if untiered is not None else cheapest[1],
-            resolutions=resolutions if untiered is None else [],
-            qualities=qualities if untiered is None else [],
-            unit="image",
-            input_image_usd=reference_usd,
-            trust_upstream_cost=True,
+        book = _quotable_endpoint_book(endpoint)
+        if book is not None:
+            quotable[tag] = book.copy(update={"endpoint_tag": tag})
+    if not quotable:
+        logger.debug(
+            "OpenRouter image model has no endpoint with bounded pricing",
+            extra={"model_id": model_id},
         )
-
-    if megapixel_usd > 0:
-        tiers, max_usd = _megapixel_tiers(megapixel_usd, resolutions)
-        return ImagePricing(
-            max_usd=max_usd,
-            tiers=tiers,
-            default_resolution="1K",
-            resolutions=[t.resolution for t in tiers if t.resolution],
-            qualities=qualities,
-            unit="megapixel",
-            megapixel_usd=megapixel_usd,
-            input_image_usd=reference_usd,
-            trust_upstream_cost=True,
-        )
-
-    if output_token_usd > 0:
-        book = openai_image_book(
-            model_id,
-            {
-                "image_output": output_token_usd,
-                "prompt": input_text_usd,
-                "image_token": input_image_usd,
-            },
-        )
-        if book is None:
-            estimate = output_token_usd * _ESTIMATED_MAX_OUTPUT_IMAGE_TOKENS
-            book = ImagePricing(
-                max_usd=estimate,
-                tiers=[ImagePriceTier(usd=estimate)],
-                qualities=qualities,
-                unit="token",
-                output_token_usd=output_token_usd,
-                input_text_token_usd=input_text_usd,
-                input_image_token_usd=input_image_usd,
-            )
-        return book.copy(
-            update={"trust_upstream_cost": True, "input_image_usd": reference_usd}
-        )
-
-    return None
-
-
-def _cheapest(
-    per_image: dict[tuple[str | None, str | None], float],
-) -> tuple[str | None, str | None]:
-    """The tier a request naming nothing is priced at: the cheapest one."""
-    labelled = {k: v for k, v in per_image.items() if k != (None, None)}
-    if not labelled:
-        return None, None
-    return min(labelled, key=lambda k: labelled[k])
-
-
-def openrouter_book_from_pricing(
-    pricing: dict[str, Any], model_id: str
-) -> ImagePricing | None:
-    """A book from the ``/models`` pricing keys, for when the Image API is down.
-
-    ``image_output`` is USD per image output token on every image model the
-    catalog lists; ``prompt`` is the text input rate. The flat ``image`` key
-    there is a per-input-image surcharge, not a generation price, so it is
-    not read as one.
-    """
-    output_token_usd = _float(pricing.get("image_output"))
-    if output_token_usd <= 0:
         return None
-    book = openrouter_book_from_endpoints(
-        {
-            "endpoints": [
-                {
-                    "pricing": [
-                        {
-                            "billable": "output_image",
-                            "unit": "token",
-                            "cost_usd": output_token_usd,
-                        },
-                        {
-                            "billable": "input_text",
-                            "unit": "token",
-                            "cost_usd": _float(pricing.get("prompt")),
-                        },
-                        {
-                            "billable": "input_image",
-                            "unit": "token",
-                            "cost_usd": _float(pricing.get("image_token")),
-                        },
-                    ]
-                }
-            ]
-        },
-        model_id,
+    max_usd = max(book.max_usd for book in quotable.values())
+    return ImagePricing(
+        max_usd=max_usd,
+        tiers=[ImagePriceTier(usd=max_usd)],
+        unit="image",
+        input_image_usd=max(book.input_image_usd for book in quotable.values()),
+        trust_upstream_cost=True,
+        endpoints=quotable,
     )
-    return book
 
 
 async def fetch_openrouter_image_books(

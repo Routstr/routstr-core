@@ -341,6 +341,19 @@ class TopupData(BaseModel):
     checkout_url: str | None = None
 
 
+async def _read_bounded(response: httpx.Response, limit: int) -> bytes:
+    """The body of a buffered response, refused once it passes ``limit`` bytes."""
+    declared = response.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise UpstreamError("Image response exceeds the configured size limit")
+    content = bytearray()
+    async for chunk in response.aiter_bytes():
+        content.extend(chunk)
+        if len(content) > limit:
+            raise UpstreamError("Image response exceeds the configured size limit")
+    return bytes(content)
+
+
 class BaseUpstreamProvider:
     """Provider for forwarding requests to an upstream AI service API."""
 
@@ -2180,9 +2193,11 @@ class BaseUpstreamProvider:
         ``settle_image_sats`` picks the unit the model's price book names:
         the upstream's own USD cost, reported image tokens, or a flat price
         per image returned. A response with nothing to bill releases the
-        reservation.
+        reservation, and none is charged past it.
         """
-        content = await response.aread()
+        from ..core.settings import settings
+
+        content = await _read_bounded(response, settings.image_max_response_bytes)
         content_type = response.headers.get("content-type")
         usage = read_image_response(
             content, _is_json_content_type(content_type) if content_type else True
@@ -2206,6 +2221,20 @@ class BaseUpstreamProvider:
                     "key_hash": key.hashed_key[:8] + "...",
                 },
             )
+
+        if total_sats * 1000 > max_cost_for_model:
+            # The quote is what the key agreed to; an upstream charging more
+            # than it is the node's loss to reconcile, not the key's.
+            logger.error(
+                "Image settlement exceeded its reservation; charging the reservation",
+                extra={
+                    "model": model_id,
+                    "settled_msats": math.ceil(total_sats * 1000),
+                    "reserved_msats": max_cost_for_model,
+                    "key_hash": key.hashed_key[:8] + "...",
+                },
+            )
+            total_sats = max_cost_for_model / 1000
 
         if usage.image_count > 0 and total_sats <= 0:
             logger.warning(

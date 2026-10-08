@@ -27,8 +27,10 @@ regardless of unit.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlsplit
 
 from pydantic.v1 import BaseModel
 
@@ -42,6 +44,9 @@ __all__ = [
     "ImageUsage",
     "ImageBillingUnit",
     "image_reservation_msats",
+    "ImageRequestRefused",
+    "quote_image_endpoint",
+    "with_image_book",
     "output_megapixels",
     "per_image_sats",
     "produces_images",
@@ -132,6 +137,15 @@ class ImagePricing(BaseModel):
     # The upstream reports the USD it charged in ``usage.cost``; settle on it.
     trust_upstream_cost: bool = False
 
+    # OpenRouter serves one model from several endpoints, each with its own
+    # prices. Their books are keyed by ``provider_tag``; a request is quoted
+    # on one and pinned to it, see ``quote_image_endpoint``.
+    endpoints: dict[str, ImagePricing] = {}
+    # On an endpoint's book: its tag, and the descriptor of every request
+    # parameter it accepts (``{"type": "enum" | "range" | ..., ...}``).
+    endpoint_tag: str | None = None
+    parameters: dict[str, dict] = {}
+
     class Config:
         extra = "ignore"
 
@@ -201,6 +215,9 @@ class ImagePricing(BaseModel):
                 return None
             total += images * self.max_input_image_tokens * self.input_image_token_usd
         return total
+
+
+ImagePricing.update_forward_refs()
 
 
 @dataclass(frozen=True)
@@ -502,3 +519,232 @@ def image_reservation_msats(
         + _sats_per_usd(model) * input_ceiling_usd
     )
     return math.ceil(total * 1000)
+
+
+def with_image_book(model: "Model", book: ImagePricing) -> "Model":
+    """``model`` priced on ``book`` instead, at the same sats per USD."""
+    rate = _sats_per_usd(model)
+    pricing = model.pricing.copy(
+        update={"image_output": book.max_usd, "image": book.input_image_usd}
+    )
+    sats_pricing = (
+        model.sats_pricing.copy(
+            update={
+                "image_output": rate * book.max_usd,
+                "image": rate * book.input_image_usd,
+            }
+        )
+        if model.sats_pricing is not None
+        else None
+    )
+    return model.copy(
+        update={
+            "image_pricing": book,
+            "pricing": pricing,
+            "sats_pricing": sats_pricing,
+        }
+    )
+
+
+class ImageRequestRefused(ValueError):
+    """An image request that cannot be quoted, with the reason to report."""
+
+
+# Fields an OpenRouter image request may carry. Anything else could change
+# what the endpoint bills without the quote accounting for it.
+_OPENROUTER_FIELDS = frozenset(
+    {
+        "model",
+        "prompt",
+        "stream",
+        "n",
+        "resolution",
+        "aspect_ratio",
+        "size",
+        "quality",
+        "output_format",
+        "background",
+        "output_compression",
+        "seed",
+        "input_references",
+        "response_format",
+        "user",
+        "session_id",
+    }
+)
+# Checked once per request rather than against an endpoint's descriptors;
+# ``size`` is OpenAI-compatible input the router normalises itself.
+_UNDESCRIBED_FIELDS = frozenset(
+    {"model", "prompt", "stream", "user", "session_id", "response_format", "size"}
+)
+# ``size`` values that are an endpoint's ``resolution`` in shorthand.
+_SIZE_TIERS = frozenset({"512", "768", "1K", "1.5K", "2K", "4K"})
+_PIXEL_SIZE = re.compile(r"^\d{2,5}x\d{2,5}$")
+_OUTPUT_FORMATS = frozenset({"png", "jpeg", "webp", "svg"})
+_RESPONSE_FORMATS = frozenset({"b64_json", "url"})
+_MAX_REQUEST_IMAGES = 10
+_MAX_REFERENCES = 16
+_MAX_ID_LENGTH = 256
+
+
+def _check_references(refs: object) -> None:
+    if not isinstance(refs, list) or len(refs) > _MAX_REFERENCES:
+        raise ImageRequestRefused(
+            f"input_references must be an array of at most {_MAX_REFERENCES} images"
+        )
+    for ref in refs:
+        if (
+            not isinstance(ref, dict)
+            or set(ref) != {"type", "image_url"}
+            or ref["type"] != "image_url"
+        ):
+            raise ImageRequestRefused("References must be image_url content parts")
+        image_url = ref["image_url"]
+        if not isinstance(image_url, dict) or set(image_url) != {"url"}:
+            raise ImageRequestRefused("References must contain image_url.url")
+        url = image_url["url"]
+        if not isinstance(url, str) or not url:
+            raise ImageRequestRefused("Reference URL must be a nonempty string")
+        try:
+            parsed = urlsplit(url)
+            web = (
+                parsed.scheme in {"http", "https"}
+                and bool(parsed.hostname)
+                and not parsed.username
+                and not parsed.password
+            )
+        except ValueError:
+            web = False
+        if not web and not (url.startswith("data:image/") and ";base64," in url):
+            raise ImageRequestRefused(
+                "References require HTTP(S) or base64 image data URLs"
+            )
+
+
+def _openrouter_parameters(body: dict) -> dict:
+    """Check the request-level rules; return what each endpoint must accept."""
+    prompt = body.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ImageRequestRefused("prompt must be a nonempty string")
+    if "provider" in body:
+        raise ImageRequestRefused(
+            "Client provider routing is not supported for image requests"
+        )
+    unknown = set(body) - _OPENROUTER_FIELDS
+    if unknown:
+        raise ImageRequestRefused(
+            f"Unsupported image request fields: {', '.join(sorted(unknown))}"
+        )
+    n = body.get("n", 1)
+    if (
+        isinstance(n, bool)
+        or not isinstance(n, int)
+        or not 1 <= n <= _MAX_REQUEST_IMAGES
+    ):
+        raise ImageRequestRefused(
+            f"n must be an integer between 1 and {_MAX_REQUEST_IMAGES}"
+        )
+    for field in ("user", "session_id"):
+        value = body.get(field)
+        if field in body and (
+            not isinstance(value, str) or len(value) > _MAX_ID_LENGTH
+        ):
+            raise ImageRequestRefused(
+                f"{field} must be a string of at most {_MAX_ID_LENGTH} characters"
+            )
+    output_format = body.get("output_format", "png")
+    if not isinstance(output_format, str) or output_format not in _OUTPUT_FORMATS:
+        raise ImageRequestRefused("Unsupported output_format")
+    if body.get("background") == "transparent" and output_format not in {"png", "webp"}:
+        raise ImageRequestRefused("Transparent background requires png or webp")
+    if "response_format" in body and body["response_format"] not in _RESPONSE_FORMATS:
+        raise ImageRequestRefused("Unsupported response_format")
+    if "input_references" in body:
+        _check_references(body["input_references"])
+
+    parameters = {k: v for k, v in body.items() if k not in _UNDESCRIBED_FIELDS}
+    size = body.get("size")
+    if size is not None:
+        if not isinstance(size, str):
+            raise ImageRequestRefused("size must be a string")
+        if size in _SIZE_TIERS:
+            if "resolution" in body and body["resolution"] != size:
+                raise ImageRequestRefused("size conflicts with resolution")
+            parameters["resolution"] = size
+        elif size != "auto" and not _PIXEL_SIZE.match(size):
+            raise ImageRequestRefused("Unsupported size")
+    return parameters
+
+
+def _check_parameter(name: str, value: object, descriptors: dict[str, dict]) -> None:
+    descriptor = descriptors.get(name)
+    if descriptor is None:
+        raise ImageRequestRefused(f"Endpoint does not support {name}")
+    kind = descriptor.get("type")
+    if kind == "enum":
+        if not isinstance(value, str) or value not in descriptor.get("values", []):
+            raise ImageRequestRefused(f"Unsupported {name}")
+    elif kind == "range":
+        count = (
+            len(value)
+            if name == "input_references" and isinstance(value, list)
+            else value
+        )
+        low, high = descriptor.get("min"), descriptor.get("max")
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or isinstance(low, bool)
+            or not isinstance(low, (int, float))
+            or isinstance(high, bool)
+            or not isinstance(high, (int, float))
+            or not low <= count <= high
+        ):
+            raise ImageRequestRefused(f"{name} is outside endpoint limits")
+    elif kind == "boolean" and name == "seed":
+        # The listing's boolean descriptor means "supported", not a boolean seed.
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ImageRequestRefused("seed must be an integer")
+    else:
+        raise ImageRequestRefused(f"Cannot validate {name}")
+
+
+def _check_endpoint(parameters: dict, n: int, descriptors: dict[str, dict]) -> None:
+    for name, value in parameters.items():
+        _check_parameter(name, value, descriptors)
+    if "n" not in parameters and "n" in descriptors:
+        _check_parameter("n", n, descriptors)
+
+
+def quote_image_endpoint(body: dict, model: "Model", path: str = "") -> "Model":
+    """``model`` quoted on the cheapest OpenRouter endpoint that accepts ``body``.
+
+    The returned model carries that endpoint's own book, so the reservation
+    and settlement use the prices of the endpoint the request is pinned to
+    (``book.endpoint_tag``) rather than a blend of every endpoint's. Raises
+    ``ImageRequestRefused`` with the first reason when no endpoint does.
+    """
+    book = model.image_pricing
+    if book is None or not book.endpoints:
+        raise ImageRequestRefused(
+            "No image endpoint with bounded pricing is available for this model"
+        )
+    parameters = _openrouter_parameters(body)
+    n = body.get("n", 1)
+    quotes: list[tuple[int, str, "Model"]] = []
+    reasons: list[str] = []
+    for tag, endpoint_book in book.endpoints.items():
+        try:
+            _check_endpoint(parameters, n, endpoint_book.parameters)
+        except ImageRequestRefused as refused:
+            reasons.append(str(refused))
+            continue
+        quoted = with_image_book(model, endpoint_book)
+        reserved = image_reservation_msats(body, quoted, path)
+        if reserved is None:
+            reasons.append("Image request cannot be priced on this endpoint")
+            continue
+        quotes.append((reserved, tag, quoted))
+    if not quotes:
+        raise ImageRequestRefused(reasons[0])
+    return min(quotes, key=lambda quote: (quote[0], quote[1]))[2]

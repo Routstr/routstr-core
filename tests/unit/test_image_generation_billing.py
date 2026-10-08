@@ -351,7 +351,7 @@ CHAT_IMAGE_MODEL = IMAGE_MODEL.copy(
 async def test_image_route_refuses_what_it_cannot_bill(
     model: Model, extra: dict
 ) -> None:
-    upstream = MagicMock(forward_request=AsyncMock())
+    upstream = MagicMock(forward_request=AsyncMock(), base_url="https://api.example")
     request = MagicMock(method="POST", headers={"authorization": "Bearer sk-x"})
     request.state.request_id = "req-image"
     mock_request_stream(request, json.dumps({**BODY, **extra}).encode())

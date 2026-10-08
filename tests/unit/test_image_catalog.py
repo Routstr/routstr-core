@@ -20,7 +20,6 @@ from routstr.upstream.image_catalog import (
     attach_image_books,
     openai_image_book,
     openrouter_book_from_endpoints,
-    openrouter_book_from_pricing,
     static_image_book,
 )
 from routstr.upstream.openai import OpenAIUpstreamProvider
@@ -34,6 +33,7 @@ def _endpoints(*lines: dict[str, Any], supported: dict | None = None) -> dict:
         "endpoints": [
             {
                 "provider_name": "P",
+                "provider_tag": "p",
                 "supported_parameters": supported or {},
                 "pricing": list(lines),
             }
@@ -53,10 +53,13 @@ def test_openrouter_flat_per_image_book() -> None:
     assert book.unit == "image"
     assert book.max_usd == pytest.approx(0.04)
     assert book.trust_upstream_cost is True
+    assert set(book.endpoints) == {"p"}
+    assert book.endpoints["p"].endpoint_tag == "p"
     assert select_image_price_usd(book, {"resolution": "4K"}) == pytest.approx(0.04)
 
 
-def test_openrouter_resolution_variants_become_tiers() -> None:
+def test_openrouter_variants_are_reserved_at_the_dearest() -> None:
+    """No request field reliably names a variant, so none is mapped to one."""
     book = openrouter_book_from_endpoints(
         _endpoints(
             {
@@ -76,69 +79,56 @@ def test_openrouter_resolution_variants_become_tiers() -> None:
         "seed/y",
     )
     assert book is not None
-    assert book.max_usd == pytest.approx(0.10)
-    assert book.default_resolution == "2K"
-    assert book.resolutions == ["2K", "4K"]
-    assert select_image_price_usd(book, {}) == pytest.approx(0.05)
-    assert select_image_price_usd(book, {"resolution": "4K"}) == pytest.approx(0.10)
-    # An undeclared class is billed at the ceiling.
-    assert select_image_price_usd(book, {"resolution": "8K"}) == pytest.approx(0.10)
+    endpoint = book.endpoints["p"]
+    assert endpoint.max_usd == pytest.approx(0.10)
+    assert endpoint.parameters == {
+        "resolution": {"type": "enum", "values": ["2K", "4K"]}
+    }
+    assert select_image_price_usd(endpoint, {"resolution": "2K"}) == pytest.approx(0.10)
 
 
-def test_openrouter_megapixel_book() -> None:
-    book = openrouter_book_from_endpoints(
-        _endpoints({"billable": "output_image", "unit": "megapixel", "cost_usd": 0.03}),
-        "bfl/flux",
-    )
-    assert book is not None
-    assert book.unit == "megapixel"
-    assert book.megapixel_usd == pytest.approx(0.03)
-    # No declared resolutions: reserved up to the 2K class.
-    assert book.max_usd == pytest.approx(0.12)
-    assert [t.resolution for t in book.tiers] == ["512", "1K", "2K"]
+@pytest.mark.parametrize(
+    "lines",
+    [
+        # Quantities the node cannot cap before dispatch.
+        [{"billable": "output_image", "unit": "megapixel", "cost_usd": 0.03}],
+        [{"billable": "output_image", "unit": "token", "cost_usd": 0.00003}],
+        # A metered input next to a flat output.
+        [
+            {"billable": "output_image", "unit": "image", "cost_usd": 0.04},
+            {"billable": "input_text", "unit": "token", "cost_usd": 0.000005},
+        ],
+        # One billable line in two units.
+        [
+            {"billable": "output_image", "unit": "image", "cost_usd": 0.04},
+            {"billable": "output_image", "unit": "megapixel", "cost_usd": 0.03},
+        ],
+        # Nothing to bill per image.
+        [{"billable": "output_image", "unit": "image", "cost_usd": 0}],
+        [{"billable": "input_image", "unit": "image", "cost_usd": 0.01}],
+        # Not a rate.
+        [{"billable": "output_image", "unit": "image", "cost_usd": "nan"}],
+        [{"billable": "output_image", "unit": "image", "cost_usd": -1}],
+    ],
+)
+def test_openrouter_endpoints_without_a_bounded_price_have_no_book(
+    lines: list[dict[str, Any]],
+) -> None:
+    assert openrouter_book_from_endpoints(_endpoints(*lines), "m") is None
 
 
-def test_openrouter_token_book_for_gpt_image_uses_the_documented_estimates() -> None:
+def test_openrouter_free_inputs_and_reference_surcharges_are_bounded() -> None:
     book = openrouter_book_from_endpoints(
         _endpoints(
-            {"billable": "input_image", "unit": "token", "cost_usd": 0.000008},
-            {"billable": "input_text", "unit": "token", "cost_usd": 0.000005},
-            {"billable": "output_image", "unit": "token", "cost_usd": 0.00003},
-            supported={"quality": {"type": "enum", "values": ["auto", "low", "high"]}},
+            {"billable": "output_image", "unit": "image", "cost_usd": 0.03},
+            {"billable": "input_text", "unit": "token", "cost_usd": 0},
+            {"billable": "input_image", "unit": "image", "cost_usd": 0.003},
         ),
-        "openai/gpt-image-2",
+        "qwen/qwen-image-3",
     )
     assert book is not None
-    assert book.unit == "token"
-    assert book.output_token_usd == pytest.approx(0.00003)
-    assert book.input_text_token_usd == pytest.approx(0.000005)
-    assert book.input_image_token_usd == pytest.approx(0.000008)
-    assert book.trust_upstream_cost is True
-    assert select_image_price_usd(book, {}) == pytest.approx(0.053)
-    assert select_image_price_usd(book, {"quality": "high"}) == pytest.approx(0.211)
-    assert book.max_usd > 0.211
-
-
-def test_openrouter_token_book_for_an_undocumented_model_is_estimated() -> None:
-    book = openrouter_book_from_endpoints(
-        _endpoints({"billable": "output_image", "unit": "token", "cost_usd": 0.00001}),
-        "someone/new-image",
-    )
-    assert book is not None
-    assert book.unit == "token"
-    assert book.max_usd == pytest.approx(0.00001 * 8192)
-    assert select_image_price_usd(book, {}) == pytest.approx(book.max_usd)
-
-
-def test_openrouter_catalog_fallback_reads_image_output_not_image() -> None:
-    assert openrouter_book_from_pricing({"image": "0.01"}, "x-ai/grok") is None
-    book = openrouter_book_from_pricing(
-        {"prompt": "0.000008", "image_output": "0.00003", "image": "0.01"},
-        "openai/gpt-image-1",
-    )
-    assert book is not None
-    assert book.unit == "token"
-    assert book.output_token_usd == pytest.approx(0.00003)
+    assert book.endpoints["p"].input_image_usd == pytest.approx(0.003)
+    assert book.input_image_usd == pytest.approx(0.003)
 
 
 def test_openai_book_per_family() -> None:
@@ -267,9 +257,7 @@ def test_openrouter_provider_prices_image_models_from_the_image_api() -> None:
     async def fake_books(ids: list[str], **_: Any) -> dict:
         assert ids == ["openai/gpt-image-2", "bfl/flux"]
         book = openrouter_book_from_endpoints(
-            _endpoints(
-                {"billable": "output_image", "unit": "megapixel", "cost_usd": 0.03}
-            ),
+            _endpoints({"billable": "output_image", "unit": "image", "cost_usd": 0.03}),
             "bfl/flux",
         )
         return {"bfl/flux": book}
@@ -284,14 +272,13 @@ def test_openrouter_provider_prices_image_models_from_the_image_api() -> None:
     ):
         models = asyncio.run(provider.fetch_models())
     by_id = {m.id: m for m in models}
-    assert set(by_id) == {"openai/gpt-image-2", "bfl/flux", "openai/gpt-4o"}
-    assert by_id["bfl/flux"].image_pricing is not None
-    assert by_id["bfl/flux"].image_pricing.unit == "megapixel"
-    # The Image API had nothing for gpt-image-2, so the catalog's token rate stands in.
-    gpt = by_id["openai/gpt-image-2"]
-    assert gpt.image_pricing is not None and gpt.image_pricing.unit == "token"
-    assert gpt.image_pricing.trust_upstream_cost is True
-    assert gpt.pricing.image_output == pytest.approx(gpt.image_pricing.max_usd)
+    # The Image API had no quotable endpoint for gpt-image-2, so it has no
+    # endpoint to pin and is not listed rather than priced off the catalog.
+    assert set(by_id) == {"bfl/flux", "openai/gpt-4o"}
+    flux = by_id["bfl/flux"]
+    assert flux.image_pricing is not None
+    assert set(flux.image_pricing.endpoints) == {"p"}
+    assert flux.pricing.image_output == pytest.approx(0.03)
     assert by_id["openai/gpt-4o"].image_pricing is None
 
 
@@ -365,7 +352,7 @@ def test_xai_drops_image_models_the_openrouter_feed_prices_per_token() -> None:
     assert [m.id for m in models] == ["grok-4"]
 
 
-def test_openrouter_quality_resolution_variants_and_reference_surcharge() -> None:
+def test_openrouter_tiered_variants_and_reference_surcharge() -> None:
     book = openrouter_book_from_endpoints(
         _endpoints(
             {"billable": "input_image", "unit": "image", "cost_usd": 0.01},
@@ -401,16 +388,17 @@ def test_openrouter_quality_resolution_variants_and_reference_surcharge() -> Non
         "x-ai/grok-imagine-image-2.0",
     )
     assert book is not None
-    assert book.max_usd == pytest.approx(0.08)
-    assert book.input_image_usd == pytest.approx(0.01)
-    assert (book.default_resolution, book.default_quality) == ("1K", "low")
-    assert select_image_price_usd(book, {}) == pytest.approx(0.04)
-    assert select_image_price_usd(book, {"quality": "medium"}) == pytest.approx(0.06)
-    assert select_image_price_usd(
-        book, {"resolution": "2K", "quality": "medium"}
-    ) == pytest.approx(0.08)
-    assert book.reference_usd({"input_references": ["a", "b"]}) == pytest.approx(0.02)
-    assert book.reference_usd({}) == 0.0
+    endpoint = book.endpoints["p"]
+    # Variants are alternatives no request field reliably names: every
+    # request is reserved at the dearest, and ``usage.cost`` settles it.
+    assert endpoint.max_usd == pytest.approx(0.08)
+    for body in ({}, {"quality": "low", "resolution": "1K"}):
+        assert select_image_price_usd(endpoint, body) == pytest.approx(0.08)
+    assert endpoint.input_image_usd == pytest.approx(0.01)
+    assert endpoint.reference_usd({"input_references": ["a", "b"]}) == pytest.approx(
+        0.02
+    )
+    assert endpoint.reference_usd({}) == 0.0
 
     seed = openrouter_book_from_endpoints(
         _endpoints(
@@ -426,11 +414,8 @@ def test_openrouter_quality_resolution_variants_and_reference_surcharge() -> Non
         "bytedance-seed/seedream-5-0-pro",
     )
     assert seed is not None
-    # The untiered line prices a plain request; a size it did not name goes
-    # to the ceiling, since that is what ``high_resolution`` most likely is.
-    assert select_image_price_usd(seed, {}) == pytest.approx(0.045)
-    assert select_image_price_usd(seed, {"resolution": "4K"}) == pytest.approx(0.09)
-    assert seed.max_usd == pytest.approx(0.09)
+    assert seed.endpoints["p"].max_usd == pytest.approx(0.09)
+    assert select_image_price_usd(seed.endpoints["p"], {}) == pytest.approx(0.09)
 
 
 def test_attach_carries_input_and_output_image_prices() -> None:

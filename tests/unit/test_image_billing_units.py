@@ -23,6 +23,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 import routstr.auth as auth_module
 from routstr.auth import ReservationSnapshot, get_reservation_snapshot, pay_for_request
 from routstr.core.db import ApiKey, ReservationRelease
+from routstr.core.exceptions import UpstreamError
 from routstr.payment.image_pricing import (
     ImagePriceTier,
     ImagePricing,
@@ -34,7 +35,11 @@ from routstr.payment.image_pricing import (
     settle_image_sats,
 )
 from routstr.payment.models import Architecture, Model, Pricing
-from routstr.upstream.base import IMAGES_PER_RESERVATION, BaseUpstreamProvider
+from routstr.upstream.base import (
+    IMAGES_PER_RESERVATION,
+    BaseUpstreamProvider,
+    _read_bounded,
+)
 from routstr.upstream.image_generation import read_image_response
 
 BALANCE = 100_000
@@ -354,7 +359,7 @@ async def _drain(response: Any) -> bytes:
 
 
 async def _settle(
-    model: Model, body: dict, payload: dict
+    model: Model, body: dict, payload: dict, reserved: int = RESERVED
 ) -> tuple[int, int, str | None]:
     engine = await _engine()
     provider = BaseUpstreamProvider(
@@ -374,7 +379,7 @@ async def _settle(
         key = ApiKey(hashed_key="key", balance=BALANCE)
         session.add(key)
         await session.commit()
-        await pay_for_request(key, RESERVED, session)
+        await pay_for_request(key, reserved, session)
         snapshot: ReservationSnapshot = await get_reservation_snapshot(key, session)
         with (
             patch("httpx.AsyncClient.send", AsyncMock(return_value=upstream)),
@@ -393,7 +398,7 @@ async def _settle(
                 {},
                 json.dumps(body).encode(),
                 key,
-                RESERVED,
+                reserved,
                 session,
                 model,
                 snapshot,
@@ -417,6 +422,7 @@ async def test_openai_style_response_is_billed_on_its_tokens() -> None:
             "data": [{"b64_json": "x"}],
             "usage": {"input_tokens": 10, "output_tokens": 1000},
         },
+        reserved=50_000,
     )
     expected_msats = math.ceil((1000 * 0.00003 + 10 * 0.000005) * 1000 * 1000)
     assert spent == expected_msats
@@ -448,8 +454,46 @@ async def test_openrouter_style_response_is_billed_on_its_reported_cost() -> Non
             "data": [{"b64_json": "x"}, {"b64_json": "y"}],
             "usage": {"prompt_tokens": 16, "completion_tokens": 272, "cost": 0.0123},
         },
+        reserved=50_000,
     )
     expected_msats = math.ceil(0.0123 * 1000 * 1000)
     assert spent == expected_msats
     assert balance == BALANCE - expected_msats
     assert status == "charged"
+
+
+@pytest.mark.asyncio
+async def test_settlement_never_charges_past_the_reservation() -> None:
+    """An upstream billing more than it was quoted is the node's loss."""
+    model = _model(TRUSTED_BOOK)
+    balance, spent, status = await _settle(
+        model,
+        {"model": "img", "prompt": "a cat"},
+        {"data": [{"b64_json": "x"}], "usage": {"cost": 0.0123}},
+    )
+    assert spent == RESERVED
+    assert balance == BALANCE - RESERVED
+    assert status == "charged"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declared", [True, False])
+async def test_an_oversized_image_response_is_refused(declared: bool) -> None:
+    """Refused before it is buffered whole, whether or not it says its size."""
+    payload = json.dumps({"data": [{"b64_json": "x" * 64}]}).encode()
+    headers = {"content-type": "application/json"}
+    if declared:
+        headers["content-length"] = str(len(payload))
+    response = httpx.Response(
+        200,
+        stream=httpx.ByteStream(payload),
+        headers=headers,
+        request=httpx.Request("POST", "http://upstream"),
+    )
+    with pytest.raises(UpstreamError, match="size limit"):
+        await _read_bounded(response, len(payload) - 1)
+
+    response = httpx.Response(
+        200, content=payload, request=httpx.Request("POST", "http://upstream")
+    )
+    assert await _read_bounded(response, len(payload)) == payload

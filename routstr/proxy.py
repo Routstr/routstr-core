@@ -41,8 +41,13 @@ from .payment.helpers import (
     create_upstream_error_response,
     get_max_cost_for_model,
 )
-from .payment.image_pricing import image_reservation_msats
+from .payment.image_pricing import (
+    ImageRequestRefused,
+    image_reservation_msats,
+    quote_image_endpoint,
+)
 from .payment.models import Model
+from .payment.price import sats_usd_price
 from .upstream import BaseUpstreamProvider
 from .upstream.cooldown import (
     candidate_model_identity,
@@ -159,6 +164,47 @@ def _candidate_for_selector(
             continue
         return model_obj, upstream
     return None
+
+
+_TEXT_GENERATION_PATHS = frozenset(
+    {"chat/completions", "completions", "responses", "messages"}
+)
+
+
+def _image_only(model: Model) -> bool:
+    outputs = model.architecture.output_modalities
+    return "image" in outputs and "text" not in outputs
+
+
+def _price_image_candidate(
+    body: dict,
+    model: Model,
+    upstream: BaseUpstreamProvider,
+    path: str,
+) -> tuple[Model, BaseUpstreamProvider] | str:
+    """The candidate priced for an image request, or why it cannot be.
+
+    OpenRouter serves a model from several endpoints at different prices, so
+    the request is quoted on one endpoint and pinned there. A quote above the
+    node's per-request budget is refused like one that cannot be bounded.
+    """
+    if is_openrouter_base_url(upstream.base_url):
+        try:
+            model = quote_image_endpoint(body, model, path)
+        except ImageRequestRefused as refused:
+            return str(refused)
+    reserved = image_reservation_msats(body, model, path)
+    if reserved is None:
+        return f"Model '{model.id}' cannot be priced for this request on this node"
+    budget = settings.image_max_request_usd
+    if budget > 0:
+        try:
+            reserved_usd = reserved / 1000 * sats_usd_price()
+        except ValueError:
+            return "Image requests cannot be priced until the exchange rate is known"
+        if reserved_usd > budget:
+            return "Image quote exceeds the node's per-request budget"
+    return model, upstream
 
 
 async def _price_pinned_endpoint(
@@ -791,6 +837,21 @@ async def _proxy(
             )
 
     single_dispatch = is_image_generation_path(path)
+    if _canonical_api_path(path) in _TEXT_GENERATION_PATHS:
+        # An image-only model has no token price, so a text route would serve
+        # its generations free. It is refused whatever its capabilities say.
+        candidates = [
+            (model, upstream)
+            for model, upstream in candidates
+            if not _image_only(model)
+        ]
+        if not candidates:
+            return create_error_response(
+                "unsupported_request",
+                f"Model '{model_id}' requires the images API",
+                400,
+                request=request,
+            )
     if single_dispatch:
         # Settlement buffers the whole response and bills the images it counts,
         # so a stream would be billed as one image whatever it carried.
@@ -801,15 +862,21 @@ async def _proxy(
                 400,
                 request=request,
             )
-        candidates = [
-            (model, upstream)
-            for model, upstream in candidates
-            if image_reservation_msats(request_body_dict, model, path) is not None
-        ]
+        priced_candidates: list[tuple[Model, BaseUpstreamProvider]] = []
+        refusals: list[str] = []
+        for model, upstream in candidates:
+            priced = _price_image_candidate(request_body_dict, model, upstream, path)
+            if isinstance(priced, str):
+                refusals.append(priced)
+            else:
+                priced_candidates.append(priced)
+        candidates = priced_candidates
         if not candidates:
             return create_error_response(
                 "unsupported_request",
-                f"Model '{model_id}' cannot be priced for this request on this node",
+                refusals[0]
+                if refusals
+                else f"Model '{model_id}' cannot be priced for this request on this node",
                 400,
                 request=request,
             )
