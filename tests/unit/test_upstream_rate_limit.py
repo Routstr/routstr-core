@@ -28,6 +28,8 @@ from routstr.upstream.rate_limit import (
     classify_rate_limit,
 )
 
+from .proxy_test_utils import mock_request_stream, patch_proxy_session
+
 # The exact scenario from the issue, with a realistic (fake) org identifier.
 RAW_ORG_ID = "org-abc123XYZ456def"
 RATE_LIMIT_MESSAGE = (
@@ -353,7 +355,7 @@ async def test_proxy_loop_surfaces_rate_limit_and_reverts_once() -> None:
     request = MagicMock()
     request.method = "POST"
     request.headers = {"authorization": "Bearer sk-rlkey"}
-    request.body = AsyncMock(return_value=b'{"model": "test-model"}')
+    mock_request_stream(request, b'{"model": "test-model"}')
     request.state = MagicMock()
     request.state.request_id = "req-rl"
 
@@ -394,17 +396,15 @@ async def test_proxy_loop_surfaces_rate_limit_and_reverts_once() -> None:
         ),
         patch.object(proxy_module, "check_token_balance", MagicMock()),
         patch.object(proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)),
-        patch.object(proxy_module, "pay_for_request", AsyncMock(return_value=1_000)),
         patch.object(
             proxy_module,
-            "get_reservation_snapshot",
+            "pay_for_request",
             AsyncMock(return_value=reservation),
         ),
         patch.object(proxy_module, "revert_pay_for_request", revert_mock),
+        patch_proxy_session(session),
     ):
-        response = await proxy_module.proxy(
-            request, "v1/chat/completions", session=session
-        )
+        response = await proxy_module.proxy(request, "v1/chat/completions")
 
     # Original 429 status and the stable code/details survive to the client.
     assert response.status_code == 429

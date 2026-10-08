@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import ipaddress
 import json
 import math
 import socket
@@ -26,6 +25,7 @@ from ..core.error_scope import (
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..core.settings import settings
+from ..net_guard import is_blocked_address as _is_blocked_address
 from ..wallet import (
     UntrustedSourceMintError,
     classify_redemption_error,
@@ -399,21 +399,6 @@ def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
             extra={"error": str(e)},
         )
         return (512, 512)
-
-
-def _is_blocked_address(address: str) -> bool:
-    """Allow only globally reachable addresses (RFC 6890)."""
-    try:
-        ip = ipaddress.ip_address(address)
-    except ValueError:
-        return True
-    if isinstance(ip, ipaddress.IPv6Address):
-        # An embedded v4 address would otherwise smuggle a rejected target past
-        # the v6 checks.
-        for embedded in (ip.ipv4_mapped, ip.sixtofour):
-            if embedded is not None:
-                return _is_blocked_address(str(embedded))
-    return not ip.is_global or ip.is_multicast
 
 
 async def _validated_fetch_target(url: str) -> tuple[str, str]:

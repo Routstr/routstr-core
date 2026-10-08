@@ -31,3 +31,13 @@ def _isolate_redemption_negative_cache() -> Iterator[None]:
     redemption_negative_cache.clear()
     yield
     redemption_negative_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_upstream_cooldowns() -> Iterator[None]:
+    """Clear process-wide upstream cooldowns so one test's failures can't skip providers in the next."""
+    from routstr.upstream.cooldown import reset_cooldowns
+
+    reset_cooldowns()
+    yield
+    reset_cooldowns()

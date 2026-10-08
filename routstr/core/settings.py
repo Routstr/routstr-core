@@ -40,6 +40,22 @@ class Settings(BaseSettings):
     upstream_5xx_retry_attempts: int = Field(
         default=1, ge=0, env="UPSTREAM_5XX_RETRY_ATTEMPTS"
     )
+    # Streaming guards, off by default (0). A stream that never produces a
+    # first chunk can still fail over; one that stalls later can only be
+    # aborted and billed for what it delivered. Reasoning models can stay
+    # silent for minutes, so set these above the longest expected think time.
+    upstream_first_token_timeout_seconds: float = Field(
+        default=0.0, ge=0, env="UPSTREAM_FIRST_TOKEN_TIMEOUT_SECONDS"
+    )
+    upstream_stream_idle_timeout_seconds: float = Field(
+        default=0.0, ge=0, env="UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS"
+    )
+    # Circuit breaker: timeouts/5xx per (provider, model) within a minute that
+    # take the pair out of candidate selection. 0 seconds disables it.
+    upstream_allowed_fails: int = Field(default=3, ge=1, env="UPSTREAM_ALLOWED_FAILS")
+    upstream_cooldown_seconds: float = Field(
+        default=30.0, ge=0, env="UPSTREAM_COOLDOWN_SECONDS"
+    )
 
     # Node info
     name: str = Field(default="ARoutstrNode", env="NAME")
@@ -84,6 +100,24 @@ class Settings(BaseSettings):
     mint_max_concurrency: int = Field(default=4, ge=0, env="MINT_MAX_CONCURRENCY")
     # Max retries when a mint returns 429 or times out (exponential backoff).
     mint_retry_max_attempts: int = Field(default=3, ge=0, env="MINT_RETRY_MAX_ATTEMPTS")
+    # Single-attempt deadline for any call to a mint the operator did not
+    # configure. No retries: the sender chose that mint, not the operator.
+    foreign_mint_operation_timeout_seconds: float = Field(
+        default=5.0, gt=0, env="FOREIGN_MINT_OPERATION_TIMEOUT_SECONDS"
+    )
+    # Lightning settlement is not a normal mint round-trip. Give foreign-mint
+    # melts a longer deadline without cooling the entire mint on timeout.
+    foreign_mint_melt_timeout_seconds: float = Field(
+        default=60.0, gt=0, env="FOREIGN_MINT_MELT_TIMEOUT_SECONDS"
+    )
+    # Process-wide cap on in-flight foreign-mint calls across all such mints, so
+    # rotating hostnames cannot multiply the per-mint budget.
+    foreign_mint_max_concurrency: int = Field(
+        default=4, ge=1, env="FOREIGN_MINT_MAX_CONCURRENCY"
+    )
+    swap_reconcile_interval_seconds: int = Field(
+        default=60, gt=0, env="SWAP_RECONCILE_INTERVAL_SECONDS"
+    )
 
     # Pricing
     # Default behavior: derive pricing from MODELS
@@ -117,6 +151,16 @@ class Settings(BaseSettings):
         default=604_800, env="DEAD_KEY_MIN_AGE_SECONDS"
     )
 
+    max_request_lifetime_seconds: float = Field(
+        default=1800, gt=0, env="MAX_REQUEST_LIFETIME_SECONDS"
+    )
+    downstream_send_timeout_seconds: float = Field(
+        default=60, gt=0, env="DOWNSTREAM_SEND_TIMEOUT_SECONDS"
+    )
+    request_cleanup_timeout_seconds: float = Field(
+        default=30, gt=0, env="REQUEST_CLEANUP_TIMEOUT_SECONDS"
+    )
+
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
     # Comma-separated METHOD:path pairs adding to the proxy's canonical
@@ -125,6 +169,14 @@ class Settings(BaseSettings):
     # widens what the provider credential can be spent against, so wildcards
     # and prefixes are not supported.
     proxy_extra_allowed_paths: str = Field(default="", env="PROXY_EXTRA_ALLOWED_PATHS")
+    # Bound the client request body: a slow or oversized upload otherwise blocks
+    # the proxy before authentication and holds server resources for its duration.
+    request_body_timeout_seconds: float = Field(
+        default=30.0, gt=0, env="REQUEST_BODY_TIMEOUT_SECONDS"
+    )
+    max_request_body_bytes: int = Field(
+        default=20 * 1024 * 1024, gt=0, env="MAX_REQUEST_BODY_BYTES"
+    )
     tor_proxy_url: str = Field(default="socks5://127.0.0.1:9050", env="TOR_PROXY_URL")
     providers_refresh_interval_seconds: int = Field(
         default=0, env="PROVIDERS_REFRESH_INTERVAL_SECONDS"
@@ -177,9 +229,21 @@ class Settings(BaseSettings):
         default=30.0, gt=0, env="DATABASE_BUSY_TIMEOUT"
     )
 
+    # Per-origin upstream connection pools. These fields are env-only below.
+    upstream_max_connections: int = Field(
+        default=200, ge=1, env="UPSTREAM_MAX_CONNECTIONS"
+    )
+    upstream_pool_timeout: float = Field(default=5.0, gt=0, env="UPSTREAM_POOL_TIMEOUT")
+    upstream_read_timeout: float = Field(
+        default=900.0, gt=0, env="UPSTREAM_READ_TIMEOUT"
+    )
+
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     enable_console_logging: bool = Field(default=True, env="ENABLE_CONSOLE_LOGGING")
+    slow_request_warn_seconds: float = Field(
+        default=60.0, gt=0, env="SLOW_REQUEST_WARN_SECONDS"
+    )
 
     # Other
     chat_completions_api_version: str = Field(
@@ -195,6 +259,11 @@ class Settings(BaseSettings):
     # Discovery
     relays: list[str] = Field(default_factory=list, env="RELAYS")
     enable_analytics_sharing: bool = Field(default=True, env="ENABLE_ANALYTICS_SHARING")
+    # Self-provision a Nostr identity on first boot when none is configured, so a
+    # fresh node can announce itself without an operator pasting an nsec. Off by
+    # default (an identity is the node's reputation and should normally be an
+    # explicit, backed-up choice); the bundled compose stack turns it on.
+    auto_generate_nsec: bool = Field(default=False, env="AUTO_GENERATE_NSEC")
 
 
 def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -238,6 +307,13 @@ ENV_ONLY_FIELDS = frozenset(
         "database_pool_pre_ping",
         "database_pool_hold_warn_seconds",
         "database_busy_timeout",
+        # Reconfiguring a live pool would disrupt in-flight streams.
+        "upstream_max_connections",
+        "upstream_pool_timeout",
+        "upstream_read_timeout",
+        # Boot-time provisioning switch: read before the DB is available and
+        # must not be toggled from the persisted settings blob.
+        "auto_generate_nsec",
     }
 )
 
@@ -681,6 +757,47 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
             secret.nsec_state = NsecState.encrypted
             settings.nsec = legacy_nsec
             changed = True
+        elif settings.auto_generate_nsec:
+            # Self-provision an identity so a fresh node can announce itself with
+            # no manual setup. Claim the empty legacy slot atomically (same
+            # reason as the admin password): a racing worker must not generate a
+            # second, different identity and overwrite the winner's.
+            from ..nostr.sdk import generate_keypair
+
+            generated_nsec, generated_npub = generate_keypair()
+            claim_stmt = (
+                update(Secret)
+                .where(col(Secret.id) == 1)
+                .where(col(Secret.nsec_state) == NsecState.legacy)
+                .where(col(Secret.encrypted_nsec).is_(None))
+                .values(
+                    encrypted_nsec=vault.encrypt(generated_nsec),
+                    nsec_state=NsecState.encrypted,
+                    updated_at=int(time.time()),
+                )
+            )
+            result = await db_session.exec(claim_stmt)  # type: ignore[call-overload]
+            await db_session.commit()
+            await db_session.refresh(secret)
+            if result.rowcount == 1:
+                settings.nsec = generated_nsec
+                settings.npub = generated_npub
+                # Announce only the public identity. stdout is captured by
+                # `docker compose logs`, so the nsec must never be echoed there;
+                # the operator retrieves it on demand with
+                # scripts/reveal_nsec.py (which needs ROUTSTR_SECRET_KEY).
+                print(
+                    "No Nostr identity configured; generated one and stored it "
+                    "encrypted in the database.\n"
+                    f"  npub: {generated_npub}\n"
+                    "Retrieve the nsec later with scripts/reveal_nsec.py "
+                    "(requires ROUTSTR_SECRET_KEY).",
+                    flush=True,
+                )
+            elif secret.encrypted_nsec:
+                # Lost the race: adopt whatever the winner stored so this worker
+                # holds the same identity instead of an empty one.
+                settings.nsec = vault.decrypt(secret.encrypted_nsec)
 
     # Derive npub from whatever nsec we now hold, if not already known.
     if settings.nsec and not settings.npub:

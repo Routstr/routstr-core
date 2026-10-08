@@ -1,6 +1,8 @@
 import json
 import re
 import secrets
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,11 +14,13 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..payment.models import (
     REQUIRED_PRICING_FIELDS,
+    Model,
+    _build_model_from_row,
     _row_to_model,
     list_models,
 )
 from ..payment.rates import BILLABLE_PRICING_FIELDS, coerce_rate
-from ..proxy import refresh_model_maps, reinitialize_upstreams
+from ..proxy import get_candidates, refresh_model_maps, reinitialize_upstreams
 from ..wallet import fetch_all_balances, send_token, token_mint_url
 from . import vault
 from .db import (
@@ -24,6 +28,7 @@ from .db import (
     CashuTransaction,
     CliToken,
     LightningInvoice,
+    ModelPathRow,
     ModelRow,
     UpstreamProviderRow,
     create_session,
@@ -493,9 +498,11 @@ class ModelCreate(BaseModel):
         negative or ``NaN``/``inf`` value is truthy and reads back as a real
         price, so the model could be enabled and bill a nonsensical amount.
         Surfacing a 422 reports the client bug as a client bug instead of
-        persisting it. Numeric strings (``"0.000005"``) stay valid, and so does
-        an omitted auxiliary rate — the stored JSON accepts both.
+        persisting it. Numeric strings (``"0.000005"``) stay valid and are
+        stored as the number they spell, so the read path never meets a string
+        rate; an omitted auxiliary rate is valid too.
         """
+        normalized = dict(value)
         for field in BILLABLE_PRICING_FIELDS:
             if field not in value:
                 # ``dict.get`` cannot tell this from an explicit ``null``, so
@@ -508,12 +515,14 @@ class ModelCreate(BaseModel):
             # The shared coercion also absorbs the OverflowError an oversized
             # integer raises, which pydantic does not convert into a validation
             # error — unhandled it escaped as a 500 for a bad client value.
-            if coerce_rate(value[field]) is None:
+            rate = coerce_rate(value[field])
+            if rate is None:
                 raise ValueError(
                     f"{field} must be a finite, non-negative number, "
                     f"got {value[field]!r}"
                 )
-        return value
+            normalized[field] = rate
+        return normalized
 
 
 def _normalize_forwarded_model_id(value: str | None) -> str | None:
@@ -615,7 +624,10 @@ async def upsert_provider_model(
     await refresh_model_maps()
     await _refresh_provider_model_paths(provider_pk)
     return _row_to_model(
-        row, apply_provider_fee=True, provider_fee=provider.provider_fee
+        row,
+        apply_provider_fee=True,
+        provider_fee=provider.provider_fee,
+        provider_type=provider.provider_type,
     ).dict()  # type: ignore
 
 
@@ -651,7 +663,10 @@ async def get_provider_model(provider_id: str, model_id: str) -> dict[str, objec
         # is not a usable number must be shown as it is, not encoded as `null`.
         return json_compliant(  # type: ignore[return-value]
             _row_to_model(
-                row, apply_provider_fee=False, provider_fee=provider.provider_fee
+                row,
+                apply_provider_fee=False,
+                provider_fee=provider.provider_fee,
+                provider_type=provider.provider_type,
             ).dict()
         )
 
@@ -1247,6 +1262,27 @@ async def get_provider_models(provider_id: str) -> dict[str, object]:
             m for m in upstream_models if m.id not in db_model_ids
         ]
 
+        path_result = await session.exec(
+            select(ModelPathRow).where(ModelPathRow.upstream_provider_id == provider_pk)
+        )
+        path_rows = list(path_result.all())
+        paths_by_public_id: dict[str, list[dict[str, object]]] = {}
+        for row in path_rows:
+            paths_by_public_id.setdefault(row.model_id.lower(), []).append(
+                {
+                    "path": row.path,
+                    "endpoint_tag": row.endpoint_tag,
+                    "endpoint_name": row.endpoint_name,
+                }
+            )
+
+        from ..upstream.model_paths import exposed_model_id
+
+        certification_paths: dict[str, list[dict[str, object]]] = {}
+        for model in [*db_models, *filtered_remote_models]:
+            paths = paths_by_public_id.get(exposed_model_id(model).lower(), [])
+            certification_paths[model.id] = paths
+
         return {
             "provider": {
                 "id": provider.id,
@@ -1260,7 +1296,500 @@ async def get_provider_models(provider_id: str) -> dict[str, object]:
             # missing one; show the operator the value that needs fixing.
             "db_models": [json_compliant(m.dict()) for m in db_models],
             "remote_models": [json_compliant(m.dict()) for m in filtered_remote_models],
+            "certification_paths": certification_paths,
         }
+
+
+def _served_model_for_provider(model_id: str, provider_pk: int) -> Model | None:
+    """The model this provider serves for ``model_id``, or ``None``.
+
+    ``get_candidates`` returns every provider's candidate for the alias (a
+    model id can be served by more than one configured provider); narrow to
+    the one this report is about.
+    """
+    for model, _upstream in get_candidates(model_id) or []:
+        if model.upstream_provider_id == provider_pk:
+            return model
+    return None
+
+
+@dataclass
+class _ModelEvaluation:
+    """One enabled model row's facts, built once and shared by every row.
+
+    ``configured`` is the fee-applied USD view of the row, or ``None`` when the
+    row could not be parsed (``build_error`` carries the exception). ``served``
+    is this provider's live candidate, or ``None`` when the model is withheld
+    from the served map despite the row being enabled.
+    """
+
+    model_id: str
+    configured: Model | None
+    build_error: str | None
+    served: Model | None
+
+
+def _evaluate_model_row(
+    row: ModelRow, provider: UpstreamProviderRow, provider_pk: int
+) -> _ModelEvaluation:
+    try:
+        configured: Model | None = _build_model_from_row(
+            row,
+            apply_provider_fee=True,
+            provider_fee=provider.provider_fee,
+            provider_type=provider.provider_type,
+        )
+        build_error = None
+    except Exception as exc:
+        configured = None
+        build_error = f"{type(exc).__name__}: {exc}"
+
+    served = _served_model_for_provider(row.id, provider_pk)
+    return _ModelEvaluation(
+        model_id=row.id, configured=configured, build_error=build_error, served=served
+    )
+
+
+def _report_row(
+    row_id: str, status: str, title: str, detail: str, evidence: dict[str, object]
+) -> dict[str, object]:
+    return {
+        "id": row_id,
+        "status": status,
+        "title": title,
+        "detail": detail,
+        "evidence": evidence,
+    }
+
+
+def _aggregate_row(
+    row_id: str,
+    title: str,
+    checked: int,
+    flagged: Sequence[object],
+    *,
+    fail_status: str,
+    empty_detail: str,
+    ok_detail: str,
+    flagged_detail: str,
+    empty_status: str = "ok",
+) -> dict[str, object]:
+    """The ok/fail(-or-warn) shape every pricing row shares: examine
+    ``checked`` items, flag some of them as a problem, report the count.
+    """
+    evidence: dict[str, object] = {"checked": checked, "flagged": list(flagged)}
+    if checked == 0:
+        detail = (
+            empty_detail if empty_status == "ok" else f"Not evaluated — {empty_detail}"
+        )
+        return _report_row(row_id, empty_status, title, detail, evidence)
+    if flagged:
+        return _report_row(row_id, fail_status, title, flagged_detail, evidence)
+    return _report_row(row_id, "ok", title, ok_detail, evidence)
+
+
+def _report_row_served_matches_configured(
+    evaluations: list[_ModelEvaluation],
+) -> dict[str, object]:
+    mismatched: list[dict[str, object]] = []
+    for ev in evaluations:
+        if ev.configured is None:
+            mismatched.append(
+                {
+                    "model_id": ev.model_id,
+                    "configured": None,
+                    "served": None,
+                    "error": ev.build_error,
+                }
+            )
+            continue
+
+        served_pricing = ev.served.pricing.dict() if ev.served else None
+        if served_pricing != ev.configured.pricing.dict():
+            mismatched.append(
+                {
+                    "model_id": ev.model_id,
+                    "configured": ev.configured.pricing.dict(),
+                    "served": served_pricing,
+                }
+            )
+
+    checked = len(evaluations)
+    return _aggregate_row(
+        "pricing.served_matches_configured",
+        "Served price matches configured price",
+        checked,
+        mismatched,
+        fail_status="fail",
+        empty_detail="No enabled models to check.",
+        ok_detail=f"All {checked} enabled models are served at the configured price.",
+        flagged_detail=(
+            f"{len(mismatched)} of {checked} enabled models have a served price "
+            "that disagrees with the configured price."
+        ),
+    )
+
+
+def _report_row_sats_pricing_present(
+    evaluations: list[_ModelEvaluation],
+) -> dict[str, object]:
+    checked = 0
+    missing: list[str] = []
+    for ev in evaluations:
+        if ev.served is None:
+            continue
+        checked += 1
+        if ev.served.sats_pricing is None:
+            missing.append(ev.model_id)
+
+    return _aggregate_row(
+        "pricing.sats_pricing_present",
+        "Sats pricing computed for served models",
+        checked,
+        missing,
+        fail_status="fail",
+        empty_detail="No served models to check.",
+        ok_detail=f"All {checked} served models have a computed sats price.",
+        flagged_detail=f"{len(missing)} of {checked} served models have no computed sats price.",
+    )
+
+
+def _report_row_enabled_models_served(
+    evaluations: list[_ModelEvaluation],
+) -> dict[str, object]:
+    missing = [ev.model_id for ev in evaluations if ev.served is None]
+    checked = len(evaluations)
+    return _aggregate_row(
+        "pricing.enabled_models_served",
+        "Enabled models are served",
+        checked,
+        missing,
+        fail_status="fail",
+        empty_detail="No enabled models to check.",
+        ok_detail=f"All {checked} enabled models are being served.",
+        flagged_detail=f"{len(missing)} of {checked} enabled models are not being served.",
+    )
+
+
+def _report_row_cache_rate(
+    evaluations: list[_ModelEvaluation],
+) -> dict[str, object]:
+    checked = 0
+    unknown: list[dict[str, object]] = []
+    for ev in evaluations:
+        # Served models only, like every sibling row: an unserved model has no
+        # cache-billing behaviour to certify, and
+        # ``pricing.enabled_models_served`` already flags it.
+        if ev.served is None or ev.configured is None:
+            continue
+        checked += 1
+
+        pricing = ev.configured.pricing
+        missing_rates = []
+        if (pricing.input_cache_read or 0.0) <= 0.0:
+            missing_rates.append("input_cache_read")
+        if (pricing.input_cache_write or 0.0) <= 0.0:
+            missing_rates.append("input_cache_write")
+        if missing_rates:
+            unknown.append({"model_id": ev.model_id, "missing_rates": missing_rates})
+
+    return _aggregate_row(
+        "pricing.cache_rate",
+        "Cache rate known for served models",
+        checked,
+        unknown,
+        fail_status="warn",
+        # Enabled rows that are all unserved leave no cache rate verified.
+        empty_status="warn" if evaluations else "ok",
+        empty_detail="No served models to check.",
+        ok_detail=(
+            f"All {checked} served models have known cache-read and cache-write rates."
+        ),
+        flagged_detail=(
+            f"{len(unknown)} of {checked} served models are missing a cache-read or "
+            "cache-write rate."
+        ),
+    )
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}/report",
+    dependencies=[Depends(require_admin_api)],
+)
+async def get_upstream_provider_report(provider_id: str) -> dict[str, object]:
+    """Certification report for one configured upstream provider.
+
+    The four pricing rows (``pricing.served_matches_configured``,
+    ``pricing.sats_pricing_present``, ``pricing.enabled_models_served``,
+    ``pricing.cache_rate``) are computed from the DB row plus the in-process
+    served map; none of them make a network call, so the ``GET`` never spends
+    and never blocks on an upstream. Each enabled row is evaluated once and
+    the result shared across all four rows, rather than every row re-walking
+    the served map and re-parsing the stored pricing on its own.
+    """
+    async with create_session() as session:
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        provider_pk = _provider_pk(provider)
+        result = await session.exec(
+            select(ModelRow).where(
+                ModelRow.upstream_provider_id == provider_pk,
+                ModelRow.enabled,
+            )
+        )
+        enabled_rows = list(result.all())
+
+    evaluations = [
+        _evaluate_model_row(row, provider, provider_pk) for row in enabled_rows
+    ]
+
+    rows = [
+        _report_row_served_matches_configured(evaluations),
+        _report_row_sats_pricing_present(evaluations),
+        _report_row_enabled_models_served(evaluations),
+        _report_row_cache_rate(evaluations),
+    ]
+
+    return {
+        "provider_id": provider.id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "rows": rows,
+    }
+
+
+class CertifyRequest(BaseModel):
+    model_id: str | None = None
+    model_path: str | None = None
+    check_cache: bool = True
+
+
+@admin_router.post(
+    "/api/upstream-providers/{provider_id}/certify",
+    dependencies=[Depends(require_admin_api)],
+)
+async def certify_upstream_provider(
+    provider_id: str, payload: CertifyRequest
+) -> dict[str, object]:
+    """Live certification checks for a configured upstream provider.
+
+    Unlike the read-only ``GET …/report``, this probes the upstream over the
+    network and runs the node's cost engine on the real response. It never
+    enters the billing path, so it costs nothing from the node's wallet. Its
+    upstream spend is one short completion, plus two or three completions on a
+    ~4.4k-token prompt when ``check_cache`` is set. Each completion starts at 32
+    output tokens and retries only on a recognized limit error, up to 2048.
+
+    Returns the read-only report's four ``pricing.*`` rows (re-derived here so
+    the certification is self-contained), the live rows from
+    :mod:`routstr.upstream.certification`, and a ``checklist`` of the
+    operator-facing goals.
+    """
+    from ..upstream.certification import (
+        PROBE_TIMEOUT_SECONDS,
+        build_checklist,
+        run_live_checks,
+    )
+
+    async with create_session() as session:
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        provider_pk = _provider_pk(provider)
+        result = await session.exec(
+            select(ModelRow).where(
+                ModelRow.upstream_provider_id == provider_pk,
+                ModelRow.enabled,
+            )
+        )
+        enabled_rows = list(result.all())
+
+        endpoint_tag: str | None = None
+        path_model_id: str | None = None
+        selected_path: ModelPathRow | None = None
+        if payload.model_path is not None:
+            from ..upstream.model_paths import decode_model_path
+
+            selector = decode_model_path(payload.model_path)
+            if selector is None:
+                raise HTTPException(status_code=400, detail="Malformed model path")
+            path_result = await session.exec(
+                select(ModelPathRow).where(
+                    ModelPathRow.upstream_provider_id == provider_pk,
+                    ModelPathRow.path == payload.model_path,
+                )
+            )
+            selected_path = path_result.first()
+            if selected_path is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Model path is not available for this provider",
+                )
+            endpoint_tag = selector.endpoint_tag
+            path_model_id = selector.model_id
+
+    evaluations = [
+        _evaluate_model_row(row, provider, provider_pk) for row in enabled_rows
+    ]
+    pricing_rows = [
+        _report_row_served_matches_configured(evaluations),
+        _report_row_sats_pricing_present(evaluations),
+        _report_row_enabled_models_served(evaluations),
+        _report_row_cache_rate(evaluations),
+    ]
+
+    model_id = payload.model_id
+    if not model_id and enabled_rows:
+        # Prefer a served model: one withheld from the served map would fail
+        # the chat probe for a reason unrelated to the endpoint's health.
+        for ev in evaluations:
+            if ev.served is not None:
+                model_id = ev.served.id
+                break
+        if model_id is None:
+            model_id = enabled_rows[0].id
+
+    from ..proxy import get_candidates, get_upstreams
+
+    # The live upstream instance shapes the probes exactly like the proxy's
+    # own requests (paths, auth headers, query params, model-name transforms).
+    upstream_obj = next(
+        (u for u in get_upstreams() if getattr(u, "db_id", None) == provider_pk),
+        None,
+    )
+    model_obj = None
+    if model_id:
+        try:
+            candidates = get_candidates(model_id) or []
+        except Exception as exc:  # noqa: BLE001 - a broken served map is a warn
+            logger.warning(
+                "Could not read the served map for certification",
+                extra={
+                    "provider_id": provider.id,
+                    "model_id": model_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            candidates = []
+        for model, _upstream in candidates:
+            if model.upstream_provider_id == provider_pk:
+                model_obj = model
+                break
+
+        # A model selected from the provider's discovered catalog may not have
+        # a database override and therefore may not appear in get_candidates().
+        # The active upstream cache carries the same fee-adjusted USD and sats
+        # pricing used by the proxy, so it is the authoritative fallback for a
+        # pre-configuration certification probe.
+        if model_obj is None and upstream_obj is not None:
+            model_obj = next(
+                (
+                    model
+                    for model in upstream_obj.get_cached_models()
+                    if model.id == model_id or model.forwarded_model_id == model_id
+                ),
+                None,
+            )
+    if selected_path is not None:
+        from ..upstream.model_paths import exposed_model_id
+
+        selected_id = exposed_model_id(model_obj) if model_obj else model_id
+        if (
+            payload.model_id is None
+            or selected_id is None
+            or path_model_id is None
+            or selected_id.lower() != path_model_id.lower()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Model path does not match the selected model",
+            )
+    if model_obj is None:
+        from ..upstream.certification import (
+            STATUS_WARN,
+            certification_row,
+        )
+        from ..upstream.certification_cache import skipped_cache_rows
+
+        live_rows = [
+            certification_row(
+                "endpoint.validity",
+                STATUS_WARN,
+                "Upstream URL is well-formed",
+                "No served model is available for this provider, so the "
+                "live checks could not run.",
+                {"base_url": provider.base_url},
+            ),
+            certification_row(
+                "endpoint.reachable",
+                STATUS_WARN,
+                "Endpoint responds",
+                "Skipped — no model to probe.",
+                {},
+            ),
+            certification_row(
+                "endpoint.models_payload",
+                STATUS_WARN,
+                "Models payload has the expected shape",
+                "Skipped — no model to probe.",
+                {},
+            ),
+            certification_row(
+                "usage.capture",
+                STATUS_WARN,
+                "Token usage captured from a completion",
+                "Skipped — no model to probe.",
+                {},
+            ),
+            certification_row(
+                "cost.prompt_completion",
+                STATUS_WARN,
+                "Prompt and completion cost calculated",
+                "Skipped — no model to probe.",
+                {},
+            ),
+            *skipped_cache_rows("Skipped — no model to probe."),
+        ]
+    else:
+        from ..payment import price as price_module
+
+        # Never fetch the price inline: the lifespan task owns it, and a fetch
+        # here could block the request for the exchange timeout.
+        sats_to_usd = price_module.SATS_USD_PRICE
+        if not sats_to_usd:
+            raise HTTPException(
+                status_code=503,
+                detail="sats/USD price is not initialized yet; retry shortly",
+            )
+        # The proxy reserves and token-bills a pinned endpoint at that
+        # endpoint's own rates, so the cost rows price it the same way.
+        if selected_path is not None:
+            from ..upstream.model_paths import apply_model_path_pricing
+
+            model_obj = apply_model_path_pricing(
+                model_obj,
+                selected_path,
+                provider.provider_fee,
+                sats_to_usd,
+            )
+        # The timeout applies per upstream call. Worst case is 21 calls: models,
+        # plus up to five attempts for each of the short probe and the three
+        # cache probes (one field correction and the 32/128/512/2048 budgets).
+        live_rows = await run_live_checks(
+            provider.base_url,
+            provider.api_key,
+            model_obj,
+            provider_fee=provider.provider_fee,
+            sats_to_usd=sats_to_usd,
+            timeout=PROBE_TIMEOUT_SECONDS,
+            check_cache=payload.check_cache,
+            endpoint_tag=endpoint_tag,
+            upstream=upstream_obj,
+        )
+
+    rows = pricing_rows + live_rows
+    return {
+        "provider_id": provider.id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "rows": rows,
+        "checklist": build_checklist(rows),
+    }
 
 
 class CreateAccountRequest(BaseModel):

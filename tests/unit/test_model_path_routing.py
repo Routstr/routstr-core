@@ -17,6 +17,8 @@ from routstr.core.error_scope import (
 )
 from routstr.upstream.model_paths import decode_model_path, encode_model_path
 
+from .proxy_test_utils import mock_request_stream, patch_proxy_session
+
 MODEL_ID = "test-model"
 
 
@@ -38,7 +40,7 @@ def _make_request(headers: dict[str, str], body: bytes) -> MagicMock:
     request = MagicMock()
     request.method = "POST"
     request.headers = headers
-    request.body = AsyncMock(return_value=body)
+    mock_request_stream(request, body)
     request.state = MagicMock()
     request.state.request_id = "req-model-path"
     return request
@@ -48,6 +50,7 @@ async def _run_proxy(
     request: MagicMock,
     candidates: list[tuple[Any, Any]],
     path: str = "v1/chat/completions",
+    session: Any = None,
 ) -> Any:
     key = ApiKey(hashed_key="mpkey", balance=10_000)
     reservation = ReservationSnapshot(
@@ -68,15 +71,13 @@ async def _run_proxy(
         ),
         patch.object(proxy_module, "check_token_balance", MagicMock()),
         patch.object(proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)),
-        patch.object(proxy_module, "pay_for_request", AsyncMock(return_value=1_000)),
         patch.object(
-            proxy_module,
-            "get_reservation_snapshot",
-            AsyncMock(return_value=reservation),
+            proxy_module, "pay_for_request", AsyncMock(return_value=reservation)
         ),
         patch.object(proxy_module, "revert_pay_for_request", AsyncMock()),
+        patch_proxy_session(session if session is not None else MagicMock()),
     ):
-        return await proxy_module.proxy(request, path, session=MagicMock())
+        return await proxy_module.proxy(request, path)
 
 
 def test_decode_model_path_round_trips_encode() -> None:
@@ -532,8 +533,9 @@ async def test_unsupported_endpoint_pins_fail_before_payment(
         patch.object(
             proxy_module, "get_candidates", return_value=[(MagicMock(), upstream)]
         ),
+        patch_proxy_session(MagicMock()),
     ):
-        response = await proxy_module.proxy(request, path, MagicMock())
+        response = await proxy_module.proxy(request, path)
     assert response.status_code == 400
     assert json.loads(response.body)["error"]["type"] == "unsupported_request"
     payment.assert_not_called()
@@ -705,6 +707,75 @@ async def test_pinned_recovery_preserves_routing_fields(
     fallback.forward_request.assert_not_awaited()
 
 
+_OPENAI_MAX_TOKENS_ERROR = json.dumps(
+    {
+        "error": {
+            "message": "Unsupported parameter: 'max_tokens' is not supported "
+            "with this model. Use 'max_completion_tokens' instead.",
+            "type": "invalid_request_error",
+            "param": "max_tokens",
+            "code": "unsupported_parameter",
+        }
+    }
+).encode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [False, True])
+async def test_rejected_max_tokens_is_renamed_and_retried_on_same_upstream(
+    pinned: bool,
+) -> None:
+    selected, fallback = _make_upstream(1), _make_upstream(2)
+    selected.forward_request = AsyncMock(
+        side_effect=[
+            MagicMock(status_code=400, body=_OPENAI_MAX_TOKENS_ERROR),
+            MagicMock(status_code=200, body=b"{}"),
+        ]
+    )
+    headers = {"authorization": "Bearer key"}
+    if pinned:
+        headers["x-routstr-model-path"] = encode_model_path(selected.base_url, MODEL_ID)
+    request = _make_request(
+        headers,
+        json.dumps(
+            {"model": MODEL_ID, "max_tokens": 300, "messages": [], "stream": True}
+        ).encode(),
+    )
+
+    response = await _run_proxy(
+        request, [(MagicMock(), selected), (MagicMock(), fallback)]
+    )
+
+    assert response.status_code == 200
+    assert selected.forward_request.await_count == 2
+    before, after = [
+        json.loads(call.args[3]) for call in selected.forward_request.await_args_list
+    ]
+    assert before["max_tokens"] == 300 and "max_completion_tokens" not in before
+    assert after["max_completion_tokens"] == 300 and "max_tokens" not in after
+    assert {k: v for k, v in after.items() if k != "max_completion_tokens"} == {
+        k: v for k, v in before.items() if k != "max_tokens"
+    }
+    fallback.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rename_that_changes_spend_bound_is_not_retried() -> None:
+    selected = _make_upstream(1, 400)
+    selected.forward_request.return_value.body = json.dumps(
+        {"error": {"message": "'max_tokens' is not supported. Use 'n' instead."}}
+    ).encode()
+    request = _make_request(
+        {"authorization": "Bearer key"},
+        json.dumps({"model": MODEL_ID, "max_tokens": 300}).encode(),
+    )
+
+    response = await _run_proxy(request, [(MagicMock(), selected)])
+
+    assert response.status_code == 400
+    selected.forward_request.assert_awaited_once()
+
+
 # --------------------------------------------------------------------------- #
 # Upstream 5xx -> 424 + UPSTREAM_UNAVAILABLE + scope header; node faults stay 500.
 # --------------------------------------------------------------------------- #
@@ -775,3 +846,170 @@ async def test_node_fault_stays_500_without_scope_header() -> None:
     assert ERROR_SCOPE_HEADER not in response.headers
     body = json.loads(bytes(response.body))
     assert body["error"]["code"] != UPSTREAM_UNAVAILABLE
+
+
+_OPENROUTER = "https://openrouter.ai/api/v1"
+_SATS_USD = 0.001
+_ENDPOINT_PRICING = {"prompt": 2e-6, "completion": 4e-6}
+
+
+def _priced_model(
+    prompt: float = 1e-6, completion: float = 2e-6, cache_read: float = 0.0
+) -> Any:
+    from routstr.payment.models import (
+        Architecture,
+        Model,
+        Pricing,
+        _calculate_usd_max_costs,
+        _update_model_sats_pricing,
+    )
+
+    model = Model(
+        id=MODEL_ID,
+        name=MODEL_ID,
+        created=0,
+        description="",
+        context_length=8192,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="unknown",
+            instruct_type=None,
+        ),
+        pricing=Pricing(
+            prompt=prompt, completion=completion, input_cache_read=cache_read
+        ),
+    )
+    (
+        model.pricing.max_prompt_cost,
+        model.pricing.max_completion_cost,
+        model.pricing.max_cost,
+    ) = _calculate_usd_max_costs(model)
+    return _update_model_sats_pricing(model, _SATS_USD)
+
+
+def _endpoint_row(
+    model_id: str = MODEL_ID,
+    endpoint_tag: str = "deepinfra/fp8",
+    pricing: dict[str, float] | None = None,
+    **limits: int,
+) -> Any:
+    from routstr.core.db import ModelPathRow
+
+    return ModelPathRow(
+        model_id=model_id,
+        path=encode_model_path(_OPENROUTER, model_id, endpoint_tag),
+        provider_slug="openrouter",
+        provider_type="openrouter",
+        endpoint_tag=endpoint_tag,
+        model_metadata=json.dumps(
+            {"id": model_id, "pricing": pricing or _ENDPOINT_PRICING, **limits}
+        ),
+        upstream_provider_id=1,
+    )
+
+
+def _session_with_rows(rows: list[Any]) -> MagicMock:
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
+    return session
+
+
+def _endpoint_selector() -> Any:
+    selector = decode_model_path(
+        encode_model_path(_OPENROUTER, MODEL_ID, "deepinfra/fp8")
+    )
+    assert selector is not None
+    return selector
+
+
+def _openrouter_upstream() -> MagicMock:
+    upstream = _make_upstream(1)
+    upstream.base_url = _OPENROUTER
+    upstream.provider_fee = 1.0
+    return upstream
+
+
+@pytest.mark.asyncio
+async def test_endpoint_pin_bills_the_endpoint_pricing() -> None:
+    """A pinned endpoint is reserved and billed at the rates
+    ``/v1/models/paths`` quotes for it, not the model's default listing."""
+    model = _priced_model()
+    upstream = _openrouter_upstream()
+    request = _make_request(
+        {
+            "authorization": "Bearer sk-mpkey",
+            "x-routstr-model-path": encode_model_path(
+                _OPENROUTER, MODEL_ID, "deepinfra/fp8"
+            ),
+        },
+        json.dumps({"model": MODEL_ID}).encode(),
+    )
+
+    with patch("routstr.payment.price.SATS_USD_PRICE", _SATS_USD):
+        await _run_proxy(
+            request, [(model, upstream)], session=_session_with_rows([_endpoint_row()])
+        )
+
+    billed = upstream.forward_request.await_args.args[7]
+    assert billed.sats_pricing.prompt == pytest.approx(2e-6 / _SATS_USD)
+    assert billed.sats_pricing.completion == pytest.approx(4e-6 / _SATS_USD)
+    assert billed.sats_pricing.max_cost > model.sats_pricing.max_cost
+    assert model.sats_pricing.prompt == pytest.approx(1e-6 / _SATS_USD)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rows",
+    [[], [_endpoint_row(model_id="other-model")]],
+    ids=["no-stored-path", "other-model"],
+)
+async def test_endpoint_pin_without_a_stored_path_keeps_model_pricing(
+    rows: list[Any],
+) -> None:
+    model = _priced_model()
+    with patch("routstr.payment.price.SATS_USD_PRICE", _SATS_USD):
+        priced = await proxy_module._price_pinned_endpoint(
+            _session_with_rows(rows),
+            _endpoint_selector(),
+            model,
+            _openrouter_upstream(),
+        )
+    assert priced is model
+
+
+@pytest.mark.asyncio
+async def test_endpoint_pin_without_sats_price_keeps_model_pricing() -> None:
+    model = _priced_model()
+    session = _session_with_rows([_endpoint_row()])
+    with patch("routstr.payment.price.SATS_USD_PRICE", None):
+        priced = await proxy_module._price_pinned_endpoint(
+            session,
+            _endpoint_selector(),
+            model,
+            _openrouter_upstream(),
+        )
+    assert priced is model
+    session.exec.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_endpoint_pin_reserves_the_max_cost_paths_quotes() -> None:
+    """The reservation uses the endpoint's own context and completion limits,
+    the same ones ``/v1/models/paths`` quotes its max cost from."""
+    from routstr.upstream.model_paths import _serialize_path
+
+    row = _endpoint_row(context_length=32768, max_completion_tokens=8192)
+    with patch("routstr.payment.price.SATS_USD_PRICE", _SATS_USD):
+        priced = await proxy_module._price_pinned_endpoint(
+            _session_with_rows([row]),
+            _endpoint_selector(),
+            _priced_model(),
+            _openrouter_upstream(),
+        )
+        quoted = _serialize_path(row, 1.0)["model"]["sats_pricing"]["max_cost"]
+
+    assert priced.sats_pricing is not None and priced.top_provider is not None
+    assert priced.sats_pricing.max_cost == pytest.approx(quoted)
+    assert priced.top_provider.max_completion_tokens == 8192

@@ -34,6 +34,7 @@ from .redemption_cache import (
     redemption_negative_cache,
 )
 from .wallet import (
+    SWAP_BUSY_RETRY_AFTER_SECONDS,
     classify_redemption_error,
     credit_balance,
     deserialize_token_from_string,
@@ -49,9 +50,7 @@ payments_logger = get_logger("routstr.payments")
 
 # Routstr platform fee constants
 ROUTSTR_FEE_PERCENT: float = 2.1
-ROUTSTR_LN_ADDRESS: str = (
-    "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qqdufs7ql29s@npub.cash"
-)
+ROUTSTR_LN_ADDRESS: str = "routstr-fees@rizful.com"
 ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS: int = 900
 ROUTSTR_FEE_DEFAULT_PAYOUT: int = 200
 
@@ -126,6 +125,11 @@ def redemption_error_to_http_exception(error: Exception) -> HTTPException:
                 "code": error_code,
             }
         },
+        headers=(
+            {"Retry-After": str(SWAP_BUSY_RETRY_AFTER_SECONDS)}
+            if error_code == "cashu_swap_busy"
+            else None
+        ),
     )
 
 
@@ -292,6 +296,20 @@ async def _validate_bearer_key_locked(
             logger.warning(
                 "sk- API key not found in database",
                 extra={"key_preview": bearer_key[:10] + "..."},
+            )
+            # Keep the "Key not found." prefix verbatim: @routstr/sdk (<=0.4.6)
+            # detects a dead key with a case-sensitive `body.includes("Key not
+            # found")` probe, and uses it to purge the key from its store. The
+            # refund path in balance.py already relies on the same prefix.
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "message": "Key not found. Deposit first via /v1/wallet/create to get a key on this node.",
+                        "type": "invalid_request_error",
+                        "code": "key_not_found",
+                    }
+                },
             )
 
     if bearer_key.startswith("cashu"):
@@ -552,8 +570,8 @@ async def _validate_bearer_key_locked(
 
 async def pay_for_request(
     key: ApiKey, cost_per_request: int, session: AsyncSession
-) -> int:
-    """Process payment for a request."""
+) -> ReservationSnapshot:
+    """Reserve funds and return the durable identity for this request."""
     # Ensure cost_per_request is at least the minimum allowed request cost
     cost_per_request = max(cost_per_request, settings.min_request_msat)
 
@@ -637,6 +655,14 @@ async def pay_for_request(
     )
 
     # Charge the base cost for the request atomically to avoid race conditions
+    from .core.lifecycle import request_lifetime
+
+    lifetime = request_lifetime.get()
+    remaining_lifetime = (
+        max(0, lifetime.deadline - asyncio.get_running_loop().time())
+        if lifetime is not None
+        else settings.max_request_lifetime_seconds
+    )
     reserved_at_now = int(time.time())
     stmt = (
         update(ApiKey)
@@ -686,6 +712,13 @@ async def pay_for_request(
             billing_key_hash=reservation.billing_key_hash,
             reserved_msats=reservation.reserved_msats,
             status="active",
+            started_at=reserved_at_now,
+            # reserved_at_now floors to the second; add 1s margin so a
+            # finalizer finishing right at the nominal deadline isn't fenced
+            # out by truncation.
+            expires_at=reserved_at_now
+            + math.ceil(remaining_lifetime + settings.request_cleanup_timeout_seconds)
+            + 1,
         )
     )
     # Publish the identity before commit. If the commit succeeds but its
@@ -738,6 +771,53 @@ async def pay_for_request(
             extra={"reservation_id": reservation.release_id},
         )
 
+    try:
+        # Identity checks only: this call just committed the reservation, so the
+        # stale-reservation sweeper may legitimately have released it already.
+        # Release is a terminal state that settlement handles; it is not a
+        # mismatch between the record and the request.
+        await _validate_reservation_snapshot(
+            key, reservation, session, require_active=False
+        )
+    except BaseException:
+        released = False
+        try:
+            released = await _transition_reservation_to_released(
+                reservation,
+                session,
+                decrement_requests=True,
+                idempotent_success=True,
+            )
+        except BaseException:
+            try:
+                await session.rollback()
+            except BaseException:
+                pass
+
+        if not released:
+            try:
+                async with create_session() as cleanup_session:
+                    released = await _transition_reservation_to_released(
+                        reservation,
+                        cleanup_session,
+                        decrement_requests=True,
+                        idempotent_success=True,
+                    )
+            except BaseException:
+                logger.exception(
+                    "Failed to release invalid billing reservation",
+                    extra={"reservation_id": reservation.release_id},
+                )
+
+        if not released:
+            logger.error(
+                "Invalid billing reservation could not be released",
+                extra={"reservation_id": reservation.release_id},
+            )
+            await _stop_reservation_heartbeat(reservation.release_id)
+            _clear_current_reservation(reservation)
+        raise
+
     logger.info(
         "Payment processed successfully",
         extra={
@@ -762,7 +842,7 @@ async def pay_for_request(
         },
     )
 
-    return cost_per_request
+    return reservation
 
 
 async def revert_pay_for_request(
@@ -828,6 +908,10 @@ async def renew_reservation(
         update(ReservationRelease)
         .where(col(ReservationRelease.id) == snapshot.release_id)
         .where(col(ReservationRelease.status) == "active")
+        .where(
+            (col(ReservationRelease.expires_at).is_(None))
+            | (col(ReservationRelease.expires_at) > int(time.time()))
+        )
         .values(created_at=int(time.time()))
     )
     await session.commit()
@@ -855,12 +939,21 @@ def _start_reservation_heartbeat(snapshot: ReservationSnapshot) -> None:
     """
     interval = max(1, settings.stale_reservation_timeout_seconds // 3)
     owner = asyncio.current_task()
+    from .core.lifecycle import request_lifetime
+
+    lifetime = request_lifetime.get()
+    deadline = asyncio.get_running_loop().time() + settings.max_request_lifetime_seconds
 
     async def beat() -> None:
         try:
             while True:
                 await asyncio.sleep(interval)
-                if owner is None or owner.done():
+                if (
+                    owner is None
+                    or owner.done()
+                    or (lifetime is not None and lifetime.stopped)
+                    or asyncio.get_running_loop().time() >= deadline
+                ):
                     # Request control is gone; let the lease expire so the
                     # sweeper can release the reservation if no terminal
                     # transition ever ran.
@@ -1044,6 +1137,10 @@ async def _claim_reservation_for_charge(
         update(ReservationRelease)
         .where(col(ReservationRelease.id) == snapshot.release_id)
         .where(col(ReservationRelease.status) == "active")
+        .where(
+            col(ReservationRelease.expires_at).is_(None)
+            | (col(ReservationRelease.expires_at) > int(time.time()))
+        )
         .where(col(ReservationRelease.key_hash) == snapshot.key_hash)
         .where(col(ReservationRelease.billing_key_hash) == snapshot.billing_key_hash)
         .where(col(ReservationRelease.reserved_msats) == snapshot.reserved_msats)
@@ -1104,7 +1201,7 @@ async def _charge_reservation_rows(
     return True
 
 
-async def adjust_payment_for_tokens(
+async def _adjust_payment_for_tokens(
     key: ApiKey,
     response_data: dict,
     session: AsyncSession,
@@ -1545,6 +1642,47 @@ async def adjust_payment_for_tokens(
 
     # All calculate_cost variants are handled above.
     raise AssertionError("Unreachable: unhandled calculate_cost result")
+
+
+async def adjust_payment_for_tokens(
+    key: ApiKey,
+    response_data: dict,
+    session: AsyncSession,
+    deducted_max_cost: int,
+    model_obj: "Model | None" = None,
+    provider_fee: float | None = None,
+    reservation_snapshot: ReservationSnapshot | None = None,
+    precomputed_cost: CostData | None = None,
+) -> dict:
+    """Settle payment while exposing latency for every import path."""
+    started = time.perf_counter()
+    key_log_hash = key.hashed_key[:8] + "..."
+    succeeded = False
+    try:
+        result = await _adjust_payment_for_tokens(
+            key,
+            response_data,
+            session,
+            deducted_max_cost,
+            model_obj,
+            provider_fee,
+            reservation_snapshot,
+            precomputed_cost,
+        )
+        succeeded = True
+        return result
+    finally:
+        logger.info(
+            "Payment settlement finished",
+            extra={
+                "key_hash": key_log_hash,
+                "model": response_data.get("model", "unknown"),
+                "settlement_duration_ms": round(
+                    (time.perf_counter() - started) * 1000, 2
+                ),
+                "settlement_succeeded": succeeded,
+            },
+        )
 
 
 async def periodic_dead_key_prune() -> None:

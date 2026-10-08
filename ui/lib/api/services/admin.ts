@@ -46,6 +46,42 @@ export const UpdateUpstreamProviderSchema = z.object({
   slug: z.string().optional(),
 });
 
+export const CertificationStatusSchema = z.enum(['ok', 'warn', 'fail']);
+
+export const CertificationRowSchema = z.object({
+  id: z.string(),
+  status: CertificationStatusSchema,
+  title: z.string(),
+  detail: z.string(),
+  evidence: z.record(z.string(), z.unknown()),
+});
+
+export const CertificationGoalSchema = z.object({
+  goal: z.string(),
+  label: z.string(),
+  status: CertificationStatusSchema,
+  tick: z.string(),
+  rows: z.array(z.string()),
+});
+
+export const ProviderCertificationSchema = z.object({
+  provider_id: z.number(),
+  generated_at: z.string(),
+  rows: z.array(CertificationRowSchema),
+  checklist: z.array(CertificationGoalSchema),
+});
+
+export type CertificationStatus = z.infer<typeof CertificationStatusSchema>;
+export type CertificationRow = z.infer<typeof CertificationRowSchema>;
+export type CertificationGoal = z.infer<typeof CertificationGoalSchema>;
+export type ProviderCertification = z.infer<typeof ProviderCertificationSchema>;
+
+export type CertifyProviderRequest = {
+  model_id?: string;
+  model_path?: string;
+  check_cache?: boolean;
+};
+
 export const AdminModelPricingSchema = z.object({
   prompt: z.number().optional(),
   completion: z.number().optional(),
@@ -84,6 +120,12 @@ export const AdminModelSchema = z.object({
   forwarded_model_id: z.string().nullable().optional(),
 });
 
+export const CertificationPathSchema = z.object({
+  path: z.string(),
+  endpoint_tag: z.string().nullable(),
+  endpoint_name: z.string().nullable(),
+});
+
 export const ProviderModelsSchema = z.object({
   provider: z.object({
     id: z.number(),
@@ -92,6 +134,7 @@ export const ProviderModelsSchema = z.object({
   }),
   db_models: z.array(AdminModelSchema),
   remote_models: z.array(AdminModelSchema),
+  certification_paths: z.record(z.string(), z.array(CertificationPathSchema)),
 });
 
 export type ProviderType = z.infer<typeof ProviderTypeSchema>;
@@ -107,6 +150,7 @@ export type AdminModelPricing = z.infer<typeof AdminModelPricingSchema>;
 export type AdminModelArchitecture = z.infer<
   typeof AdminModelArchitectureSchema
 >;
+export type CertificationPath = z.infer<typeof CertificationPathSchema>;
 export type ProviderModels = z.infer<typeof ProviderModelsSchema>;
 
 export interface AdminModelAsModel {
@@ -317,6 +361,17 @@ export class AdminService {
     );
   }
 
+  static async certifyProvider(
+    providerId: number,
+    body: CertifyProviderRequest = {}
+  ): Promise<ProviderCertification> {
+    const data = await apiClient.post<unknown>(
+      `/admin/api/upstream-providers/${providerId}/certify`,
+      body
+    );
+    return ProviderCertificationSchema.parse(data);
+  }
+
   static async getProviderModels(providerId: number): Promise<ProviderModels> {
     const data = await apiClient.get<ProviderModels>(
       `/admin/api/upstream-providers/${providerId}/models`
@@ -446,14 +501,50 @@ export class AdminService {
     const allModels: AdminModelAsModel[] = [];
     const seenModelIds = new Set<string>();
 
-    for (const provider of providers) {
-      try {
-        const providerModels = await this.getProviderModels(provider.id);
+    // One provider's catalog never depends on another's, and each miss costs an
+    // upstream round trip, so the whole fan-out happens in a single wave.
+    const providerResults = await Promise.all(
+      providers.map(async (provider) => {
+        try {
+          return {
+            provider,
+            models: await this.getProviderModels(provider.id),
+          };
+        } catch (error) {
+          console.error(
+            `Failed to fetch models for provider ${provider.id}:`,
+            error
+          );
+          return null;
+        }
+      })
+    );
 
-        providerModels.db_models.forEach((dbModel) => {
-          seenModelIds.add(dbModel.id);
+    for (const result of providerResults) {
+      if (!result) {
+        continue;
+      }
+      const { provider, models: providerModels } = result;
+      providerModels.db_models.forEach((dbModel) => {
+        seenModelIds.add(dbModel.id);
+        const modelWithProvider = {
+          ...dbModel,
+          upstream_provider_id: provider.id,
+        };
+        allModels.push({
+          ...this.transformAdminModelToModel(
+            modelWithProvider,
+            provider.provider_type
+          ),
+          has_own_api_key: false,
+          api_key_type: 'group',
+        });
+      });
+
+      providerModels.remote_models.forEach((remoteModel) => {
+        if (!seenModelIds.has(remoteModel.id)) {
           const modelWithProvider = {
-            ...dbModel,
+            ...remoteModel,
             upstream_provider_id: provider.id,
           };
           allModels.push({
@@ -462,33 +553,11 @@ export class AdminService {
               provider.provider_type
             ),
             has_own_api_key: false,
-            api_key_type: 'group',
+            api_key_type: 'remote',
+            soft_deleted: false,
           });
-        });
-
-        providerModels.remote_models.forEach((remoteModel) => {
-          if (!seenModelIds.has(remoteModel.id)) {
-            const modelWithProvider = {
-              ...remoteModel,
-              upstream_provider_id: provider.id,
-            };
-            allModels.push({
-              ...this.transformAdminModelToModel(
-                modelWithProvider,
-                provider.provider_type
-              ),
-              has_own_api_key: false,
-              api_key_type: 'remote',
-              soft_deleted: false,
-            });
-          }
-        });
-      } catch (error) {
-        console.error(
-          `Failed to fetch models for provider ${provider.id}:`,
-          error
-        );
-      }
+        }
+      });
     }
 
     return { models: allModels, groups };

@@ -3,12 +3,11 @@ import json
 import random
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel as V2BaseModel
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic.v1 import BaseModel, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from ..core.db import ModelRow, UpstreamProviderRow, get_session
+from ..core.db import ModelRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
 from .image_pricing import ImagePricing
@@ -18,24 +17,6 @@ from .rates import BILLABLE_PRICING_FIELDS, coerce_rate, is_usable_rate
 logger = get_logger(__name__)
 
 models_router = APIRouter()
-
-_MODEL_TEST_ENDPOINT_PATHS = {
-    "chat-completions": "chat/completions",
-    "completions": "completions",
-    "embeddings": "embeddings",
-    "responses": "responses",
-}
-
-# Cap the caller-supplied test payload to avoid forwarding oversized bodies
-# upstream on the operator's credentials.
-_MODEL_TEST_MAX_REQUEST_BYTES = 64 * 1024
-
-
-async def _require_admin_api(request: Request) -> None:
-    """Require admin auth without creating an import-time cycle with core.admin."""
-    from ..core.admin import require_admin_api
-
-    await require_admin_api(request)
 
 
 class Architecture(BaseModel):
@@ -360,8 +341,16 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
     return []
 
 
+def allows_cache_pricing_backfill(provider_type: str | None) -> bool:
+    return provider_type not in {"ppqai", "venice"}
+
+
 def _build_model_from_row(
-    row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
+    row: ModelRow,
+    apply_provider_fee: bool = False,
+    provider_fee: float = 1.01,
+    *,
+    provider_type: str | None = None,
 ) -> Model:
     """The deterministic USD view of a stored model row, before the sats conversion."""
     architecture = json.loads(row.architecture)
@@ -373,8 +362,10 @@ def _build_model_from_row(
     raw_image_pricing = getattr(row, "image_pricing", None)
     image_pricing_dict = json.loads(raw_image_pricing) if raw_image_pricing else None
 
+    # Rows written before the admin edge normalized rates can still carry
+    # numeric strings (``"0"``); compare as floats so the clamp cannot raise.
     if isinstance(pricing, dict) and float(pricing.get("request", 0.0)) <= 0.0:
-        pricing["request"] = max(pricing.get("request", 0.0), 0.0)
+        pricing["request"] = 0.0
 
     # Rows written before ``image_output`` existed carried the generation
     # ceiling in ``image``; read them as such rather than as unpriced.
@@ -402,7 +393,8 @@ def _build_model_from_row(
     # forwarded_model_id="deepseek-v4-flash") would otherwise look up the alias
     # and miss the cache rate.
     pricing_model_id = getattr(row, "forwarded_model_id", None) or row.id
-    parsed_pricing = backfill_cache_pricing(pricing_model_id, parsed_pricing)
+    if allows_cache_pricing_backfill(provider_type):
+        parsed_pricing = backfill_cache_pricing(pricing_model_id, parsed_pricing)
 
     if apply_provider_fee:
         parsed_pricing = Pricing.parse_obj(
@@ -442,9 +434,15 @@ def _build_model_from_row(
 
 
 def _row_to_model(
-    row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
+    row: ModelRow,
+    apply_provider_fee: bool = False,
+    provider_fee: float = 1.01,
+    *,
+    provider_type: str | None = None,
 ) -> Model:
-    model = _build_model_from_row(row, apply_provider_fee, provider_fee)
+    model = _build_model_from_row(
+        row, apply_provider_fee, provider_fee, provider_type=provider_type
+    )
 
     try:
         sats_to_usd = sats_usd_price()
@@ -489,6 +487,9 @@ async def list_models(
                 provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
                 if r.upstream_provider_id in providers_by_id
                 else 1.01,
+                provider_type=providers_by_id[r.upstream_provider_id].provider_type
+                if r.upstream_provider_id in providers_by_id
+                else None,
             )
         except Exception as e:
             # Stored pricing/architecture is JSON from whatever wrote the row, so
@@ -689,95 +690,6 @@ async def update_sats_pricing() -> None:
             break
         except Exception as e:
             logger.error(f"Error updating sats pricing: {e}")
-
-
-class ModelTestRequest(V2BaseModel):
-    model_id: str
-    endpoint_type: str
-    request_data: dict
-
-
-@models_router.post("/api/models/test", dependencies=[Depends(_require_admin_api)])
-async def test_model(
-    payload: ModelTestRequest,
-    session: AsyncSession = Depends(get_session),
-) -> dict:
-    """Test a model by sending a request through its configured upstream provider."""
-    from sqlmodel import select
-
-    result = await session.execute(
-        select(ModelRow).where(ModelRow.id == payload.model_id)
-    )
-    model_row = result.scalars().first()
-
-    if not model_row:
-        return {
-            "success": False,
-            "error": f"Model '{payload.model_id}' not found in database",
-            "status_code": 404,
-        }
-
-    provider = await session.get(UpstreamProviderRow, model_row.upstream_provider_id)
-    if not provider:
-        return {
-            "success": False,
-            "error": "Upstream provider not found",
-            "status_code": 404,
-        }
-
-    endpoint_path = _MODEL_TEST_ENDPOINT_PATHS.get(payload.endpoint_type)
-    if endpoint_path is None:
-        raise HTTPException(status_code=400, detail="Unsupported endpoint_type")
-
-    actual_model_id = model_row.forwarded_model_id or model_row.id
-    request_data = dict(payload.request_data)
-    request_data["model"] = actual_model_id
-
-    try:
-        request_size = len(json.dumps(request_data).encode("utf-8"))
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="Invalid request_data")
-    if request_size > _MODEL_TEST_MAX_REQUEST_BYTES:
-        raise HTTPException(status_code=413, detail="request_data too large")
-
-    base_url = provider.base_url.rstrip("/")
-    url = f"{base_url}/{endpoint_path}"
-
-    logger.info(
-        "admin model test",
-        extra={
-            "model_id": payload.model_id,
-            "forwarded_model_id": actual_model_id,
-            "endpoint_type": payload.endpoint_type,
-            "upstream_provider_id": model_row.upstream_provider_id,
-            "request_bytes": request_size,
-        },
-    )
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {provider.api_key}",
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, json=request_data, headers=headers)
-            try:
-                response_data = response.json()
-            except Exception:
-                response_data = {"raw": response.text}
-
-            return {
-                "success": response.status_code < 400,
-                "data": response_data,
-                "status_code": response.status_code,
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "status_code": 500,
-        }
 
 
 @models_router.get("/v1/models/paths")

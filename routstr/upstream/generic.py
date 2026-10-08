@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .base import BaseUpstreamProvider
+from .base import BaseUpstreamProvider, _reported_provider
 from .model_paths import public_provider_url
 from .pricing_resolver import (
     FallbackPricingResolver,
@@ -28,7 +28,11 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
 
     provider_type = "generic"
     default_base_url = "http://localhost:8888"
-    platform_url = None
+    platform_url: str | None = None
+    # Subclasses that own an authoritative price table set this False so a model
+    # the table misses imports disabled instead of taking a litellm/OpenRouter
+    # price that may undercut the upstream's own rate.
+    use_fallback_pricing = True
 
     def __init__(
         self,
@@ -60,8 +64,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
         """
         if not isinstance(response_json, dict):
             return
-        existing = response_json.get("provider")
-        if not (isinstance(existing, str) and existing.strip()):
+        if _reported_provider(response_json) is None:
             response_json["provider"] = (
                 urlparse(public_provider_url(self.base_url)).hostname
                 or self.upstream_name
@@ -163,7 +166,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                     model_spec = model_data.get("model_spec", {})
 
                     resolved = self._native_pricing(model_id, model_spec)
-                    if resolved is None:
+                    if resolved is None and self.use_fallback_pricing:
                         resolved = await resolver.resolve(model_id)
 
                     if resolved is None:

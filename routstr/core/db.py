@@ -174,7 +174,10 @@ async def _transition_stale_reservation(
         update(ReservationRelease)
         .where(col(ReservationRelease.id) == reservation_id)
         .where(col(ReservationRelease.status) == "active")
-        .where(col(ReservationRelease.created_at) < cutoff)
+        .where(
+            (col(ReservationRelease.created_at) < cutoff)
+            | (col(ReservationRelease.expires_at) <= int(time.time()))
+        )
         .values(status="released")
     )
     return bool(transition.rowcount == 1)
@@ -221,7 +224,10 @@ async def release_stale_reservations(
     query = (
         select(ReservationRelease)
         .where(col(ReservationRelease.status) == "active")
-        .where(col(ReservationRelease.created_at) < cutoff)
+        .where(
+            (col(ReservationRelease.created_at) < cutoff)
+            | (col(ReservationRelease.expires_at) <= int(time.time()))
+        )
     )
     if key_hash is not None:
         query = query.where(
@@ -432,7 +438,11 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     enabled: bool = Field(default=True, description="Whether this model is enabled")
     forwarded_model_id: str | None = Field(
         default=None,
-        description="Model ID to use when forwarding requests to upstream provider. Defaults to id if not set.",
+        description=(
+            "Client-facing alias advertised by /v1/models and accepted on "
+            "requests in place of id. JSON request bodies sent upstream carry "
+            "id (via the provider's transform_model_name), not this value."
+        ),
     )
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
 
@@ -621,6 +631,63 @@ class Refund(SQLModel, table=True):  # type: ignore
     updated_at: int = Field(default_factory=lambda: int(time.time()))
 
 
+# Swap rows the reconciler still owns: the melt was dispatched and its outcome
+# or follow-up (mint, credit, token issue) is not final.
+SWAP_OPEN_STATUSES = ("melting", "ambiguous", "melted", "minted", "issued")
+
+
+class CashuSwap(SQLModel, table=True):  # type: ignore
+    """Journal of one cross-mint swap, written before any Lightning payment.
+
+    ``in`` swaps melt a token from a mint the operator does not trust into the
+    preferred trusted mint and credit an API key. ``out`` swaps melt owner
+    proofs on that trusted mint to issue a refund token on the user's own mint.
+    Every money movement is recorded here first so a crash or timeout leaves a row the
+    reconciler can finish or fail, never an unknown balance.
+    """
+
+    __tablename__ = "cashu_swaps"
+
+    id: str = Field(primary_key=True, default_factory=lambda: uuid.uuid4().hex)
+    direction: str = Field(description="in (token -> primary) or out (refund)")
+    status: str = Field(
+        default="melting",
+        index=True,
+        description=(
+            "melting, ambiguous, melted, minted, credited, issued, settled, failed"
+        ),
+    )
+    api_key_hashed_key: str | None = Field(
+        default=None, foreign_key="api_keys.hashed_key", index=True
+    )
+    refund_id: str | None = Field(default=None, index=True)
+    token_hash: str | None = Field(
+        default=None,
+        index=True,
+        unique=True,
+        description="sha256 of the incoming token",
+    )
+    source_mint: str = Field()
+    source_unit: str = Field()
+    source_amount: int = Field(description="Gross amount leaving the source mint")
+    destination_mint: str = Field()
+    destination_unit: str = Field()
+    destination_amount: int = Field(description="Net amount minted at the destination")
+    fee_reserve: int = Field(default=0)
+    input_fees: int = Field(default=0)
+    mint_quote_id: str | None = Field(default=None)
+    melt_quote_id: str | None = Field(default=None)
+    token: str | None = Field(default=None, description="Issued token (out swaps)")
+    change_token: str | None = Field(
+        default=None,
+        description="Unused inbound melt fee reserve returned on the source mint",
+    )
+    error: str | None = Field(default=None)
+    claimed_at: int | None = Field(default=None, description="Reconciler lease")
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    updated_at: int = Field(default_factory=lambda: int(time.time()))
+
+
 async def store_cashu_transaction(
     token: str,
     amount: int,
@@ -787,6 +854,8 @@ class ReservationRelease(SQLModel, table=True):  # type: ignore
     key_hash: str = Field(index=True)
     billing_key_hash: str = Field(index=True)
     reserved_msats: int
+    started_at: int | None = Field(default=None)
+    expires_at: int | None = Field(default=None, index=True)
     status: str = Field(default="active")
     created_at: int = Field(default_factory=lambda: int(time.time()))
 

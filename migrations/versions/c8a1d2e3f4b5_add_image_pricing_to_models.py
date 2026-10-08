@@ -1,7 +1,7 @@
 """add image_pricing to models
 
 Revision ID: c8a1d2e3f4b5
-Revises: e4c7a1b9d520
+Revises: 424bb59871d4
 Create Date: 2026-09-24 00:00:00.000000
 """
 
@@ -11,7 +11,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "c8a1d2e3f4b5"
-down_revision = "e4c7a1b9d520"
+down_revision = "424bb59871d4"
 branch_labels = None
 depends_on = None
 

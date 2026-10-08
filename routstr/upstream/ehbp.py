@@ -5,7 +5,7 @@ import math
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Mapping
+from typing import AsyncIterator, Awaitable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Request
@@ -269,7 +269,6 @@ def _validated_tinfoil_enclave_base_url(enclave_url: str) -> str | None:
 
 def _resolve_ehbp_target_url(
     target_url: str,
-    path: str,
     headers: Mapping[str, str],
     provider_type: str | None = None,
     profile: "ConfidentialInferenceProfile | None" = None,
@@ -281,6 +280,13 @@ def _resolve_ehbp_target_url(
     opt in to client-supplied target overrides and constrain the destination;
     otherwise the header is ignored so callers cannot redirect other providers
     or leak upstream API keys.
+
+    The provider builds the request path through
+    :meth:`~routstr.upstream.base.BaseUpstreamProvider.build_ehbp_request_path`.
+    The override supplies the host and optional base path. If that base path
+    already ends in ``/v1``, do not append the provider's version twice.
+    Appending the caller's raw path instead would lose the provider's prefix
+    for clients that post to ``/chat/completions``.
     """
     override_header = (
         profile.client_target_url_header if profile else _ENCLAVE_URL_HEADER
@@ -318,7 +324,10 @@ def _resolve_ehbp_target_url(
             status_code=400,
         )
 
-    return f"{validated_base_url}/{path.lstrip('/')}"
+    target_path = urlsplit(target_url).path
+    if validated_base_url.endswith("/v1") and target_path.startswith("/v1/"):
+        target_path = target_path[3:]
+    return f"{validated_base_url}{target_path}"
 
 
 def _validated_confidential_target_url(
@@ -649,6 +658,37 @@ async def _release_failed_ehbp_charge(
     )
 
 
+async def _record_ehbp_settlement(
+    operation: Awaitable[int],
+    *,
+    key: ApiKey,
+    model_id: str,
+    settlement_type: str,
+) -> int:
+    """Expose EHBP settlement latency alongside normal request settlement."""
+    started = time.perf_counter()
+    # A rollback can expire the ORM instance, so capture this before the operation.
+    key_log_hash = key.hashed_key[:8] + "..."
+    succeeded = False
+    try:
+        result = await operation
+        succeeded = True
+        return result
+    finally:
+        logger.info(
+            "Payment settlement finished",
+            extra={
+                "key_hash": key_log_hash,
+                "model": model_id,
+                "settlement_type": settlement_type,
+                "settlement_duration_ms": round(
+                    (time.perf_counter() - started) * 1000, 2
+                ),
+                "settlement_succeeded": succeeded,
+            },
+        )
+
+
 async def finalize_ehbp_actual_cost_payment(
     key: ApiKey,
     session: AsyncSession,
@@ -814,9 +854,7 @@ async def forward_ehbp_request(
 
     provider_type = getattr(upstream, "provider_type", "unknown")
     profile = target.profile or upstream.get_confidential_inference_profile()  # type: ignore[attr-defined]
-    target_url = _resolve_ehbp_target_url(
-        target.url, path, headers, provider_type, profile
-    )
+    target_url = _resolve_ehbp_target_url(target.url, headers, provider_type, profile)
     upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers, profile)
 
     # Merge query params into the target URL since forward_with_trailer
@@ -937,13 +975,18 @@ async def forward_ehbp_request(
             )
             billing_model = cost_info.pop("actual_model", None) or model_obj.id
             computed_msats = int(cost_info["total_msats"])
-            charged_msats = await finalize_ehbp_actual_cost_payment(
-                key,
-                session,
-                max_cost_for_model,
-                billing_model,
-                cost_info,
-                reservation_snapshot,
+            charged_msats = await _record_ehbp_settlement(
+                finalize_ehbp_actual_cost_payment(
+                    key,
+                    session,
+                    max_cost_for_model,
+                    billing_model,
+                    cost_info,
+                    reservation_snapshot,
+                ),
+                key=key,
+                model_id=billing_model,
+                settlement_type="ehbp_usage",
             )
             cost_data = {
                 **cost_info,
@@ -963,12 +1006,17 @@ async def forward_ehbp_request(
                     "key_hash": key.hashed_key[:8] + "...",
                 },
             )
-            charged_msats = await finalize_ehbp_max_cost_payment(
-                key,
-                session,
-                max_cost_for_model,
-                model_obj.id,
-                reservation_snapshot,
+            charged_msats = await _record_ehbp_settlement(
+                finalize_ehbp_max_cost_payment(
+                    key,
+                    session,
+                    max_cost_for_model,
+                    model_obj.id,
+                    reservation_snapshot,
+                ),
+                key=key,
+                model_id=model_obj.id,
+                settlement_type="ehbp_unmeasured_release",
             )
             cost_data = {
                 "total_msats": charged_msats,
@@ -1087,7 +1135,7 @@ async def forward_ehbp_x_cashu_request(
         provider_type = getattr(upstream, "provider_type", "unknown")
         profile = target.profile or upstream.get_confidential_inference_profile()  # type: ignore[attr-defined]
         target_url = _resolve_ehbp_target_url(
-            target.url, path, headers, provider_type, profile
+            target.url, headers, provider_type, profile
         )
         upstream_headers = _prepare_ehbp_upstream_headers(
             headers, target.headers, profile

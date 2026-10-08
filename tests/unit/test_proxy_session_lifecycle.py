@@ -6,6 +6,8 @@ from fastapi.responses import StreamingResponse
 
 from routstr import proxy as proxy_module
 
+from .proxy_test_utils import mock_request_stream, patch_proxy_session
+
 
 @pytest.mark.asyncio
 async def test_proxy_closes_request_session_before_returning_response() -> None:
@@ -15,9 +17,11 @@ async def test_proxy_closes_request_session_before_returning_response() -> None:
     request.headers = {"accept": "application/json"}
     request.url.path = "/not-an-api-route"
     request.state.request_id = "test-request"
+    mock_request_stream(request, b"")
     session = AsyncMock()
 
-    response = await proxy_module.proxy(request, "not-an-api-route", session=session)
+    with patch_proxy_session(session):
+        response = await proxy_module.proxy(request, "not-an-api-route")
 
     assert response.status_code == 404
     session.close.assert_awaited_once()
@@ -26,6 +30,8 @@ async def test_proxy_closes_request_session_before_returning_response() -> None:
 @pytest.mark.asyncio
 async def test_proxy_session_is_closed_before_first_stream_chunk() -> None:
     request = MagicMock()
+    request.headers = {}
+    mock_request_stream(request, b"")
     session = AsyncMock()
 
     async def stream() -> AsyncIterator[bytes]:
@@ -33,10 +39,11 @@ async def test_proxy_session_is_closed_before_first_stream_chunk() -> None:
         yield b"chunk"
 
     upstream_response = StreamingResponse(stream())
-    with patch("routstr.proxy._proxy", AsyncMock(return_value=upstream_response)):
-        response = await proxy_module.proxy(
-            request, "v1/chat/completions", session=session
-        )
+    with (
+        patch("routstr.proxy._proxy", AsyncMock(return_value=upstream_response)),
+        patch_proxy_session(session),
+    ):
+        response = await proxy_module.proxy(request, "v1/chat/completions")
 
     assert isinstance(response, StreamingResponse)
     chunks = [chunk async for chunk in response.body_iterator]

@@ -17,6 +17,7 @@ provider they named.
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
 import json
 import random
@@ -37,6 +38,7 @@ from ..core.logging import get_logger
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
 
+    from ..payment.models import Model
     from .base import BaseUpstreamProvider
 
 logger = get_logger(__name__)
@@ -101,6 +103,8 @@ class ProviderPathSnapshot:
     preserve_model_ids: frozenset[str] = frozenset()
 
 
+# Streaming paths stamp this onto every chunk; the configured base URL set is small.
+@functools.lru_cache(maxsize=256)
 def public_provider_url(base_url: str) -> str:
     """Mask private IP addresses and URLs with explicit ports."""
     parsed = urlsplit(base_url)
@@ -224,10 +228,11 @@ def openrouter_author_slug(model: object) -> str | None:
     """Return a canonical ``author/slug`` for the OpenRouter endpoints API.
 
     Prefer ``canonical_slug``, then a slash-containing ``id``, then a
-    slash-containing ``forwarded_model_id``. The forwarded id is exactly what
-    the proxy sends upstream for admin-created alias rows (``base.py`` forwards
-    ``forwarded_model_id or id``), so it is a valid OpenRouter id when the
-    bare ``id`` is a local alias with no slash.
+    slash-containing ``forwarded_model_id``. That field is the client-facing
+    alias: JSON request bodies sent upstream carry
+    ``transform_model_name(model.id)``, not it (``base.py``). It is used here
+    only as a last-resort guess at an ``author/slug`` when neither
+    ``canonical_slug`` nor ``id`` carries one.
     """
     canonical = getattr(model, "canonical_slug", None)
     if canonical and "/" in canonical:
@@ -819,7 +824,9 @@ async def refresh_model_paths_periodically(
             break
 
 
-def _price_in_sats(model: dict[str, Any], provider_fee: float) -> None:
+def _price_in_sats(
+    model: dict[str, Any], provider_fee: float, provider_type: str | None = None
+) -> None:
     """Run a path's USD rates through the ``/v1/models`` pricing pipeline.
 
     Metadata copied from the provider model cache is already priced. OpenRouter
@@ -837,13 +844,16 @@ def _price_in_sats(model: dict[str, Any], provider_fee: float) -> None:
         TopProvider,
         _calculate_usd_max_costs,
         _update_model_sats_pricing,
+        allows_cache_pricing_backfill,
         backfill_cache_pricing,
     )
     from ..payment.price import sats_usd_price
 
     try:
         model_id = model.get("forwarded_model_id") or model["id"]
-        usd = backfill_cache_pricing(model_id, Pricing.parse_obj(pricing))
+        usd = Pricing.parse_obj(pricing)
+        if allows_cache_pricing_backfill(provider_type):
+            usd = backfill_cache_pricing(model_id, usd)
         usd = Pricing.parse_obj({k: v * provider_fee for k, v in usd.dict().items()})
         priced = Model(
             id=model_id,
@@ -884,6 +894,72 @@ def _price_in_sats(model: dict[str, Any], provider_fee: float) -> None:
         model["sats_pricing"] = priced.sats_pricing.dict()
 
 
+def apply_model_path_pricing(
+    model: "Model",
+    row: ModelPathRow,
+    provider_fee: float,
+    sats_to_usd: float,
+) -> "Model":
+    """Return ``model`` priced from an exact endpoint path's own rates.
+
+    Direct paths already use the provider model cache and therefore carry the
+    same pricing as ``model``. OpenRouter endpoint rows instead contain raw,
+    endpoint-specific USD rates and limits, which can differ from the model's
+    default listing; OpenRouter charges the endpoint that serves the request,
+    so the proxy reserves and token-bills a pinned endpoint with them, using
+    the same limits ``/v1/models/paths`` quotes its max cost from.
+    """
+    if row.endpoint_tag is None:
+        return model
+
+    from ..payment.models import (
+        Pricing,
+        TopProvider,
+        _calculate_usd_max_costs,
+        _update_model_sats_pricing,
+        backfill_cache_pricing,
+    )
+
+    try:
+        metadata = json.loads(row.model_metadata)
+        if not isinstance(metadata, dict) or not isinstance(
+            metadata.get("pricing"), dict
+        ):
+            return model
+        from ..payment.models import allows_cache_pricing_backfill
+
+        pricing = Pricing.parse_obj(metadata["pricing"])
+        if allows_cache_pricing_backfill(row.provider_type):
+            pricing = backfill_cache_pricing(
+                model.forwarded_model_id or row.model_id, pricing
+            )
+        pricing = Pricing.parse_obj(
+            {key: float(value) * provider_fee for key, value in pricing.dict().items()}
+        )
+        update: dict[str, Any] = {"pricing": pricing, "sats_pricing": None}
+        context_length = metadata.get("context_length")
+        max_completion_tokens = metadata.get("max_completion_tokens")
+        if context_length or max_completion_tokens:
+            update["context_length"] = context_length or model.context_length
+            update["top_provider"] = TopProvider(
+                context_length=context_length,
+                max_completion_tokens=max_completion_tokens,
+            )
+        priced = model.copy(update=update)
+        (
+            pricing.max_prompt_cost,
+            pricing.max_completion_cost,
+            pricing.max_cost,
+        ) = _calculate_usd_max_costs(priced)
+        return _update_model_sats_pricing(priced, sats_to_usd)
+    except Exception as exc:
+        logger.warning(
+            "Could not apply model-path pricing",
+            extra={"model_id": model.id, "path": row.path, "error": str(exc)},
+        )
+        return model
+
+
 def _serialize_path(row: ModelPathRow, provider_fee: float) -> dict[str, Any]:
     endpoint = None
     if row.endpoint_tag or row.endpoint_name:
@@ -895,7 +971,7 @@ def _serialize_path(row: ModelPathRow, provider_fee: float) -> dict[str, Any]:
     if not isinstance(model, dict):
         model = {}
     model.setdefault("id", row.model_id)
-    _price_in_sats(model, provider_fee)
+    _price_in_sats(model, provider_fee, row.provider_type)
     return {
         "path": row.path,
         "provider": {

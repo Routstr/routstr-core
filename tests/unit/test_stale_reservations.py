@@ -9,6 +9,7 @@ Covers:
 """
 
 import asyncio
+import math
 import time
 from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,16 +17,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+import routstr.auth as auth_module
 from routstr.auth import pay_for_request
 from routstr.balance import refund_wallet_endpoint
 from routstr.core.db import (
     ApiKey,
+    ReservationRelease,
     release_stale_reservations,
     reset_all_reserved_balances,
 )
+
+from .proxy_test_utils import mock_request_stream, patch_proxy_session
 
 
 def _make_engine() -> AsyncEngine:
@@ -55,11 +60,16 @@ async def session() -> "AsyncGenerator[AsyncSession, None]":
 
 
 @pytest.mark.asyncio
-async def test_pay_for_request_sets_reserved_at(session: AsyncSession) -> None:
+async def test_pay_for_request_sets_reserved_at(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
     key = ApiKey(hashed_key="paykey", balance=10_000)
     session.add(key)
     await session.commit()
-
+    logger_info = MagicMock()
+    payments_info = MagicMock()
+    monkeypatch.setattr(auth_module.logger, "info", logger_info)
+    monkeypatch.setattr(auth_module.payments_logger, "info", payments_info)
     before = int(time.time())
     await pay_for_request(key, 1_000, session)
 
@@ -67,6 +77,85 @@ async def test_pay_for_request_sets_reserved_at(session: AsyncSession) -> None:
     assert key.reserved_balance == 1_000
     assert key.reserved_at is not None
     assert key.reserved_at >= before
+    success_logs = [
+        call
+        for call in logger_info.call_args_list
+        if call.args == ("Payment processed successfully",)
+    ]
+    assert len(success_logs) == 1
+    payments_info.assert_called_once()
+    assert payments_info.call_args.args == ("RESERVE",)
+
+
+@pytest.mark.asyncio
+async def test_pay_for_request_expires_at_has_floor_margin(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reserved_at_now floors to the second; expires_at must add 1s so a
+    finalizer finishing exactly at the nominal deadline isn't fenced out."""
+    key = ApiKey(hashed_key="floorkey", balance=10_000)
+    session.add(key)
+    await session.commit()
+
+    fixed_time = 1_700_000_000.9  # fractional second, floors when int()'d
+    monkeypatch.setattr(auth_module.time, "time", lambda: fixed_time)
+
+    snapshot = await pay_for_request(key, 1_000, session)
+
+    row = await session.get(ReservationRelease, snapshot.release_id)
+    assert row is not None
+    expected = (
+        int(fixed_time)
+        + math.ceil(
+            auth_module.settings.max_request_lifetime_seconds
+            + auth_module.settings.request_cleanup_timeout_seconds
+        )
+        + 1
+    )
+    assert row.expires_at == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_pay_for_request_releases_reservation_when_validation_fails(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = ApiKey(hashed_key="invalid-reservation", balance=10_000)
+    session.add(key)
+    await session.commit()
+
+    async def reject_reservation(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("reservation identity changed")
+
+    logger_info = MagicMock()
+    payments_info = MagicMock()
+    monkeypatch.setattr(
+        auth_module, "_validate_reservation_snapshot", reject_reservation
+    )
+    monkeypatch.setattr(auth_module.logger, "info", logger_info)
+    monkeypatch.setattr(auth_module.payments_logger, "info", payments_info)
+
+    with pytest.raises(RuntimeError, match="identity changed"):
+        await pay_for_request(key, 1_000, session)
+
+    assert not any(
+        call.args == ("Payment processed successfully",)
+        for call in logger_info.call_args_list
+    )
+    payments_info.assert_not_called()
+
+    await session.refresh(key)
+    release = (
+        await session.exec(
+            select(ReservationRelease).where(
+                ReservationRelease.key_hash == key.hashed_key
+            )
+        )
+    ).one()
+    assert key.reserved_balance == 0
+    assert key.total_requests == 0
+    assert release.status == "released"
+    assert release.id not in auth_module._reservation_heartbeats
 
 
 @pytest.mark.asyncio
@@ -288,7 +377,11 @@ async def test_refund_rejects_recent_reservation(session: AsyncSession) -> None:
             )
 
     assert exc_info.value.status_code == 400
-    assert "ongoing requests" in exc_info.value.detail
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    error = detail["error"]
+    assert error["code"] == "refund_ongoing_requests"
+    assert "ongoing requests" in error["message"]
 
 
 @pytest.mark.asyncio
@@ -328,7 +421,7 @@ async def test_proxy_reverts_reservation_on_client_disconnect() -> None:
     request = MagicMock()
     request.method = "POST"
     request.headers = {"authorization": "Bearer sk-cancelkey"}
-    request.body = AsyncMock(return_value=b'{"model": "test-model"}')
+    mock_request_stream(request, b'{"model": "test-model"}')
 
     upstream = MagicMock()
     upstream.provider_type = "test"
@@ -355,15 +448,74 @@ async def test_proxy_reverts_reservation_on_client_disconnect() -> None:
         ),
         patch.object(proxy_module, "check_token_balance", MagicMock()),
         patch.object(proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)),
-        patch.object(proxy_module, "pay_for_request", AsyncMock(return_value=1_000)),
         patch.object(
             proxy_module,
-            "get_reservation_snapshot",
+            "pay_for_request",
             AsyncMock(return_value=reservation_snapshot),
         ),
         patch.object(proxy_module, "revert_pay_for_request", revert_mock),
+        patch_proxy_session(session),
     ):
         with pytest.raises(asyncio.CancelledError):
-            await proxy_module.proxy(request, "v1/chat/completions", session=session)
+            await proxy_module.proxy(request, "v1/chat/completions")
 
     revert_mock.assert_awaited_once_with(key, session, 1000, reservation_snapshot)
+
+
+@pytest.mark.asyncio
+async def test_absolute_expiry_releases_fresh_lease(session: AsyncSession) -> None:
+    now = int(time.time())
+    key = ApiKey(
+        hashed_key="expired-deadline",
+        balance=5000,
+        reserved_balance=1000,
+        reserved_at=now,
+    )
+    session.add(key)
+    session.add(
+        ReservationRelease(
+            id="expired",
+            key_hash=key.hashed_key,
+            billing_key_hash=key.hashed_key,
+            reserved_msats=1000,
+            created_at=now,
+            started_at=now - 100,
+            expires_at=now - 1,
+        )
+    )
+    await session.commit()
+    assert await release_stale_reservations(session, 300) == 1
+    await session.refresh(key)
+    assert key.reserved_balance == 0
+    assert key.balance == 5000
+
+
+@pytest.mark.asyncio
+async def test_expired_reservation_cannot_renew_or_claim_charge(
+    session: AsyncSession,
+) -> None:
+    from routstr.auth import (
+        ReservationSnapshot,
+        _claim_reservation_for_charge,
+        renew_reservation,
+    )
+
+    snapshot = ReservationSnapshot(
+        release_id="fenced",
+        key_hash="fenced-key",
+        billing_key_hash="fenced-key",
+        reserved_msats=1000,
+    )
+    session.add(ApiKey(hashed_key="fenced-key", balance=5000, reserved_balance=1000))
+    session.add(
+        ReservationRelease(
+            id="fenced",
+            key_hash="fenced-key",
+            billing_key_hash="fenced-key",
+            reserved_msats=1000,
+            expires_at=int(time.time()) - 1,
+        )
+    )
+    await session.commit()
+    assert not await renew_reservation(snapshot, session)
+    assert not await _claim_reservation_for_charge(snapshot, session)

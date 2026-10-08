@@ -52,3 +52,50 @@ async def test_x_cashu_responses_stream_reports_complete_provider_path() -> None
 
     payload = json.loads((await _body(response)).decode().removeprefix("data: "))
     assert payload["provider"] == "openrouter:z.ai"
+
+
+@pytest.mark.asyncio
+async def test_x_cashu_messages_stream_carries_provider_to_later_events() -> None:
+    provider = OpenRouterUpstreamProvider(api_key="test-key")
+    events = [
+        {"type": "message_start", "message": {"provider": "Anthropic"}},
+        {"type": "content_block_delta", "delta": {"text": "hi"}},
+    ]
+    content = "".join(f"data: {json.dumps(e)}\n" for e in events)
+
+    response = await provider.handle_x_cashu_streaming_response(
+        content,
+        httpx.Response(200, headers={"content-type": "text/event-stream"}),
+        amount=1,
+        unit="sat",
+        max_cost_for_model=1,
+    )
+
+    lines = (await _body(response)).decode().splitlines()
+    stamped = [json.loads(line.removeprefix("data: ")) for line in lines if line]
+    assert [e["provider"] for e in stamped] == ["openrouter:Anthropic"] * 2
+
+
+@pytest.mark.asyncio
+async def test_x_cashu_responses_stream_carries_nested_provider() -> None:
+    provider = OpenRouterUpstreamProvider(api_key="test-key")
+    events = [
+        {"type": "response.created", "response": {"provider": "OpenAI"}},
+        {"type": "response.output_text.delta", "delta": "hi"},
+    ]
+    content = "".join(f"data: {json.dumps(e)}\n\n" for e in events)
+
+    with patch.object(
+        provider, "get_x_cashu_cost", new=AsyncMock(return_value=None)
+    ):
+        response = await provider.handle_x_cashu_streaming_responses_response(
+            content,
+            httpx.Response(200, headers={"content-type": "text/event-stream"}),
+            amount=1,
+            unit="sat",
+            max_cost_for_model=1,
+        )
+
+    lines = (await _body(response)).decode().splitlines()
+    stamped = [json.loads(line.removeprefix("data: ")) for line in lines if line]
+    assert [e["provider"] for e in stamped] == ["openrouter:OpenAI"] * 2
