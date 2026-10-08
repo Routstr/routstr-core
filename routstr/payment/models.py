@@ -689,6 +689,7 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
 
     from ..core.settings import settings
     from ..proxy import get_provider_for_model, get_unique_models
+    from ..tlsn_ws import tlsn_proverd_ws_public_url
 
     items = get_unique_models()
     tlsn_enabled = bool(settings.tlsn_proverd_url)
@@ -712,9 +713,10 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
                 {
                     "mode": "proxy",
                     "upstream_hosts": hosts,
-                    # Channel-B endpoint the SDK verifier dials.
-                    "proverd_ws": settings.tlsn_proverd_url.replace("http", "ws", 1).rstrip("/")
-                    + "/ws",
+                    # Channel-B endpoint the SDK verifier dials: this node's
+                    # own ws proxy when a public URL is configured, else the
+                    # direct proverd address (local dev).
+                    "proverd_ws": tlsn_proverd_ws_public_url(),
                 }
                 if hosts
                 else False

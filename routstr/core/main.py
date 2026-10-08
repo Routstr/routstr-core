@@ -463,3 +463,11 @@ app.include_router(v2_lightning_router)
 app.include_router(deprecated_wallet_router)
 app.include_router(providers_router)
 app.include_router(proxy_router)
+
+# Channel-B proxy: expose proverd's TLSN mux on this node's public URL so
+# remote verifiers can reach it (proverd itself binds loopback / the compose
+# network). Only meaningful when verified mode is configured.
+if global_settings.tlsn_proverd_url:
+    from ..tlsn_ws import tlsn_ws_router
+
+    app.include_router(tlsn_ws_router)
