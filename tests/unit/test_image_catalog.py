@@ -25,6 +25,7 @@ from routstr.upstream.image_catalog import (
 )
 from routstr.upstream.openai import OpenAIUpstreamProvider
 from routstr.upstream.openrouter import OpenRouterUpstreamProvider
+from routstr.upstream.xai import XAIUpstreamProvider
 
 
 def _endpoints(*lines: dict[str, Any], supported: dict | None = None) -> dict:
@@ -320,6 +321,48 @@ def test_openai_provider_prices_gpt_image_from_its_token_rate() -> None:
         }
     )
     assert per_image_sats(sats, {"quality": "medium"}) == pytest.approx(0.053 * 1.01)
+
+
+def test_xai_drops_image_models_the_openrouter_feed_prices_per_token() -> None:
+    """The feed's ``image_output`` is per token; read per image it bills ~0."""
+    catalog = [
+        {
+            "id": "grok-imagine-image-2.0",
+            "name": "Grok Imagine",
+            "created": 1,
+            "description": "",
+            "context_length": 0,
+            "architecture": {
+                "modality": "text->image",
+                "input_modalities": ["text"],
+                "output_modalities": ["image"],
+                "tokenizer": "Grok",
+                "instruct_type": None,
+            },
+            "pricing": {"prompt": "0", "completion": "0", "image_output": "0.0000096"},
+        },
+        {
+            "id": "grok-4",
+            "name": "Grok 4",
+            "created": 1,
+            "description": "",
+            "context_length": 128000,
+            "architecture": {
+                "modality": "text->text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "Grok",
+                "instruct_type": None,
+            },
+            "pricing": {"prompt": "0.000003", "completion": "0.000015"},
+        },
+    ]
+    provider = XAIUpstreamProvider(api_key="k")
+    with patch(
+        "routstr.upstream.xai.async_fetch_openrouter_models", return_value=catalog
+    ):
+        models = asyncio.run(provider.fetch_models())
+    assert [m.id for m in models] == ["grok-4"]
 
 
 def test_openrouter_quality_resolution_variants_and_reference_surcharge() -> None:

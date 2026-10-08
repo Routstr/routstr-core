@@ -335,9 +335,23 @@ def per_image_sats(model: "Model | None", body: dict) -> float:
         return ceiling_sats
 
     rate = ceiling_sats / book.max_usd
+    # Only an upscale call carries ``scale``; it is priced by factor, not tier.
+    if book.upscale and "scale" in body:
+        return rate * book.upscale_usd(_scale_factor(body.get("scale")))
     if book.unit == "megapixel" and book.megapixel_usd > 0:
         return rate * output_megapixels(body) * book.megapixel_usd
     return rate * select_image_price_usd(book, body)
+
+
+def _scale_factor(value: object) -> str | None:
+    """``4`` or ``"4x"`` as the book's ``"4x"`` key; ``None`` when unreadable."""
+    if isinstance(value, str):
+        value = value.lower().removesuffix("x")
+    try:
+        factor = int(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f"{factor}x" if factor > 0 else None
 
 
 def reference_images_sats(model: "Model | None", body: dict) -> float:
@@ -397,9 +411,10 @@ def image_reservation_msats(body: dict, model: "Model | None") -> int | None:
     if sats_per_image <= 0:
         return None
 
+    # OpenAI batches with ``n``; Venice's native route with ``variants``.
     try:
-        count = int(body.get("n", 1))
-    except (TypeError, ValueError):
+        count = int(body.get("n") or body.get("variants") or 1)
+    except (TypeError, ValueError, OverflowError):
         count = 1
     count = min(max(count, 1), MAX_RESERVED_IMAGES)
 

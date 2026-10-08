@@ -327,8 +327,9 @@ _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     # response's usage exactly like embeddings.
     "systemone": frozenset({"POST"}),
     "decisions": frozenset({"POST"}),
-    # Image generation: the OpenAI images API plus Venice's native routes.
-    # All are billed per image by ``handle_image_generation``.
+    # Image generation: the OpenAI images API plus Venice's native routes,
+    # billed per image by ``handle_image_generation``. Bodies must be JSON;
+    # multipart uploads to edits/variations are refused before routing.
     "images/generations": frozenset({"POST"}),
     "images/edits": frozenset({"POST"}),
     "images/variations": frozenset({"POST"}),

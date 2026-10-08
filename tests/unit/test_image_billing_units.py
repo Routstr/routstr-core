@@ -95,6 +95,41 @@ TRUSTED_BOOK = ImagePricing(
     unit="image",
     trust_upstream_cost=True,
 )
+# Venice's ``upscaler``: generation at 0.01, upscale priced by factor.
+UPSCALE_BOOK = ImagePricing(
+    max_usd=1.0,
+    tiers=[ImagePriceTier(usd=0.01)],
+    unit="image",
+    upscale={"2x": 0.02, "4x": 0.08},
+)
+
+
+def test_upscale_is_priced_by_factor_not_generation_tier() -> None:
+    model = _model(UPSCALE_BOOK)
+    assert per_image_sats(model, {"prompt": "cat"}) == pytest.approx(10.0)
+    assert per_image_sats(model, {"scale": 4}) == pytest.approx(80.0)
+    assert per_image_sats(model, {"scale": "2x"}) == pytest.approx(20.0)
+    # An unknown factor reserves at the dearest upscale, not the generation price.
+    assert per_image_sats(model, {"scale": 3}) == pytest.approx(80.0)
+    assert image_reservation_msats({"scale": 4}, model) == 80_000
+    usage = ImageUsage(image_count=1)
+    assert settle_image_sats(model, {"scale": 4}, usage) == pytest.approx(80.0)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_images"),
+    [
+        ({"n": 3}, 3),
+        ({"variants": 4}, 4),
+        ({"n": 1e999}, 1),
+        ({"n": "nope"}, 1),
+    ],
+)
+def test_reservation_counts_openai_n_and_venice_variants(
+    body: dict, expected_images: int
+) -> None:
+    model = _model(UPSCALE_BOOK)
+    assert image_reservation_msats(body, model) == expected_images * 10_000
 
 
 def test_reservation_for_a_token_book_uses_the_per_image_estimate() -> None:
