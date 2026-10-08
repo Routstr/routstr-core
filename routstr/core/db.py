@@ -426,6 +426,10 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     architecture: str = Field()
     pricing: str = Field()
     sats_pricing: str | None = Field(default=None)
+    api_capabilities: str | None = Field(
+        default=None,
+        description="JSON endpoint capabilities and pricing discovered from upstream",
+    )
     per_request_limits: str | None = Field(default=None)
     top_provider: str | None = Field(default=None)
     canonical_slug: str | None = Field(default=None, description="Canonical model slug")

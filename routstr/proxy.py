@@ -322,6 +322,7 @@ _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     # Anthropic SDKs) call it before every request.
     "messages/count_tokens": frozenset({"POST"}),
     "embeddings": frozenset({"POST"}),
+    "images": frozenset({"POST"}),
     # TypeSafe System One decision endpoint: POST {state, model, questions}
     # -> {answers, usage}. Non-streaming, JSON in/out; billed from the
     # response's usage exactly like embeddings.
@@ -566,6 +567,12 @@ async def _proxy(
     if not _forwarding_allowed(path, request.method):
         return build_not_found_response(request, path)
 
+    if _canonical_api_path(path) == "images":
+        # Separate from chat retries, token discounts, and usage estimation.
+        from .upstream.images import forward_image_request
+
+        return await forward_image_request(request, session, request_body)
+
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
 
     # EHBP (Encrypted HTTP Body Protocol) requests carry an Ehbp-Encapsulated-Key
@@ -694,6 +701,28 @@ async def _proxy(
         return create_error_response(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
         )
+
+    if _canonical_api_path(path) in {
+        "chat/completions",
+        "completions",
+        "responses",
+        "messages",
+    }:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if not (
+                "image" in candidate[0].architecture.output_modalities
+                and "text" not in candidate[0].architecture.output_modalities
+            )
+        ]
+        if not candidates:
+            return create_error_response(
+                "unsupported_request",
+                "This model requires the Images API",
+                400,
+                request=request,
+            )
 
     if selector is not None:
         pinned = _candidate_for_selector(selector, candidates)

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, RootModel, field_validator
+from pydantic import BaseModel, RootModel, field_validator, model_validator
 from pydantic.v1 import ValidationError as PydanticValidationError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -487,6 +487,15 @@ class ModelCreate(BaseModel):
     enabled: bool = True
     forwarded_model_id: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_capability_writes(cls, value: object) -> object:
+        # Capability rates come from upstream discovery, never an ordinary
+        # model override. Reject rather than silently accepting a forged quote.
+        if isinstance(value, dict) and "api_capabilities" in value:
+            raise ValueError("api_capabilities is read-only upstream metadata")
+        return value
+
     @field_validator("pricing")
     @classmethod
     def _validate_pricing(cls, value: dict[str, object]) -> dict[str, object]:
@@ -555,6 +564,8 @@ async def upsert_provider_model(
             existing_row.created = int(payload.created)
             existing_row.context_length = int(payload.context_length)
             existing_row.architecture = json.dumps(payload.architecture)
+            # Preserve discovered api_capabilities; ordinary edits cannot
+            # replace the endpoint contract or its financial pricing lines.
             existing_row.pricing = json.dumps(payload.pricing)
             existing_row.sats_pricing = None
             existing_row.per_request_limits = (
@@ -737,6 +748,7 @@ async def batch_override_provider_models(
                 existing_row.created = int(model_data.created)
                 existing_row.context_length = int(model_data.context_length)
                 existing_row.architecture = json.dumps(model_data.architecture)
+                # Preserve read-only upstream api_capabilities on batch edits.
                 existing_row.pricing = json.dumps(model_data.pricing)
                 existing_row.sats_pricing = None
                 existing_row.per_request_limits = (

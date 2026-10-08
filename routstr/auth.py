@@ -1209,6 +1209,8 @@ async def _adjust_payment_for_tokens(
     model_obj: "Model | None" = None,
     provider_fee: float | None = None,
     reservation_snapshot: ReservationSnapshot | None = None,
+    *,
+    precomputed_cost: CostData | None = None,
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
@@ -1285,9 +1287,39 @@ async def _adjust_payment_for_tokens(
                     extra={"error": str(e), "fee_msats": fee_msats},
                 )
 
-    calculated_cost = await calculate_cost(
-        response_data, deducted_max_cost, model_obj, provider_fee
-    )
+    if precomputed_cost is not None:
+        if not isinstance(precomputed_cost, CostData):
+            raise ValueError("Precomputed cost must be CostData")
+        amounts = (
+            precomputed_cost.base_msats,
+            precomputed_cost.input_msats,
+            precomputed_cost.output_msats,
+            precomputed_cost.total_msats,
+            precomputed_cost.cache_read_msats,
+            precomputed_cost.cache_creation_msats,
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in amounts
+        ):
+            raise ValueError(
+                "Precomputed cost must contain nonnegative integer amounts"
+            )
+        if (
+            any(value > deducted_max_cost for value in amounts)
+            or sum(amounts[index] for index in (0, 1, 2, 4, 5))
+            != precomputed_cost.total_msats
+            or not math.isfinite(precomputed_cost.total_usd)
+            or precomputed_cost.total_usd < 0
+        ):
+            raise ValueError(
+                "Precomputed cost exceeds the authoritative reservation or is invalid"
+            )
+        calculated_cost = precomputed_cost.copy(deep=True)
+    else:
+        calculated_cost = await calculate_cost(
+            response_data, deducted_max_cost, model_obj, provider_fee
+        )
     if isinstance(calculated_cost, CostDataError):
         # Content was already served, so release instead of raising a 400.
         logger.error(
@@ -1645,6 +1677,8 @@ async def adjust_payment_for_tokens(
     model_obj: "Model | None" = None,
     provider_fee: float | None = None,
     reservation_snapshot: ReservationSnapshot | None = None,
+    *,
+    precomputed_cost: CostData | None = None,
 ) -> dict:
     """Settle payment while exposing latency for every import path."""
     started = time.perf_counter()
@@ -1659,6 +1693,7 @@ async def adjust_payment_for_tokens(
             model_obj,
             provider_fee,
             reservation_snapshot,
+            precomputed_cost=precomputed_cost,
         )
         succeeded = True
         return result

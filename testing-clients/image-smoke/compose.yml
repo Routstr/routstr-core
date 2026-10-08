@@ -1,0 +1,12 @@
+services:
+  fake-openrouter:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${IMAGE_SMOKE_BASE_IMAGE:-ghcr.io/astral-sh/uv:python3.11-bookworm-slim}
+    ports:
+      - "127.0.0.1:${IMAGE_SMOKE_PORT:-18091}:8080"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true

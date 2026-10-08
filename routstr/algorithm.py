@@ -150,6 +150,50 @@ def create_model_mappings(
         """
         return not has_usable_pricing(model.pricing)
 
+    def _image_only(model: "Model") -> bool:
+        outputs = model.architecture.output_modalities
+        return "image" in outputs and "text" not in outputs
+
+    def _openrouter_images(provider: "BaseUpstreamProvider") -> bool:
+        from .upstream.model_paths import is_openrouter_base_url
+
+        return provider.provider_type == "openrouter" and is_openrouter_base_url(
+            provider.base_url
+        )
+
+    def _advertisable(model: "Model", provider: "BaseUpstreamProvider") -> bool:
+        if not _image_only(model):
+            return True
+        import time
+
+        from .core.settings import settings
+        from .payment.images import ImageRequestError, quote_image_request
+
+        capability = model.api_capabilities.get("images")
+        if (
+            not _openrouter_images(provider)
+            or not settings.image_generation_enabled
+            or capability is None
+            or capability.fetched_at > time.time() + 60
+            or time.time() - capability.fetched_at
+            > settings.image_capabilities_max_age_seconds
+        ):
+            return False
+        try:
+            # Catalogue eligibility asks whether a minimal request is safely
+            # bounded. The actual request is quoted again with the current FX.
+            quote_image_request(
+                {"model": model.id, "prompt": "catalogue eligibility"},
+                upstream_model_id=model.id,
+                capabilities=capability.dict(),
+                provider_fee=provider.provider_fee,
+                usd_per_sat=1.0,
+                max_request_usd=settings.image_max_request_usd,
+            )
+        except ImageRequestError:
+            return False
+        return True
+
     candidates: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
     unique_models: dict[str, "Model"] = {}
     unique_model_keys: dict[str, str] = {}
@@ -264,6 +308,15 @@ def create_model_mappings(
             else:
                 model_to_use = model
 
+            # Operator overrides cannot replace the discovered API contract.
+            # Prefer current metadata over a persisted, potentially stale copy.
+            if model.api_capabilities:
+                model_to_use = model_to_use.copy(
+                    update={"api_capabilities": model.api_capabilities}
+                )
+
+            if _image_only(model_to_use) and not _openrouter_images(upstream):
+                continue
             if _unusable_price(model_to_use):
                 continue
 
@@ -335,6 +388,8 @@ def create_model_mappings(
             )
             continue
         if not model_to_use.enabled:
+            continue
+        if _image_only(model_to_use) and not _openrouter_images(upstream_for_override):
             continue
         if _unusable_price(model_to_use):
             continue
@@ -434,7 +489,12 @@ def create_model_mappings(
         ranked_candidates = provider_map.get(unique_key)
         if not ranked_candidates:
             continue
-        best_model, best_provider = ranked_candidates[0]
+        advertisable = [
+            item for item in ranked_candidates if _advertisable(*item)
+        ]
+        if not advertisable:
+            continue
+        best_model, best_provider = advertisable[0]
         unique_models[unique_key] = best_model.copy(
             update={
                 "id": advertised_id,
