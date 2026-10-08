@@ -119,8 +119,9 @@ class ImagePricing(BaseModel):
     output_token_usd: float = 0.0
     input_text_token_usd: float = 0.0
     input_image_token_usd: float = 0.0
-    # ``megapixel`` books: USD per output megapixel.
+    # ``megapixel`` books: USD per output megapixel at ``default_steps``.
     megapixel_usd: float = 0.0
+    default_steps: int | None = None
     # USD per reference image the request attaches, past the first
     # ``input_images_included``; charged once per request, not per output.
     input_image_usd: float = 0.0
@@ -316,7 +317,9 @@ def _sats_per_usd(model: "Model") -> float:
     return ceiling_sats / max_usd
 
 
-def per_image_sats(model: "Model | None", body: dict) -> float:
+def per_image_sats(
+    model: "Model | None", body: dict, path: str = ""
+) -> float:
     """Sats for one image from this model, at the tier ``body`` asks for.
 
     ``sats_pricing.image_output`` is the ceiling, already carrying the
@@ -335,12 +338,30 @@ def per_image_sats(model: "Model | None", body: dict) -> float:
         return ceiling_sats
 
     rate = ceiling_sats / book.max_usd
-    # Only an upscale call carries ``scale``; it is priced by factor, not tier.
-    if book.upscale and "scale" in body:
-        return rate * book.upscale_usd(_scale_factor(body.get("scale")))
+    # An upscale is priced by factor, not tier; Venice defaults ``scale`` to 2.
+    if book.upscale and path.rstrip("/").endswith("image/upscale"):
+        return rate * book.upscale_usd(_scale_factor(body.get("scale", 2)))
     if book.unit == "megapixel" and book.megapixel_usd > 0:
-        return rate * output_megapixels(body) * book.megapixel_usd
+        return (
+            rate
+            * output_megapixels(body)
+            * book.megapixel_usd
+            * _steps_multiplier(body.get("steps"), book.default_steps)
+        )
     return rate * select_image_price_usd(book, body)
+
+
+def _steps_multiplier(value: object, default_steps: int | None) -> float:
+    """Together's per-MP multiplier above the catalog's default step count."""
+    if default_steps is None or default_steps <= 0 or isinstance(value, bool):
+        return 1.0
+    try:
+        steps = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return 1.0
+    if not math.isfinite(steps) or steps <= default_steps:
+        return 1.0
+    return steps / default_steps
 
 
 def _scale_factor(value: object) -> str | None:
@@ -361,7 +382,9 @@ def reference_images_sats(model: "Model | None", body: dict) -> float:
     return _sats_per_usd(model) * model.image_pricing.reference_usd(body)
 
 
-def settle_image_sats(model: "Model | None", body: dict, usage: ImageUsage) -> float:
+def settle_image_sats(
+    model: "Model | None", body: dict, usage: ImageUsage, path: str = ""
+) -> float:
     """Sats to charge for what an image response actually carried.
 
     Preference order, each falling through when it has nothing to bill on:
@@ -388,9 +411,9 @@ def settle_image_sats(model: "Model | None", body: dict, usage: ImageUsage) -> f
             if token_usd > 0:
                 return rate * token_usd
 
-    return usage.image_count * per_image_sats(model, body) + reference_images_sats(
-        model, body
-    )
+    return usage.image_count * per_image_sats(
+        model, body, path
+    ) + reference_images_sats(model, body)
 
 
 def produces_images(model: "Model | None") -> bool:
@@ -398,7 +421,9 @@ def produces_images(model: "Model | None") -> bool:
     return getattr(architecture, "output_modalities", None) == ["image"]
 
 
-def image_reservation_msats(body: dict, model: "Model | None") -> int | None:
+def image_reservation_msats(
+    body: dict, model: "Model | None", path: str = ""
+) -> int | None:
     """Msats to hold for an image request, or ``None`` if not an image model.
 
     Token-window math means nothing for a model that returns images, so the
@@ -407,7 +432,19 @@ def image_reservation_msats(body: dict, model: "Model | None") -> int | None:
     if not produces_images(model):
         return None
 
-    sats_per_image = per_image_sats(model, body)
+    book = getattr(model, "image_pricing", None)
+    # A per-MP rate is tied to a provider's default step count. If a caller
+    # changes ``steps`` but the catalog did not publish that default, no exact
+    # reservation is possible, so fail closed rather than undercharge.
+    if (
+        book is not None
+        and book.unit == "megapixel"
+        and "steps" in body
+        and book.default_steps is None
+    ):
+        return None
+
+    sats_per_image = per_image_sats(model, body, path)
     if sats_per_image <= 0:
         return None
 

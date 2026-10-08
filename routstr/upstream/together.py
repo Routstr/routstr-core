@@ -44,8 +44,8 @@ TOGETHER_IMAGE_USD: dict[str, tuple[float, str]] = {
     "black-forest-labs/flux.1-pro": (0.05, "megapixel"),
     "black-forest-labs/flux.1.1-pro": (0.04, "megapixel"),
     "black-forest-labs/flux.1-kontext-dev": (0.025, "megapixel"),
-    "black-forest-labs/flux.1-kontext-pro": (0.04, "image"),
-    "black-forest-labs/flux.1-kontext-max": (0.08, "image"),
+    "black-forest-labs/flux.1-kontext-pro": (0.04, "megapixel"),
+    "black-forest-labs/flux.1-kontext-max": (0.08, "megapixel"),
     "black-forest-labs/flux.2-pro": (0.03, "megapixel"),
     "black-forest-labs/flux.2-dev": (0.025, "megapixel"),
     "black-forest-labs/flux.2-flex": (0.06, "megapixel"),
@@ -58,6 +58,13 @@ TOGETHER_IMAGE_USD: dict[str, tuple[float, str]] = {
 }
 
 _IMAGE_PRICE_SETTING = "image_prices"
+_PUBLISHED_DEFAULT_STEPS = {
+    # Together's public examples use 28 steps for Kontext; FLUX.2-max's
+    # catalog also publishes 50 as ``min_steps``.
+    "black-forest-labs/flux.1-kontext-pro": 28,
+    "black-forest-labs/flux.1-kontext-max": 28,
+    "black-forest-labs/flux.2-max": 50,
+}
 
 
 def _usd_per_million(value: Any) -> float | None:
@@ -68,7 +75,9 @@ def _usd_per_million(value: Any) -> float | None:
     return None
 
 
-def _catalog_book(pricing_raw: dict[str, Any]) -> ImagePricing | None:
+def _catalog_book(
+    pricing_raw: dict[str, Any], default_steps: int | None = None
+) -> ImagePricing | None:
     """A book from the price the ``/models`` entry itself carries.
 
     ``image_pixel.price_per_megapixel`` is exact. ``image.example_price`` is
@@ -78,8 +87,18 @@ def _catalog_book(pricing_raw: dict[str, Any]) -> ImagePricing | None:
     per_pixel = pricing_raw.get("image_pixel")
     if isinstance(per_pixel, dict):
         usd = per_pixel.get("price_per_megapixel")
+        steps = per_pixel.get("min_steps")
+        catalog_steps = (
+            int(steps)
+            if isinstance(steps, (int, float))
+            and not isinstance(steps, bool)
+            and steps > 0
+            else default_steps
+        )
         if isinstance(usd, (int, float)) and not isinstance(usd, bool) and usd > 0:
-            return static_image_book(float(usd), "megapixel")
+            return static_image_book(
+                float(usd), "megapixel", default_steps=catalog_steps
+            )
     per_image = pricing_raw.get("image")
     if isinstance(per_image, dict):
         usd = per_image.get("example_price")
@@ -100,8 +119,18 @@ def _override_book(entry: Any) -> ImagePricing | None:
     if isinstance(entry, dict):
         usd = entry.get("usd")
         unit = entry.get("unit", "image")
+        steps = entry.get("default_steps")
+        default_steps = (
+            int(steps)
+            if isinstance(steps, (int, float))
+            and not isinstance(steps, bool)
+            and steps > 0
+            else None
+        )
         if isinstance(usd, (int, float)) and not isinstance(usd, bool):
-            return static_image_book(float(usd), str(unit))
+            return static_image_book(
+                float(usd), str(unit), default_steps=default_steps
+            )
     return None
 
 
@@ -165,14 +194,18 @@ class TogetherUpstreamProvider(BaseUpstreamProvider):
         if override is not None:
             return override
         if pricing_raw:
-            from_catalog = _catalog_book(pricing_raw)
+            from_catalog = _catalog_book(
+                pricing_raw, _PUBLISHED_DEFAULT_STEPS.get(key)
+            )
             if from_catalog is not None:
                 return from_catalog
         published = TOGETHER_IMAGE_USD.get(key)
         if published is None:
             return None
         usd, unit = published
-        return static_image_book(usd, unit)
+        return static_image_book(
+            usd, unit, default_steps=_PUBLISHED_DEFAULT_STEPS.get(key)
+        )
 
     async def _fetch_catalog(self) -> list[dict[str, Any]]:
         url = f"{self.base_url.rstrip('/')}/models"

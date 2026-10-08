@@ -367,18 +367,6 @@ def _build_model_from_row(
     if isinstance(pricing, dict) and float(pricing.get("request", 0.0)) <= 0.0:
         pricing["request"] = 0.0
 
-    # Rows written before ``image_output`` existed carried the generation
-    # ceiling in ``image``; read them as such rather than as unpriced.
-    if (
-        isinstance(pricing, dict)
-        and isinstance(architecture, dict)
-        and architecture.get("output_modalities") == ["image"]
-        and float(pricing.get("image_output", 0.0) or 0.0) <= 0.0
-        and float(pricing.get("image", 0.0) or 0.0) > 0.0
-    ):
-        pricing["image_output"] = pricing["image"]
-        pricing["image"] = 0.0
-
     parsed_pricing = Pricing.parse_obj(pricing)
 
     # Fill missing cache-read/write rates from litellm's cost map BEFORE applying

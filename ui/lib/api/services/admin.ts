@@ -87,6 +87,7 @@ export const AdminModelPricingSchema = z.object({
   completion: z.number().optional(),
   request: z.number().optional(),
   image: z.number().optional(),
+  image_output: z.number().optional(),
   web_search: z.number().optional(),
   internal_reasoning: z.number().optional(),
   input_cache_read: z.number().optional(),
@@ -118,6 +119,7 @@ export const AdminModelSchema = z.object({
   alias_ids: z.array(z.string()).nullable().optional(),
   enabled: z.boolean().default(true),
   forwarded_model_id: z.string().nullable().optional(),
+  image_pricing: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 
 export const CertificationPathSchema = z.object({

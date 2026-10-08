@@ -409,7 +409,10 @@ async def fetch_openrouter_image_books(
 
 
 def static_image_book(
-    usd: float, unit: str = "image", resolutions: list[str] | None = None
+    usd: float,
+    unit: str = "image",
+    resolutions: list[str] | None = None,
+    default_steps: int | None = None,
 ) -> ImagePricing | None:
     """A book from one published price, per image or per megapixel.
 
@@ -427,6 +430,7 @@ def static_image_book(
             resolutions=[t.resolution for t in tiers if t.resolution],
             unit="megapixel",
             megapixel_usd=usd,
+            default_steps=default_steps,
         )
     return ImagePricing(max_usd=usd, tiers=[ImagePriceTier(usd=usd)], unit="image")
 

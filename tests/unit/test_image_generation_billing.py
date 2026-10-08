@@ -17,12 +17,15 @@ from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 import routstr.auth as auth_module
+from routstr import proxy as proxy_module
 from routstr.auth import ReservationSnapshot, get_reservation_snapshot, pay_for_request
 from routstr.core.db import ApiKey, ModelRow, ReservationRelease
 from routstr.payment.helpers import calculate_discounted_max_cost
 from routstr.payment.image_pricing import ImagePriceTier, ImagePricing
 from routstr.payment.models import Architecture, Model, Pricing, _row_to_model
 from routstr.upstream.base import BaseUpstreamProvider
+
+from .proxy_test_utils import mock_request_stream, patch_proxy_session
 
 BALANCE = 100_000
 RESERVED = 5_000
@@ -322,3 +325,42 @@ async def test_reservation_is_sized_from_the_requested_batch() -> None:
 
     assert single == int(SATS_PER_IMAGE * 1000)
     assert batch == int(3 * SATS_PER_IMAGE * 1000)
+
+
+# A chat model the upstream can also serve on the images API (OpenRouter's
+# google/gemini-2.5-flash-image): its ``image_output`` is a per-token rate.
+CHAT_IMAGE_MODEL = IMAGE_MODEL.copy(
+    update={
+        "architecture": IMAGE_MODEL.architecture.copy(
+            update={"output_modalities": ["image", "text"]}
+        ),
+        "sats_pricing": Pricing(prompt=0.0003, completion=0.0025, image_output=0.03),
+    }
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "extra"),
+    [
+        (UNPRICED_MODEL, {}),
+        (CHAT_IMAGE_MODEL, {}),
+        (IMAGE_MODEL, {"stream": True}),
+    ],
+)
+async def test_image_route_refuses_what_it_cannot_bill(
+    model: Model, extra: dict
+) -> None:
+    upstream = MagicMock(forward_request=AsyncMock())
+    request = MagicMock(method="POST", headers={"authorization": "Bearer sk-x"})
+    request.state.request_id = "req-image"
+    mock_request_stream(request, json.dumps({**BODY, **extra}).encode())
+
+    with (
+        patch.object(proxy_module, "get_candidates", return_value=[(model, upstream)]),
+        patch_proxy_session(MagicMock()),
+    ):
+        response = await proxy_module.proxy(request, "v1/images/generations")
+
+    assert response.status_code == 400
+    upstream.forward_request.assert_not_awaited()

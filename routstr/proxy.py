@@ -41,6 +41,7 @@ from .payment.helpers import (
     create_upstream_error_response,
     get_max_cost_for_model,
 )
+from .payment.image_pricing import image_reservation_msats
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
 from .upstream.cooldown import (
@@ -51,6 +52,7 @@ from .upstream.cooldown import (
 )
 from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
+from .upstream.image_generation import is_image_generation_path
 from .upstream.model_paths import (
     ModelPathSelector,
     apply_model_path_pricing,
@@ -788,6 +790,29 @@ async def _proxy(
                 request=request,
             )
 
+    if is_image_generation_path(path):
+        # Settlement buffers the whole response and bills the images it counts,
+        # so a stream would be billed as one image whatever it carried.
+        if request_body_dict.get("stream"):
+            return create_error_response(
+                "unsupported_request",
+                "Streaming is not supported for image generation",
+                400,
+                request=request,
+            )
+        candidates = [
+            (model, upstream)
+            for model, upstream in candidates
+            if image_reservation_msats(request_body_dict, model, path) is not None
+        ]
+        if not candidates:
+            return create_error_response(
+                "unsupported_request",
+                f"Model '{model_id}' has no image price on this node",
+                400,
+                request=request,
+            )
+
     # A provider that just failed this model repeatedly is skipped while some
     # other candidate can serve it. An explicit route is never rerouted.
     if selector is None:
@@ -811,7 +836,7 @@ async def _proxy(
         model=model_id, session=session, model_obj=model_obj
     )
     max_cost_for_model = await calculate_discounted_max_cost(
-        _max_cost_for_model, request_body_dict, model_obj=model_obj
+        _max_cost_for_model, request_body_dict, model_obj=model_obj, path=path
     )
 
     check_token_balance(headers, request_body_dict, max_cost_for_model)
@@ -987,7 +1012,7 @@ async def _proxy(
                 model=model_id, session=session, model_obj=model_obj
             )
             candidate_max = await calculate_discounted_max_cost(
-                candidate_max, request_body_dict, model_obj=model_obj
+                candidate_max, request_body_dict, model_obj=model_obj, path=path
             )
             if candidate_max > max_cost_for_model:
                 await revert_pay_for_request(

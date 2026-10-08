@@ -2173,6 +2173,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None,
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
+        path: str = "",
     ) -> Response:
         """Settle an image response on what it carried.
 
@@ -2187,7 +2188,7 @@ class BaseUpstreamProvider:
             content, _is_json_content_type(content_type) if content_type else True
         )
         body = parse_json_body(request_body)
-        total_sats = settle_image_sats(model_obj, body, usage)
+        total_sats = settle_image_sats(model_obj, body, usage, path)
         model_id = model_obj.id if model_obj else "unknown"
 
         if usage.image_count > 0 and total_sats <= 0:
@@ -3638,6 +3639,7 @@ class BaseUpstreamProvider:
                         model_obj,
                         reservation_snapshot=reservation_snapshot,
                         request_body=request_body,
+                        path=path,
                     )
                 finally:
                     await response_handoff.close()

@@ -155,7 +155,9 @@ def _from_openrouter(model_id: str, feed: list[dict]) -> ResolvedPricing | None:
     pricing = entry.get("pricing", {})
     prompt = _as_float(pricing.get("prompt"))
     completion = _as_float(pricing.get("completion"))
-    if prompt is None or completion is None:
+    # The feed also lists image models, which carry no token price; resolving
+    # one at 0/0 would serve it free, as with the litellm guard above.
+    if prompt is None or completion is None or (prompt == 0 and completion == 0):
         return None
 
     architecture = entry.get("architecture", {})

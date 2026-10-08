@@ -88,6 +88,7 @@ MEGAPIXEL_BOOK = ImagePricing(
     resolutions=["1K", "2K"],
     unit="megapixel",
     megapixel_usd=0.03,
+    default_steps=20,
 )
 TRUSTED_BOOK = ImagePricing(
     max_usd=1.0,
@@ -106,14 +107,21 @@ UPSCALE_BOOK = ImagePricing(
 
 def test_upscale_is_priced_by_factor_not_generation_tier() -> None:
     model = _model(UPSCALE_BOOK)
+    upscale = "v1/image/upscale"
     assert per_image_sats(model, {"prompt": "cat"}) == pytest.approx(10.0)
-    assert per_image_sats(model, {"scale": 4}) == pytest.approx(80.0)
-    assert per_image_sats(model, {"scale": "2x"}) == pytest.approx(20.0)
+    assert per_image_sats(model, {"scale": 4}, upscale) == pytest.approx(80.0)
+    assert per_image_sats(model, {"scale": "2x"}, upscale) == pytest.approx(20.0)
+    # Venice upscales 2x when ``scale`` is left out.
+    assert per_image_sats(model, {}, upscale) == pytest.approx(20.0)
     # An unknown factor reserves at the dearest upscale, not the generation price.
-    assert per_image_sats(model, {"scale": 3}) == pytest.approx(80.0)
-    assert image_reservation_msats({"scale": 4}, model) == 80_000
+    assert per_image_sats(model, {"scale": 3}, upscale) == pytest.approx(80.0)
+    # ``scale`` on any other route is not an upscale.
+    assert per_image_sats(model, {"scale": 2}, "v1/image/generate") == pytest.approx(
+        10.0
+    )
+    assert image_reservation_msats({"scale": 4}, model, upscale) == 80_000
     usage = ImageUsage(image_count=1)
-    assert settle_image_sats(model, {"scale": 4}, usage) == pytest.approx(80.0)
+    assert settle_image_sats(model, {"scale": 4}, usage, upscale) == pytest.approx(80.0)
 
 
 @pytest.mark.parametrize(
@@ -168,8 +176,16 @@ def test_megapixel_book_prices_the_requested_area() -> None:
     assert per_image_sats(model, {"width": 1024, "height": 768}) == pytest.approx(
         30.0 * 0.786432
     )
+    # Together only applies a steps multiplier above the catalog's default.
+    assert per_image_sats(model, {"steps": 10}) == pytest.approx(30.0)
+    assert per_image_sats(model, {"steps": 40}) == pytest.approx(60.0)
     usage = ImageUsage(image_count=3)
     assert settle_image_sats(model, {"resolution": "2K"}, usage) == pytest.approx(360.0)
+
+
+def test_megapixel_book_rejects_custom_steps_without_a_known_default() -> None:
+    book = MEGAPIXEL_BOOK.copy(update={"default_steps": None})
+    assert image_reservation_msats({"steps": 40}, _model(book)) is None
 
 
 def test_trusted_upstream_cost_wins_over_the_flat_rate() -> None:
@@ -281,36 +297,6 @@ def test_reference_images_are_charged_once_per_request() -> None:
     assert settle_image_sats(model, {}, ImageUsage(image_count=1)) == pytest.approx(
         40.0
     )
-
-
-def test_legacy_rows_read_image_as_the_output_ceiling() -> None:
-    from routstr.core.db import ModelRow
-    from routstr.payment.models import _row_to_model
-
-    row = ModelRow(
-        id="old",
-        name="old",
-        created=0,
-        description="",
-        context_length=0,
-        architecture=json.dumps(
-            {
-                "modality": "text->image",
-                "input_modalities": ["text"],
-                "output_modalities": ["image"],
-                "tokenizer": "Unknown",
-                "instruct_type": None,
-            }
-        ),
-        pricing=json.dumps({"prompt": 0.0, "completion": 0.0, "image": 0.01}),
-        image_pricing=json.dumps({"max_usd": 0.01, "tiers": [{"usd": 0.01}]}),
-    )
-    with patch("routstr.payment.models.sats_usd_price", return_value=5.0e-4):
-        model = _row_to_model(row)
-    assert model.pricing.image_output == pytest.approx(0.01)
-    assert model.pricing.image == 0.0
-    assert model.sats_pricing is not None and model.sats_pricing.image_output > 0
-    assert per_image_sats(model, {}) == pytest.approx(model.sats_pricing.image_output)
 
 
 # --- end to end through the proxy's image path ---------------------------------

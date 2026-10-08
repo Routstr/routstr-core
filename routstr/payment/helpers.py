@@ -193,6 +193,7 @@ async def calculate_discounted_max_cost(
     max_cost_for_model: int,
     body: dict,
     model_obj: Any | None = None,
+    path: str = "",
 ) -> int:
     """Calculate the discounted max cost for a request using model pricing when available.
 
@@ -209,7 +210,7 @@ async def calculate_discounted_max_cost(
     if not model_pricing:
         return max_cost_for_model
 
-    image_reservation = image_reservation_msats(body, model_obj)
+    image_reservation = image_reservation_msats(body, model_obj, path)
     if image_reservation is not None:
         return max(settings.min_request_msat, image_reservation)
 

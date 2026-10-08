@@ -162,8 +162,12 @@ def test_published_image_prices_become_books() -> None:
 
     kontext = by_id["black-forest-labs/FLUX.1-kontext-pro"]
     assert kontext.image_pricing is not None
-    assert kontext.image_pricing.unit == "image"
-    assert kontext.pricing.image_output == pytest.approx(0.04)
+    assert kontext.image_pricing.unit == "megapixel"
+    assert kontext.image_pricing.megapixel_usd == pytest.approx(0.04)
+    assert kontext.image_pricing.default_steps == 28
+    assert kontext.pricing.image_output == pytest.approx(
+        kontext.image_pricing.max_usd
+    )
 
 
 def test_catalog_prices_list_models_and_beat_the_table() -> None:
@@ -179,6 +183,7 @@ def test_catalog_prices_list_models_and_beat_the_table() -> None:
     assert flux_max.image_pricing is not None
     assert flux_max.image_pricing.unit == "megapixel"
     assert flux_max.image_pricing.megapixel_usd == pytest.approx(0.09)
+    assert flux_max.image_pricing.default_steps == 50
 
 
 def test_operator_prices_beat_catalog_prices() -> None:
@@ -236,6 +241,22 @@ def test_megapixel_image_is_reserved_at_the_requested_size() -> None:
         0.0027 * 1.048576
     )
     assert per_image_sats(priced, {}) == pytest.approx(0.0027)
+
+
+def test_catalog_default_steps_scale_megapixel_price_only_above_default() -> None:
+    models, _ = _fetch()
+    provider = TogetherUpstreamProvider(api_key="k", provider_fee=1.0)
+    flux_max = next(m for m in models if m.id == "black-forest-labs/FLUX.2-max")
+    priced = provider._apply_provider_fee_to_model(flux_max)
+    priced = priced.copy(update={"sats_pricing": priced.pricing})
+
+    default = per_image_sats(priced, {"width": 1024, "height": 1024})
+    assert per_image_sats(
+        priced, {"width": 1024, "height": 1024, "steps": 25}
+    ) == pytest.approx(default)
+    assert per_image_sats(
+        priced, {"width": 1024, "height": 1024, "steps": 100}
+    ) == pytest.approx(default * 2)
 
 
 def test_empty_catalog_on_error() -> None:
