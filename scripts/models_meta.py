@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 
+import asyncio
 import json
 import os
 from typing import TypedDict
-from urllib.request import urlopen
+
+import httpx
+
+from routstr.upstream.openrouter_catalog import fetch_openrouter_catalog
 
 
 class ModelArchitecture(TypedDict):
@@ -45,35 +49,30 @@ OUTPUT_FILE = os.getenv("OUTPUT_FILE", "models.json")
 SOURCE = os.getenv("SOURCE")
 
 
-def fetch_openrouter_models(source_filter: str | None = None) -> list[Model]:
+def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
     """Fetches model information from OpenRouter API."""
-    base_url = "https://openrouter.ai/api/v1"
-    with urlopen(f"{base_url}/models") as response:
-        data = json.loads(response.read().decode("utf-8"))
 
-        models_data: list[Model] = []
-        for model in data.get("data", []):
-            model_id = model.get("id", "")
+    async def fetch() -> list[dict]:
+        async with httpx.AsyncClient() as client:
+            return await fetch_openrouter_catalog(client)
 
-            if source_filter:
-                source_prefix = f"{source_filter}/"
-                if not model_id.startswith(source_prefix):
-                    continue
-
-                model = dict(model)
-                model["id"] = model_id[len(source_prefix) :]
-                model_id = model["id"]
-
-            if (
-                "(free)" in model.get("name", "")
-                or model_id == "openrouter/auto"
-                or model_id == "google/gemini-2.5-pro-exp-03-25"
-            ):
+    models_data = []
+    for model in asyncio.run(fetch()):
+        model_id = model.get("id", "")
+        if source_filter:
+            prefix = f"{source_filter}/"
+            if not model_id.startswith(prefix):
                 continue
-
-            models_data.append(model)
-
-        return models_data
+            model = {**model, "id": model_id[len(prefix) :]}
+            model_id = model["id"]
+        if (
+            "(free)" in model.get("name", "")
+            or model_id == "openrouter/auto"
+            or model_id == "google/gemini-2.5-pro-exp-03-25"
+        ):
+            continue
+        models_data.append(model)
+    return models_data
 
 
 def main() -> None:

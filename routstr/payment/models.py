@@ -4,12 +4,13 @@ import random
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic.v1 import BaseModel, validator
+from pydantic.v1 import BaseModel, Field, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core.db import ModelRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
+from ..modalities import ApiCapability
 from .price import sats_usd_price
 from .rates import BILLABLE_PRICING_FIELDS, coerce_rate, is_usable_rate
 
@@ -107,6 +108,7 @@ class Model(BaseModel):
     alias_ids: list[str] | None = None
     forwarded_model_id: str | None = None
     reasoning: Reasoning | None = None
+    api_capabilities: dict[str, ApiCapability] = Field(default_factory=dict)
 
     class Config:
         extra = "ignore"
@@ -132,6 +134,8 @@ class Model(BaseModel):
         # Non-reasoning models omit the field entirely so the catalog stays
         # additive: existing clients never see a new null key.
         data = super().dict(**kwargs)  # type: ignore[arg-type]
+        if not data.get("api_capabilities"):
+            data.pop("api_capabilities", None)
         reasoning = data.get("reasoning")
         if not reasoning:
             data.pop("reasoning", None)
@@ -217,7 +221,16 @@ def _has_valid_pricing(model: dict) -> bool:
         return False
 
     if prompt == 0 and completion == 0:
-        return False
+        try:
+            capabilities = model.get("api_capabilities", {})
+            image = ApiCapability.parse_obj(capabilities.get("images", {}))
+        except (TypeError, ValueError):
+            return False
+        return any(
+            line.cost_usd > 0
+            for endpoint in image.endpoints
+            for line in endpoint.pricing
+        )
 
     return True
 
@@ -236,36 +249,14 @@ def _is_transient(error: BaseException) -> bool:
     return True
 
 
-def _parse_models_response(response: httpx.Response | BaseException) -> list[dict]:
-    if isinstance(response, BaseException):
-        raise response
-    response.raise_for_status()
-    return [
-        model
-        for model in response.json().get("data", [])
-        if ":free" not in model.get("id", "").lower()
-    ]
-
-
 async def _fetch_openrouter_models_once(source_filter: str | None) -> list[dict]:
     """One attempt. Raises if /models is unusable; embeddings are best-effort."""
-    base_url = "https://openrouter.ai/api/v1"
     timeout = OPENROUTER_MODELS_TIMEOUT_SECONDS
 
     async with httpx.AsyncClient() as client:
-        models_response, embeddings_response = await asyncio.gather(
-            client.get(f"{base_url}/models", timeout=timeout),
-            client.get(f"{base_url}/embeddings/models", timeout=timeout),
-            return_exceptions=True,
-        )
+        from ..upstream.openrouter_catalog import fetch_openrouter_catalog
 
-        # Losing /models is what empties the node, so it fails the attempt and
-        # the caller retries. A missing embeddings half must not do the same.
-        models_data = _parse_models_response(models_response)
-        try:
-            models_data.extend(_parse_models_response(embeddings_response))
-        except Exception as e:
-            logger.warning(f"Skipping OpenRouter embeddings models: {e}")
+        models_data = await fetch_openrouter_catalog(client, timeout)
 
         # Apply source filter and exclusions
         filtered_models = []
@@ -379,6 +370,9 @@ def _build_model_from_row(
         canonical_slug=getattr(row, "canonical_slug", None),
         alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
         forwarded_model_id=getattr(row, "forwarded_model_id", None),
+        api_capabilities=json.loads(row.api_capabilities)
+        if row.api_capabilities
+        else {},
     )
 
     if apply_provider_fee:

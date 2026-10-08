@@ -402,8 +402,10 @@ class _CatalogClient:
     async def __aexit__(self, *exc: object) -> bool:
         return False
 
-    async def get(self, url: str, timeout: int | None = None) -> _CatalogResponse:
-        if url.endswith("/embeddings/models"):
+    async def get(
+        self, url: str, timeout: int | None = None, **kwargs: Any
+    ) -> _CatalogResponse:
+        if url.endswith(("/embeddings/models", "/images/models")):
             return _CatalogResponse({"data": []})
         return _CatalogResponse({"data": self._models})
 

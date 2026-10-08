@@ -236,3 +236,9 @@ def test_ehbp_is_gated_by_the_same_allowlist() -> None:
     assert _forwarding_allowed("anything/encrypted", "POST") is False
     assert _forwarding_allowed("v1/organization/api_keys", "POST") is False
     assert _forwarding_allowed("v1/chat/completions", "POST") is True
+
+
+@pytest.mark.parametrize("path", ["images", "v1/images", "v1/images/"])
+def test_buffered_images_surface_is_post_only(path: str) -> None:
+    assert _forwarding_allowed(path, "POST") is True
+    assert _forwarding_allowed(path, "GET") is False

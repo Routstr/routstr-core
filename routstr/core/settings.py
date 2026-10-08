@@ -161,6 +161,22 @@ class Settings(BaseSettings):
         default=30, gt=0, env="REQUEST_CLEANUP_TIMEOUT_SECONDS"
     )
 
+    # Images are explicitly enabled by deployment; token-priced image models
+    # remain unavailable until their maximum billable quantities can be bounded.
+    image_generation_enabled: bool = Field(
+        default=False, env="IMAGE_GENERATION_ENABLED"
+    )
+    image_max_request_usd: float = Field(default=0.0, ge=0, env="IMAGE_MAX_REQUEST_USD")
+    image_generation_timeout_seconds: float = Field(
+        default=180.0, gt=0, env="IMAGE_GENERATION_TIMEOUT_SECONDS"
+    )
+    image_max_response_bytes: int = Field(
+        default=40 * 1024 * 1024, gt=0, env="IMAGE_MAX_RESPONSE_BYTES"
+    )
+    image_capabilities_max_age_seconds: int = Field(
+        default=3600, gt=0, env="IMAGE_CAPABILITIES_MAX_AGE_SECONDS"
+    )
+
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
     # Comma-separated METHOD:path pairs adding to the proxy's canonical
@@ -300,6 +316,11 @@ ENV_ONLY_FIELDS = frozenset(
         # credential can be spent against. Keeping it env-only also lets the
         # proxy parse it once at import without going stale.
         "proxy_extra_allowed_paths",
+        "image_generation_enabled",
+        "image_max_request_usd",
+        "image_generation_timeout_seconds",
+        "image_max_response_bytes",
+        "image_capabilities_max_age_seconds",
         "database_pool_size",
         "database_max_overflow",
         "database_pool_timeout",

@@ -109,7 +109,14 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
     async def fetch_models(self) -> list[Model]:
         """Fetch all OpenRouter models."""
         models_data = await async_fetch_openrouter_models()
-        models = [Model(**model) for model in models_data]  # type: ignore
+        models = []
+        for record in models_data:
+            try:
+                models.append(Model(**record))
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Skipping malformed OpenRouter model {record.get('id')}"
+                )
         # manual alias for openai/text-embedding-ada-002 due to openrouter api bug
         for model in models:
             if model.id == "openai/text-embedding-ada-002":
