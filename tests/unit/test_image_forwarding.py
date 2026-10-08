@@ -3,6 +3,7 @@
 import time
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -14,7 +15,7 @@ from routstr.payment.images import ImageQuote
 from routstr.upstream import images
 
 
-def request(headers=None, query=b""):
+def request(headers: dict[str, str] | None = None, query: bytes = b"") -> Request:
     return Request(
         {
             "type": "http",
@@ -35,7 +36,7 @@ def request(headers=None, query=b""):
     )
 
 
-def quote():
+def quote() -> ImageQuote:
     return ImageQuote(
         "image-model",
         "provider",
@@ -47,7 +48,7 @@ def quote():
     )
 
 
-def cost():
+def cost() -> CostData:
     return CostData(
         base_msats=0,
         input_msats=0,
@@ -58,7 +59,9 @@ def cost():
 
 
 @pytest.fixture
-def configured(monkeypatch):
+def configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[SimpleNamespace, SimpleNamespace]:
     import routstr.proxy as proxy
 
     monkeypatch.setattr(images.settings, "image_generation_enabled", True)
@@ -100,36 +103,46 @@ def configured(monkeypatch):
         ({"content-type": "application/json"}, b"provider=x"),
     ],
 )
-async def test_rejects_before_quote_or_payment(configured, headers, query):
+async def test_rejects_before_quote_or_payment(
+    configured: tuple[SimpleNamespace, SimpleNamespace],
+    headers: dict[str, str] | None,
+    query: bytes,
+) -> None:
     result = await images.forward_image_request(
         request(headers, query), AsyncMock(), b'{"model":"image-model"}'
     )
     assert result.status_code == 400
-    images.quote_image_request.assert_not_called()
-    images.generate_buffered_image.assert_not_called()
+    cast(Mock, images.quote_image_request).assert_not_called()
+    cast(AsyncMock, images.generate_buffered_image).assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_stale_metadata_rejects_before_dispatch(configured):
+async def test_stale_metadata_rejects_before_dispatch(
+    configured: tuple[SimpleNamespace, SimpleNamespace],
+) -> None:
     model, _ = configured
     model.api_capabilities["images"]["fetched_at"] = 1
     result = await images.forward_image_request(
         request(), AsyncMock(), b'{"model":"image-model"}'
     )
     assert result.status_code == 400
-    images.generate_buffered_image.assert_not_called()
+    cast(AsyncMock, images.generate_buffered_image).assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_disabled_rejects(configured, monkeypatch):
+async def test_disabled_rejects(
+    configured: tuple[SimpleNamespace, SimpleNamespace], monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(images.settings, "image_generation_enabled", False)
     result = await images.forward_image_request(request(), AsyncMock(), b"{}")
     assert result.status_code == 503
-    images.quote_image_request.assert_not_called()
+    cast(Mock, images.quote_image_request).assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_account_uses_snapshot_and_precomputed_cost(configured, monkeypatch):
+async def test_account_uses_snapshot_and_precomputed_cost(
+    configured: tuple[SimpleNamespace, SimpleNamespace], monkeypatch: pytest.MonkeyPatch
+) -> None:
     import routstr.proxy as proxy
 
     key = SimpleNamespace(balance=123456)
@@ -145,20 +158,24 @@ async def test_account_uses_snapshot_and_precomputed_cost(configured, monkeypatc
         request(), session, b'{"model":"image-model"}'
     )
     assert result.status_code == 200
-    images.generate_buffered_image.assert_awaited_once()
+    cast(AsyncMock, images.generate_buffered_image).assert_awaited_once()
     assert (
-        images.adjust_payment_for_tokens.call_args.kwargs[
-            "precomputed_cost"
-        ].total_msats
+        cast(AsyncMock, images.adjust_payment_for_tokens)
+        .call_args.kwargs["precomputed_cost"]
+        .total_msats
         == 100001
     )
-    assert images.adjust_payment_for_tokens.call_args.args[-1] is snapshot
-    images.revert_pay_for_request.assert_not_called()
+    assert (
+        cast(AsyncMock, images.adjust_payment_for_tokens).call_args.args[-1] is snapshot
+    )
+    cast(AsyncMock, images.revert_pay_for_request).assert_not_called()
     assert result.headers["x-routstr-cost-msats"] == "100001"
 
 
 @pytest.mark.asyncio
-async def test_account_timeout_releases_once_without_retry(configured, monkeypatch):
+async def test_account_timeout_releases_once_without_retry(
+    configured: tuple[SimpleNamespace, SimpleNamespace], monkeypatch: pytest.MonkeyPatch
+) -> None:
     import routstr.proxy as proxy
 
     key = SimpleNamespace(balance=1)
@@ -167,19 +184,21 @@ async def test_account_timeout_releases_once_without_retry(configured, monkeypat
     monkeypatch.setattr(proxy, "get_bearer_token_key", AsyncMock(return_value=key))
     monkeypatch.setattr(images, "pay_for_request", AsyncMock(return_value=snapshot))
     monkeypatch.setattr(images, "revert_pay_for_request", AsyncMock())
-    images.generate_buffered_image.side_effect = TimeoutError()
+    cast(AsyncMock, images.generate_buffered_image).side_effect = TimeoutError()
     result = await images.forward_image_request(
         request(), session, b'{"model":"image-model"}'
     )
     assert result.status_code == 502
-    images.generate_buffered_image.assert_awaited_once()
-    images.revert_pay_for_request.assert_awaited_once_with(
+    cast(AsyncMock, images.generate_buffered_image).assert_awaited_once()
+    cast(AsyncMock, images.revert_pay_for_request).assert_awaited_once_with(
         key, session, 200000, snapshot
     )
 
 
 @pytest.mark.asyncio
-async def test_cashu_rejected_before_quote_or_redemption(configured):
+async def test_cashu_rejected_before_quote_or_redemption(
+    configured: tuple[SimpleNamespace, SimpleNamespace],
+) -> None:
     result = await images.forward_image_request(
         request({"content-type": "application/json", "x-cashu": "cashu-test"}),
         AsyncMock(),
@@ -187,8 +206,8 @@ async def test_cashu_rejected_before_quote_or_redemption(configured):
     )
     assert result.status_code == 400
     assert b"x_cashu_unsupported_endpoint" in result.body
-    images.quote_image_request.assert_not_called()
-    images.generate_buffered_image.assert_not_called()
+    cast(Mock, images.quote_image_request).assert_not_called()
+    cast(AsyncMock, images.generate_buffered_image).assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -202,11 +221,11 @@ async def test_cashu_rejected_before_quote_or_redemption(configured):
     ],
 )
 async def test_transport_one_post_and_safe_headers(
-    monkeypatch, content_type, body, status
-):
-    calls = []
+    monkeypatch: pytest.MonkeyPatch, content_type: str, body: bytes, status: int
+) -> None:
+    calls: list[httpx.Request] = []
 
-    async def handler(req):
+    async def handler(req: httpx.Request) -> httpx.Response:
         calls.append(req)
         return httpx.Response(
             status, headers={"content-type": content_type}, content=body
@@ -239,7 +258,9 @@ async def test_transport_one_post_and_safe_headers(
 
 
 @pytest.mark.asyncio
-async def test_transport_bounds_decompressed_response(monkeypatch):
+async def test_transport_bounds_decompressed_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     real_client = httpx.AsyncClient
     transport = httpx.MockTransport(
         lambda req: httpx.Response(
@@ -260,7 +281,9 @@ async def test_transport_bounds_decompressed_response(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_images_dispatch_bypasses_generic_retry_path(monkeypatch):
+async def test_images_dispatch_bypasses_generic_retry_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import routstr.proxy as proxy
 
     dispatch = AsyncMock(
@@ -275,7 +298,9 @@ async def test_images_dispatch_bypasses_generic_retry_path(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_quote_uses_upstream_model_not_client_alias(configured, monkeypatch):
+async def test_quote_uses_upstream_model_not_client_alias(
+    configured: tuple[SimpleNamespace, SimpleNamespace], monkeypatch: pytest.MonkeyPatch
+) -> None:
     import routstr.proxy as proxy
 
     model, upstream = configured
@@ -293,10 +318,10 @@ async def test_quote_uses_upstream_model_not_client_alias(configured, monkeypatc
         )
     upstream.transform_model_name.assert_called_once_with("upstream/image-model")
     assert (
-        images.quote_image_request.call_args.kwargs["upstream_model_id"]
+        cast(Mock, images.quote_image_request).call_args.kwargs["upstream_model_id"]
         == "wire/image-model"
     )
-    images.generate_buffered_image.assert_not_called()
+    cast(AsyncMock, images.generate_buffered_image).assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -304,7 +329,9 @@ async def test_quote_uses_upstream_model_not_client_alias(configured, monkeypatc
 @pytest.mark.parametrize(
     "path", ["v1/chat/completions", "v1/responses", "v1/messages", "v1/completions"]
 )
-async def test_image_catalogue_outage_never_routes_to_chat(monkeypatch, outputs, path):
+async def test_image_catalogue_outage_never_routes_to_chat(
+    monkeypatch: pytest.MonkeyPatch, outputs: list[str] | None, path: str
+) -> None:
     import routstr.proxy as proxy
 
     model = SimpleNamespace(

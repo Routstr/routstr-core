@@ -4,7 +4,7 @@ import asyncio
 import json
 import math
 import time
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from fastapi import HTTPException, Request
@@ -198,7 +198,11 @@ async def forward_image_request(
             capability = model.api_capabilities.get("images")
             if capability is None:
                 continue
-            caps = capability.dict() if hasattr(capability, "dict") else capability
+            caps = (
+                capability.dict()
+                if hasattr(capability, "dict")
+                else cast(dict[str, Any], capability)
+            )
             fetched_at = caps.get("fetched_at", 0)
             if (
                 not isinstance(fetched_at, (int, float))

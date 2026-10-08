@@ -1,6 +1,7 @@
 """Capability discovery is additive, outage-tolerant and fail-closed on prices."""
 
 import asyncio
+from typing import Any
 
 import httpx
 import pytest
@@ -15,7 +16,9 @@ from routstr.payment.models import (
 from routstr.upstream.openrouter_catalog import fetch_openrouter_catalog
 
 
-def record(model_id="vendor/image", outputs=None):
+def record(
+    model_id: str = "vendor/image", outputs: list[str] | None = None
+) -> dict[str, Any]:
     return {
         "id": model_id,
         "name": model_id,
@@ -33,7 +36,7 @@ def record(model_id="vendor/image", outputs=None):
     }
 
 
-def endpoint(rate="0.04", unit="image"):
+def endpoint(rate: Any = "0.04", unit: str = "image") -> dict[str, Any]:
     return {
         "provider_slug": "vendor",
         "provider_tag": "vendor",
@@ -42,8 +45,13 @@ def endpoint(rate="0.04", unit="image"):
     }
 
 
-def transport(main, images=None, endpoints=None, image_status=200):
-    def handler(request):
+def transport(
+    main: list[dict[str, Any]],
+    images: list[Any] | None = None,
+    endpoints: list[Any] | None = None,
+    image_status: int = 200,
+) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/api/v1/models":
             assert request.url.params["output_modalities"] == "text,image"
@@ -60,7 +68,7 @@ def transport(main, images=None, endpoints=None, image_status=200):
 
 
 @pytest.mark.asyncio
-async def test_merges_unit_pricing_without_fabricating_general_records():
+async def test_merges_unit_pricing_without_fabricating_general_records() -> None:
     image = {
         "id": "vendor/image",
         "supported_parameters": {"n": {"type": "range", "min": 1, "max": 4}},
@@ -86,7 +94,7 @@ async def test_merges_unit_pricing_without_fabricating_general_records():
 
 
 @pytest.mark.asyncio
-async def test_image_outage_preserves_identical_text_record():
+async def test_image_outage_preserves_identical_text_record() -> None:
     text = record("vendor/chat", ["text"])
     text["pricing"]["prompt"] = "0.001"
     async with httpx.AsyncClient(
@@ -98,13 +106,13 @@ async def test_image_outage_preserves_identical_text_record():
 
 
 @pytest.mark.parametrize("bad", [True, -1, "NaN", "Infinity", {}, 10**400])
-def test_rates_are_not_silently_free(bad):
+def test_rates_are_not_silently_free(bad: Any) -> None:
     with pytest.raises(ValidationError):
         ModalityPricingLine(billable="output_image", unit="image", cost_usd=bad)
 
 
 @pytest.mark.asyncio
-async def test_malformed_endpoint_is_removed_not_zero_priced():
+async def test_malformed_endpoint_is_removed_not_zero_priced() -> None:
     async with httpx.AsyncClient(
         transport=transport(
             [record()],
@@ -120,8 +128,8 @@ async def test_malformed_endpoint_is_removed_not_zero_priced():
 
 @pytest.mark.asyncio
 async def test_discovered_image_models_remain_available_for_endpoint_routing(
-    monkeypatch,
-):
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     main = [record(), record("vendor/dual", ["text", "image"])]
     main[1]["pricing"]["prompt"] = "0.001"
     original = httpx.AsyncClient
@@ -138,11 +146,11 @@ async def test_discovered_image_models_remain_available_for_endpoint_routing(
 
 
 @pytest.mark.asyncio
-async def test_endpoint_concurrency_is_bounded():
+async def test_endpoint_concurrency_is_bounded() -> None:
     active = peak = 0
     models = [record(f"vendor/image-{i}") for i in range(20)]
 
-    async def handler(request):
+    async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal active, peak
         path = request.url.path
         if path.endswith("/endpoints"):
@@ -162,11 +170,11 @@ async def test_endpoint_concurrency_is_bounded():
 
 
 @pytest.mark.asyncio
-async def test_slow_endpoint_enrichment_does_not_stall_refresh():
+async def test_slow_endpoint_enrichment_does_not_stall_refresh() -> None:
     text = record("vendor/text", ["text"])
     image = record()
 
-    async def handler(request):
+    async def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path.endswith("/endpoints"):
             await asyncio.sleep(10)
@@ -183,10 +191,10 @@ async def test_slow_endpoint_enrichment_does_not_stall_refresh():
     assert result == [text, image]
 
 
-def test_script_delegates_to_shared_catalogue(monkeypatch):
+def test_script_delegates_to_shared_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts import models_meta
 
-    async def fake_catalogue(client):
+    async def fake_catalogue(client: httpx.AsyncClient) -> list[dict[str, Any]]:
         return [record(), record("other/model")]
 
     monkeypatch.setattr(models_meta, "fetch_openrouter_catalog", fake_catalogue)
@@ -196,7 +204,7 @@ def test_script_delegates_to_shared_catalogue(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_malformed_duplicate_tag_cannot_be_quoted():
+async def test_malformed_duplicate_tag_cannot_be_quoted() -> None:
     from routstr.payment.images import ImageRequestError, quote_image_request
 
     async with httpx.AsyncClient(
@@ -221,7 +229,7 @@ async def test_malformed_duplicate_tag_cannot_be_quoted():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("malformed", [None, {}, {"provider_tag": 123}])
-async def test_unidentifiable_endpoint_invalidates_capability(malformed):
+async def test_unidentifiable_endpoint_invalidates_capability(malformed: Any) -> None:
     async with httpx.AsyncClient(
         transport=transport(
             [record()], [{"id": "vendor/image"}], [endpoint(), malformed]

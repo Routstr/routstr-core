@@ -5,6 +5,7 @@ import base64
 import json
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from urllib.parse import urlsplit
 
 MODEL = "recraft/recraft-v4.1-flash"
@@ -54,11 +55,11 @@ IMAGE_MODEL = {
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):
+    def log_message(self, format: str, *args: Any) -> None:
         # Never log authorization, prompts, image bytes, or payment tokens.
         pass
 
-    def reply(self, status, payload):
+    def reply(self, status: int, payload: dict[str, Any]) -> None:
         content = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -66,7 +67,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         parsed = urlsplit(self.path)
         path = parsed.path.rstrip("/")
         if path == "/health":
@@ -97,7 +98,7 @@ class Handler(BaseHTTPRequestHandler):
                 404, {"error": {"message": "Unknown fake endpoint", "code": 404}}
             )
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         if self.path != "/api/v1/images":
             return self.reply(
                 404, {"error": {"message": "Unknown fake endpoint", "code": 404}}

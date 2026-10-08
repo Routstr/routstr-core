@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -113,7 +114,7 @@ async def test_capabilities_roundtrip_and_survive_admin_edits(
             await session.commit()
 
         @asynccontextmanager
-        async def create_session():
+        async def create_session() -> AsyncIterator[AsyncSession]:
             # Match production create_session's detached read-back contract.
             async with AsyncSession(engine, expire_on_commit=False) as session:
                 yield session
@@ -147,6 +148,7 @@ async def test_capabilities_roundtrip_and_survive_admin_edits(
             legacy = await session.get(ModelRow, ("legacy", provider_id))
             assert stored is not None and legacy is not None
             assert stored.name == "Edited name"
+            assert stored.api_capabilities is not None
             assert json.loads(stored.api_capabilities) == CAPABILITIES
             assert legacy.api_capabilities is None
     finally:

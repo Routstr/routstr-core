@@ -371,7 +371,7 @@ def _build_model_from_row(
         alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
         forwarded_model_id=getattr(row, "forwarded_model_id", None),
         api_capabilities=json.loads(row.api_capabilities)
-        if getattr(row, "api_capabilities", None)
+        if row.api_capabilities
         else {},
     )
 

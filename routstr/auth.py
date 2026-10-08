@@ -1287,6 +1287,7 @@ async def _adjust_payment_for_tokens(
                     extra={"error": str(e), "fee_msats": fee_msats},
                 )
 
+    calculated_cost: CostData | MaxCostData | CostDataError
     if precomputed_cost is not None:
         if not isinstance(precomputed_cost, CostData):
             raise ValueError("Precomputed cost must be CostData")

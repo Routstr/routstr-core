@@ -6,14 +6,18 @@ import hashlib
 import json
 import time
 from io import BytesIO
+from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from PIL import Image
 from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 from starlette.requests import Request
 
 from routstr.core.db import ApiKey, ReservationRelease
+from routstr.modalities import ApiCapability
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream import images
 from routstr.upstream.openrouter import OpenRouterUpstreamProvider
@@ -23,8 +27,12 @@ from routstr.upstream.openrouter import OpenRouterUpstreamProvider
 @pytest.mark.parametrize("failed", [False, True, "cancelled"])
 @pytest.mark.parametrize("via_route", [False, True])
 async def test_image_account_real_reservation(
-    integration_session, integration_client, monkeypatch, failed, via_route
-):
+    integration_session: AsyncSession,
+    integration_client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    failed: bool | str,
+    via_route: bool,
+) -> None:
     import routstr.proxy as proxy
 
     session = integration_session
@@ -48,31 +56,37 @@ async def test_image_account_real_reservation(
         ),
         pricing=Pricing(prompt=0, completion=0),
         api_capabilities={
-            "images": {
-                "fetched_at": int(time.time()),
-                "endpoints": [
-                    {
-                        "provider_slug": "recraft",
-                        "provider_tag": "recraft",
-                        "supported_parameters": {},
-                        "pricing": [
-                            {
-                                "billable": "output_image",
-                                "unit": "image",
-                                "cost_usd": 0.007,
-                            }
-                        ],
-                    }
-                ],
-            }
+            "images": ApiCapability.parse_obj(
+                {
+                    "fetched_at": int(time.time()),
+                    "endpoints": [
+                        {
+                            "provider_slug": "recraft",
+                            "provider_tag": "recraft",
+                            "supported_parameters": {},
+                            "pricing": [
+                                {
+                                    "billable": "output_image",
+                                    "unit": "image",
+                                    "cost_usd": 0.007,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
         },
     )
     upstream = OpenRouterUpstreamProvider("dummy-provider-key", provider_fee=1.1)
     monkeypatch.setattr(proxy, "get_candidates", lambda _: [(model, upstream)])
 
     async def authenticated_key(
-        headers, path, request_session, authorization, **kwargs
-    ):
+        headers: dict[str, str],
+        path: str,
+        request_session: AsyncSession,
+        authorization: str,
+        **kwargs: Any,
+    ) -> ApiKey | None:
         return await request_session.get(ApiKey, key.hashed_key)
 
     monkeypatch.setattr(proxy, "get_bearer_token_key", authenticated_key)
@@ -114,7 +128,7 @@ async def test_image_account_real_reservation(
         }
     )
 
-    async def dispatch():
+    async def dispatch() -> Any:
         if via_route:
             return await integration_client.post(
                 "/v1/images",

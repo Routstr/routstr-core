@@ -2,79 +2,130 @@
 
 import time
 from types import SimpleNamespace
+from typing import cast
+
+import pytest
 
 from routstr.algorithm import create_model_mappings
 from routstr.core.settings import settings
+from routstr.modalities import ApiCapability
 from routstr.payment.models import Architecture, Model, Pricing
+from routstr.upstream.base import BaseUpstreamProvider
 
 
-def model(unit="image", *, dual=False, fetched_at=None):
+def model(
+    unit: str = "image", *, dual: bool = False, fetched_at: int | None = None
+) -> Model:
     return Model(
-        id="vendor/image-model", name="Image", created=0, description="test",
+        id="vendor/image-model",
+        name="Image",
+        created=0,
+        description="test",
         context_length=0,
-        architecture=Architecture(modality="text->image", input_modalities=["text"],
-                                  output_modalities=["image", "text"] if dual else ["image"],
-                                  tokenizer="unknown", instruct_type=None),
+        architecture=Architecture(
+            modality="text->image",
+            input_modalities=["text"],
+            output_modalities=["image", "text"] if dual else ["image"],
+            tokenizer="unknown",
+            instruct_type=None,
+        ),
         pricing=Pricing(prompt=0, completion=0),
-        api_capabilities={"images": {
-            "fetched_at": int(time.time()) if fetched_at is None else fetched_at,
-            "endpoints": [{"provider_slug": "vendor", "provider_tag": "vendor",
-                           "supported_parameters": {},
-                           "pricing": [{"billable": "output_image", "unit": unit, "cost_usd": .007}]}],
-        }},
+        api_capabilities={
+            "images": ApiCapability.parse_obj(
+                {
+                    "fetched_at": int(time.time())
+                    if fetched_at is None
+                    else fetched_at,
+                    "endpoints": [
+                        {
+                            "provider_slug": "vendor",
+                            "provider_tag": "vendor",
+                            "supported_parameters": {},
+                            "pricing": [
+                                {
+                                    "billable": "output_image",
+                                    "unit": unit,
+                                    "cost_usd": 0.007,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+        },
     )
 
 
-def mappings(m, provider_type="openrouter"):
+def mappings(
+    m: Model, provider_type: str = "openrouter"
+) -> tuple[
+    dict[str, Model],
+    dict[str, list[tuple[Model, BaseUpstreamProvider]]],
+    dict[str, Model],
+]:
     provider = SimpleNamespace(
         provider_type=provider_type,
-        base_url="https://openrouter.ai/api/v1" if provider_type == "openrouter" else "https://generic.example/v1",
-        db_id=1, upstream_name=provider_type, provider_fee=1.06,
+        base_url="https://openrouter.ai/api/v1"
+        if provider_type == "openrouter"
+        else "https://generic.example/v1",
+        db_id=1,
+        upstream_name=provider_type,
+        provider_fee=1.06,
         get_cached_models=lambda: [m],
     )
-    return create_model_mappings([provider], {}, set())
+    return create_model_mappings([cast(BaseUpstreamProvider, provider)], {}, set())
 
 
-def enable(monkeypatch):
+def enable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "image_generation_enabled", True)
-    monkeypatch.setattr(settings, "image_max_request_usd", .1)
+    monkeypatch.setattr(settings, "image_max_request_usd", 0.1)
 
 
-def test_discovered_image_is_not_advertised_while_feature_disabled(monkeypatch):
+def test_discovered_image_is_not_advertised_while_feature_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "image_generation_enabled", False)
     _, candidates, public = mappings(model())
     assert "image-model" in candidates
     assert not public
 
 
-def test_bounded_images_advertised_only_when_enabled(monkeypatch):
+def test_bounded_images_advertised_only_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     enable(monkeypatch)
     _, candidates, public = mappings(model())
     assert candidates["image-model"]
     assert public["image-model"].api_capabilities["images"]
 
 
-def test_unbounded_image_model_retained_for_explicit_rejection(monkeypatch):
+def test_unbounded_image_model_retained_for_explicit_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     enable(monkeypatch)
     _, candidates, public = mappings(model("token"))
     assert candidates["image-model"]
     assert not public
 
 
-def test_generic_provider_cannot_inherit_images_api_support(monkeypatch):
+def test_generic_provider_cannot_inherit_images_api_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     enable(monkeypatch)
     _, candidates, public = mappings(model(), "generic")
     assert not candidates
     assert not public
 
 
-def test_stale_capability_not_advertised(monkeypatch):
+def test_stale_capability_not_advertised(monkeypatch: pytest.MonkeyPatch) -> None:
     enable(monkeypatch)
     _, _, public = mappings(model(fetched_at=1))
     assert not public
 
 
-def test_dual_output_chat_catalogue_is_preserved(monkeypatch):
+def test_dual_output_chat_catalogue_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "image_generation_enabled", False)
     _, _, public = mappings(model("token", dual=True))
     assert "image-model" in public

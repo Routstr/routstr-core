@@ -9,6 +9,7 @@ import math
 import os
 import sys
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request
@@ -59,8 +60,9 @@ def main() -> int:
             )
             return 1
         for name in ("ROUTSTR_URL", "ROUTSTR_API_KEY", "ROUTSTR_IMAGE_PROVIDER_FEE"):
-            if name not in os.environ and isinstance(values.get(name), str):
-                os.environ[name] = values[name]
+            value = values.get(name)
+            if name not in os.environ and isinstance(value, str):
+                os.environ[name] = value
     url = (args.url or os.environ.get("ROUTSTR_URL", "")).rstrip("/")
     parsed = urlsplit(url)
     loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
@@ -87,7 +89,7 @@ def main() -> int:
     if not args.fake:
         headers["Authorization"] = f"Bearer {key}"
 
-    def fetch(path, payload=None):
+    def fetch(path: str, payload: dict[str, Any] | None = None) -> Any:
         request = Request(
             url + path,
             data=json.dumps(payload).encode() if payload is not None else None,
@@ -97,7 +99,7 @@ def main() -> int:
         from urllib.request import HTTPRedirectHandler, build_opener
 
         class NoRedirect(HTTPRedirectHandler):
-            def redirect_request(self, *unused):
+            def redirect_request(self, *unused: Any) -> None:
                 return None
 
         with build_opener(NoRedirect).open(request, timeout=120) as response:
