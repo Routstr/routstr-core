@@ -25,9 +25,12 @@ advertise and will not publish until one is set.
 ### Automatic identity (no manual nsec)
 
 Setting `AUTO_GENERATE_NSEC=true` makes the node create its own Nostr identity on
-first boot when none is configured — no dashboard step required. The bundled
-`compose.yml` enables this by default, so a fresh stack starts announcing as soon
-as it has a reachable endpoint (the Tor service supplies one automatically).
+first boot when none is configured — no dashboard step required. Both bundled
+stacks enable this by default (`compose.yml` and `compose.node.yml`), so a fresh
+node starts announcing as soon as it has a reachable endpoint: the Tor service
+supplies one for `compose.yml`, and a public `HTTP_URL` (behind your reverse
+proxy) supplies one for `compose.node.yml`. With neither, the generated identity
+simply waits — nothing is published.
 
 Only the generated `npub` is logged at startup; the `nsec` is stored encrypted at
 rest and never printed. Retrieve it when you need to back it up with

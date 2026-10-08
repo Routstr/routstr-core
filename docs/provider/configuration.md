@@ -37,7 +37,7 @@ On first start the node generates an admin password and logs it once — read it
 
 ## Admin Dashboard (Primary)
 
-Access the dashboard at `/admin/` on your node.
+Access the dashboard at `/admin` on your node.
 
 ### Upstream Providers
 
