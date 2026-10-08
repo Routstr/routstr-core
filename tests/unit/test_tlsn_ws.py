@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import websockets
@@ -195,3 +196,81 @@ def test_public_url_falls_back_to_proverd_direct(
     monkeypatch.setattr(settings, "tlsn_proverd_url", "http://127.0.0.1:7047/")
     monkeypatch.setattr(settings, "http_url", "")
     assert tlsn_ws.tlsn_proverd_ws_public_url() == "ws://127.0.0.1:7047/ws"
+
+
+# ── tlsn advertisement: upstream model forwarding ───────��─────────────────
+
+
+def _advertised_tlsn_block(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    model_id: str,
+    candidate_upstream_id: str | None,
+) -> object:
+    """Call the /v1/models endpoint with one fake model/provider and return
+    its tlsn block. The candidate's id is what the proxy would forward
+    upstream (the canonical listing id may differ, e.g. glm-5.3-flash vs
+    z-ai/glm-5.3-flash)."""
+    import routstr.payment.models as payment_models
+    from routstr.payment.models import Architecture, Model, Pricing
+
+    def make_model(mid: str) -> Model:
+        return Model(
+            id=mid,
+            name=mid,
+            created=0,
+            description="",
+            context_length=64_000,
+            architecture=Architecture(
+                modality="text->text",
+                input_modalities=["text"],
+                output_modalities=["text"],
+                tokenizer="Other",
+                instruct_type=None,
+            ),
+            pricing=Pricing(prompt=0.001, completion=0.002),
+        )
+
+    model = make_model(model_id)
+    candidate = make_model(candidate_upstream_id or model_id)
+    provider = MagicMock()
+    provider.provider_type = "ppqai"
+    provider.base_url = "https://api.example.com"
+
+    monkeypatch.setattr(settings, "tlsn_proverd_url", "http://proverd:7047")
+    monkeypatch.setattr(settings, "http_url", "https://node.example.com")
+    monkeypatch.setattr("routstr.proxy.get_unique_models", lambda: [model])
+    monkeypatch.setattr("routstr.proxy.get_provider_for_model", lambda _mid: [provider])
+    monkeypatch.setattr(
+        "routstr.proxy.get_candidates", lambda _mid: [(candidate, provider)]
+    )
+
+    import asyncio
+
+    result = asyncio.get_event_loop().run_until_complete(
+        payment_models.models(session=MagicMock())
+    )
+    return result["data"][0].get("tlsn")
+
+
+def test_advertisement_includes_candidate_upstream_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tlsn = _advertised_tlsn_block(
+        monkeypatch,
+        model_id="glm-5.3-flash",
+        candidate_upstream_id="z-ai/glm-5.3-flash",
+    )
+    assert isinstance(tlsn, dict)
+    assert tlsn["upstream_models"] == ["z-ai/glm-5.3-flash"]
+    assert tlsn["upstream_hosts"] == ["api.example.com"]
+
+
+def test_advertisement_omits_upstream_models_when_ids_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tlsn = _advertised_tlsn_block(
+        monkeypatch, model_id="gpt-mock", candidate_upstream_id=None
+    )
+    assert isinstance(tlsn, dict)
+    assert "upstream_models" not in tlsn

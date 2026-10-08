@@ -688,7 +688,7 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
     from urllib.parse import urlsplit
 
     from ..core.settings import settings
-    from ..proxy import get_provider_for_model, get_unique_models
+    from ..proxy import get_candidates, get_provider_for_model, get_unique_models
     from ..tlsn_ws import tlsn_proverd_ws_public_url
 
     items = get_unique_models()
@@ -709,8 +709,8 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
                     and (host := urlsplit(p.base_url).hostname)
                 }
             )
-            model_dict["tlsn"] = (
-                {
+            if hosts:
+                advertisement: dict = {
                     "mode": "proxy",
                     "upstream_hosts": hosts,
                     # Channel-B endpoint the SDK verifier dials: this node's
@@ -718,8 +718,24 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
                     # direct proverd address (local dev).
                     "proverd_ws": tlsn_proverd_ws_public_url(),
                 }
-                if hosts
-                else False
-            )
+                # The node legitimately puts a different model id on the
+                # wire when the listed (canonical) id maps to a provider
+                # candidate with another upstream id (e.g. glm-5.3-flash ->
+                # z-ai/glm-5.3-flash). Advertise exactly the ids the proxy
+                # would forward (forwarded_model_id or candidate id); the
+                # verifier's comparator accepts only those.
+                upstream_ids = sorted(
+                    {
+                        upstream_id
+                        for candidate, _provider in (get_candidates(model.id) or [])
+                        if (upstream_id := candidate.forwarded_model_id or candidate.id)
+                        != model.id
+                    }
+                )
+                if upstream_ids:
+                    advertisement["upstream_models"] = upstream_ids
+                model_dict["tlsn"] = advertisement
+            else:
+                model_dict["tlsn"] = False
         data.append(model_dict)
     return {"data": data}
