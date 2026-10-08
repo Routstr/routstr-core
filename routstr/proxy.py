@@ -790,7 +790,8 @@ async def _proxy(
                 request=request,
             )
 
-    if is_image_generation_path(path):
+    single_dispatch = is_image_generation_path(path)
+    if single_dispatch:
         # Settlement buffers the whole response and bills the images it counts,
         # so a stream would be billed as one image whatever it carried.
         if request_body_dict.get("stream"):
@@ -808,7 +809,7 @@ async def _proxy(
         if not candidates:
             return create_error_response(
                 "unsupported_request",
-                f"Model '{model_id}' has no image price on this node",
+                f"Model '{model_id}' cannot be priced for this request on this node",
                 400,
                 request=request,
             )
@@ -826,6 +827,13 @@ async def _proxy(
         ]
         if healthy:
             candidates = healthy
+
+    if single_dispatch:
+        # A generation is a purchase. Once dispatched, an ambiguous failure
+        # (lost response, timeout, gateway error) is no proof the upstream did
+        # not charge for it, so no second provider is tried and no 5xx is
+        # re-sent: one candidate, one POST, settle or refund.
+        candidates = candidates[:1]
 
     # Reserve/max-cost checks use the best-ranked candidate; the failover loop
     # below rebinds (model_obj, upstream) per candidate so forwarding and
@@ -1036,7 +1044,7 @@ async def _proxy(
         # Only once the candidate is actually tried: a fallback skipped for its
         # reservation must not take over the last attempted upstream's line.
         _attribute_request(request, model_obj, upstream)
-        retries_left = settings.upstream_5xx_retry_attempts
+        retries_left = 0 if single_dispatch else settings.upstream_5xx_retry_attempts
         retry_index = 0
         headers = upstream.prepare_headers(dict(request.headers))
 

@@ -1,8 +1,10 @@
+import json
 from typing import TYPE_CHECKING
 
 import httpx
 
 from ..core.logging import get_logger
+from ..payment.image_pricing import produces_images
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider, _reported_provider
 from .image_catalog import (
@@ -90,6 +92,31 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
         super().__init__(
             base_url=self.default_base_url, api_key=api_key, provider_fee=provider_fee
         )
+
+    def prepare_request_body(
+        self,
+        body: bytes | None,
+        model_obj: Model,
+        include_stream_usage: bool = False,
+    ) -> bytes | None:
+        body = super().prepare_request_body(body, model_obj, include_stream_usage)
+        if not body or not produces_images(model_obj):
+            return body
+        # OpenRouter would otherwise re-route a failed generation to another
+        # provider on its side, which can buy twice for one settled response.
+        try:
+            data = json.loads(body)
+        except Exception:
+            return body
+        if not isinstance(data, dict):
+            return body
+        routing = data.get("provider")
+        routing = dict(routing) if isinstance(routing, dict) else {}
+        if routing.get("allow_fallbacks") is False:
+            return body
+        routing["allow_fallbacks"] = False
+        data["provider"] = routing
+        return json.dumps(data).encode()
 
     @classmethod
     def _build_from_row(

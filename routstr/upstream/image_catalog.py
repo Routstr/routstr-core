@@ -63,6 +63,10 @@ _OPENAI_IMAGE_USD_1K: dict[str, dict[str, float]] = {
 # multiples of ``high``.
 _OPENAI_IMAGE_25_EXTRA_STEPS: dict[str, float] = {"xhigh": 2.0, "max": 4.0}
 _OPENAI_IMAGE_DEFAULT_QUALITY = "medium"
+# Ceiling on the tokens one reference image meters: OpenAI scales inputs to
+# at most four 512px tiles (85 + 4 x 170) and adds at most 6,240 tokens for
+# high input fidelity, so 8,192 covers every documented case.
+_OPENAI_MAX_INPUT_IMAGE_TOKENS = 8_192
 # Sizes above 1K are accepted but undocumented; the ceiling assumes the token
 # count scales with area up to 4K.
 _OPENAI_LARGER_SIZE_FACTOR = 4.0
@@ -135,6 +139,7 @@ def openai_image_book(model_id: str, pricing: dict[str, Any]) -> ImagePricing | 
         output_token_usd=output_token_usd,
         input_text_token_usd=input_text,
         input_image_token_usd=input_image,
+        max_input_image_tokens=_OPENAI_MAX_INPUT_IMAGE_TOKENS,
     )
 
 

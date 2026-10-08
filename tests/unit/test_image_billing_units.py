@@ -147,6 +147,27 @@ def test_reservation_for_a_token_book_uses_the_per_image_estimate() -> None:
     assert image_reservation_msats({"n": 2, "quality": "high"}, model) == 500_000
 
 
+def test_token_book_reservation_bounds_the_inputs() -> None:
+    """The hold is a ceiling: tier per image, plus one text token per prompt
+    byte and the book's per-image token cap for every reference image."""
+    model = _model(TOKEN_BOOK.copy(update={"max_input_image_tokens": 1_000}))
+    prompt = "a cat"  # 5 bytes -> 5 tokens at 0.000005 USD
+    body = {"prompt": prompt, "quality": "high", "input_references": ["a", "b"]}
+    text_usd = 5 * 0.000005
+    images_usd = 2 * 1_000 * 0.000008
+    expected_sats = 250.0 + (text_usd + images_usd) * CEILING_SATS
+    assert image_reservation_msats(body, model) == math.ceil(expected_sats * 1000)
+    # Enum strings such as ``quality`` are not prompt text.
+    assert image_reservation_msats({"quality": "high"}, model) == 250_000
+
+
+def test_token_book_refuses_reference_images_it_cannot_bound() -> None:
+    model = _model(TOKEN_BOOK)
+    assert TOKEN_BOOK.max_input_image_tokens is None
+    assert image_reservation_msats({"prompt": "x"}, model) is not None
+    assert image_reservation_msats({"prompt": "x", "image": "b64"}, model) is None
+
+
 def test_token_book_settles_on_reported_tokens() -> None:
     model = _model(TOKEN_BOOK)
     usage = ImageUsage(
@@ -159,10 +180,17 @@ def test_token_book_settles_on_reported_tokens() -> None:
     assert settle_image_sats(model, {}, usage) == pytest.approx(expected_usd * 1000)
 
 
-def test_token_book_falls_back_to_the_tier_without_usage() -> None:
+def test_token_book_is_not_settled_on_the_tier_without_usage() -> None:
+    """The tier is a reservation estimate, not a bill; without metering the
+    caller settles on the reservation instead."""
     model = _model(TOKEN_BOOK)
     usage = ImageUsage(image_count=2)
-    assert settle_image_sats(model, {"quality": "high"}, usage) == pytest.approx(500.0)
+    assert settle_image_sats(model, {"quality": "high"}, usage) is None
+    trusted = _model(TOKEN_BOOK.copy(update={"trust_upstream_cost": True}))
+    assert settle_image_sats(trusted, {}, ImageUsage(image_count=1)) is None
+    assert settle_image_sats(
+        trusted, {}, ImageUsage(image_count=1, upstream_cost_usd=0.02)
+    ) == pytest.approx(20.0)
 
 
 def test_megapixel_book_prices_the_requested_area() -> None:
@@ -393,6 +421,20 @@ async def test_openai_style_response_is_billed_on_its_tokens() -> None:
     expected_msats = math.ceil((1000 * 0.00003 + 10 * 0.000005) * 1000 * 1000)
     assert spent == expected_msats
     assert balance == BALANCE - expected_msats
+    assert status == "charged"
+
+
+@pytest.mark.asyncio
+async def test_token_book_without_usage_is_settled_on_the_reservation() -> None:
+    """No metering, no estimate: the hold is the only agreed figure."""
+    model = _model(TOKEN_BOOK)
+    balance, spent, status = await _settle(
+        model,
+        {"model": "img", "prompt": "a cat", "quality": "low"},
+        {"data": [{"b64_json": "x"}]},
+    )
+    assert spent == RESERVED
+    assert balance == BALANCE - RESERVED
     assert status == "charged"
 
 

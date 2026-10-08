@@ -119,6 +119,9 @@ class ImagePricing(BaseModel):
     output_token_usd: float = 0.0
     input_text_token_usd: float = 0.0
     input_image_token_usd: float = 0.0
+    # Most tokens one reference image can meter on a ``token`` book. Without
+    # it a request attaching reference images has no cost bound and is refused.
+    max_input_image_tokens: int | None = None
     # ``megapixel`` books: USD per output megapixel at ``default_steps``.
     megapixel_usd: float = 0.0
     default_steps: int | None = None
@@ -176,6 +179,29 @@ class ImagePricing(BaseModel):
             + usage.input_image_tokens * self.input_image_token_usd
         )
 
+    def input_ceiling_usd(self, body: dict) -> float | None:
+        """Most USD the inputs of ``body`` can meter on a ``token`` book.
+
+        The output side is bounded by the tier; this bounds the input side so
+        the reservation is a ceiling, not an estimate. Text is bounded at one
+        token per UTF-8 byte, which no BPE tokenizer exceeds. Reference images
+        need ``max_input_image_tokens``; ``None`` means no bound exists.
+        """
+        if self.unit != "token":
+            return 0.0
+        text_bytes = sum(
+            len(value.encode("utf-8"))
+            for field in _TEXT_FIELDS
+            if isinstance(value := body.get(field), str)
+        )
+        total = text_bytes * self.input_text_token_usd
+        images = reference_image_count(body)
+        if images > 0 and self.input_image_token_usd > 0:
+            if self.max_input_image_tokens is None:
+                return None
+            total += images * self.max_input_image_tokens * self.input_image_token_usd
+        return total
+
 
 @dataclass(frozen=True)
 class ImageUsage:
@@ -202,6 +228,8 @@ _REFERENCE_FIELDS = (
     "image",
     "image_url",
 )
+# Request fields a token-metered upstream tokenizes as text input.
+_TEXT_FIELDS = ("prompt", "negative_prompt")
 
 
 def reference_image_count(body: dict) -> int:
@@ -317,9 +345,7 @@ def _sats_per_usd(model: "Model") -> float:
     return ceiling_sats / max_usd
 
 
-def per_image_sats(
-    model: "Model | None", body: dict, path: str = ""
-) -> float:
+def per_image_sats(model: "Model | None", body: dict, path: str = "") -> float:
     """Sats for one image from this model, at the tier ``body`` asks for.
 
     ``sats_pricing.image_output`` is the ceiling, already carrying the
@@ -384,7 +410,7 @@ def reference_images_sats(model: "Model | None", body: dict) -> float:
 
 def settle_image_sats(
     model: "Model | None", body: dict, usage: ImageUsage, path: str = ""
-) -> float:
+) -> float | None:
     """Sats to charge for what an image response actually carried.
 
     Preference order, each falling through when it has nothing to bill on:
@@ -393,6 +419,11 @@ def settle_image_sats(
     2. Reported image output tokens times the book's token rates.
     3. The per-image price at the requested tier, times images returned,
        plus the reference-image surcharge.
+
+    Step 3 is the contract for ``image`` and ``megapixel`` books. A ``token``
+    book whose response reports neither cost nor tokens cannot be metered;
+    ``None`` tells the caller to settle on the reservation rather than bill
+    the tier estimate as if it were authoritative.
 
     A response with no images and no reported cost is free; the reservation
     is released instead.
@@ -406,7 +437,9 @@ def settle_image_sats(
     if book is not None and rate > 0:
         if book.trust_upstream_cost and usage.upstream_cost_usd > 0:
             return rate * usage.upstream_cost_usd
-        if book.unit == "token" and usage.output_image_tokens > 0:
+        if book.unit == "token":
+            if usage.output_image_tokens <= 0:
+                return None
             token_usd = book.token_usd(usage)
             if token_usd > 0:
                 return rate * token_usd
@@ -424,15 +457,23 @@ def produces_images(model: "Model | None") -> bool:
 def image_reservation_msats(
     body: dict, model: "Model | None", path: str = ""
 ) -> int | None:
-    """Msats to hold for an image request, or ``None`` if not an image model.
+    """Msats to hold for an image request, or ``None`` if it cannot be bounded.
 
     Token-window math means nothing for a model that returns images, so the
-    hold is the requested tier times the requested batch size.
+    hold is the requested tier times the requested batch size, plus the
+    input ceiling of a ``token`` book. ``None`` refuses the request: a
+    prepaid node must not buy a generation whose cost it cannot bound.
     """
-    if not produces_images(model):
+    if model is None or not produces_images(model):
         return None
 
-    book = getattr(model, "image_pricing", None)
+    book = model.image_pricing
+    input_ceiling_usd = 0.0
+    if book is not None:
+        ceiling = book.input_ceiling_usd(body)
+        if ceiling is None:
+            return None
+        input_ceiling_usd = ceiling
     # A per-MP rate is tied to a provider's default step count. If a caller
     # changes ``steps`` but the catalog did not publish that default, no exact
     # reservation is possible, so fail closed rather than undercharge.
@@ -455,5 +496,9 @@ def image_reservation_msats(
         count = 1
     count = min(max(count, 1), MAX_RESERVED_IMAGES)
 
-    total = count * sats_per_image + reference_images_sats(model, body)
+    total = (
+        count * sats_per_image
+        + reference_images_sats(model, body)
+        + _sats_per_usd(model) * input_ceiling_usd
+    )
     return math.ceil(total * 1000)
