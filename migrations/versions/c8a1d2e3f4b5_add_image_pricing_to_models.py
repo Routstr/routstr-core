@@ -16,16 +16,23 @@ branch_labels = None
 depends_on = None
 
 
+def _columns() -> set[str]:
+    conn = op.get_bind()
+    return {column["name"] for column in sa.inspect(conn).get_columns("models")}
+
+
 def upgrade() -> None:
-    op.add_column(
-        "models",
-        sa.Column(
-            "image_pricing",
-            sqlmodel.sql.sqltypes.AutoString(),
-            nullable=True,
-        ),
-    )
+    if "image_pricing" not in _columns():
+        op.add_column(
+            "models",
+            sa.Column(
+                "image_pricing",
+                sqlmodel.sql.sqltypes.AutoString(),
+                nullable=True,
+            ),
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("models", "image_pricing")
+    if "image_pricing" in _columns():
+        op.drop_column("models", "image_pricing")
