@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import Response
 
 from routstr import proxy as proxy_module
 from routstr.auth import ReservationSnapshot
@@ -71,7 +72,10 @@ def _upstream(base_url: str, forward: AsyncMock) -> MagicMock:
 
 
 async def _run_proxy(
-    path: str, candidates: list[tuple[Model, MagicMock]], revert: AsyncMock
+    path: str,
+    candidates: list[tuple[Model, MagicMock]],
+    revert: AsyncMock,
+    body: dict | None = None,
 ) -> Any:
     key = ApiKey(hashed_key="imagekey", balance=10_000_000)
     reservation = ReservationSnapshot(
@@ -98,7 +102,7 @@ async def _run_proxy(
         patch.object(proxy_module, "revert_pay_for_request", revert),
         patch.object(proxy_module.asyncio, "sleep", AsyncMock()),
     ):
-        request = _request({"model": "test-model", "prompt": "a cat"})
+        request = _request(body or {"model": "test-model", "prompt": "a cat"})
         return await proxy_module._proxy(
             request, path, MagicMock(), await request.body()
         )
@@ -139,6 +143,51 @@ async def test_image_generation_is_not_re_sent_on_a_gateway_5xx(
 
     assert response.status_code == 424
     only.forward_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_image_generation_is_not_corrected_and_re_sent_on_a_400() -> None:
+    """Stripping a field the upstream rejected would change what the image
+    costs after the reservation priced it, so the 400 is returned as is."""
+    rejected = Response(
+        content=json.dumps(
+            {"error": {"message": "`quality` is not supported for this model"}}
+        ).encode(),
+        status_code=400,
+    )
+    only = _upstream("https://a.example", AsyncMock(return_value=rejected))
+
+    await _run_proxy(
+        "v1/images/generations",
+        [(IMAGE_MODEL, only)],
+        AsyncMock(return_value=True),
+        body={"model": "test-model", "prompt": "a cat", "quality": "high"},
+    )
+
+    only.forward_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_chat_400_is_still_corrected_and_re_sent() -> None:
+    """Control: the correction loop is only skipped on image routes."""
+    rejected = Response(
+        content=json.dumps(
+            {"error": {"message": "`temperature` is deprecated for this model"}}
+        ).encode(),
+        status_code=400,
+    )
+    served = MagicMock(status_code=200)
+    only = _upstream("https://a.example", AsyncMock(side_effect=[rejected, served]))
+
+    response = await _run_proxy(
+        "v1/chat/completions",
+        [(CHAT_MODEL, only)],
+        AsyncMock(return_value=True),
+        body={"model": "test-model", "messages": [], "temperature": 1},
+    )
+
+    assert response is served
+    assert only.forward_request.await_count == 2
 
 
 @pytest.mark.asyncio

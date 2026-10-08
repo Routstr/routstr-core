@@ -2207,13 +2207,12 @@ class BaseUpstreamProvider:
         model_id = model_obj.id if model_obj else "unknown"
 
         if total_sats is None:
-            # A token-metered upstream answered without metering. The tier is
-            # an estimate, not a bill; the reservation is the only figure the
-            # key agreed to and the ceiling the node accepted, so settle on it.
-            total_sats = max_cost_for_model / 1000
+            # The upstream reported no cost or usage we can bill on. An
+            # estimate is not a bill, so release the reservation.
+            total_sats = 0.0
             logger.warning(
-                "Token-metered image response reports no usage; settling on "
-                "the reservation instead of the tier estimate",
+                "Image response reports no billable cost or usage; releasing "
+                "the reservation",
                 extra={
                     "model": model_id,
                     "image_count": usage.image_count,

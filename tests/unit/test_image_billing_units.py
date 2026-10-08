@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from pydantic.v1 import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -24,23 +25,28 @@ import routstr.auth as auth_module
 from routstr.auth import ReservationSnapshot, get_reservation_snapshot, pay_for_request
 from routstr.core.db import ApiKey, ReservationRelease
 from routstr.core.exceptions import UpstreamError
+from routstr.payment.cost_calculation import calculate_flat_cost
 from routstr.payment.image_pricing import (
     ImagePriceTier,
     ImagePricing,
+    ImageRequestRefused,
     ImageUsage,
     image_reservation_msats,
     output_megapixels,
     per_image_sats,
     reference_image_count,
+    requested_image_count,
     settle_image_sats,
 )
 from routstr.payment.models import Architecture, Model, Pricing
+from routstr.proxy import _price_image_candidate
 from routstr.upstream.base import (
     IMAGES_PER_RESERVATION,
     BaseUpstreamProvider,
     _read_bounded,
 )
 from routstr.upstream.image_generation import read_image_response
+from routstr.upstream.together import _override_book
 
 BALANCE = 100_000
 RESERVED = 5_000
@@ -120,6 +126,10 @@ def test_upscale_is_priced_by_factor_not_generation_tier() -> None:
     assert per_image_sats(model, {}, upscale) == pytest.approx(20.0)
     # An unknown factor reserves at the dearest upscale, not the generation price.
     assert per_image_sats(model, {"scale": 3}, upscale) == pytest.approx(80.0)
+    # A fractional factor is unknown too, not truncated to the cheaper 2x.
+    assert per_image_sats(model, {"scale": 2.5}, upscale) == pytest.approx(80.0)
+    assert per_image_sats(model, {"scale": "2.5x"}, upscale) == pytest.approx(80.0)
+    assert per_image_sats(model, {"scale": 4.0}, upscale) == pytest.approx(80.0)
     # ``scale`` on any other route is not an upscale.
     assert per_image_sats(model, {"scale": 2}, "v1/image/generate") == pytest.approx(
         10.0
@@ -136,6 +146,11 @@ def test_upscale_is_priced_by_factor_not_generation_tier() -> None:
         ({"variants": 4}, 4),
         ({"n": 1e999}, 1),
         ({"n": "nope"}, 1),
+        # Venice's native route batches by ``variants`` even when ``n`` is set.
+        ({"n": 1, "variants": 2}, 2),
+        ({"n": 4, "variants": 2}, 4),
+        ({"n": "nope", "variants": 3}, 3),
+        ({"n": 10}, 10),
     ],
 )
 def test_reservation_counts_openai_n_and_venice_variants(
@@ -143,6 +158,46 @@ def test_reservation_counts_openai_n_and_venice_variants(
 ) -> None:
     model = _model(UPSCALE_BOOK)
     assert image_reservation_msats(body, model) == expected_images * 10_000
+
+
+@pytest.mark.parametrize(
+    "body", [{"n": 11}, {"variants": 11}, {"n": 1, "variants": 50}]
+)
+def test_a_batch_past_the_reservation_cap_is_refused(body: dict) -> None:
+    with pytest.raises(ImageRequestRefused, match="at most 10"):
+        requested_image_count(body)
+    assert image_reservation_msats(body, _model(UPSCALE_BOOK)) is None
+
+
+def test_the_proxy_refuses_an_oversized_batch_on_every_image_upstream() -> None:
+    model = _model(UPSCALE_BOOK)
+    upstream = MagicMock(base_url="https://api.venice.ai/api/v1")
+    for body in ({"prompt": "cat", "n": 11}, {"prompt": "cat", "variants": 11}):
+        refused = _price_image_candidate(body, model, upstream, "v1/image/generate")
+        assert refused == "n and variants must be at most 10"
+    priced = _price_image_candidate(
+        {"prompt": "cat", "variants": 10}, model, upstream, "v1/image/generate"
+    )
+    assert priced == (model, upstream)
+
+
+def test_flat_cost_reports_usd_at_usd_per_sat() -> None:
+    # The autouse fixture prices one sat at 5e-4 USD.
+    cost = calculate_flat_cost(2, 10.0)
+    assert cost.total_msats == 20_000
+    assert cost.total_usd == pytest.approx(20 * 5.0e-4)
+
+
+def test_together_override_rejects_an_unknown_unit() -> None:
+    assert _override_book({"usd": 0.04, "unit": "pixel"}) is None
+    assert _override_book({"usd": 0.04, "unit": "token"}) is None
+    assert _override_book({"usd": 0.04, "unit": ["image"]}) is None
+    megapixel = _override_book({"usd": 0.03, "unit": "megapixel"})
+    assert megapixel is not None and megapixel.unit == "megapixel"
+    flat = _override_book({"usd": 0.04})
+    assert flat is not None and flat.unit == "image"
+    with pytest.raises(ValidationError):
+        ImagePricing(max_usd=0.04, unit="pixel")
 
 
 def test_reservation_for_a_token_book_uses_the_per_image_estimate() -> None:
@@ -187,7 +242,7 @@ def test_token_book_settles_on_reported_tokens() -> None:
 
 def test_token_book_is_not_settled_on_the_tier_without_usage() -> None:
     """The tier is a reservation estimate, not a bill; without metering the
-    caller settles on the reservation instead."""
+    caller releases the reservation instead."""
     model = _model(TOKEN_BOOK)
     usage = ImageUsage(image_count=2)
     assert settle_image_sats(model, {"quality": "high"}, usage) is None
@@ -225,10 +280,8 @@ def test_trusted_upstream_cost_wins_over_the_flat_rate() -> None:
     model = _model(TRUSTED_BOOK)
     usage = ImageUsage(image_count=1, upstream_cost_usd=0.011)
     assert settle_image_sats(model, {}, usage) == pytest.approx(11.0)
-    # Without a reported cost the flat rate applies.
-    assert settle_image_sats(model, {}, ImageUsage(image_count=2)) == pytest.approx(
-        80.0
-    )
+    # Without a reported cost there is nothing to bill on.
+    assert settle_image_sats(model, {}, ImageUsage(image_count=2)) is None
 
 
 def test_nothing_returned_costs_nothing_even_with_a_reported_cost() -> None:
@@ -431,17 +484,32 @@ async def test_openai_style_response_is_billed_on_its_tokens() -> None:
 
 
 @pytest.mark.asyncio
-async def test_token_book_without_usage_is_settled_on_the_reservation() -> None:
-    """No metering, no estimate: the hold is the only agreed figure."""
+async def test_token_book_without_usage_releases_the_reservation() -> None:
+    """No metering means no bill: an estimate is not charged."""
     model = _model(TOKEN_BOOK)
-    balance, spent, status = await _settle(
+    balance, spent, _ = await _settle(
         model,
         {"model": "img", "prompt": "a cat", "quality": "low"},
         {"data": [{"b64_json": "x"}]},
     )
-    assert spent == RESERVED
-    assert balance == BALANCE - RESERVED
-    assert status == "charged"
+    assert spent == 0
+    assert balance == BALANCE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage", [None, {"cost": 0}, {"completion_tokens": 272}])
+async def test_trusted_book_without_reported_cost_releases_the_reservation(
+    usage: dict | None,
+) -> None:
+    """A book that bills on the upstream's cost does not fall back to its tier."""
+    payload: dict = {"data": [{"b64_json": "x"}]}
+    if usage is not None:
+        payload["usage"] = usage
+    balance, spent, _ = await _settle(
+        _model(TRUSTED_BOOK), {"model": "img", "prompt": "a cat"}, payload
+    )
+    assert spent == 0
+    assert balance == BALANCE
 
 
 @pytest.mark.asyncio

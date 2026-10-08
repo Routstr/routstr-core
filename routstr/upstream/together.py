@@ -58,6 +58,8 @@ TOGETHER_IMAGE_USD: dict[str, tuple[float, str]] = {
 }
 
 _IMAGE_PRICE_SETTING = "image_prices"
+# Units one published USD figure can describe; ``token`` needs per-token rates.
+_OVERRIDE_UNITS = frozenset({"image", "megapixel"})
 _PUBLISHED_DEFAULT_STEPS = {
     # Together's public examples use 28 steps for Kontext; FLUX.2-max's
     # catalog also publishes 50 as ``min_steps``.
@@ -127,10 +129,14 @@ def _override_book(entry: Any) -> ImagePricing | None:
             and steps > 0
             else None
         )
-        if isinstance(usd, (int, float)) and not isinstance(usd, bool):
-            return static_image_book(
-                float(usd), str(unit), default_steps=default_steps
+        if not isinstance(unit, str) or unit not in _OVERRIDE_UNITS:
+            logger.warning(
+                "Ignoring image price override with unsupported unit",
+                extra={"unit": unit},
             )
+            return None
+        if isinstance(usd, (int, float)) and not isinstance(usd, bool):
+            return static_image_book(float(usd), unit, default_steps=default_steps)
     return None
 
 
@@ -194,9 +200,7 @@ class TogetherUpstreamProvider(BaseUpstreamProvider):
         if override is not None:
             return override
         if pricing_raw:
-            from_catalog = _catalog_book(
-                pricing_raw, _PUBLISHED_DEFAULT_STEPS.get(key)
-            )
+            from_catalog = _catalog_book(pricing_raw, _PUBLISHED_DEFAULT_STEPS.get(key))
             if from_catalog is not None:
                 return from_catalog
         published = TOGETHER_IMAGE_USD.get(key)

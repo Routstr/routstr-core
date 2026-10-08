@@ -52,6 +52,7 @@ __all__ = [
     "produces_images",
     "reference_image_count",
     "reference_images_sats",
+    "requested_image_count",
     "resolution_label",
     "select_image_price_usd",
     "settle_image_sats",
@@ -79,8 +80,8 @@ RESOLUTION_MEGAPIXELS: dict[str, float] = {
 }
 _DEFAULT_MEGAPIXELS = 1.0
 
-# Bounds what a single reservation can hold. A larger batch is still billed per
-# image returned.
+# Most images one request may ask for. Settlement never charges past the
+# reservation, so a larger batch is refused rather than served partly free.
 MAX_RESERVED_IMAGES = 10
 
 
@@ -119,7 +120,7 @@ class ImagePricing(BaseModel):
     # How the upstream meters one generation. Tiers still describe the
     # per-image estimate for token and megapixel books, since the reservation
     # is taken before the response says how much was actually consumed.
-    unit: str = "image"
+    unit: ImageBillingUnit = "image"
     # ``token`` books: USD per image output token, and per input token by kind.
     output_token_usd: float = 0.0
     input_text_token_usd: float = 0.0
@@ -412,10 +413,14 @@ def _scale_factor(value: object) -> str | None:
     if isinstance(value, str):
         value = value.lower().removesuffix("x")
     try:
-        factor = int(float(value))  # type: ignore[arg-type]
+        factor = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError, OverflowError):
         return None
-    return f"{factor}x" if factor > 0 else None
+    # A fractional factor has no key of its own; truncating it would price 2.5x
+    # as 2x, so it falls through to the dearest upscale instead.
+    if not factor.is_integer() or factor <= 0:
+        return None
+    return f"{int(factor)}x"
 
 
 def reference_images_sats(model: "Model | None", body: dict) -> float:
@@ -437,10 +442,11 @@ def settle_image_sats(
     3. The per-image price at the requested tier, times images returned,
        plus the reference-image surcharge.
 
-    Step 3 is the contract for ``image`` and ``megapixel`` books. A ``token``
-    book whose response reports neither cost nor tokens cannot be metered;
-    ``None`` tells the caller to settle on the reservation rather than bill
-    the tier estimate as if it were authoritative.
+    Step 3 is the contract for ``image`` and ``megapixel`` books without
+    ``trust_upstream_cost``. A book that trusts the upstream's cost but got
+    none, or a ``token`` book whose response reports no usable tokens, cannot
+    be metered; ``None`` tells the caller to release the reservation rather
+    than bill an estimate as if it were authoritative.
 
     A response with no images and no reported cost is free; the reservation
     is released instead.
@@ -452,18 +458,38 @@ def settle_image_sats(
     rate = _sats_per_usd(model)
 
     if book is not None and rate > 0:
-        if book.trust_upstream_cost and usage.upstream_cost_usd > 0:
+        if book.trust_upstream_cost:
+            if usage.upstream_cost_usd <= 0:
+                return None
             return rate * usage.upstream_cost_usd
         if book.unit == "token":
             if usage.output_image_tokens <= 0:
                 return None
             token_usd = book.token_usd(usage)
-            if token_usd > 0:
-                return rate * token_usd
+            return rate * token_usd if token_usd > 0 else None
 
     return usage.image_count * per_image_sats(
         model, body, path
     ) + reference_images_sats(model, body)
+
+
+def requested_image_count(body: dict) -> int:
+    """Images ``body`` asks for, refusing a batch the reservation cannot hold.
+
+    OpenAI batches with ``n``, Venice's native route with ``variants``; either
+    may be set and every returned image is billed, so the larger one counts.
+    """
+    count = 1
+    for field in ("n", "variants"):
+        try:
+            count = max(count, int(body.get(field) or 1))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    if count > MAX_RESERVED_IMAGES:
+        raise ImageRequestRefused(
+            f"n and variants must be at most {MAX_RESERVED_IMAGES}"
+        )
+    return count
 
 
 def produces_images(model: "Model | None") -> bool:
@@ -506,12 +532,10 @@ def image_reservation_msats(
     if sats_per_image <= 0:
         return None
 
-    # OpenAI batches with ``n``; Venice's native route with ``variants``.
     try:
-        count = int(body.get("n") or body.get("variants") or 1)
-    except (TypeError, ValueError, OverflowError):
-        count = 1
-    count = min(max(count, 1), MAX_RESERVED_IMAGES)
+        count = requested_image_count(body)
+    except ImageRequestRefused:
+        return None
 
     total = (
         count * sats_per_image

@@ -84,7 +84,7 @@ def calculate_flat_cost(units: int, sats_per_unit: float) -> CostData:
     total_sats = units * sats_per_unit
     total_msats = math.ceil(total_sats * 1000)
     try:
-        total_usd = total_sats / sats_usd_price()
+        total_usd = total_sats * sats_usd_price()
     except Exception:
         total_usd = 0.0
     return CostData(

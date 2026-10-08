@@ -45,6 +45,7 @@ from .payment.image_pricing import (
     ImageRequestRefused,
     image_reservation_msats,
     quote_image_endpoint,
+    requested_image_count,
 )
 from .payment.models import Model
 from .payment.price import sats_usd_price
@@ -188,11 +189,12 @@ def _price_image_candidate(
     the request is quoted on one endpoint and pinned there. A quote above the
     node's per-request budget is refused like one that cannot be bounded.
     """
-    if is_openrouter_base_url(upstream.base_url):
-        try:
+    try:
+        requested_image_count(body)
+        if is_openrouter_base_url(upstream.base_url):
             model = quote_image_endpoint(body, model, path)
-        except ImageRequestRefused as refused:
-            return str(refused)
+    except ImageRequestRefused as refused:
+        return str(refused)
     reserved = image_reservation_msats(body, model, path)
     if reserved is None:
         return f"Model '{model.id}' cannot be priced for this request on this node"
@@ -1216,8 +1218,10 @@ async def _proxy(
                     )
                     raise
 
-                # Same-provider recovery must not relax an explicit route.
-                if response.status_code == 400 and not is_ehbp:
+                # Same-provider recovery must not relax an explicit route, and
+                # must not re-send an image request the reservation priced as
+                # sent.
+                if response.status_code == 400 and not is_ehbp and not single_dispatch:
                     correction = correct_request(
                         request_body,
                         extract_error_message(response),
