@@ -1,10 +1,11 @@
 """Upstream provider for the Together AI API.
 
 Together is OpenAI-compatible for chat and images. Its ``/models`` listing
-prices text per million tokens but says nothing about images, which are
-priced per image or per megapixel on its pricing page only. The image book
-therefore comes from a table of published prices, which the operator can
-extend or correct per model through ``provider_settings.image_prices``.
+prices text per million tokens and, for image models, carries either a per
+megapixel rate (``pricing.image_pixel.price_per_megapixel``) or a per-image
+starting price (``pricing.image.example_price``). Models the listing leaves
+unpriced fall back to a table of published prices; the operator can override
+any of it per model through ``provider_settings.image_prices``.
 """
 
 from __future__ import annotations
@@ -33,8 +34,9 @@ _EMBEDDING_TYPES = frozenset({"embedding"})
 
 # Published Together image prices, keyed by lower-cased model id, as
 # ``(usd, unit)`` with unit ``image`` or ``megapixel``. Checked against the
-# pricing page; a model missing here is not listed until an operator prices
-# it in ``provider_settings``.
+# pricing page; used only when the catalog entry carries no price. A model
+# missing from both is not listed until an operator prices it in
+# ``provider_settings``.
 TOGETHER_IMAGE_USD: dict[str, tuple[float, str]] = {
     "black-forest-labs/flux.1-schnell": (0.0027, "megapixel"),
     "black-forest-labs/flux.1-dev": (0.025, "megapixel"),
@@ -63,6 +65,26 @@ def _usd_per_million(value: Any) -> float | None:
         return None
     if isinstance(value, (int, float)):
         return float(value) / _USD_PER_MILLION
+    return None
+
+
+def _catalog_book(pricing_raw: dict[str, Any]) -> ImagePricing | None:
+    """A book from the price the ``/models`` entry itself carries.
+
+    ``image_pixel.price_per_megapixel`` is exact. ``image.example_price`` is
+    the upstream's "starting" per-image price, so a model priced by tier may
+    settle above it; operators can pin a ceiling through ``image_prices``.
+    """
+    per_pixel = pricing_raw.get("image_pixel")
+    if isinstance(per_pixel, dict):
+        usd = per_pixel.get("price_per_megapixel")
+        if isinstance(usd, (int, float)) and not isinstance(usd, bool) and usd > 0:
+            return static_image_book(float(usd), "megapixel")
+    per_image = pricing_raw.get("image")
+    if isinstance(per_image, dict):
+        usd = per_image.get("example_price")
+        if isinstance(usd, (int, float)) and not isinstance(usd, bool) and usd > 0:
+            return static_image_book(float(usd), "image")
     return None
 
 
@@ -134,12 +156,18 @@ class TogetherUpstreamProvider(BaseUpstreamProvider):
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("together/")
 
-    def image_book(self, model_id: str) -> ImagePricing | None:
-        """The operator's price for ``model_id`` if set, else the published one."""
+    def image_book(
+        self, model_id: str, pricing_raw: dict[str, Any] | None = None
+    ) -> ImagePricing | None:
+        """Operator price for ``model_id``, else the catalog's, else the table's."""
         key = model_id.lower()
         override = _override_book(self.image_prices.get(key))
         if override is not None:
             return override
+        if pricing_raw:
+            from_catalog = _catalog_book(pricing_raw)
+            if from_catalog is not None:
+                return from_catalog
         published = TOGETHER_IMAGE_USD.get(key)
         if published is None:
             return None
@@ -193,7 +221,10 @@ class TogetherUpstreamProvider(BaseUpstreamProvider):
                 continue
             models.append(model)
             if model.architecture.output_modalities == ["image"]:
-                book = self.image_book(model.id)
+                pricing_raw = entry.get("pricing")
+                book = self.image_book(
+                    model.id, pricing_raw if isinstance(pricing_raw, dict) else None
+                )
                 if book is not None:
                     books[model.id] = book
 

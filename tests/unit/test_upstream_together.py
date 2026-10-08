@@ -1,9 +1,9 @@
 """Unit tests for ``TogetherUpstreamProvider.fetch_models``.
 
-Together's ``/models`` prices text per million tokens and says nothing about
-images, so image models are priced from the published table or the
-operator's ``provider_settings.image_prices`` and dropped when neither has
-them.
+Together's ``/models`` prices text per million tokens and image models per
+megapixel or per image when it says so; otherwise image models are priced
+from the published table or the operator's ``provider_settings.image_prices``
+and dropped when none has them.
 """
 
 from __future__ import annotations
@@ -89,6 +89,22 @@ CATALOG: list[dict[str, Any]] = [
         "type": "image",
     },
     {
+        "id": "ByteDance/Seedream-5.0-lite",
+        "object": "model",
+        "created": 1,
+        "type": "image",
+        "pricing": {
+            "image": {"example_price": 0.035, "example_description": "2K & 3K"}
+        },
+    },
+    {
+        "id": "black-forest-labs/FLUX.2-max",
+        "object": "model",
+        "created": 1,
+        "type": "image",
+        "pricing": {"image_pixel": {"price_per_megapixel": 0.09, "min_steps": 50}},
+    },
+    {
         "id": "togethercomputer/m2-bert-80M-8k-retrieval",
         "object": "model",
         "created": 1,
@@ -148,6 +164,29 @@ def test_published_image_prices_become_books() -> None:
     assert kontext.image_pricing is not None
     assert kontext.image_pricing.unit == "image"
     assert kontext.pricing.image_output == pytest.approx(0.04)
+
+
+def test_catalog_prices_list_models_and_beat_the_table() -> None:
+    models, _ = _fetch()
+    by_id = {m.id: m for m in models}
+    lite = by_id["ByteDance/Seedream-5.0-lite"]
+    assert lite.image_pricing is not None
+    assert lite.image_pricing.unit == "image"
+    assert lite.pricing.image_output == pytest.approx(0.035)
+
+    # The table says 0.07/MP; the catalog's 0.09/MP wins.
+    flux_max = by_id["black-forest-labs/FLUX.2-max"]
+    assert flux_max.image_pricing is not None
+    assert flux_max.image_pricing.unit == "megapixel"
+    assert flux_max.image_pricing.megapixel_usd == pytest.approx(0.09)
+
+
+def test_operator_prices_beat_catalog_prices() -> None:
+    models, _ = _fetch(image_prices={"bytedance/seedream-5.0-lite": 0.05})
+    by_id = {m.id: m for m in models}
+    assert by_id["ByteDance/Seedream-5.0-lite"].pricing.image_output == pytest.approx(
+        0.05
+    )
 
 
 def test_unknown_image_models_and_other_families_are_dropped() -> None:
