@@ -16,4 +16,4 @@ All requests went through a local routstr-core node on this branch. Charge = wal
 
 The last two rows exercise the review fixes: `variants` is reserved and billed like `n`, and an upscale is priced by its factor instead of the model's generation tier.
 
-Together: provider registered, catalog priced (21 image models), but every generation on this account returns `third_party_data_sharing_blocked`; enable third-party data sharing on the Together org to run them.
+Together: provider registered, catalog priced (21 image models). Text chat through the node works (qwen3.5-35b-a3b, qwen3-coder-30b-a3b-instruct, qwen3-30b-a3b, gemma-4-26b-a4b-it: 200, charged 2 to 7 msat each, matching the balance delta). All 26 image models in Together's catalog are third-party hosted and every generation on this account returns `third_party_data_sharing_blocked`, so no Together image was produced.
