@@ -86,9 +86,11 @@ python3 scripts/node_setup.py start \
   answer before anything is published (a proxy `502` while the node boots is
   fine). Use `--private` if this fails;
 - writes `.env` from `.env.example` with owner-only (`0600`) permissions,
-  setting `HTTP_URL` and `RECEIVE_LN_ADDRESS`. An existing `.env` is never
-  blindly overwritten: a conflicting `HTTP_URL` is an error, and `NSEC` /
-  `ONION_URL` are refused (manage those elsewhere);
+  setting `HTTP_URL` and `RECEIVE_LN_ADDRESS` and leaving the template's upstream
+  pair commented, so the node boots with no upstream until you add one in the
+  dashboard. An existing `.env` is never blindly overwritten: a conflicting
+  `HTTP_URL` is an error, and `NSEC` / `ONION_URL` are refused (manage those
+  elsewhere);
 - builds and starts `compose.node.yml`: the API binds **`127.0.0.1` only**, there
   is no Tor service, and analytics sharing starts off (change it later in Settings);
 - **auto-generates the node's secrets** — the master key `routstr_secret.key` and
