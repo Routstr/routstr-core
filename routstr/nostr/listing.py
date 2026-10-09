@@ -285,12 +285,31 @@ DEFAULT_RELAY_URLS = [
 ]
 
 
+def _is_unroutable_url(url: str) -> bool:
+    """True for localhost/loopback/private/link-local hosts.
+
+    Such URLs are useless to other users, and announcing them publishes a test
+    or dev node to public relays (seen with ``HTTP_URL=http://127.0.0.1:8000``).
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    host = (urlsplit(url).hostname or "").lower()
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified
+
+
 def _resolve_endpoint_urls() -> list[str]:
     """Endpoints to advertise: a public HTTP URL and/or an onion URL."""
     endpoint_urls: list[str] = []
 
     base_url = (settings.http_url or "").strip()
-    if base_url and base_url != "http://localhost:8000":
+    if base_url and not _is_unroutable_url(base_url):
         endpoint_urls.append(base_url)
 
     onion_url = (settings.onion_url or "").strip()
