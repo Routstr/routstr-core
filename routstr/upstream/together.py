@@ -36,7 +36,9 @@ _EMBEDDING_TYPES = frozenset({"embedding"})
 # ``(usd, unit)`` with unit ``image`` or ``megapixel``. Checked against the
 # pricing page; used only when the catalog entry carries no price. A model
 # missing from both is not listed until an operator prices it in
-# ``provider_settings``.
+# ``provider_settings``. FLUX.2 [pro]/[dev]/[flex] are listed per image at
+# the lowest resolution, with larger sizes costing more, so that price is
+# reserved per megapixel.
 TOGETHER_IMAGE_USD: dict[str, tuple[float, str]] = {
     "black-forest-labs/flux.1-schnell": (0.0027, "megapixel"),
     "black-forest-labs/flux.1-dev": (0.025, "megapixel"),
@@ -47,8 +49,8 @@ TOGETHER_IMAGE_USD: dict[str, tuple[float, str]] = {
     "black-forest-labs/flux.1-kontext-pro": (0.04, "megapixel"),
     "black-forest-labs/flux.1-kontext-max": (0.08, "megapixel"),
     "black-forest-labs/flux.2-pro": (0.03, "megapixel"),
-    "black-forest-labs/flux.2-dev": (0.025, "megapixel"),
-    "black-forest-labs/flux.2-flex": (0.06, "megapixel"),
+    "black-forest-labs/flux.2-dev": (0.0154, "megapixel"),
+    "black-forest-labs/flux.2-flex": (0.03, "megapixel"),
     "black-forest-labs/flux.2-max": (0.07, "megapixel"),
     "bytedance-seed/seedream-3.0": (0.018, "image"),
     "bytedance-seed/seedream-4.0": (0.03, "image"),

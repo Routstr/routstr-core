@@ -284,6 +284,17 @@ def test_trusted_upstream_cost_wins_over_the_flat_rate() -> None:
     assert settle_image_sats(model, {}, ImageUsage(image_count=2)) is None
 
 
+def test_a_pinned_endpoint_without_a_reported_cost_bills_its_listed_price() -> None:
+    """An endpoint lists one per-image price, so that price is the bill."""
+    book = TRUSTED_BOOK.copy(update={"endpoint_tag": "alibaba"})
+    model = _model(book)
+    assert settle_image_sats(model, {}, ImageUsage(image_count=2)) == pytest.approx(
+        80.0
+    )
+    usage = ImageUsage(image_count=1, upstream_cost_usd=0.011)
+    assert settle_image_sats(model, {}, usage) == pytest.approx(11.0)
+
+
 def test_nothing_returned_costs_nothing_even_with_a_reported_cost() -> None:
     model = _model(TRUSTED_BOOK)
     assert settle_image_sats(model, {}, ImageUsage(upstream_cost_usd=0.5)) == 0.0
@@ -412,7 +423,11 @@ async def _drain(response: Any) -> bytes:
 
 
 async def _settle(
-    model: Model, body: dict, payload: dict, reserved: int = RESERVED
+    model: Model,
+    body: dict,
+    payload: dict,
+    reserved: int = RESERVED,
+    raises: str | None = None,
 ) -> tuple[int, int, str | None]:
     engine = await _engine()
     provider = BaseUpstreamProvider(
@@ -445,7 +460,7 @@ async def _settle(
                 auth_module.adjust_payment_for_tokens,
             ),
         ):
-            response = await provider.forward_request(
+            forwarded = provider.forward_request(
                 request,
                 "v1/images/generations",
                 {},
@@ -456,7 +471,11 @@ async def _settle(
                 model,
                 snapshot,
             )
-            await _drain(response)
+            if raises:
+                with pytest.raises(UpstreamError, match=raises):
+                    await forwarded
+            else:
+                await _drain(await forwarded)
 
     async with AsyncSession(engine, expire_on_commit=False) as session:
         settled = await session.get(ApiKey, snapshot.key_hash)
@@ -565,3 +584,21 @@ async def test_an_oversized_image_response_is_refused(declared: bool) -> None:
         200, content=payload, request=httpx.Request("POST", "http://upstream")
     )
     assert await _read_bounded(response, len(payload)) == payload
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_image_response_charges_the_quote() -> None:
+    """The upstream answered 200 and billed the node, so the hold is kept."""
+    from routstr.core.settings import settings
+
+    model = _model(TRUSTED_BOOK)
+    with patch.object(settings, "image_max_response_bytes", 16):
+        balance, spent, status = await _settle(
+            model,
+            {"model": "img", "prompt": "a cat"},
+            {"data": [{"b64_json": "x" * 64}], "usage": {"cost": 0.001}},
+            raises="size limit",
+        )
+    assert spent == RESERVED
+    assert balance == BALANCE - RESERVED
+    assert status == "charged"

@@ -443,8 +443,9 @@ def settle_image_sats(
        plus the reference-image surcharge.
 
     Step 3 is the contract for ``image`` and ``megapixel`` books without
-    ``trust_upstream_cost``. A book that trusts the upstream's cost but got
-    none, or a ``token`` book whose response reports no usable tokens, cannot
+    ``trust_upstream_cost``, and for an endpoint's book that got no cost: it
+    lists one per-image price, so that price is the bill. Any other book that
+    trusts the upstream's cost but got none, or a ``token`` book whose response reports no usable tokens, cannot
     be metered; ``None`` tells the caller to release the reservation rather
     than bill an estimate as if it were authoritative.
 
@@ -458,10 +459,10 @@ def settle_image_sats(
     rate = _sats_per_usd(model)
 
     if book is not None and rate > 0:
-        if book.trust_upstream_cost:
-            if usage.upstream_cost_usd <= 0:
-                return None
+        if book.trust_upstream_cost and usage.upstream_cost_usd > 0:
             return rate * usage.upstream_cost_usd
+        if book.trust_upstream_cost and book.endpoint_tag is None:
+            return None
         if book.unit == "token":
             if usage.output_image_tokens <= 0:
                 return None

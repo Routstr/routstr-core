@@ -17,7 +17,6 @@ from ..payment.image_pricing import ImageUsage
 
 __all__ = [
     "ImageUsage",
-    "count_generated_images",
     "is_image_generation_path",
     "parse_json_body",
     "read_image_response",
@@ -86,15 +85,6 @@ def _usd(value: Any) -> float:
             return 0.0
         return parsed if parsed > 0 else 0.0
     return 0.0
-
-
-def count_generated_images(content: bytes, is_json: bool) -> int:
-    """How many images the response carried.
-
-    A response that produced nothing counts zero and is never billed; the
-    reservation is released instead.
-    """
-    return read_image_response(content, is_json).image_count
 
 
 def read_image_response(content: bytes, is_json: bool) -> ImageUsage:

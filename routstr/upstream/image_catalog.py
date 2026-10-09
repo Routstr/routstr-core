@@ -57,7 +57,10 @@ _OPENAI_IMAGE_USD_1K: dict[str, dict[str, float]] = {
 # per-image token counts are not documented, so they are reserved at
 # multiples of ``high``.
 _OPENAI_IMAGE_25_EXTRA_STEPS: dict[str, float] = {"xhigh": 2.0, "max": 4.0}
-_OPENAI_IMAGE_DEFAULT_QUALITY = "medium"
+# OpenAI's default quality is ``auto``, "the best quality for the given
+# model", so a request that names none is reserved like ``auto``: at the
+# dearest step.
+_OPENAI_IMAGE_DEFAULT_QUALITY = "auto"
 # Ceiling on the tokens one reference image meters: OpenAI scales inputs to
 # at most four 512px tiles (85 + 4 x 170) and adds at most 6,240 tokens for
 # high input fidelity, so 8,192 covers every documented case.
@@ -115,11 +118,12 @@ def openai_image_book(model_id: str, pricing: dict[str, Any]) -> ImagePricing | 
             }
         )
 
+    dearest_1k = max(steps.values())
+    steps["auto"] = dearest_1k
     tiers = [
         ImagePriceTier(resolution="1K", quality=quality, usd=usd)
         for quality, usd in steps.items()
     ]
-    dearest_1k = max(steps.values())
     input_text = _float(pricing.get("prompt"))
     input_image = _float(pricing.get("image_token")) or input_text
 
@@ -129,7 +133,7 @@ def openai_image_book(model_id: str, pricing: dict[str, Any]) -> ImagePricing | 
         default_resolution="1K",
         default_quality=_OPENAI_IMAGE_DEFAULT_QUALITY,
         resolutions=["1K"],
-        qualities=[*steps.keys(), "auto"],
+        qualities=list(steps),
         unit="token",
         output_token_usd=output_token_usd,
         input_text_token_usd=input_text,

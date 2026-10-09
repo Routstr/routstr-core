@@ -2197,14 +2197,38 @@ class BaseUpstreamProvider:
         """
         from ..core.settings import settings
 
-        content = await _read_bounded(response, settings.image_max_response_bytes)
+        model_id = model_obj.id if model_obj else "unknown"
+        try:
+            content = await _read_bounded(response, settings.image_max_response_bytes)
+        except UpstreamError:
+            # The upstream answered 200 and has billed the node; the quote is
+            # what the key agreed to, so it is charged though the body is not
+            # relayed.
+            logger.error(
+                "Image response exceeded the size limit; charging the reservation",
+                extra={
+                    "model": model_id,
+                    "reserved_msats": max_cost_for_model,
+                    "key_hash": key.hashed_key[:8] + "...",
+                },
+            )
+            await adjust_payment_for_tokens(
+                key,
+                {"model": model_id, "usage": None},
+                session,
+                max_cost_for_model,
+                model_obj,
+                self.provider_fee,
+                reservation_snapshot,
+                precomputed_cost=calculate_flat_cost(1, max_cost_for_model / 1000),
+            )
+            raise
         content_type = response.headers.get("content-type")
         usage = read_image_response(
             content, _is_json_content_type(content_type) if content_type else True
         )
         body = parse_json_body(request_body)
         total_sats = settle_image_sats(model_obj, body, usage, path)
-        model_id = model_obj.id if model_obj else "unknown"
 
         if total_sats is None:
             # The upstream reported no cost or usage we can bill on. An

@@ -141,7 +141,7 @@ def test_openai_book_per_family() -> None:
     assert two is not None and two.qualities == ["low", "medium", "high", "auto"]
     assert two.trust_upstream_cost is False
     mini = openai_image_book("gpt-image-1-mini", pricing)
-    assert mini is not None and select_image_price_usd(mini, {}) == pytest.approx(0.015)
+    assert mini is not None and select_image_price_usd(mini, {}) == pytest.approx(0.052)
     flare = openai_image_book("gpt-image-2.5-flare", pricing)
     assert flare is not None
     assert select_image_price_usd(flare, {"quality": "max"}) == pytest.approx(0.211 * 4)
@@ -308,6 +308,10 @@ def test_openai_provider_prices_gpt_image_from_its_token_rate() -> None:
         }
     )
     assert per_image_sats(sats, {"quality": "medium"}) == pytest.approx(0.053 * 1.01)
+    # OpenAI defaults ``quality`` to ``auto``, its best quality, so a request
+    # naming none reserves the dearest step, as ``auto`` does.
+    assert per_image_sats(sats, {}) == pytest.approx(0.211 * 1.01)
+    assert per_image_sats(sats, {"quality": "auto"}) == pytest.approx(0.211 * 1.01)
 
 
 def test_xai_drops_image_models_the_openrouter_feed_prices_per_token() -> None:
