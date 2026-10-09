@@ -688,7 +688,15 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
     from ..proxy import get_unique_models
 
     items = get_unique_models()
+    confidential: dict = {}
+    if settings.confidential_sidecar_url:
+        from ..confidential import models_fields
+
+        confidential = await models_fields()
     data = []
     for model in items:
-        data.append(model.dict())
+        item = model.dict()
+        if model.id in confidential:
+            item["confidential_upstream"] = confidential[model.id]
+        data.append(item)
     return {"data": data}

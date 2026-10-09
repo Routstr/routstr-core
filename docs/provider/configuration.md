@@ -173,6 +173,21 @@ the first configured trusted mint. Core discovers that mint's active units from
 its keysets and, when advertised, filters them through its enabled NUT-04/NUT-05
 Bolt11 methods. For an existing key, its liability unit must remain supported;
 for a new key, Core prefers the foreign token's unit, then `sat`, then `msat`.
+
+### Confidential Upstream (optional)
+
+Lets clients that opt in use your upstream provider *through* your node,
+without your node seeing their prompts or responses, and without your
+provider API key leaving your node. It needs the separate **cu-sidecar**
+process ([routstr-confidential](https://github.com/jooray/routstr-confidential),
+`crypto/relay`) running next to the node on loopback.
+
+| Env | Description |
+| --- | ----------- |
+| `CONFIDENTIAL_SIDECAR_URL` | Base URL of the cu-sidecar (e.g. `http://127.0.0.1:7443`). Empty (default) disables the mode. |
+
+Requires `NSEC` (the node signs its offer and receipts). Billing, mints and
+refunds use your normal settings. See [Confidential upstream](../confidential-upstream.md).
 With an empty trusted-mint list or no compatible unit, foreign top-ups are
 rejected before any token proofs are spent.
 

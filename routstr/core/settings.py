@@ -57,6 +57,11 @@ class Settings(BaseSettings):
         default=30.0, ge=0, env="UPSTREAM_COOLDOWN_SECONDS"
     )
 
+    # Confidential-upstream mode: base URL of the cu-sidecar (e.g.
+    # http://127.0.0.1:7443). Empty disables the mode: no offer, no websocket
+    # routes, no /v1/models field.
+    confidential_sidecar_url: str = Field(default="", env="CONFIDENTIAL_SIDECAR_URL")
+
     # Node info
     name: str = Field(default="ARoutstrNode", env="NAME")
     description: str = Field(default="A Routstr Node", env="DESCRIPTION")
