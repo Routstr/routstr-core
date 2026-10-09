@@ -352,8 +352,9 @@ only steps 1–2 remain; when you started in **private mode** (or with
 3. Choose a public HTTPS domain, set up DNS and certificates, firewall the host,
    and run the reverse proxy **on the same host**. Only `443` should be publicly
    routed — keep the node port on loopback (`compose.node.yml` does this; with
-   `compose.yml`, firewall port `8000`). Restrict administrative endpoints to
-   trusted clients at the proxy where you can.
+   `compose.yml`, firewall port `8000`). Optionally, restrict administrative
+   endpoints to trusted clients at the proxy — the node's admin password is the
+   required protection.
 4. Decide explicitly whether the node should be discoverable on Nostr (see
    [Discovery](discovery.md)) and whether to share analytics. Setting the URL in
    the next step publishes the listing immediately.

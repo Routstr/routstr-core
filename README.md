@@ -62,7 +62,7 @@ git clone https://github.com/Routstr/routstr-core.git
 cd routstr-core
 # production: check out a reviewed release tag
 
-# Phase 0: DNS + TLS + reverse proxy -> 127.0.0.1:8000, and restrict /admin
+# Phase 0: DNS + TLS + reverse proxy -> 127.0.0.1:8000
 
 # Phase 1: start (public is the default)
 python3 scripts/node_setup.py start \
