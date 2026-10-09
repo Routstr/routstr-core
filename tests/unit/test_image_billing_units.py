@@ -197,7 +197,7 @@ def test_together_override_rejects_an_unknown_unit() -> None:
     flat = _override_book({"usd": 0.04})
     assert flat is not None and flat.unit == "image"
     with pytest.raises(ValidationError):
-        ImagePricing(max_usd=0.04, unit="pixel")
+        ImagePricing.parse_obj({"max_usd": 0.04, "unit": "pixel"})
 
 
 def test_reservation_for_a_token_book_uses_the_per_image_estimate() -> None:
