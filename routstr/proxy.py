@@ -3,6 +3,7 @@ import inspect
 import json
 import re
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -330,6 +331,7 @@ _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     "models": frozenset({"GET"}),
     "attestation": frozenset({"GET"}),
     "tee/attestation": frozenset({"GET"}),
+    "tee/signature": frozenset({"GET"}),
 }
 
 _ALLOWED_METHODS = frozenset({"GET", "POST"})
@@ -565,6 +567,57 @@ async def _proxy(
 
     if not _forwarding_allowed(path, request.method):
         return build_not_found_response(request, path)
+
+    metadata_path = _canonical_api_path(path)
+    if (
+        request.method == "GET"
+        and metadata_path in {"tee/attestation", "tee/signature"}
+        and ("model" in request.query_params or metadata_path == "tee/signature")
+    ):
+        if MODEL_PATH_HEADER in headers:
+            return create_error_response(
+                "unsupported_request",
+                "Model paths do not apply to attestation",
+                400,
+                request=request,
+            )
+        model_id = request.query_params.get("model", "")
+        venice_candidates = (
+            [
+                (model, upstream)
+                for model, upstream in (get_candidates(model_id) or [])
+                if upstream.provider_type == "venice" and upstream in _upstreams
+            ]
+            if model_id
+            else []
+        )
+        if not venice_candidates:
+            return create_error_response(
+                "invalid_request",
+                "No Venice upstream for the requested model",
+                404,
+                request=request,
+            )
+        model, upstream = venice_candidates[0]
+        params = [(k, v) for k, v in request.query_params.multi_items() if k != "model"]
+        params.append(("model", upstream.transform_model_name(model.id)))
+
+        async def receive_metadata_body() -> dict[str, Any]:
+            # Reusing request.receive would wait for an already-consumed body.
+            return {"type": "http.request", "body": request_body, "more_body": False}
+
+        forwarded = Request(
+            {**request.scope, "query_string": urlencode(params).encode()},
+            receive=receive_metadata_body,
+        )
+        request.state.model = model_id
+        request.state.provider = upstream.provider_type
+        try:
+            return await upstream.forward_get_request(
+                forwarded, metadata_path, upstream.prepare_headers(headers)
+            )
+        except UpstreamError as exc:
+            return create_upstream_error_response(exc, request)
 
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
 
