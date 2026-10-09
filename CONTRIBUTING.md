@@ -27,8 +27,8 @@ We welcome contributions to Routstr Proxy! This document provides guidelines and
 1. **Fork and clone the repository**
 
    ```bash
-   git clone https://github.com/YOUR_USERNAME/routstr-proxy.git
-   cd routstr-proxy
+   git clone https://github.com/Routstr/routstr-core.git
+   cd routstr-core
    ```
 
 2. **Set up the development environment**

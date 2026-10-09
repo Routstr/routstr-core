@@ -13,7 +13,8 @@ This repo contains Routstr Core: a FastAPI-based reverse proxy that sits in fron
 
 - **Overview**: <https://docs.routstr.com/overview/>
 - **Provider Guide**: <https://docs.routstr.com/provider/quickstart/>
-- **User Guide**: <https://docs.routstr.com/user-guide/introduction/>
+- **Client Guide**: <https://docs.routstr.com/client/introduction/>
+- **Browse providers and models**: <https://routstr.com/providers>
 
 ## Basic Usage
 
