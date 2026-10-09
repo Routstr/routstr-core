@@ -67,7 +67,9 @@ async def test_first_boot_preserves_generated_npub(
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(lambda c: Secret.__table__.create(c))
+            await conn.run_sync(
+                lambda c: Secret.__table__.create(c)  # type: ignore[attr-defined]
+            )
             # Migrations create the table, but a fresh node has no settings row.
             await conn.execute(
                 text(
@@ -89,7 +91,7 @@ async def test_first_boot_preserves_generated_npub(
             assert blob["npub"] == generated_npub
             assert "nsec" not in blob
             secret = await session.get(Secret, 1)
-            assert secret is not None
+            assert secret is not None and secret.encrypted_nsec is not None
             assert vault.decrypt(secret.encrypted_nsec) == generated_nsec
 
             # A subsequent boot keeps the same identity from the encrypted store.
