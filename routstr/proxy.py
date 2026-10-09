@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import math
 import re
 from typing import Any
 
@@ -191,9 +192,30 @@ def _price_image_candidate(
     """
     try:
         requested_image_count(body)
+        # A published output-tier estimate is not a provider-enforced token
+        # limit, even when input tokens can be conservatively estimated.
+        if model.image_pricing is not None and model.image_pricing.unit == "token":
+            return "Token-priced images require provider-enforced quantity bounds"
+        fx = sats_usd_price()
+        fee = upstream.provider_fee
+        if not math.isfinite(fx) or fx <= 0 or not math.isfinite(fee) or fee <= 0:
+            return "Image requests require finite positive exchange rates and fees"
+        # Work on a request snapshot, never mutate cached/catalogue pricing.
+        model = model.copy(deep=True)
+        model._image_quote_usd_per_sat = fx
+        if model.image_pricing is not None:
+            book = model.image_pricing
+            model.sats_pricing = model.pricing.copy(
+                update={
+                    "image_output": book.max_usd * fee / fx,
+                    "image": book.input_image_usd * fee / fx,
+                }
+            )
         if is_openrouter_base_url(upstream.base_url):
+            if path.strip("/").removeprefix("v1/") != "images/generations":
+                return "OpenRouter only supports native image generation"
             model = quote_image_endpoint(body, model, path)
-    except ImageRequestRefused as refused:
+    except (ImageRequestRefused, ValueError) as refused:
         return str(refused)
     reserved = image_reservation_msats(body, model, path)
     if reserved is None:
@@ -201,7 +223,7 @@ def _price_image_candidate(
     budget = settings.image_max_request_usd
     if budget > 0:
         try:
-            reserved_usd = reserved / 1000 * sats_usd_price()
+            reserved_usd = reserved / 1000 * fx
         except ValueError:
             return "Image requests cannot be priced until the exchange rate is known"
         if reserved_usd > budget:
@@ -1338,6 +1360,10 @@ async def _proxy(
                     "max_cost_for_model": max_cost_for_model,
                 },
             )
+            # Undo an unfinished charge claim before releasing the durable
+            # image reservation; otherwise release observes uncommitted status.
+            if single_dispatch:
+                await session.rollback()
             # The cancellation has been caught, so complete exact cleanup in
             # this task before the request-scoped session can be torn down.
             await revert_pay_for_request(
@@ -1368,6 +1394,8 @@ async def _proxy(
 
             # If this was the last provider
             if i == len(candidates) - 1:
+                if single_dispatch:
+                    await session.rollback()
                 await revert_pay_for_request(
                     key, session, max_cost_for_model, reservation_snapshot
                 )
@@ -1375,6 +1403,14 @@ async def _proxy(
 
             # Otherwise loop continues to next provider
             continue
+
+        except Exception:
+            if single_dispatch:
+                await session.rollback()
+                await revert_pay_for_request(
+                    key, session, max_cost_for_model, reservation_snapshot
+                )
+            raise
 
     # Should not be reached given logic above
     return create_error_response(

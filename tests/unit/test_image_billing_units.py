@@ -171,14 +171,17 @@ def test_a_batch_past_the_reservation_cap_is_refused(body: dict) -> None:
 
 def test_the_proxy_refuses_an_oversized_batch_on_every_image_upstream() -> None:
     model = _model(UPSCALE_BOOK)
-    upstream = MagicMock(base_url="https://api.venice.ai/api/v1")
+    upstream = MagicMock(base_url="https://api.venice.ai/api/v1", provider_fee=1.0)
     for body in ({"prompt": "cat", "n": 11}, {"prompt": "cat", "variants": 11}):
         refused = _price_image_candidate(body, model, upstream, "v1/image/generate")
         assert refused == "n and variants must be at most 10"
-    priced = _price_image_candidate(
-        {"prompt": "cat", "variants": 10}, model, upstream, "v1/image/generate"
-    )
-    assert priced == (model, upstream)
+    with patch("routstr.proxy.sats_usd_price", return_value=0.001):
+        priced = _price_image_candidate(
+            {"prompt": "cat", "variants": 10}, model, upstream, "v1/image/generate"
+        )
+    assert isinstance(priced, tuple)
+    assert priced[0].image_pricing == model.image_pricing
+    assert priced[1] is upstream
 
 
 def test_flat_cost_reports_usd_at_usd_per_sat() -> None:
@@ -197,7 +200,7 @@ def test_together_override_rejects_an_unknown_unit() -> None:
     flat = _override_book({"usd": 0.04})
     assert flat is not None and flat.unit == "image"
     with pytest.raises(ValidationError):
-        ImagePricing(max_usd=0.04, unit="pixel")
+        ImagePricing.parse_obj({"max_usd": 0.04, "unit": "pixel"})
 
 
 def test_reservation_for_a_token_book_uses_the_per_image_estimate() -> None:

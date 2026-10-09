@@ -65,6 +65,7 @@ def _upstream(base_url: str, forward: AsyncMock) -> MagicMock:
     upstream = MagicMock()
     upstream.provider_type = "test"
     upstream.base_url = base_url
+    upstream.provider_fee = 1.0
     upstream.db_id = None
     upstream.prepare_headers = MagicMock(side_effect=lambda h: h)
     upstream.forward_request = forward
@@ -86,6 +87,7 @@ async def _run_proxy(
     )
     with (
         patch.object(proxy_module, "get_candidates", return_value=candidates),
+        patch.object(proxy_module, "sats_usd_price", return_value=0.001),
         patch.object(
             proxy_module, "get_max_cost_for_model", AsyncMock(return_value=40_000)
         ),
@@ -104,7 +106,7 @@ async def _run_proxy(
     ):
         request = _request(body or {"model": "test-model", "prompt": "a cat"})
         return await proxy_module._proxy(
-            request, path, MagicMock(), await request.body()
+            request, path, MagicMock(rollback=AsyncMock()), await request.body()
         )
 
 

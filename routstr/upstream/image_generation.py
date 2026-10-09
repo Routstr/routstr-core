@@ -25,6 +25,7 @@ __all__ = [
 
 # OpenAI's images API plus the native image routes providers expose beside it.
 _IMAGE_GENERATION_SUFFIXES = (
+    "/images",
     "/images/generations",
     "/images/edits",
     "/images/variations",
