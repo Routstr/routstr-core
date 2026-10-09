@@ -106,9 +106,11 @@ python3 scripts/node_setup.py start --private
   advertises a dead endpoint;
 - creates `.env` from `.env.example` with owner-only (`0600`) permissions when it
   does not exist, and only writes the keys it manages (`HTTP_URL`,
-  `RECEIVE_LN_ADDRESS`, `MIN_PAYOUT_SAT`, `PAYOUT_INTERVAL_SECONDS`). A
-  conflicting `HTTP_URL` is an error and `NSEC`/`ONION_URL` are refused, so an
-  operator edit is never silently clobbered. Review it and never commit it;
+  `RECEIVE_LN_ADDRESS`, `MIN_PAYOUT_SAT`, `PAYOUT_INTERVAL_SECONDS`). The
+  template's upstream pair is left commented, so a new node has no upstream until
+  one is added in the dashboard. A conflicting `HTTP_URL` is an error and
+  `NSEC`/`ONION_URL` are refused, so an operator edit is never silently clobbered.
+  Review it and never commit it;
 - validates `--ln-address` (a `user@host` address is resolved to its LNURL-pay
   endpoint) — a saved address is still not a *tested* payout;
 - builds and starts `compose.node.yml`, generates the master key and Nostr
@@ -194,9 +196,12 @@ Everything can be configured from the dashboard after first start, but you can
 pre-configure a deployment by editing the `.env` file you created above:
 
 ```bash
-# Upstream (optional — can also be set from the dashboard)
-UPSTREAM_BASE_URL=https://api.openai.com/v1
-UPSTREAM_API_KEY=sk-proj-...
+# Upstream (optional — prefer the dashboard, where providers are managed).
+# Uncommenting this pair seeds one enabled "custom" provider on the node's first
+# boot; the values are saved in Settings afterwards, so dashboard changes and
+# later `.env` edits win over it.
+# UPSTREAM_BASE_URL=https://api.openai.com/v1
+# UPSTREAM_API_KEY=sk-proj-...
 
 # Encrypts node secrets at rest. Optional — if unset, a key is generated next to
 # your database (on the same volume) and its file is named once for backup. Set
@@ -347,8 +352,9 @@ only steps 1–2 remain; when you started in **private mode** (or with
 3. Choose a public HTTPS domain, set up DNS and certificates, firewall the host,
    and run the reverse proxy **on the same host**. Only `443` should be publicly
    routed — keep the node port on loopback (`compose.node.yml` does this; with
-   `compose.yml`, firewall port `8000`). Restrict administrative endpoints to
-   trusted clients at the proxy where you can.
+   `compose.yml`, firewall port `8000`). Optionally, restrict administrative
+   endpoints to trusted clients at the proxy — the node's admin password is the
+   required protection.
 4. Decide explicitly whether the node should be discoverable on Nostr (see
    [Discovery](discovery.md)) and whether to share analytics. Setting the URL in
    the next step publishes the listing immediately.
