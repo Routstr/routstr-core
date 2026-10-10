@@ -73,8 +73,9 @@ class Settings(BaseSettings):
     # routes, no /v1/models field.
     confidential_sidecar_url: str = Field(default="", env="CONFIDENTIAL_SIDECAR_URL")
     # Denial-of-service limit: confidential sessions per client address that
-    # have not been used yet (from setup until the credential record is
-    # written). Pre-warmed sessions count. 0 disables the limit.
+    # have not been used yet (from the WebSocket accept, before the setup
+    # frame, until the credential record is written). Pre-warmed sessions
+    # count. 0 disables the limit.
     confidential_max_unused_per_ip: int = Field(
         default=12, env="CONFIDENTIAL_MAX_UNUSED_PER_IP"
     )

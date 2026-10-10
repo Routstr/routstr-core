@@ -35,8 +35,9 @@ cannot read (cf. EHBP), at rates fixed when the session starts:
    also carry `offer_sig`, the `sig` of the signed offer the client verified.
 2. The session's rates (msats per 1k tokens: `in`, `cached_in`, `out`) are
    frozen at setup. With `offer_sig` they are that offer's `price_list` entry
-   for the model; the node honours offers it signed in the last 10 minutes
-   (an unchanged offer keeps its signature). An unknown or expired
+   for the model; the node honours an offer for 10 minutes after it last
+   served it (an unchanged offer keeps its signature, and serving it again
+   restarts the 10 minutes) and keeps at most 512 offers. An unknown or expired
    `offer_sig`, or a model the offer does not price, is refused with
    `409` / `offer_expired`, and the client refetches the offer. Without
    `offer_sig` the current rates are frozen.
@@ -58,7 +59,16 @@ cannot read (cf. EHBP), at rates fixed when the session starts:
    actual-cost path (released when the cost is zero). A usage event for
    another model, or without token counts, charges the reservation.
 5. The node then sends a signed receipt with the usage, the cost, the
-   reservation, the frozen rates and the new balance.
+   reservation, the frozen rates, the new balance and the SHA-256 of the
+   session attestation. The attestation comes from the sidecar when the
+   provider closes the connection: it binds the session id, the
+   certificate-chain hash, both handshake transcript hashes, the record count
+   and the SHA-256 of all bytes in each direction, the credential-record
+   commitment (`c_commit`) and the time. The sidecar signs it with a
+   per-process Ed25519 key; the node re-signs it with its Nostr key (the
+   sidecar's signature is passed along as `sidecar_sig`). The client checks
+   the node's signature and that the session id and transcript hashes are
+   its own.
 6. An upstream HTTP error is disclosed under π_C3 from the response's status
    line and headers only; the node learns the status and those headers, never
    the error body. A 4xx or 503 releases the reservation (less the session fee,
@@ -141,7 +151,14 @@ sessions at once; parallel coding agents need several.
   string, `max_tokens` an integer in `[1, max_tokens_cap]`, `len` (the request
   body size) an integer in `[1, 8 MiB]`, `nonce_c` 64 hex characters.
 - At most 32 confidential sessions run at once per node process; a session
-  lasts at most 10 minutes.
+  lasts at most 10 minutes from the websocket accept. (The sidecar gives an
+  armed session 10 minutes from its setup to send the ClientHello and then
+  starts a fresh 10-minute limit, so in practice the node's limit is the one
+  that ends a session.)
+- A session counts as unused for `CONFIDENTIAL_MAX_UNUSED_PER_IP` from the
+  websocket accept, before the `setup` frame arrives, until the sidecar
+  reports that the credential record was written (`head_written`), or until
+  the session ends.
 - Every refusal or failure is sent as
   `{"type":"error","status":<int>,"reason":<str>,"detail":<…>}` before the
   socket closes (400 bad setup, 402 balance, 408 timeout, 409 stale offer,
@@ -158,7 +175,7 @@ sessions at once; parallel coding agents need several.
 | Env | Meaning | Default |
 |---|---|---|
 | `CONFIDENTIAL_SIDECAR_URL` | cu-sidecar base URL; empty disables the mode | `""` |
-| `CONFIDENTIAL_MAX_UNUSED_PER_IP` | refuse (429) a new session from a client address that already has this many unused sessions (set up, credential record not yet written; pre-warmed sessions count); 0 disables | `12` |
+| `CONFIDENTIAL_MAX_UNUSED_PER_IP` | refuse (429) a new session from a client address that already has this many unused sessions (connected, credential record not yet written; counted from the websocket accept, before the setup; pre-warmed sessions count); 0 disables | `12` |
 | `CONFIDENTIAL_TRUSTED_PROXIES` | comma-separated peers whose client-address header is believed; `self` adds the node's own addresses (where a rootless container port forwarder connects from; enable only behind a reverse proxy that always sets the header) | `127.0.0.1,::1` |
 | `CONFIDENTIAL_SESSION_FEE_MSAT` | fee (msat) on top of the usage of a completed confidential request, and the charge for a provider refusal (4xx/503); published in the signed offer; clients must accept it at setup | `0` (off) |
 | `CONFIDENTIAL_ABANDON_FEE_MSAT` | fee (msat) for a session the sidecar accepted that ends without a request reaching the provider (armed and never used, aborted, client gone): the anti-DoS deposit, reserved at setup; never below the session fee (0 = equal to it) | `0` (off) |
@@ -172,8 +189,8 @@ afterwards a value in the database wins over the environment, so change them
 with the admin settings API (`PATCH /admin/api/settings`, e.g.
 `{"confidential_session_fee_msat": 2000, "confidential_abandon_fee_msat": 10000}`)
 or the dashboard. Clients pick up a
-change with the next offer; sessions set up on an older signed offer (up to
-10 minutes) keep its terms.
+change with the next offer; sessions set up on an older signed offer (valid
+for 10 minutes after it was last served) keep its terms.
 
 ## Tests
 
