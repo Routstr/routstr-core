@@ -177,12 +177,17 @@ def test_candidate_is_the_provider_behind_the_sidecar_host(
     assert conf.candidate_for("m", "api.example.com") is None
 
 
-def test_modality_allowed_semantics() -> None:
-    assert conf.modality_allowed("m", None) is True
-    assert conf.modality_allowed("m", {}) is True
-    assert conf.modality_allowed("m", {"m": True}) is True
-    assert conf.modality_allowed("m", {"m": False}) is False
-    assert conf.modality_allowed("m", {"other": True}) is False
+def test_model_allowlist_semantics() -> None:
+    allow = conf.model_allowlist
+    assert allow({}) == set() and allow({"model_allowlist": []}) == set()
+    assert allow({"model_allowlist": ["m"]}) == {"m"}
+    # legacy name and shape
+    assert allow({"text_only_ok": {"m": True, "x": False}}) == {"m"}
+    # the new name wins over the old one
+    assert allow({"model_allowlist": ["a"], "text_only_ok": {"m": True}}) == {"a"}
+    assert conf.model_allowed("m", set()) is True
+    assert conf.model_allowed("m", {"m"}) is True
+    assert conf.model_allowed("m", {"other"}) is False
 
 
 async def test_models_fields(monkeypatch: pytest.MonkeyPatch) -> None:
