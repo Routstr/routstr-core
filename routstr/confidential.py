@@ -12,6 +12,19 @@ the node reserves the full-context prompt plus the pinned completion cap with
 setup (the signed offer's) and releases the reservation when the upstream
 never ran. Refunds of unused balance are the existing ``/v1/wallet/refund``.
 
+Optional pricing for the node's own work (all off by default):
+``CONFIDENTIAL_RATE_SURCHARGE_PCT`` raises the per-token rates of the signed
+offer; ``CONFIDENTIAL_SESSION_FEE_MSAT`` is a flat fee charged on top of the
+usage of a completed request (and for a provider refusal, 4xx/503, which also
+reached the provider); ``CONFIDENTIAL_ABANDON_FEE_MSAT`` (≥ the session fee,
+defaulting to it) is charged instead when a session the sidecar accepted ends
+without a request reaching the provider (an armed, pre-warmed session never
+used, an abort before the body, a client gone): the anti-DoS price of the
+~22 MB / ~0.5 s CPU the node spends per session. The reservation includes the
+larger of the two. A client accepts both by echoing the signed offer's
+``session_fee_msat`` and ``abandon_fee_msat`` in its setup; a setup that does
+not is refused, so an older client is never charged a fee it does not check.
+
 Inert unless ``CONFIDENTIAL_SIDECAR_URL`` is set.
 """
 
@@ -50,6 +63,56 @@ _SIDECAR_TIMEOUT = httpx.Timeout(3.0)
 _SIDECAR_OFFER_TTL_S = 30.0
 _SIDECAR_OFFER_STALE_S = 600.0
 _SIDECAR_FAILURE_TTL_S = 10.0
+
+
+def session_fee_msat() -> int:
+    """The configured flat fee per confidential session (msat, ≥ 0)."""
+    try:
+        return max(0, int(settings.confidential_session_fee_msat or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def abandon_fee_msat() -> int:
+    """The fee (msat) for a session that ends without a request reaching the
+    provider: the configured abandon fee, never below the session fee (and
+    equal to it when unset)."""
+    try:
+        fee = max(0, int(settings.confidential_abandon_fee_msat or 0))
+    except (TypeError, ValueError):
+        fee = 0
+    return max(fee, session_fee_msat())
+
+
+def rate_surcharge_pct() -> float:
+    """The configured surcharge on per-token rates (percent, ≥ 0)."""
+    try:
+        pct = float(settings.confidential_rate_surcharge_pct or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return pct if math.isfinite(pct) and pct > 0 else 0.0
+
+
+def surcharged(entry: dict[str, float], pct: float) -> dict[str, float]:
+    """``entry``'s rates raised by ``pct`` percent (unchanged at 0)."""
+    if pct <= 0:
+        return dict(entry)
+    factor = 1.0 + pct / 100.0
+    return {k: float(v) * factor for k, v in entry.items()}
+
+
+def pricing_fields(fee_msat: int, abandon_msat: int, pct: float) -> dict[str, Any]:
+    """The offer/receipt fields for the confidential pricing; empty when off,
+    so a node with the defaults signs exactly the payload it signed before."""
+    out: dict[str, Any] = {}
+    if fee_msat > 0:
+        out["session_fee_msat"] = int(fee_msat)
+    if abandon_msat > 0:
+        out["abandon_fee_msat"] = int(abandon_msat)
+    if pct > 0:
+        out["rate_surcharge_pct"] = pct
+    return out
+
 
 # Signed offers stay valid for setup (``offer_sig``) this long.
 SIGNED_OFFER_TTL_S = 600.0
@@ -261,14 +324,27 @@ def confidential_offer_url() -> str:
     return f"{base}/v1/confidential/offer"
 
 
-# sig -> (monotonic time last served, price_list), oldest first.
-_SIGNED_OFFERS: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+@dataclass(frozen=True)
+class OfferTerms:
+    """What a signed offer fixes for billing: rates, fees, surcharge."""
+
+    price_list: dict[str, Any]
+    session_fee_msat: int = 0
+    rate_surcharge_pct: float = 0.0
+    abandon_fee_msat: int = 0
+
+
+# sig -> (monotonic time last served, terms), oldest first.
+_SIGNED_OFFERS: OrderedDict[str, tuple[float, OfferTerms]] = OrderedDict()
 _LAST_OFFER: dict[str, Any] = {"payload": None, "offer": None}
 
 
-def _remember_offer(sig: str, price_list: dict[str, Any]) -> None:
+def _remember_offer(sig: str, terms: OfferTerms | dict[str, Any]) -> None:
+    """Remember a signed offer's terms (a bare price list means no fee)."""
+    if not isinstance(terms, OfferTerms):
+        terms = OfferTerms(terms)
     now = time.monotonic()
-    _SIGNED_OFFERS[sig] = (now, price_list)
+    _SIGNED_OFFERS[sig] = (now, terms)
     _SIGNED_OFFERS.move_to_end(sig)
     while _SIGNED_OFFERS:
         oldest, (at, _) = next(iter(_SIGNED_OFFERS.items()))
@@ -286,12 +362,21 @@ def sidecar_protocol_version(side: dict[str, Any]) -> int:
     return v if CONFIDENTIAL_MIN_V <= v <= CONFIDENTIAL_MAX_V else CONFIDENTIAL_VERSION
 
 
-def signed_offer_rates(sig: str, model_id: str) -> dict[str, float] | None:
-    """The rates for ``model_id`` in an offer this node signed recently."""
+def signed_offer_terms(sig: str) -> OfferTerms | None:
+    """The terms of an offer this node signed recently."""
     found = _SIGNED_OFFERS.get(sig)
     if found is None or time.monotonic() - found[0] >= SIGNED_OFFER_TTL_S:
         return None
-    entry = found[1].get(model_id)
+    return found[1]
+
+
+def signed_offer_rates(sig: str, model_id: str) -> dict[str, float] | None:
+    """The rates for ``model_id`` in an offer this node signed recently
+    (surcharge included: they are the rates the client verified)."""
+    terms = signed_offer_terms(sig)
+    if terms is None:
+        return None
+    entry = terms.price_list.get(model_id)
     return dict(entry) if isinstance(entry, dict) else None
 
 
@@ -302,9 +387,17 @@ async def build_offer() -> dict[str, Any]:
     offer's ``sig`` is billed at exactly these rates, and the client checks that
     the receipt never charges more than its usage at them. An unchanged offer
     is served again with the same signature.
+
+    With a rate surcharge the price list already carries the surcharged rates
+    (the ones billed), so a client's rate check needs no change; the session
+    fee and the surcharge are listed beside it (only when set).
     """
     side = await cached_sidecar_offer()
-    prices = {mid: entry for mid, (_c, entry) in priced_models(side).items()}
+    fee, abandon, pct = session_fee_msat(), abandon_fee_msat(), rate_surcharge_pct()
+    prices = {
+        mid: surcharged(entry, pct) for mid, (_c, entry) in priced_models(side).items()
+    }
+    terms = OfferTerms(prices, fee, pct, abandon)
     offer: dict[str, Any] = {
         # The sidecar runs one protocol version (v2: the two-party handshake).
         "v": sidecar_protocol_version(side),
@@ -321,17 +414,18 @@ async def build_offer() -> dict[str, Any]:
         "suffix_keys": side.get("suffix_keys", []),
         "price_list": prices,
         "mints": settings.cashu_mints,
+        **pricing_fields(fee, abandon, pct),
     }
     payload = canonical_json(offer).decode("utf-8")
     last = _LAST_OFFER["offer"]
     if last is not None and _LAST_OFFER["payload"] == payload:
-        _remember_offer(last["sig"], prices)
+        _remember_offer(last["sig"], terms)
         return dict(last)
     sig = sign_payload(offer)
     if sig:
         offer["sig_payload"] = payload
         offer["sig"] = sig
-        _remember_offer(sig, prices)
+        _remember_offer(sig, terms)
         _LAST_OFFER.update(payload=payload, offer=dict(offer))
     else:
         logger.warning("confidential: serving an UNSIGNED offer (no NSEC configured)")
@@ -357,7 +451,12 @@ async def models_fields() -> dict[str, dict[str, Any]]:
         side = await cached_sidecar_offer()
     except Exception:
         return {}
-    field = {"v": sidecar_protocol_version(side), "offer_url": confidential_offer_url()}
+    field = {
+        "v": sidecar_protocol_version(side),
+        "offer_url": confidential_offer_url(),
+        # Lets a client size its deposit before it fetches the offer.
+        **pricing_fields(session_fee_msat(), abandon_fee_msat(), rate_surcharge_pct()),
+    }
     return {model_id: field for model_id in priced_models(side)}
 
 
@@ -375,8 +474,14 @@ class Billing:
     candidate: Candidate
     reserved_msats: int
     snapshot: Any  # auth.ReservationSnapshot
-    # Frozen at setup: msats per 1k tokens ({"in", "cached_in", "out"}).
+    # Frozen at setup: msats per 1k tokens ({"in", "cached_in", "out"}),
+    # surcharge included.
     rates: dict[str, float]
+    # Frozen at setup from the same offer; the larger fee is part of
+    # ``reserved_msats``.
+    session_fee_msat: int = 0
+    rate_surcharge_pct: float = 0.0
+    abandon_fee_msat: int = 0
 
 
 class BillingError(Exception):
@@ -448,8 +553,34 @@ def _offer_expired(model_id: str) -> BillingError:
     )
 
 
+def _fee_not_accepted(fee: int, abandon: int) -> BillingError:
+    message = (
+        f"this node charges confidential session fees (session {fee} msat, "
+        f"abandoned session {abandon} msat); the setup must accept them "
+        "(session_fee_msat and abandon_fee_msat from the signed offer). "
+        "Update the client."
+    )
+    return BillingError(
+        message,
+        409,
+        {
+            "error": {
+                "type": "session_fee_not_accepted",
+                "message": message,
+                "session_fee_msat": fee,
+                "abandon_fee_msat": abandon,
+            }
+        },
+    )
+
+
 async def reserve(
-    auth: str, model_id: str, max_tokens: int, offer_sig: str | None = None
+    auth: str,
+    model_id: str,
+    max_tokens: int,
+    offer_sig: str | None = None,
+    accepted_fee_msat: int | None = None,
+    accepted_abandon_fee_msat: int | None = None,
 ) -> Billing:
     """Validate the bearer, freeze the rates and reserve the worst case.
 
@@ -457,7 +588,9 @@ async def reserve(
     full context plus the pinned ``max_tokens`` (which π_C2 enforces before the
     upstream starts), at the frozen rates. Without a known context length it
     is the model's undiscounted maximum cost; fixed-pricing deployments keep
-    their per-request reservation.
+    their per-request reservation. The larger of the frozen offer's session
+    and abandon fees is added on top; the client must have accepted exactly
+    those fees.
     """
     from .auth import pay_for_request, validate_bearer_key
     from .core.db import create_session
@@ -468,13 +601,22 @@ async def reserve(
     if cand is None:
         raise BillingError(f"model {model_id!r} is not served confidentially")
     if offer_sig:
+        terms = signed_offer_terms(offer_sig)
         rates = signed_offer_rates(offer_sig, model_id)
-        if rates is None:
+        if terms is None or rates is None:
             raise _offer_expired(model_id)
+        fee, pct = terms.session_fee_msat, terms.rate_surcharge_pct
+        abandon = max(terms.abandon_fee_msat, fee)
     else:
-        rates = usable_price_entry(model_id, cand)
-        if rates is None:
+        fee, abandon, pct = session_fee_msat(), abandon_fee_msat(), rate_surcharge_pct()
+        base = usable_price_entry(model_id, cand)
+        if base is None:
             raise BillingError(f"model {model_id!r} has no usable pricing")
+        rates = surcharged(base, pct)
+    if (fee > 0 and accepted_fee_msat != fee) or (
+        abandon > 0 and accepted_abandon_fee_msat != abandon
+    ):
+        raise _fee_not_accepted(fee, abandon)
     async with create_session() as session:
         try:
             key = await validate_bearer_key(auth, session)
@@ -483,38 +625,59 @@ async def reserve(
         limit = None if settings.fixed_pricing else prompt_token_limit(cand.model)
         if limit is None:
             max_cost = await get_max_cost_for_model(model_id, session, cand.model)
+            max_cost = math.ceil(max_cost * (1.0 + pct / 100.0))
         else:
             max_cost = max(
                 settings.min_request_msat,
                 math.ceil((limit * rates["in"] + max_tokens * rates["out"]) / 1000),
             )
+        max_cost += max(fee, abandon)
         try:
             snapshot = await pay_for_request(key, max_cost, session)
         except HTTPException as exc:
             raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
         return Billing(
-            key.hashed_key, model_id, cand, snapshot.reserved_msats, snapshot, rates
+            key.hashed_key,
+            model_id,
+            cand,
+            snapshot.reserved_msats,
+            snapshot,
+            rates,
+            session_fee_msat=fee,
+            rate_surcharge_pct=pct,
+            abandon_fee_msat=abandon,
         )
 
 
 async def settle(billing: Billing, usage_event: dict[str, Any]) -> dict[str, Any]:
-    """Charge the π_C3-verified usage at the frozen rates.
+    """Charge the π_C3-verified usage at the frozen rates, plus the session fee.
 
-    Returns ``{"cost_msats", "balance_msats"}``. A usage event without token
-    counts is charged the reservation. Raises if nothing was finalized.
+    Returns ``{"cost_msats", "balance_msats"}``. The cost is capped at the
+    reservation (which includes the fee). A usage event without token counts
+    is charged the reservation. Raises if nothing was finalized.
     """
-    cost = frozen_cost_msats(
+    usage_cost = frozen_cost_msats(
         billing.rates, usage_event.get("usage"), billing.reserved_msats
     )
-    if cost is None:
+    if usage_cost is None:
         cost = billing.reserved_msats
+    else:
+        cost = min(usage_cost + billing.session_fee_msat, billing.reserved_msats)
     if cost == 0:
         return {"cost_msats": 0, "balance_msats": await release(billing)}
     return {"cost_msats": cost, "balance_msats": await _charge(billing, cost)}
 
 
+async def charge_fee(billing: Billing, fee_msat: int) -> int | None:
+    """Charge exactly ``fee_msat`` (the session fee for a provider refusal, the
+    abandon fee for a session that ended without a request) and release the
+    rest of the reservation. Returns the key's balance."""
+    return await _charge(billing, max(0, min(fee_msat, billing.reserved_msats)))
+
+
 async def release(billing: Billing) -> int | None:
-    """The upstream never ran (or answered an unbilled error): charge nothing.
+    """Release the whole reservation: charge nothing (the node itself failed
+    or the session never reached the sidecar).
 
     Returns the key's balance.
     """
