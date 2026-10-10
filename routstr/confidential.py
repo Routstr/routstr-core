@@ -209,13 +209,25 @@ async def cached_sidecar_offer() -> dict[str, Any]:
     raise OfferError("confidential sidecar unavailable")
 
 
-def modality_allowed(model: str, text_only_ok: dict[str, Any] | None) -> bool:
-    """The sidecar's text-only gate: an empty map allows all, else an allow-list.
+def model_allowlist(side_offer: dict[str, Any]) -> set[str]:
+    """The operator's optional allowlist from the sidecar offer (empty = all).
 
-    Input tokens are bounded by the request's byte length only for models that
-    reject image/file parts, so the sidecar lists those explicitly.
+    ``model_allowlist`` is a list of ids; the earlier ``text_only_ok`` map
+    (``{id: true}``) is still read. Models and prices otherwise come from the
+    node itself: the sidecar offer carries no prices.
     """
-    return not text_only_ok or text_only_ok.get(model) is True
+    allow = side_offer.get("model_allowlist")
+    if allow is None:
+        allow = side_offer.get("text_only_ok")
+    if isinstance(allow, dict):
+        return {str(k) for k, v in allow.items() if v is True}
+    if isinstance(allow, list):
+        return {str(k) for k in allow}
+    return set()
+
+
+def model_allowed(model: str, allowlist: set[str]) -> bool:
+    return not allowlist or model in allowlist
 
 
 @dataclass(frozen=True)
@@ -243,14 +255,14 @@ def candidate_for(model_id: str, host: str) -> Candidate | None:
 
 
 def offered_models(side_offer: dict[str, Any]) -> dict[str, Candidate]:
-    """Models the node serves confidentially: on the sidecar host and text-only."""
+    """Models the node serves confidentially: on the sidecar host, within the allowlist."""
     from .proxy import get_unique_models
 
     host = str(side_offer.get("upstream_host", ""))
-    text_only_ok = side_offer.get("text_only_ok") or {}
+    allowlist = model_allowlist(side_offer)
     out: dict[str, Candidate] = {}
     for model in get_unique_models():
-        if not modality_allowed(model.id, text_only_ok):
+        if not model_allowed(model.id, allowlist):
             continue
         cand = candidate_for(model.id, host)
         if cand is not None:
