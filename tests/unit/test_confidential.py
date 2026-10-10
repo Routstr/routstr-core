@@ -1042,3 +1042,62 @@ def test_zk_proxy_rejects_bad_proof(monkeypatch: pytest.MonkeyPatch) -> None:
             msg = ws.receive()
             assert msg["type"] == "websocket.close"
             assert msg["code"] == 1008
+
+
+class _FakeWS:
+    def __init__(self, peer: str, headers: dict[str, str]) -> None:
+        self.client = type("C", (), {"host": peer})()
+        self.headers = headers
+
+
+def test_client_address_trusts_only_proxies(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "confidential_trusted_proxies", ["127.0.0.1"])
+    via_proxy = _FakeWS("127.0.0.1", {"x-real-ip": "203.0.113.7"})
+    assert cws.client_address(via_proxy) == "203.0.113.7"  # type: ignore[arg-type]
+    xff = _FakeWS("127.0.0.1", {"x-forwarded-for": "198.51.100.2, 10.0.0.1"})
+    assert cws.client_address(xff) == "198.51.100.2"  # type: ignore[arg-type]
+    # Anyone else (e.g. the Tor sidecar) cannot choose its address by header.
+    spoof = _FakeWS("10.89.0.4", {"x-real-ip": "203.0.113.7"})
+    assert cws.client_address(spoof) == "10.89.0.4"  # type: ignore[arg-type]
+
+
+def test_client_address_self_means_own_addresses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "confidential_trusted_proxies", ["self"])
+    monkeypatch.setattr(cws, "_own_addresses", lambda: {"10.89.0.3"})
+    ws = _FakeWS("10.89.0.3", {"x-real-ip": "203.0.113.9"})
+    assert cws.client_address(ws) == "203.0.113.9"  # type: ignore[arg-type]
+
+
+def test_mark_used_releases_the_slot_once() -> None:
+    cws._unused_by_ip.clear()
+    st = cws.SessionState()
+    st.unused_ip = "203.0.113.1"
+    cws._unused_by_ip["203.0.113.1"] = 2
+    cws._mark_used(st)
+    cws._mark_used(st)  # idempotent
+    assert cws._unused_by_ip == {"203.0.113.1": 1}
+    cws._unused_by_ip.clear()
+
+
+def test_ws_proxy_limits_unused_sessions_per_address(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """A fourth unused session from one address is refused (pre-warm DoS limit)."""
+    holder: dict[str, int] = {}
+    with MockSidecar(_sidecar_script(holder, [])) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        monkeypatch.setattr(cws, "cached_sidecar_offer", _fake_sidecar_offer)
+        monkeypatch.setattr(settings, "confidential_max_unused_per_ip", 3)
+        client = TestClient(_app())
+        cws._unused_by_ip.clear()
+        cws._unused_by_ip["testclient"] = 3
+        try:
+            with client.websocket_connect(
+                f"/v1/confidential/ws?session_id={uuid.uuid4()}&v=1"
+            ) as ws:
+                err = ws.receive_json()
+                assert err["type"] == "error" and err["status"] == 429
+                msg = ws.receive()
+                assert msg["type"] == "websocket.close" and msg["code"] == 1013
+        finally:
+            cws._unused_by_ip.clear()

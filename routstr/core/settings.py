@@ -67,6 +67,19 @@ class Settings(BaseSettings):
     # http://127.0.0.1:7443). Empty disables the mode: no offer, no websocket
     # routes, no /v1/models field.
     confidential_sidecar_url: str = Field(default="", env="CONFIDENTIAL_SIDECAR_URL")
+    # Denial-of-service limit: confidential sessions per client address that
+    # have not been used yet (from setup until the credential record is
+    # written). Pre-warmed sessions count. 0 disables the limit.
+    confidential_max_unused_per_ip: int = Field(
+        default=3, env="CONFIDENTIAL_MAX_UNUSED_PER_IP"
+    )
+    # Peers whose X-Real-IP / X-Forwarded-For header names the client (the
+    # reverse proxy). "self" means this host's or container's own addresses,
+    # which is where a rootless port forwarder connects from.
+    confidential_trusted_proxies: list[str] = Field(
+        default_factory=lambda: ["127.0.0.1", "::1", "self"],
+        env="CONFIDENTIAL_TRUSTED_PROXIES",
+    )
 
     # Node info
     name: str = Field(default="ARoutstrNode", env="NAME")
