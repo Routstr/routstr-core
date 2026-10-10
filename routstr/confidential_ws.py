@@ -23,7 +23,9 @@
   before the socket closes.
 
 * ``GET /v1/confidential/zk?proof=<pi_*>&session_id=<sid>``: a byte proxy for
-  one ZK proof.
+  one ZK proof (``twopc``: the v2 two-party handshake; ``zkchan``: the v2
+  session's long-lived proof channel, which carries π_NK, π_C2S and π_C3S
+  over correlations set up while the session is armed).
 """
 
 from __future__ import annotations
@@ -68,7 +70,7 @@ _UUID_RE = re.compile(
 # The zk route is keyed by the protocol sid (a 32-byte hex digest).
 _SID_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
-_PROOF_RE = re.compile(r"^(pi_c1|pi_n|pi_c2|pi_c3|twopc|pi_nk|pi_c2s|pi_c3s)$")
+_PROOF_RE = re.compile(r"^(pi_c1|pi_n|pi_c2|pi_c3|twopc|zkchan|pi_nk|pi_c2s|pi_c3s)$")
 _WS_MAX_SIZE = 64 << 20
 
 # Limits: concurrent sessions per process, time to the setup frame, a whole
@@ -577,7 +579,9 @@ async def confidential_zk_proxy(
         asyncio.create_task(client_to_sidecar()),
         asyncio.create_task(sidecar_to_client()),
     }
-    await asyncio.wait(tasks, timeout=300)
+    # A pre-warmed session keeps its 2PC and proof channels open until it is
+    # claimed; the node ends sessions at 600 s anyway.
+    await asyncio.wait(tasks, timeout=630)
     for task in tasks:
         if not task.done():
             task.cancel()

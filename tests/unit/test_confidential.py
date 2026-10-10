@@ -1016,7 +1016,8 @@ async def test_zero_cost_releases_and_reports_balance(billing_db: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_zk_proxy_passes_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("proof", ["pi_c1", "twopc", "zkchan", "pi_nk"])
+def test_zk_proxy_passes_bytes(monkeypatch: pytest.MonkeyPatch, proof: str) -> None:
     async def echo(ws: Any) -> None:
         async for frame in ws:
             await ws.send(frame)
@@ -1024,7 +1025,7 @@ def test_zk_proxy_passes_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
     with MockSidecar(echo) as mock:
         _use_sidecar(monkeypatch, mock.port)
         client = TestClient(_app())
-        url = f"/v1/confidential/zk?proof=pi_c1&session_id={SID}"
+        url = f"/v1/confidential/zk?proof={proof}&session_id={SID}"
         with client.websocket_connect(url) as ws:
             payload = b"\x00\x01\x02zkmux\xff" * 100
             ws.send_bytes(payload)
