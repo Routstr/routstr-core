@@ -18,6 +18,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.proxy import refresh_model_maps
 from routstr.upstream.base import BaseUpstreamProvider
+from routstr.upstream.model_paths import encode_model_path
 
 TYPESAFE_BASE_URL = "https://api.typesafe.ai/v1"
 
@@ -67,9 +68,7 @@ def _jev_model(prompt_sats: float = 0.001, completion_sats: float = 0.0) -> Mode
             tokenizer="Other",
             instruct_type=None,
         ),
-        pricing=Pricing(
-            prompt=prompt_sats, completion=completion_sats, max_cost=50.0
-        ),
+        pricing=Pricing(prompt=prompt_sats, completion=completion_sats, max_cost=50.0),
         sats_pricing=Pricing(
             prompt=prompt_sats, completion=completion_sats, max_cost=50.0
         ),
@@ -219,3 +218,142 @@ async def test_systemone_with_x_cashu_settles(
     assert payload["answers"]["is_urgent"]["type"] == "noul"
     # A refund header exists when the token exceeded the settled cost.
     assert response.headers.get("X-Cashu") is not None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_systemone_without_usage_is_billed_from_estimate(
+    authenticated_client: AsyncClient,
+    typesafe_provider_maps: _StaticTypeSafeProvider,
+) -> None:
+    response_without_usage = {
+        key: value for key, value in SYSTEMONE_RESPONSE.items() if key != "usage"
+    }
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=json.dumps(response_without_usage).encode(),
+            headers={"content-type": "application/json"},
+        )
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/systemone",
+            json={**SYSTEMONE_REQUEST, "state": "payouts failing again " * 300},
+        )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["answers"]["is_urgent"]["noul"] == pytest.approx(0.95)
+    # ~6.6k chars of state; counting only the absent messages bills a handful.
+    assert payload["cost"]["input_msats"] >= 1000
+    assert payload["cost"]["output_msats"] == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_decision_model_on_chat_with_x_cashu_never_redeems(
+    authenticated_client: AsyncClient,
+    typesafe_provider_maps: _StaticTypeSafeProvider,
+) -> None:
+    """The route gate refuses before the X-Cashu token is redeemed."""
+    redeem = AsyncMock(return_value=(10_000, "sat", "https://mint.test"))
+
+    with patch("routstr.upstream.base.recieve_token", redeem):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "jev-latest",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+            headers={"X-Cashu": "cashuBunredeemed"},
+        )
+
+    assert response.status_code == 400, response.text
+    assert "/v1/systemone" in response.text
+    redeem.assert_not_awaited()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pinned_decision_model_on_chat_is_refused(
+    authenticated_client: AsyncClient,
+    typesafe_provider_maps: _StaticTypeSafeProvider,
+) -> None:
+    response = await authenticated_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "jev-latest",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        headers={
+            "x-routstr-model-path": encode_model_path(TYPESAFE_BASE_URL, "jev-latest")
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    assert "/v1/systemone" in response.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_systemone_image_without_usage_is_billed_per_image_tile(
+    authenticated_client: AsyncClient,
+    typesafe_provider_maps: _StaticTypeSafeProvider,
+) -> None:
+    import base64
+    from io import BytesIO
+
+    from PIL import Image
+
+    from routstr.upstream.count_tokens import MissingUsageEstimator
+
+    buf = BytesIO()
+    Image.new("RGB", (1024, 1024), (10, 120, 200)).save(buf, format="PNG")
+    request = {
+        **SYSTEMONE_REQUEST,
+        "images": [base64.b64encode(buf.getvalue()).decode()],
+    }
+    text_only = MissingUsageEstimator(
+        json.dumps(SYSTEMONE_REQUEST).encode(), None
+    ).response_data()["usage"]["input_tokens"]
+    response_without_usage = {
+        key: value for key, value in SYSTEMONE_RESPONSE.items() if key != "usage"
+    }
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=json.dumps(response_without_usage).encode(),
+            headers={"content-type": "application/json"},
+        )
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post("/v1/systemone", json=request)
+
+    assert response.status_code == 200, response.text
+    # 0.001 sats/token = 1 msat per input token; 1024x1024 high detail = 765.
+    assert response.json()["cost"]["input_msats"] == text_only + 765
