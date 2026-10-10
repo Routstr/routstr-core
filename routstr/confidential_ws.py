@@ -527,10 +527,15 @@ async def confidential_zk_proxy(
         await websocket.close(code=1008, reason="invalid session_id or proof")
         return
     try:
+        # No keepalive pings on this loopback hop: while the client's link is
+        # slower than the sidecar's (the 2PC sends tens of MB), this proxy stops
+        # reading from the sidecar, its pongs queue unread and a ping timeout
+        # would kill a healthy session.
         upstream = await websockets.connect(
             _sidecar_ws_url("/zk", f"proof={proof}&sid={session_id}"),
             max_size=_WS_MAX_SIZE,
             open_timeout=10,
+            ping_interval=None,
         )
     except Exception:
         await websocket.close(code=1011, reason="sidecar unreachable")
