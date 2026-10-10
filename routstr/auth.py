@@ -34,6 +34,7 @@ from .redemption_cache import (
     redemption_negative_cache,
 )
 from .wallet import (
+    SWAP_BUSY_RETRY_AFTER_SECONDS,
     classify_redemption_error,
     credit_balance,
     deserialize_token_from_string,
@@ -124,6 +125,11 @@ def redemption_error_to_http_exception(error: Exception) -> HTTPException:
                 "code": error_code,
             }
         },
+        headers=(
+            {"Retry-After": str(SWAP_BUSY_RETRY_AFTER_SECONDS)}
+            if error_code == "cashu_swap_busy"
+            else None
+        ),
     )
 
 
@@ -290,6 +296,20 @@ async def _validate_bearer_key_locked(
             logger.warning(
                 "sk- API key not found in database",
                 extra={"key_preview": bearer_key[:10] + "..."},
+            )
+            # Keep the "Key not found." prefix verbatim: @routstr/sdk (<=0.4.6)
+            # detects a dead key with a case-sensitive `body.includes("Key not
+            # found")` probe, and uses it to purge the key from its store. The
+            # refund path in balance.py already relies on the same prefix.
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "message": "Key not found. Deposit first via /v1/wallet/create to get a key on this node.",
+                        "type": "invalid_request_error",
+                        "code": "key_not_found",
+                    }
+                },
             )
 
     if bearer_key.startswith("cashu"):

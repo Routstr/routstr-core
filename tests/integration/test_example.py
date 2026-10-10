@@ -136,13 +136,13 @@ async def test_error_handling(
         "/v1/wallet/topup", params={"cashu_token": invalid_token}
     )
 
-    # Should get 400 for invalid token
-    # But the endpoint might return 200 with 0 msats for some invalid tokens
+    # Locally malformed tokens return 400. A decodable token naming an
+    # untrusted mint reaches the automatic swap path and can fail safely with
+    # the documented 422 foreign-swap error instead.
     if response.status_code == 200:
-        # Check if it returned 0 msats
         assert response.json()["msats"] == 0
     else:
-        assert response.status_code == 400
+        assert response.status_code in (400, 422)
         assert "detail" in response.json()
 
     # Test unauthorized access

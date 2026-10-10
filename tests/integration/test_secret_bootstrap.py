@@ -45,6 +45,7 @@ def clean_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "nsec", "")
     monkeypatch.setattr(settings, "npub", "")
     monkeypatch.setattr(settings, "http_url", "")
+    monkeypatch.setattr(settings, "auto_generate_nsec", False)
 
 
 async def _create_settings_blob(session: AsyncSession, data: dict) -> None:
@@ -218,6 +219,116 @@ async def test_fail_fast_when_nsec_encrypted_with_different_key(
     monkeypatch.setenv("ROUTSTR_SECRET_KEY", TEST_SECRET_KEY)
     with pytest.raises(RuntimeError, match="ROUTSTR_SECRET_KEY"):
         await bootstrap_secrets(integration_session)
+
+
+@pytest.mark.asyncio
+async def test_auto_generates_nsec_when_enabled(
+    clean_secret_env: None,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A fresh node with no configured identity and AUTO_GENERATE_NSEC on should
+    # provision one itself: stored encrypted, live in memory, and announced by
+    # its npub. The nsec itself must never reach stdout (captured by
+    # `docker compose logs`); it is retrieved on demand via the reveal script.
+    monkeypatch.setattr(settings, "auto_generate_nsec", True)
+
+    await bootstrap_secrets(integration_session)
+
+    secret = await get_secret(integration_session)
+    assert secret.nsec_state == NsecState.encrypted
+    assert secret.encrypted_nsec is not None
+    assert vault.is_encrypted(secret.encrypted_nsec) is True
+    generated = vault.decrypt(secret.encrypted_nsec)
+    assert generated.startswith("nsec1")
+    assert settings.nsec == generated
+    assert settings.npub == derive_npub_from_nsec(generated)
+
+    out = capsys.readouterr().out
+    assert settings.npub in out
+    assert generated not in out
+
+
+@pytest.mark.asyncio
+async def test_auto_generate_is_idempotent(
+    clean_secret_env: None,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "auto_generate_nsec", True)
+    await bootstrap_secrets(integration_session)
+    first = vault.decrypt((await get_secret(integration_session)).encrypted_nsec or "")
+
+    # Simulate a reboot: the live value is reloaded from env (empty), and the
+    # store now owns an encrypted identity. The node must reuse it, never mint a
+    # second identity.
+    monkeypatch.setattr(settings, "nsec", "")
+    monkeypatch.setattr(settings, "npub", "")
+    await bootstrap_secrets(integration_session)
+
+    second = vault.decrypt((await get_secret(integration_session)).encrypted_nsec or "")
+    assert first == second
+    assert settings.nsec == first
+
+
+@pytest.mark.asyncio
+async def test_auto_generate_is_off_by_default(
+    clean_secret_env: None, integration_session: AsyncSession
+) -> None:
+    # Preserves existing behavior: a node with no identity stays identity-less
+    # unless auto-generation is explicitly requested.
+    await bootstrap_secrets(integration_session)
+
+    secret = await get_secret(integration_session)
+    assert secret.nsec_state == NsecState.legacy
+    assert secret.encrypted_nsec is None
+    assert settings.nsec == ""
+    assert settings.npub == ""
+
+
+@pytest.mark.asyncio
+async def test_auto_generate_prefers_provided_nsec(
+    clean_secret_env: None,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A provided NSEC (env legacy seed) always wins over auto-generation, so an
+    # operator importing a specific identity is never silently given another.
+    monkeypatch.setenv("NSEC", NSEC_HEX)
+    monkeypatch.setattr(settings, "auto_generate_nsec", True)
+
+    await bootstrap_secrets(integration_session)
+
+    secret = await get_secret(integration_session)
+    assert vault.decrypt(secret.encrypted_nsec or "") == NSEC_HEX
+    assert settings.nsec == NSEC_HEX
+
+
+@pytest.mark.asyncio
+async def test_auto_generate_does_not_resurrect_cleared_nsec(
+    clean_secret_env: None,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An identity was imported then intentionally cleared via the admin API. Auto
+    # generation must not treat the empty store as "unconfigured" and mint a new
+    # identity the operator did not ask for.
+    monkeypatch.setenv("NSEC", NSEC_HEX)
+    await bootstrap_secrets(integration_session)
+    await set_nsec(integration_session, "")
+
+    monkeypatch.setattr(settings, "auto_generate_nsec", True)
+    monkeypatch.setattr(settings, "nsec", NSEC_HEX)
+    monkeypatch.setattr(settings, "npub", derive_npub_from_nsec(NSEC_HEX))
+
+    await bootstrap_secrets(integration_session)
+
+    reloaded = await get_secret(integration_session)
+    assert reloaded.nsec_state == NsecState.cleared
+    assert reloaded.encrypted_nsec is None
+    assert settings.nsec == ""
+    assert settings.npub == ""
 
 
 # --- encryption is mandatory, key custody is not: upgrade without a key --------
@@ -470,7 +581,6 @@ async def test_startup_runs_bootstrap_before_settings_initialize(
         return None
 
     monkeypatch.setattr(main, "configure_litellm", lambda: None)
-    monkeypatch.setattr(main, "register_deepseek_v4_pricing", lambda: None)
     monkeypatch.setattr(main, "run_migrations", lambda: None)
     monkeypatch.setattr(main, "init_db", noop_init_db)
     monkeypatch.setattr(main, "create_session", fake_create_session)

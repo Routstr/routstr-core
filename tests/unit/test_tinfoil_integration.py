@@ -200,16 +200,55 @@ class TestResolveEhbpTargetUrl:
     def test_override_with_enclave_url_for_tinfoil(self) -> None:
         result = _resolve_ehbp_target_url(
             "https://default.example.com/v1/chat/completions",
-            "v1/chat/completions",
             {"X-Tinfoil-Enclave-Url": "https://enclave.tinfoil.sh"},
             "tinfoil",
         )
         assert result == "https://enclave.tinfoil.sh/v1/chat/completions"
 
+    def test_override_keeps_the_providers_version_prefix(self) -> None:
+        """The override swaps the host only, never the path.
+
+        The provider has already re-added the version prefix the enclave
+        requires, so a client that spelled the endpoint ``chat/completions``
+        must still land on ``/v1/chat/completions``: this was the path that
+        turned every SDK-style request into a paid upstream 404 against
+        ``router-0.tinfoil.sh``.
+        """
+        provider = TinfoilUpstreamProvider(api_key="test")
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-deepseek-v4-1-flash"
+        model_obj.forwarded_model_id = "deepseek-v4-1-flash"
+        target = provider.get_ehbp_forwarding_target("chat/completions", model_obj)
+        result = _resolve_ehbp_target_url(
+            target.url,
+            {"X-Tinfoil-Enclave-Url": "https://router-0.tinfoil.sh"},
+            "tinfoil",
+        )
+        assert result == "https://router-0.tinfoil.sh/v1/chat/completions"
+
+    @pytest.mark.parametrize("path", ["chat/completions", "v1/chat/completions"])
+    @pytest.mark.parametrize(
+        ("enclave_base", "expected_url"),
+        [
+            ("https://router-0.tinfoil.sh/v1", "https://router-0.tinfoil.sh/v1/chat/completions"),
+            ("https://router-0.tinfoil.sh/gateway/v1/", "https://router-0.tinfoil.sh/gateway/v1/chat/completions"),
+            ("https://router-0.tinfoil.sh/gateway", "https://router-0.tinfoil.sh/gateway/v1/chat/completions"),
+        ],
+    )
+    def test_override_with_base_path_does_not_duplicate_version(
+        self, path: str, enclave_base: str, expected_url: str
+    ) -> None:
+        provider = TinfoilUpstreamProvider(api_key="test")
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-deepseek-v4-1-flash"
+        target = provider.get_ehbp_forwarding_target(path, model_obj)
+        assert _resolve_ehbp_target_url(
+            target.url, {"X-Tinfoil-Enclave-Url": enclave_base}, "tinfoil"
+        ) == expected_url
+
     def test_override_lowercase_header_for_tinfoil(self) -> None:
         result = _resolve_ehbp_target_url(
             "https://default.example.com/v1/chat/completions",
-            "v1/chat/completions",
             {"x-tinfoil-enclave-url": "https://enclave.tinfoil.sh"},
             "tinfoil",
         )
@@ -219,7 +258,6 @@ class TestResolveEhbpTargetUrl:
         default = "https://inference.tinfoil.sh/v1/chat/completions"
         result = _resolve_ehbp_target_url(
             default,
-            "v1/chat/completions",
             {},
             "tinfoil",
         )
@@ -229,7 +267,6 @@ class TestResolveEhbpTargetUrl:
         default = "https://api.ppq.ai/private/v1/chat/completions"
         result = _resolve_ehbp_target_url(
             default,
-            "v1/chat/completions",
             {"X-Tinfoil-Enclave-Url": "https://enclave.tinfoil.sh"},
             "ppqai",
         )
@@ -252,7 +289,6 @@ class TestResolveEhbpTargetUrl:
         with pytest.raises(UpstreamError):
             _resolve_ehbp_target_url(
                 "https://default.example.com/v1/chat/completions",
-                "v1/chat/completions",
                 {"X-Tinfoil-Enclave-Url": bad_url},
                 "tinfoil",
             )
@@ -970,6 +1006,37 @@ class TestTinfoilUpstreamProvider:
         assert target.headers["X-Tinfoil-Request-Usage-Metrics"] == "true"
         assert "v1/chat/completions" in target.url
 
+    @pytest.mark.parametrize("client_path", ["v1/chat/completions", "chat/completions"])
+    def test_get_ehbp_forwarding_target_is_versioned_for_both_spellings(
+        self, client_path: str
+    ) -> None:
+        """The node accepts ``chat/completions`` and ``v1/chat/completions`` as
+        the same endpoint, so both must reach Tinfoil's versioned route.
+
+        A bare client path used to produce
+        ``https://inference.tinfoil.sh/chat/completions``, which the router
+        answers with 404 ``{"error":{"message":"Not found."}}``.
+        """
+        provider = TinfoilUpstreamProvider(api_key="test")
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-deepseek-v4-1-flash"
+        model_obj.forwarded_model_id = "deepseek-v4-1-flash"
+        target = provider.get_ehbp_forwarding_target(client_path, model_obj)
+        assert target.url == "https://inference.tinfoil.sh/v1/chat/completions"
+
+    def test_get_ehbp_forwarding_target_does_not_double_the_prefix(self) -> None:
+        """A path that already carries ``v1/`` is normalized, not prefixed again."""
+        provider = TinfoilUpstreamProvider(api_key="test")
+        model_obj = MagicMock()
+        assert (
+            provider.build_ehbp_request_path("v1/chat/completions", model_obj)
+            == "v1/chat/completions"
+        )
+        assert (
+            provider.build_ehbp_request_path("chat/completions", model_obj)
+            == "v1/chat/completions"
+        )
+
     def test_get_provider_metadata(self) -> None:
         meta = TinfoilUpstreamProvider.get_provider_metadata()
         assert meta["id"] == "tinfoil"
@@ -1375,3 +1442,80 @@ async def test_x_cashu_key_config_422_refunds_and_sets_x_cashu_header() -> None:
     assert response.headers["content-type"] == "application/problem+json"
     assert response.body == upstream_resp.body
     assert response.headers["x-cashu"] == "cashuArefund"
+
+
+# ---------------------------------------------------------------------------
+# The forwarded upstream path (regression: bare /chat/completions -> 404)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_path", ["v1/chat/completions", "chat/completions"])
+async def test_proxy_reaches_the_enclaves_versioned_route_for_both_spellings(
+    client_path: str,
+) -> None:
+    """The caller's spelling must not decide which upstream path is used.
+
+    The proxy treats ``chat/completions`` and ``v1/chat/completions`` as the
+    same endpoint (``_canonical_api_path``) and forwards the caller's path
+    verbatim, so the version prefix the enclave requires has to be re-added
+    downstream by the provider. Before that, a client that spelled the endpoint
+    without ``v1/`` reached ``https://inference.tinfoil.sh/chat/completions``
+    and got a 404 ``{"error":{"message":"Not found."}}`` from the router for
+    every Tinfoil model, while the same request with the prefix succeeded.
+    """
+    key = ApiKey(hashed_key="keyconfig", balance=10_000)
+    session = MagicMock()
+    reservation_snapshot = MagicMock()
+
+    request = MagicMock()
+    request.method = "POST"
+    request.headers = {
+        "authorization": "Bearer sk-keyconfig",
+        "ehbp-encapsulated-key": "abc123",
+        "x-routstr-model": "tinfoil-deepseek-v4-1-flash",
+    }
+    request.body = AsyncMock(return_value=b"sealed-body")
+    request.query_params = {}
+
+    model_obj = MagicMock()
+    model_obj.id = "tinfoil-deepseek-v4-1-flash"
+    model_obj.forwarded_model_id = "deepseek-v4-1-flash"
+    upstream = TinfoilUpstreamProvider(api_key="upstream-key")
+
+    # A 422 key-config response short-circuits the billing path while still
+    # exercising the URL the request was actually sent to.
+    forward_mock = AsyncMock(return_value=_key_config_trailer_response())
+
+    with (
+        patch.object(
+            proxy_module, "get_candidates", return_value=[(model_obj, upstream)]
+        ),
+        patch.object(
+            proxy_module, "get_max_cost_for_model", AsyncMock(return_value=1_000)
+        ),
+        patch.object(
+            proxy_module,
+            "calculate_discounted_max_cost",
+            AsyncMock(return_value=1_000),
+        ),
+        patch.object(proxy_module, "check_token_balance", MagicMock()),
+        patch.object(proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)),
+        patch.object(
+            proxy_module,
+            "pay_for_request",
+            AsyncMock(return_value=reservation_snapshot),
+        ),
+        patch.object(
+            proxy_module, "revert_pay_for_request", AsyncMock(return_value=True)
+        ),
+        patch("routstr.upstream.ehbp.forward_with_trailer", forward_mock),
+        patch_proxy_session(session),
+    ):
+        await proxy_module.proxy(request, client_path)
+
+    assert forward_mock.await_args is not None
+    assert (
+        forward_mock.await_args.kwargs["url"]
+        == "https://inference.tinfoil.sh/v1/chat/completions"
+    )

@@ -99,20 +99,45 @@ answer `500` with **no** `X-Routstr-Error-Scope` header.
 
 ### Authentication Errors
 
-#### Invalid API Key
+#### Invalid API Key (malformed credential)
+
+Returned when the `Authorization` value is neither an `sk-...` API key nor a
+`cashu...` token.
 
 ```json
 {
   "error": {
-    "type": "authentication_failed",
-    "message": "Invalid API key provided",
+    "type": "invalid_request_error",
+    "message": "Invalid API key format. Expected an 'sk-...' API key or a 'cashu...' token.",
     "code": "invalid_api_key"
   }
 }
 ```
 
 **Status:** 401  
-**Resolution:** Check API key format and validity
+**Resolution:** Send a well-formed credential. The node logs the received
+preview and length (`Invalid API key format: preview=… length=…`) to distinguish
+a typo from a wrong-shaped header.
+
+#### API Key Not Found (`sk-` key unknown to this node)
+
+Returned when the credential starts with `sk-` and this node has no record of
+it — for example a key minted by a different Routstr node, or one removed
+by key pruning. This is *not* a formatting problem.
+
+```json
+{
+  "error": {
+    "type": "invalid_request_error",
+    "message": "Key not found. Deposit first via /v1/wallet/create to get a key on this node.",
+    "code": "key_not_found"
+  }
+}
+```
+
+**Status:** 401  
+**Resolution:** Create or fund a key on *this* node via `POST /v1/wallet/create`.
+Keys are node-local; an `sk-` key issued by another node is not accepted here.
 
 #### Expired API Key
 
@@ -193,7 +218,10 @@ granularity) on any of them.
 | `token_already_spent` | 400 | `cashu_token_already_spent` | No | The token was already redeemed. |
 | `invalid_token` | 400 | `invalid_cashu_token` | No | The token is malformed or cannot be decoded. |
 | `mint_error` | 422 | `cashu_token_swap_fees_exceed_amount` | No | Token value is too small to cover the mint's NUT-02 input fees. |
-| `untrusted_mint` | 400 | `cashu_untrusted_source_mint` | No | The token was issued by a mint this node does not accept. Only the node's configured mints (`PRIMARY_MINT_URL` / `CASHU_MINTS`) are redeemable. |
+| `untrusted_mint` | 400 | `cashu_untrusted_source_mint` | No | The token was issued by a mint this node does not accept. Bearer and X-Cashu payments always answer this for a foreign mint; `/v1/wallet/topup` swaps foreign tokens into the first configured trusted mint. |
+| `mint_error` | 422 | `cashu_foreign_mint_swap_failed` | No | Top-up only: the foreign token could not be swapped into a trusted mint (none is configured, fees exceed its value, the unit is unsupported, the mint URL is not public HTTPS, or a mint refused the payment). Nothing was spent; the token is still yours. |
+| `swap_pending` | 409 | `cashu_swap_pending` | No | Top-up only: the swap's Lightning payment was dispatched but the issuing mint has not confirmed it. Do **not** resend the token (its proofs may be spent). The balance is credited automatically once the payment is confirmed; poll `/v1/wallet/info`. |
+| `swap_busy` | 503 | `cashu_swap_busy` | **Yes** | Top-up only: another swap against the same issuing mint is in progress. Nothing was spent; resend the same token after the `Retry-After` delay. |
 | `mint_unreachable` | 503 | `cashu_source_mint_unreachable` | **Yes** | The mint that issued the token could not be reached; it cannot be redeemed at another mint. |
 | `mint_rate_limited` | 503 | `cashu_mint_rate_limited` | **Yes** | The mint rate-limited the request; retry after the cooldown. |
 | `mint_timeout` | 503 | `cashu_mint_timeout` | **Yes** | The mint did not respond in time; retry later. |
@@ -207,8 +235,8 @@ granularity) on any of them.
     Only `mint_unreachable`, `mint_rate_limited` and `mint_timeout` (503) are
     retryable — the same token may work again later. Everything else is a
     permanent property of the token and must not be blindly retried.
-    `untrusted_mint` is permanent: the node will never accept that mint until
-    an operator adds it to `CASHU_MINTS`. Use exponential backoff for the
+    `untrusted_mint` is permanent for bearer and X-Cashu payments; foreign
+    `/v1/wallet/topup` tokens are swapped automatically. Use exponential backoff for the
     503 responses, and honor the mint's cooldown for `mint_rate_limited`. In
     particular, a `token_consumed` 500 means the mint already spent the token,
     so a retry would fail as `token_already_spent`.

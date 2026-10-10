@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,7 +10,14 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.core.settings import ENV_ONLY_FIELDS, Settings, SettingsService, settings
+from routstr.core.settings import (
+    ENV_ONLY_FIELDS,
+    Settings,
+    SettingsService,
+    bootstrap_secrets,
+    derive_npub_from_nsec,
+    settings,
+)
 
 NSEC_HEX = "1" * 64
 
@@ -33,6 +42,67 @@ async def test_settings_seed_from_env_and_persist() -> None:
         # ONION_URL may be empty if not discoverable
         assert isinstance(settings.onion_url, str)
         assert settings.enable_analytics_sharing is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_npub", ["", derive_npub_from_nsec("2" * 64)])
+async def test_first_boot_preserves_generated_npub(
+    monkeypatch: pytest.MonkeyPatch, env_npub: str
+) -> None:
+    from routstr.core import vault
+    from routstr.core.db import Secret
+    from routstr.core.main import info
+
+    monkeypatch.delenv("NSEC", raising=False)
+    monkeypatch.setenv("NPUB", env_npub)
+    monkeypatch.setenv("ADMIN_PASSWORD", "disposable-test-password")
+    # Restore the singleton after the test, including fields initialization changes.
+    for field, value in settings.dict().items():
+        monkeypatch.setattr(settings, field, value)
+    monkeypatch.setattr(settings, "nsec", "")
+    monkeypatch.setattr(settings, "npub", "")
+    monkeypatch.setattr(settings, "auto_generate_nsec", True)
+    monkeypatch.setattr(SettingsService, "_current", None)
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(
+                lambda c: Secret.__table__.create(c)  # type: ignore[attr-defined]
+            )
+            # Migrations create the table, but a fresh node has no settings row.
+            await conn.execute(
+                text(
+                    "CREATE TABLE settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+                )
+            )
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            await bootstrap_secrets(session)
+            generated_nsec, generated_npub = settings.nsec, settings.npub
+            assert generated_npub == derive_npub_from_nsec(generated_nsec)
+            assert generated_npub
+
+            initialized = await SettingsService.initialize(session)
+            assert initialized is settings
+            assert settings.nsec == generated_nsec
+            assert settings.npub == generated_npub
+            assert (await info())["npub"] == generated_npub
+            blob = await _read_settings_blob(session)
+            assert blob["npub"] == generated_npub
+            assert "nsec" not in blob
+            secret = await session.get(Secret, 1)
+            assert secret is not None and secret.encrypted_nsec is not None
+            assert vault.decrypt(secret.encrypted_nsec) == generated_nsec
+
+            # A subsequent boot keeps the same identity from the encrypted store.
+            settings.nsec = ""
+            settings.npub = ""
+            await bootstrap_secrets(session)
+            await SettingsService.initialize(session)
+            assert settings.nsec == generated_nsec
+            assert (await info())["npub"] == generated_npub
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -61,6 +131,40 @@ def test_payout_settings_have_sensible_defaults() -> None:
     s = Settings()
     assert s.min_payout_sat == 210
     assert s.payout_interval_seconds == 900
+
+
+def test_cashu_import_cannot_override_operator_environment() -> None:
+    env = dict(os.environ)
+    env["CASHU_MINTS"] = "https://mint.operator.example"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, routstr; print(os.environ['CASHU_MINTS'])",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.stdout.splitlines()[-1] == "https://mint.operator.example"
+
+
+def test_import_preserves_environment_added_by_dependencies() -> None:
+    env = dict(os.environ)
+    env.pop("TIKTOKEN_CACHE_DIR", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, routstr; print(bool(os.environ.get('TIKTOKEN_CACHE_DIR')))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.stdout.splitlines()[-1] == "True"
 
 
 def test_database_pool_defaults_provide_concurrency_headroom() -> None:
