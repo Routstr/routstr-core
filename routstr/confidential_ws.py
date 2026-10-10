@@ -253,20 +253,25 @@ def _own_addresses() -> set[str]:
 
 
 def client_address(websocket: WebSocket) -> str:
-    """The client's address: the reverse proxy's header when the peer is a
-    trusted proxy (``confidential_trusted_proxies``), else the peer itself."""
+    """The client's address for the per-address limit.
+
+    The peer itself, unless the peer is a trusted proxy
+    (``confidential_trusted_proxies``); then the proxy's header
+    (``confidential_client_ip_header``; for X-Forwarded-For its rightmost entry,
+    which the proxy appended; entries to its left come from the client).
+    """
     peer = websocket.client.host if websocket.client else ""
     trusted = set(settings.confidential_trusted_proxies)
     if "self" in trusted:
         trusted |= _own_addresses()
     if peer in trusted:
-        real = websocket.headers.get("x-real-ip", "").strip()
-        if real:
-            return real
-        forwarded = websocket.headers.get("x-forwarded-for", "")
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first
+        name = settings.confidential_client_ip_header.strip().lower()
+        value = websocket.headers.get(name, "")
+        if name == "x-forwarded-for":
+            value = value.split(",")[-1]
+        value = value.strip()
+        if value:
+            return value
     return peer or "unknown"
 
 
