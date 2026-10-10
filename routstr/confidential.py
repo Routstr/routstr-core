@@ -114,7 +114,8 @@ def pricing_fields(fee_msat: int, abandon_msat: int, pct: float) -> dict[str, An
     return out
 
 
-# Signed offers stay valid for setup (``offer_sig``) this long.
+# A signed offer stays valid for setup (``offer_sig``) this long after it was
+# last served (not after it was signed); at most this many are kept.
 SIGNED_OFFER_TTL_S = 600.0
 SIGNED_OFFER_MAX = 512
 
