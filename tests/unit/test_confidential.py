@@ -1052,19 +1052,36 @@ class _FakeWS:
 
 def test_client_address_trusts_only_proxies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "confidential_trusted_proxies", ["127.0.0.1"])
-    via_proxy = _FakeWS("127.0.0.1", {"x-real-ip": "203.0.113.7"})
-    assert cws.client_address(via_proxy) == "203.0.113.7"  # type: ignore[arg-type]
-    xff = _FakeWS("127.0.0.1", {"x-forwarded-for": "198.51.100.2, 10.0.0.1"})
+    monkeypatch.setattr(settings, "confidential_client_ip_header", "x-forwarded-for")
+    # The proxy appends the real client; anything left of it is client-supplied.
+    xff = _FakeWS("127.0.0.1", {"x-forwarded-for": "6.6.6.6, 198.51.100.2"})
     assert cws.client_address(xff) == "198.51.100.2"  # type: ignore[arg-type]
-    # Anyone else (e.g. the Tor sidecar) cannot choose its address by header.
-    spoof = _FakeWS("10.89.0.4", {"x-real-ip": "203.0.113.7"})
+    # X-Real-IP is ignored unless configured (a proxy that does not set it
+    # would pass a client's forged value through).
+    real = _FakeWS("127.0.0.1", {"x-real-ip": "6.6.6.6"})
+    assert cws.client_address(real) == "127.0.0.1"  # type: ignore[arg-type]
+    # Any other peer (e.g. a Tor sidecar, or a direct client) cannot choose
+    # its address by header.
+    spoof = _FakeWS("10.89.0.4", {"x-forwarded-for": "203.0.113.7"})
     assert cws.client_address(spoof) == "10.89.0.4"  # type: ignore[arg-type]
+    direct = _FakeWS("198.51.100.9", {})
+    assert cws.client_address(direct) == "198.51.100.9"  # type: ignore[arg-type]
 
 
-def test_client_address_self_means_own_addresses(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings, "confidential_trusted_proxies", ["self"])
+def test_client_address_configured_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "confidential_trusted_proxies", ["127.0.0.1"])
+    monkeypatch.setattr(settings, "confidential_client_ip_header", "X-Real-IP")
+    ws = _FakeWS("127.0.0.1", {"x-real-ip": "203.0.113.7"})
+    assert cws.client_address(ws) == "203.0.113.7"  # type: ignore[arg-type]
+
+
+def test_client_address_self_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "confidential_client_ip_header", "x-forwarded-for")
     monkeypatch.setattr(cws, "_own_addresses", lambda: {"10.89.0.3"})
-    ws = _FakeWS("10.89.0.3", {"x-real-ip": "203.0.113.9"})
+    ws = _FakeWS("10.89.0.3", {"x-forwarded-for": "203.0.113.9"})
+    monkeypatch.setattr(settings, "confidential_trusted_proxies", ["127.0.0.1", "::1"])
+    assert cws.client_address(ws) == "10.89.0.3"  # type: ignore[arg-type]
+    monkeypatch.setattr(settings, "confidential_trusted_proxies", ["self"])
     assert cws.client_address(ws) == "203.0.113.9"  # type: ignore[arg-type]
 
 
