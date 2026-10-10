@@ -126,8 +126,12 @@ The fees combine with the per-address unused-session limit
 (`CONFIDENTIAL_MAX_UNUSED_PER_IP`): the limit caps how many sessions one
 address can hold unused at a time, the abandon fee makes each one cost money.
 Without fees, an armed and abandoned session is free for the client. Clients
-that pre-warm (routstrd, the SDK) arm at most one session for a node that
-charges an abandon fee, and none when it exceeds their `maxSessionFeeMsat`.
+that pre-warm (routstrd, the SDK) arm at most `maxArmedWithFee` (default 6)
+sessions for a node that charges an abandon fee, and none when it exceeds their
+`maxSessionFeeMsat`. The main protection is money: every session reserves the
+full worst-case cost on a funded credential before the sidecar does any work,
+so the per-address limit only needs to stop one address from tying up many
+sessions at once; parallel coding agents need several.
 
 ## Session limits
 
@@ -154,7 +158,7 @@ charges an abandon fee, and none when it exceeds their `maxSessionFeeMsat`.
 | Env | Meaning | Default |
 |---|---|---|
 | `CONFIDENTIAL_SIDECAR_URL` | cu-sidecar base URL; empty disables the mode | `""` |
-| `CONFIDENTIAL_MAX_UNUSED_PER_IP` | refuse (429) a new session from a client address that already has this many unused sessions (set up, credential record not yet written; pre-warmed sessions count); 0 disables | `3` |
+| `CONFIDENTIAL_MAX_UNUSED_PER_IP` | refuse (429) a new session from a client address that already has this many unused sessions (set up, credential record not yet written; pre-warmed sessions count); 0 disables | `12` |
 | `CONFIDENTIAL_TRUSTED_PROXIES` | comma-separated peers whose client-address header is believed; `self` adds the node's own addresses (where a rootless container port forwarder connects from; enable only behind a reverse proxy that always sets the header) | `127.0.0.1,::1` |
 | `CONFIDENTIAL_SESSION_FEE_MSAT` | fee (msat) on top of the usage of a completed confidential request, and the charge for a provider refusal (4xx/503); published in the signed offer; clients must accept it at setup | `0` (off) |
 | `CONFIDENTIAL_ABANDON_FEE_MSAT` | fee (msat) for a session the sidecar accepted that ends without a request reaching the provider (armed and never used, aborted, client gone): the anti-DoS deposit, reserved at setup; never below the session fee (0 = equal to it) | `0` (off) |

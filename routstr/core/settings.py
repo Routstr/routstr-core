@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # have not been used yet (from setup until the credential record is
     # written). Pre-warmed sessions count. 0 disables the limit.
     confidential_max_unused_per_ip: int = Field(
-        default=3, env="CONFIDENTIAL_MAX_UNUSED_PER_IP"
+        default=12, env="CONFIDENTIAL_MAX_UNUSED_PER_IP"
     )
     # Pricing of confidential sessions (all off by default). A session moves
     # ~22 MB of 2PC data and costs the node ~0.5 s of CPU before the provider
