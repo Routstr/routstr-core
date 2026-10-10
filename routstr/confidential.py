@@ -37,7 +37,7 @@ logger = get_logger(__name__)
 # Wire-protocol version; the offer's min_v/max_v is the only negotiation.
 CONFIDENTIAL_VERSION = 1
 CONFIDENTIAL_MIN_V = 1
-CONFIDENTIAL_MAX_V = 1
+CONFIDENTIAL_MAX_V = 2
 
 # Upstream HTTP errors settled at zero cost once disclosed under π_C3: client
 # errors, rate limiting and "overloaded" are answered before any work starts.
@@ -277,6 +277,15 @@ def _remember_offer(sig: str, price_list: dict[str, Any]) -> None:
         del _SIGNED_OFFERS[oldest]
 
 
+def sidecar_protocol_version(side: dict[str, Any]) -> int:
+    """The protocol version the sidecar speaks (1 if it does not say)."""
+    try:
+        v = int(side.get("v", CONFIDENTIAL_VERSION))
+    except (TypeError, ValueError):
+        return CONFIDENTIAL_VERSION
+    return v if CONFIDENTIAL_MIN_V <= v <= CONFIDENTIAL_MAX_V else CONFIDENTIAL_VERSION
+
+
 def signed_offer_rates(sig: str, model_id: str) -> dict[str, float] | None:
     """The rates for ``model_id`` in an offer this node signed recently."""
     found = _SIGNED_OFFERS.get(sig)
@@ -297,9 +306,10 @@ async def build_offer() -> dict[str, Any]:
     side = await cached_sidecar_offer()
     prices = {mid: entry for mid, (_c, entry) in priced_models(side).items()}
     offer: dict[str, Any] = {
-        "v": CONFIDENTIAL_VERSION,
-        "min_v": CONFIDENTIAL_MIN_V,
-        "max_v": CONFIDENTIAL_MAX_V,
+        # The sidecar runs one protocol version (v2: the two-party handshake).
+        "v": sidecar_protocol_version(side),
+        "min_v": sidecar_protocol_version(side),
+        "max_v": sidecar_protocol_version(side),
         "upstream_host": str(side.get("upstream_host", "")),
         "ws": confidential_ws_public_url(),
         "notary_pubkey": node_pubkey_hex() or "",
@@ -347,7 +357,7 @@ async def models_fields() -> dict[str, dict[str, Any]]:
         side = await cached_sidecar_offer()
     except Exception:
         return {}
-    field = {"v": CONFIDENTIAL_VERSION, "offer_url": confidential_offer_url()}
+    field = {"v": sidecar_protocol_version(side), "offer_url": confidential_offer_url()}
     return {model_id: field for model_id in priced_models(side)}
 
 

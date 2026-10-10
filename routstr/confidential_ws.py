@@ -51,6 +51,7 @@ from .confidential import (
     release,
     reserve,
     settle,
+    sidecar_protocol_version,
     sign_payload,
     to_ws_url,
 )
@@ -67,7 +68,7 @@ _UUID_RE = re.compile(
 # The zk route is keyed by the protocol sid (a 32-byte hex digest).
 _SID_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
-_PROOF_RE = re.compile(r"^(pi_c1|pi_n|pi_c2|pi_c3)$")
+_PROOF_RE = re.compile(r"^(pi_c1|pi_n|pi_c2|pi_c3|twopc|pi_nk|pi_c2s|pi_c3s)$")
 _WS_MAX_SIZE = 64 << 20
 
 # Limits: concurrent sessions per process, time to the setup frame, a whole
@@ -184,6 +185,15 @@ async def confidential_session_proxy(
         return
     if not CONFIDENTIAL_MIN_V <= version <= CONFIDENTIAL_MAX_V:
         await websocket.close(code=1008, reason=f"unsupported protocol version {v}")
+        return
+    try:
+        sidecar_version = sidecar_protocol_version(await cached_sidecar_offer())
+    except Exception:
+        sidecar_version = CONFIDENTIAL_MIN_V
+    if version != sidecar_version:
+        await websocket.close(
+            code=1008, reason=f"this node speaks protocol version {sidecar_version}"
+        )
         return
     if not node_pubkey_hex():
         await websocket.close(code=1011, reason="node has no signing identity")
