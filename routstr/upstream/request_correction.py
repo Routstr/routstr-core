@@ -1,6 +1,6 @@
 """Reactive request-correction layer.
 
-When an upstream rejects a request with a recoverable 4xx error, this layer
+When an upstream rejects a request for a bad param (usually a 400), this layer
 tries to *fix* the request body and let the caller retry the same upstream
 instead of failing outright. It is provider-agnostic: correctors key off the
 upstream's own error wording, so the same recovery works across every provider.
@@ -42,6 +42,12 @@ _UNSUPPORTED_PARAM_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Same, with the param after a label, e.g. "Unsupported parameter: temperature".
+_UNSUPPORTED_PARAM_PREFIX_RE = re.compile(
+    r"unsupported\s+parameter:\s*[`'\"]?(?P<param>[a-zA-Z_][a-zA-Z0-9_]*)",
+    re.IGNORECASE,
+)
+
 
 # Matches upstream error text that rejects a param and names its replacement,
 # e.g. OpenAI's "Unsupported parameter: 'max_tokens' is not supported with this
@@ -76,13 +82,19 @@ class Correction:
 
 def extract_error_message(response: Response) -> str:
     """Best-effort extraction of an error message string from a proxy Response."""
-    body_bytes = getattr(response, "body", None)
-    if not body_bytes:
+    return error_message_from_body(getattr(response, "body", None) or b"")
+
+
+def error_message_from_body(body: bytes | str) -> str:
+    """Best-effort extraction of an error message string from a raw error body."""
+    if not body:
         return ""
     try:
-        data = json.loads(body_bytes)
+        data = json.loads(body)
     except Exception:
-        return body_bytes.decode("utf-8", errors="ignore")[:500]
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", errors="ignore")
+        return body[:500]
     if isinstance(data, dict):
         err = data.get("error")
         if isinstance(err, dict):
@@ -169,7 +181,9 @@ def strip_unsupported_param(body: dict, error_message: str) -> tuple[dict, str] 
     overcharge. When the upstream names such a field, decline so the original
     error propagates rather than silently resizing the request's cost.
     """
-    match = _UNSUPPORTED_PARAM_RE.search(error_message)
+    match = _UNSUPPORTED_PARAM_RE.search(
+        error_message
+    ) or _UNSUPPORTED_PARAM_PREFIX_RE.search(error_message)
     if not match:
         return None
     param = match.group("param")

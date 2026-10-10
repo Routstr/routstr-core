@@ -733,3 +733,64 @@ async def test_transport_failure_is_not_retried_in_place(
         "cheap.example.com",
         "expensive.example.com",
     ]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_unsupported_param_502_is_corrected_on_same_upstream(
+    authenticated_client: AsyncClient,
+    dual_provider_maps: tuple[_StaticProvider, _StaticProvider],
+) -> None:
+    """A 502 that names an unsupported param retries without it, in place.
+
+    Some upstreams report a rejected param as a 502 rather than a 400. Blindly
+    re-sending the same body would fail again, so the param is stripped first.
+    """
+    sent_bodies: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        body = json.loads(await request.aread())
+        sent_bodies.append((request.url.host, body))
+        if "temperature" in body:
+            return httpx.Response(
+                502,
+                content=json.dumps(
+                    {
+                        "error": {
+                            "message": "Codex error: Unsupported parameter: temperature"
+                        }
+                    }
+                ).encode(),
+                headers={"content-type": "application/json"},
+            )
+        return _successful_upstream_response()
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "temperature": 0.2,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert [host for host, _ in sent_bodies] == [
+        "cheap.example.com",
+        "cheap.example.com",
+    ]
+    assert "temperature" in sent_bodies[0][1]
+    assert "temperature" not in sent_bodies[1][1]
+    assert response.json()["cost"]["total_msats"] == 2_000
