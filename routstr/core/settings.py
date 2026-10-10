@@ -26,7 +26,12 @@ class Settings(BaseSettings):
 
         @classmethod
         def parse_env_var(cls, field_name: str, raw_value: str) -> Any:  # type: ignore[override]
-            if field_name in {"cashu_mints", "cors_origins", "relays"}:
+            if field_name in {
+                "cashu_mints",
+                "cors_origins",
+                "relays",
+                "confidential_trusted_proxies",
+            }:
                 v = str(raw_value).strip()
                 if v == "":
                     return []
@@ -73,12 +78,20 @@ class Settings(BaseSettings):
     confidential_max_unused_per_ip: int = Field(
         default=3, env="CONFIDENTIAL_MAX_UNUSED_PER_IP"
     )
-    # Peers whose X-Real-IP / X-Forwarded-For header names the client (the
-    # reverse proxy). "self" means this host's or container's own addresses,
-    # which is where a rootless port forwarder connects from.
+    # Peers (reverse proxies) whose client-address header is believed. Any
+    # other peer is identified by its own address. "self" adds this host's or
+    # container's own addresses, which is where a rootless container port
+    # forwarder connects from: enable it only if a proxy in front of that
+    # forwarder always sets the header.
     confidential_trusted_proxies: list[str] = Field(
-        default_factory=lambda: ["127.0.0.1", "::1", "self"],
+        default_factory=lambda: ["127.0.0.1", "::1"],
         env="CONFIDENTIAL_TRUSTED_PROXIES",
+    )
+    # Header a trusted proxy puts the client address in. For X-Forwarded-For the
+    # rightmost entry is used (the one the proxy appended; earlier entries come
+    # from the client). Other headers (X-Real-IP, CF-Connecting-IP) are used as is.
+    confidential_client_ip_header: str = Field(
+        default="x-forwarded-for", env="CONFIDENTIAL_CLIENT_IP_HEADER"
     )
 
     # Node info
