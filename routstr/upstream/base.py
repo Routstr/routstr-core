@@ -2270,6 +2270,9 @@ class BaseUpstreamProvider:
                 },
             )
 
+        flat_cost = calculate_flat_cost(1 if usage.image_count > 0 else 0, total_sats)
+        if model_obj is not None and model_obj._image_quote_usd_per_sat is not None:
+            flat_cost.total_usd = total_sats * model_obj._image_quote_usd_per_sat
         cost_data = await adjust_payment_for_tokens(
             key,
             {"model": model_id, "usage": None},
@@ -2278,9 +2281,7 @@ class BaseUpstreamProvider:
             model_obj,
             self.provider_fee,
             reservation_snapshot,
-            precomputed_cost=calculate_flat_cost(
-                1 if usage.image_count > 0 else 0, total_sats
-            ),
+            precomputed_cost=flat_cost,
         )
 
         logger.info(

@@ -4,7 +4,7 @@ import random
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic.v1 import BaseModel, validator
+from pydantic.v1 import BaseModel, PrivateAttr, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core.db import ModelRow, get_session
@@ -113,6 +113,8 @@ class Model(BaseModel):
     forwarded_model_id: str | None = None
     reasoning: Reasoning | None = None
     image_pricing: ImagePricing | None = None
+    # Request-only quote context: never persist or advertise it.
+    _image_quote_usd_per_sat: float | None = PrivateAttr(default=None)
 
     class Config:
         extra = "ignore"

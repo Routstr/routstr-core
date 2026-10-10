@@ -316,6 +316,7 @@ async def _run_proxy(path: str, body: dict, model: Model) -> tuple[Any, AsyncMoc
     upstream = MagicMock()
     upstream.provider_type = "openrouter"
     upstream.base_url = "https://openrouter.ai/api/v1"
+    upstream.provider_fee = 1.0
     upstream.db_id = None
     upstream.prepare_headers = MagicMock(side_effect=lambda h: h)
     upstream.forward_request = AsyncMock(return_value=MagicMock(status_code=200))
