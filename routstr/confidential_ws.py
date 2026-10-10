@@ -34,6 +34,7 @@ import asyncio
 import hashlib
 import json
 import re
+import socket
 import time
 from typing import Any, TypeGuard
 
@@ -81,6 +82,8 @@ SESSION_TIMEOUT_S = 600.0
 MAX_BODY_LEN = 8 << 20
 
 _active_sessions = 0
+# Unused sessions (setup accepted, credential not yet written) per client address.
+_unused_by_ip: dict[str, int] = {}
 
 
 def _sidecar_ws_url(path: str, query: str) -> str:
@@ -95,6 +98,8 @@ def _short(sid: str | None) -> str:
 class SessionState:
     def __init__(self) -> None:
         self.billing: Billing | None = None
+        # Client address counted in ``_unused_by_ip`` until the session is used.
+        self.unused_ip: str | None = None
         self.sid: str | None = None
         self.body_released = False
         # Set once the reservation is charged or released; ``lock`` makes
@@ -204,16 +209,72 @@ async def confidential_session_proxy(
         await _send_error(websocket, 503, "too many confidential sessions")
         await _close(websocket, 1013, "too many confidential sessions")
         return
+    ip = client_address(websocket)
+    limit = settings.confidential_max_unused_per_ip
+    if limit > 0 and _unused_by_ip.get(ip, 0) >= limit:
+        await _send_error(
+            websocket, 429, f"too many unused confidential sessions (limit {limit})"
+        )
+        await _close(websocket, 1013, "too many unused confidential sessions")
+        return
+    state = SessionState()
+    state.unused_ip = ip
+    _unused_by_ip[ip] = _unused_by_ip.get(ip, 0) + 1
     _active_sessions += 1
     try:
-        await _run_session(websocket, session_id)
+        await _run_session(websocket, session_id, state)
     finally:
         _active_sessions -= 1
+        _mark_used(state)
 
 
-async def _run_session(websocket: WebSocket, session_id: str) -> None:
+def _mark_used(state: "SessionState") -> None:
+    """The session no longer counts against its address's unused limit."""
+    ip, state.unused_ip = state.unused_ip, None
+    if ip is None:
+        return
+    left = _unused_by_ip.get(ip, 1) - 1
+    if left > 0:
+        _unused_by_ip[ip] = left
+    else:
+        _unused_by_ip.pop(ip, None)
+
+
+def _own_addresses() -> set[str]:
+    addrs = {"127.0.0.1", "::1"}
+    try:
+        host = socket.gethostname()
+        addrs.update(socket.gethostbyname_ex(host)[2])
+        for info in socket.getaddrinfo(host, None):
+            addrs.add(str(info[4][0]))
+    except OSError:
+        pass
+    return addrs
+
+
+def client_address(websocket: WebSocket) -> str:
+    """The client's address: the reverse proxy's header when the peer is a
+    trusted proxy (``confidential_trusted_proxies``), else the peer itself."""
+    peer = websocket.client.host if websocket.client else ""
+    trusted = set(settings.confidential_trusted_proxies)
+    if "self" in trusted:
+        trusted |= _own_addresses()
+    if peer in trusted:
+        real = websocket.headers.get("x-real-ip", "").strip()
+        if real:
+            return real
+        forwarded = websocket.headers.get("x-forwarded-for", "")
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    return peer or "unknown"
+
+
+async def _run_session(
+    websocket: WebSocket, session_id: str, state: SessionState | None = None
+) -> None:
     started = time.monotonic()
-    state = SessionState()
+    state = state or SessionState()
     upstream = await _open_session(websocket, session_id, state)
     if upstream is None:
         return
@@ -377,6 +438,11 @@ async def _on_sidecar_text(
         msg["pubkey"] = node_pubkey_hex()
         msg["sig_scheme"] = "schnorr-secp256k1"
         return json.dumps(msg)
+    if kind == "head_written":
+        # The credential record is on its way to the provider: the session is
+        # in use and no longer counts against the unused limit.
+        _mark_used(state)
+        return frame
     if kind == "body_released":
         state.body_released = True
         return frame
