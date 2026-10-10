@@ -1,10 +1,16 @@
+import json
 from typing import TYPE_CHECKING
 
 import httpx
 
 from ..core.logging import get_logger
+from ..payment.image_pricing import produces_images
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider, _reported_provider
+from .image_catalog import (
+    attach_image_books,
+    fetch_openrouter_image_books,
+)
 from .model_paths import public_provider_url
 
 if TYPE_CHECKING:
@@ -86,6 +92,35 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
             base_url=self.default_base_url, api_key=api_key, provider_fee=provider_fee
         )
 
+    def prepare_request_body(
+        self,
+        body: bytes | None,
+        model_obj: Model,
+        include_stream_usage: bool = False,
+    ) -> bytes | None:
+        body = super().prepare_request_body(body, model_obj, include_stream_usage)
+        if not body or not produces_images(model_obj):
+            return body
+        # Pin the endpoint the request was quoted on. OpenRouter would
+        # otherwise pick one with other prices, or re-route a failed
+        # generation to another provider, buying twice for one settlement.
+        try:
+            data = json.loads(body)
+        except Exception:
+            return body
+        if not isinstance(data, dict):
+            return body
+        book = model_obj.image_pricing
+        tag = book.endpoint_tag if book is not None else None
+        if tag:
+            data["provider"] = {"only": [tag], "allow_fallbacks": False}
+        else:
+            routing = data.get("provider")
+            routing = dict(routing) if isinstance(routing, dict) else {}
+            routing["allow_fallbacks"] = False
+            data["provider"] = routing
+        return json.dumps(data).encode()
+
     @classmethod
     def _build_from_row(
         cls, provider_row: "UpstreamProviderRow"
@@ -107,7 +142,13 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
         }
 
     async def fetch_models(self) -> list[Model]:
-        """Fetch all OpenRouter models."""
+        """Fetch all OpenRouter models.
+
+        Image models are priced from the Image API's per-endpoint billable
+        lines. One with no endpoint whose prices bound a request, or whose
+        listing is unavailable, has no book and is not listed; the response's
+        ``usage.cost`` settles the charge on the endpoint it was pinned to.
+        """
         models_data = await async_fetch_openrouter_models()
         models = [Model(**model) for model in models_data]  # type: ignore
         # manual alias for openai/text-embedding-ada-002 due to openrouter api bug
@@ -115,7 +156,14 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
             if model.id == "openai/text-embedding-ada-002":
                 model.alias_ids = ["text-embedding-ada-002-v2"]
                 break
-        return models
+
+        image_ids = [
+            m.id for m in models if m.architecture.output_modalities == ["image"]
+        ]
+        books = await fetch_openrouter_image_books(
+            image_ids, base_url=self.base_url, api_key=self.api_key
+        )
+        return attach_image_books(models, books, source="OpenRouter")
 
     async def get_balance(self) -> float | None:
         """Get the current account balance from OpenRouter.

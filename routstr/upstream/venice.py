@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
 from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
+from ..payment.image_pricing import ImagePriceTier, ImagePricing
 from ..payment.models import Architecture, Model, Pricing, TopProvider
 from . import messages_dispatch
 from .base import BaseUpstreamProvider
@@ -21,16 +22,21 @@ logger = get_logger(__name__)
 # configured as a generic upstream never sees the rest of its catalog.
 _MODELS_TYPE_PARAM = "all"
 
-# Families this proxy can both route and price. Image, audio, music and video
-# are billed per clip or per second and return no usage object to settle
-# against, so exposing them would hand out unpriced inference.
-_SUPPORTED_TYPES = frozenset({"text", "embedding"})
+# Families this proxy can both route and price. Audio, music and video are
+# billed per clip or per second and return no usage object to settle against,
+# so exposing them would hand out unpriced inference.
+_SUPPORTED_TYPES = frozenset({"text", "image", "inpaint", "upscale", "embedding"})
+
+_IMAGE_TYPES = frozenset({"image", "inpaint", "upscale"})
 
 # Venice prices text in USD per million tokens; Routstr prices per token.
 _USD_PER_MILLION = 1_000_000.0
 
 _ARCHITECTURES: dict[str, tuple[str, list[str], list[str]]] = {
     "text": ("text->text", ["text"], ["text"]),
+    "image": ("text->image", ["text"], ["image"]),
+    "inpaint": ("text+image->image", ["text", "image"], ["image"]),
+    "upscale": ("image->image", ["image"], ["image"]),
     "embedding": ("text->embedding", ["text"], ["embedding"]),
 }
 
@@ -172,6 +178,44 @@ def _usd(entry: Any) -> float | None:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
     return None
+
+
+def _max_usd(entry: Any) -> float | None:
+    """Worst-case USD price across a nested Venice price table."""
+    direct = _usd(entry)
+    if direct is not None:
+        return direct
+    if not isinstance(entry, dict):
+        return None
+    prices = [p for p in (_max_usd(value) for value in entry.values()) if p is not None]
+    return max(prices) if prices else None
+
+
+def _prices(table: Any, case: Callable[[str], str]) -> dict[str, float]:
+    """A Venice ``{label: {usd, diem}}`` table as ``{label: usd}``."""
+    if not isinstance(table, dict):
+        return {}
+    priced = ((case(str(label)), _usd(entry)) for label, entry in table.items())
+    return {label: usd for label, usd in priced if usd is not None}
+
+
+def _tables(table: Any) -> dict[str, dict]:
+    """The nested sub-tables of a Venice price table, keyed by their label."""
+    if not isinstance(table, dict):
+        return {}
+    return {
+        str(label): entry for label, entry in table.items() if isinstance(entry, dict)
+    }
+
+
+def _label(value: Any, case: Callable[[str], str]) -> str | None:
+    return case(value) if isinstance(value, str) else None
+
+
+def _labels(values: Any, case: Callable[[str], str]) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [case(str(value)) for value in values]
 
 
 class VeniceUpstreamProvider(BaseUpstreamProvider):
@@ -357,6 +401,11 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
         pricing = self._parse_pricing(spec.get("pricing"), str(model_type))
         if pricing is None:
             return None
+        image_pricing = (
+            self._build_image_pricing(spec.get("pricing"), spec)
+            if model_type in _IMAGE_TYPES
+            else None
+        )
 
         modality, input_modalities, output_modalities = _ARCHITECTURES[str(model_type)]
         capabilities = spec.get("capabilities")
@@ -386,6 +435,7 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
                 instruct_type=None,
             ),
             pricing=pricing,
+            image_pricing=image_pricing,
             top_provider=TopProvider(
                 context_length=int(context_length) if context_length else None,
                 max_completion_tokens=int(max_completion_tokens)
@@ -397,6 +447,17 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
     def _parse_pricing(self, raw: Any, model_type: str) -> Pricing | None:
         if not isinstance(raw, dict):
             return None
+
+        if model_type in _IMAGE_TYPES:
+            per_image = self._per_image_usd(raw)
+            if per_image is None:
+                return None
+            return Pricing(
+                prompt=0.0,
+                completion=0.0,
+                image=self._input_image_usd(raw),
+                image_output=per_image,
+            )
 
         # The ``extended`` tier some models charge past a context threshold is
         # ignored: billing it would overcharge every request staying under it.
@@ -418,3 +479,72 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
             input_cache_read=(_usd(raw.get("cache_input")) or 0.0) / _USD_PER_MILLION,
             input_cache_write=(_usd(raw.get("cache_write")) or 0.0) / _USD_PER_MILLION,
         )
+
+    def _build_image_pricing(
+        self, raw: Any, spec: dict[str, Any]
+    ) -> ImagePricing | None:
+        """Venice's per-tier image prices as the model's own price book.
+
+        ``constraints`` carries the resolution and quality applied when the
+        request names neither, so a default request is priced at the default
+        tier rather than the ceiling.
+        """
+        if not isinstance(raw, dict):
+            return None
+        max_usd = self._per_image_usd(raw)
+        if max_usd is None:
+            return None
+
+        tiers = [
+            ImagePriceTier(resolution=label, usd=price)
+            for label, price in _prices(raw.get("resolutions"), str.upper).items()
+        ]
+        for label, steps in _tables(raw.get("quality")).items():
+            tiers += [
+                ImagePriceTier(resolution=label.upper(), quality=step, usd=price)
+                for step, price in _prices(steps, str.lower).items()
+            ]
+
+        constraints = spec.get("constraints")
+        constraints = constraints if isinstance(constraints, dict) else {}
+        input_images = raw.get("inputImages")
+        input_images = input_images if isinstance(input_images, dict) else {}
+        included = input_images.get("included")
+
+        return ImagePricing(
+            max_usd=max_usd,
+            tiers=tiers,
+            default_resolution=_label(constraints.get("defaultResolution"), str.upper),
+            default_quality=_label(constraints.get("defaultQuality"), str.lower),
+            resolutions=_labels(constraints.get("resolutions"), str.upper),
+            qualities=_labels(constraints.get("qualities"), str.lower),
+            upscale=_prices(raw.get("upscale"), str.lower),
+            input_image_usd=self._input_image_usd(raw),
+            input_images_included=included
+            if isinstance(included, int) and not isinstance(included, bool)
+            else 0,
+        )
+
+    @staticmethod
+    def _input_image_usd(raw: dict[str, Any]) -> float:
+        """Venice's per-extra-reference-image surcharge, ``inputImages.additional``."""
+        input_images = raw.get("inputImages")
+        if not isinstance(input_images, dict):
+            return 0.0
+        return _usd(input_images.get("additional")) or 0.0
+
+    @staticmethod
+    def _per_image_usd(raw: dict[str, Any]) -> float | None:
+        """Worst-case USD for one generation.
+
+        ``upscale`` and ``inputImages`` price a separate call and a per-extra-
+        image surcharge, so folding them in would inflate every reservation.
+        """
+        candidates = [
+            _usd(raw.get("generation")),
+            _usd(raw.get("inpaint")),
+            _max_usd(raw.get("resolutions")),
+            _max_usd(raw.get("quality")),
+        ]
+        priced = [c for c in candidates if c is not None]
+        return max(priced) if priced else None

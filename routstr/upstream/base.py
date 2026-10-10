@@ -46,8 +46,10 @@ from ..payment.cost_calculation import (
     CostDataError,
     MaxCostData,
     calculate_cost,
+    calculate_flat_cost,
 )
 from ..payment.helpers import create_error_response
+from ..payment.image_pricing import produces_images, settle_image_sats
 from ..payment.models import (
     Model,
     Pricing,
@@ -73,6 +75,11 @@ from .cache_breakpoints import (
 from .cooldown import model_identity, provider_identity, record_failure
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
 from .http_client import acquire_upstream_http_client, build_x_cashu_client
+from .image_generation import (
+    is_image_generation_path,
+    parse_json_body,
+    read_image_response,
+)
 from .litellm_routing import detect_litellm_prefix
 from .model_paths import public_provider_url
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
@@ -94,6 +101,10 @@ if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
 
 logger = get_logger(__name__)
+
+# One image call may ask for several images, so an image model's max cost
+# covers a small batch at its ceiling price rather than a token window.
+IMAGES_PER_RESERVATION = 4
 
 
 CostMetadata = CostData | MaxCostData | dict[str, Any]
@@ -328,6 +339,19 @@ class TopupData(BaseModel):
     currency: str
     expires_at: int | None = None
     checkout_url: str | None = None
+
+
+async def _read_bounded(response: httpx.Response, limit: int) -> bytes:
+    """The body of a buffered response, refused once it passes ``limit`` bytes."""
+    declared = response.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise UpstreamError("Image response exceeds the configured size limit")
+    content = bytearray()
+    async for chunk in response.aiter_bytes():
+        content.extend(chunk)
+        if len(content) > limit:
+            raise UpstreamError("Image response exceeds the configured size limit")
+    return bytes(content)
 
 
 class BaseUpstreamProvider:
@@ -2153,6 +2177,141 @@ class BaseUpstreamProvider:
             )
             raise
 
+    async def handle_image_generation(
+        self,
+        response: httpx.Response,
+        key: ApiKey,
+        session: AsyncSession,
+        max_cost_for_model: int,
+        model_obj: Model | None,
+        reservation_snapshot: ReservationSnapshot | None = None,
+        request_body: bytes | None = None,
+        path: str = "",
+    ) -> Response:
+        """Settle an image response on what it carried.
+
+        ``settle_image_sats`` picks the unit the model's price book names:
+        the upstream's own USD cost, reported image tokens, or a flat price
+        per image returned. A response with nothing to bill releases the
+        reservation, and none is charged past it.
+        """
+        from ..core.settings import settings
+
+        model_id = model_obj.id if model_obj else "unknown"
+        try:
+            content = await _read_bounded(response, settings.image_max_response_bytes)
+        except UpstreamError:
+            # The upstream answered 200 and has billed the node; the quote is
+            # what the key agreed to, so it is charged though the body is not
+            # relayed.
+            logger.error(
+                "Image response exceeded the size limit; charging the reservation",
+                extra={
+                    "model": model_id,
+                    "reserved_msats": max_cost_for_model,
+                    "key_hash": key.hashed_key[:8] + "...",
+                },
+            )
+            await adjust_payment_for_tokens(
+                key,
+                {"model": model_id, "usage": None},
+                session,
+                max_cost_for_model,
+                model_obj,
+                self.provider_fee,
+                reservation_snapshot,
+                precomputed_cost=calculate_flat_cost(1, max_cost_for_model / 1000),
+            )
+            raise
+        content_type = response.headers.get("content-type")
+        usage = read_image_response(
+            content, _is_json_content_type(content_type) if content_type else True
+        )
+        body = parse_json_body(request_body)
+        total_sats = settle_image_sats(model_obj, body, usage, path)
+
+        if total_sats is None:
+            # The upstream reported no cost or usage we can bill on. An
+            # estimate is not a bill, so release the reservation.
+            total_sats = 0.0
+            logger.warning(
+                "Image response reports no billable cost or usage; releasing "
+                "the reservation",
+                extra={
+                    "model": model_id,
+                    "image_count": usage.image_count,
+                    "reserved_msats": max_cost_for_model,
+                    "key_hash": key.hashed_key[:8] + "...",
+                },
+            )
+
+        if total_sats * 1000 > max_cost_for_model:
+            # The quote is what the key agreed to; an upstream charging more
+            # than it is the node's loss to reconcile, not the key's.
+            logger.error(
+                "Image settlement exceeded its reservation; charging the reservation",
+                extra={
+                    "model": model_id,
+                    "settled_msats": math.ceil(total_sats * 1000),
+                    "reserved_msats": max_cost_for_model,
+                    "key_hash": key.hashed_key[:8] + "...",
+                },
+            )
+            total_sats = max_cost_for_model / 1000
+
+        if usage.image_count > 0 and total_sats <= 0:
+            logger.warning(
+                "Image response carries no per-image price; releasing the "
+                "reservation instead of billing a rate we do not have",
+                extra={
+                    "model": model_id,
+                    "image_count": usage.image_count,
+                    "key_hash": key.hashed_key[:8] + "...",
+                },
+            )
+
+        cost_data = await adjust_payment_for_tokens(
+            key,
+            {"model": model_id, "usage": None},
+            session,
+            max_cost_for_model,
+            model_obj,
+            self.provider_fee,
+            reservation_snapshot,
+            precomputed_cost=calculate_flat_cost(
+                1 if usage.image_count > 0 else 0, total_sats
+            ),
+        )
+
+        logger.info(
+            "Settled image generation request",
+            extra={
+                "model": model_id,
+                "image_count": usage.image_count,
+                "output_image_tokens": usage.output_image_tokens,
+                "upstream_cost_usd": usage.upstream_cost_usd,
+                "total_sats": total_sats,
+                "key_hash": key.hashed_key[:8] + "...",
+            },
+        )
+
+        # httpx already decoded the body, so the upstream's framing headers no
+        # longer describe it.
+        headers = {
+            name: value
+            for name, value in response.headers.items()
+            if name.lower()
+            not in {"content-length", "content-encoding", "transfer-encoding"}
+        }
+        _inject_cost_response_headers(headers, cost_data)
+
+        return Response(
+            content=content,
+            status_code=response.status_code,
+            headers=headers,
+            media_type=content_type,
+        )
+
     async def _finalize_generic_streaming_payment(
         self,
         key_hash: str,
@@ -3537,6 +3696,21 @@ class BaseUpstreamProvider:
 
             if reservation_snapshot is None:
                 reservation_snapshot = await get_reservation_snapshot(key, session)
+
+            if is_image_generation_path(path) and response.status_code == 200:
+                try:
+                    return await self.handle_image_generation(
+                        response,
+                        key,
+                        session,
+                        max_cost_for_model,
+                        model_obj,
+                        reservation_snapshot=reservation_snapshot,
+                        request_body=request_body,
+                        path=path,
+                    )
+                finally:
+                    await response_handoff.close()
 
             logger.debug(
                 "Streaming non-chat response",
@@ -5740,6 +5914,9 @@ class BaseUpstreamProvider:
         Returns:
             Model with provider fee applied to pricing and max costs calculated
         """
+        if produces_images(model):
+            return self._apply_provider_fee_to_image_model(model)
+
         base_pricing = (
             backfill_cache_pricing(model.id, model.pricing)
             if allows_cache_pricing_backfill(self.provider_type)
@@ -5760,6 +5937,20 @@ class BaseUpstreamProvider:
         ) = _calculate_usd_max_costs(temp_model)
 
         return model.copy(update={"pricing": adjusted_pricing})
+
+    def _apply_provider_fee_to_image_model(self, model: Model) -> Model:
+        """Reserve a small batch of images instead of a token window.
+
+        The token max-cost formula reads a per-image rate as a per-input-image
+        surcharge, reserving a hundred generations for one image.
+        """
+        adjusted = Pricing.parse_obj(
+            {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
+        )
+        adjusted.max_prompt_cost = adjusted.image
+        adjusted.max_completion_cost = adjusted.image_output * IMAGES_PER_RESERVATION
+        adjusted.max_cost = adjusted.max_prompt_cost + adjusted.max_completion_cost
+        return model.copy(update={"pricing": adjusted})
 
     async def fetch_models(self) -> list[Model]:
         """Fetch available models from upstream API and update cache.

@@ -479,6 +479,7 @@ class ModelCreate(BaseModel):
     context_length: int
     architecture: dict[str, object]
     pricing: dict[str, object]
+    image_pricing: dict[str, object] | None = None
     per_request_limits: dict[str, object] | None = None
     top_provider: dict[str, object] | None = None
     upstream_provider_id: int | None = None
@@ -565,6 +566,9 @@ async def upsert_provider_model(
             existing_row.top_provider = (
                 json.dumps(payload.top_provider) if payload.top_provider else None
             )
+            existing_row.image_pricing = (
+                json.dumps(payload.image_pricing) if payload.image_pricing else None
+            )
             existing_row.canonical_slug = payload.canonical_slug
             existing_row.alias_ids = (
                 json.dumps(payload.alias_ids) if payload.alias_ids else None
@@ -592,6 +596,9 @@ async def upsert_provider_model(
                 architecture=json.dumps(payload.architecture),
                 pricing=json.dumps(payload.pricing),
                 sats_pricing=None,
+                image_pricing=(
+                    json.dumps(payload.image_pricing) if payload.image_pricing else None
+                ),
                 per_request_limits=(
                     json.dumps(payload.per_request_limits)
                     if payload.per_request_limits is not None
@@ -739,6 +746,11 @@ async def batch_override_provider_models(
                 existing_row.architecture = json.dumps(model_data.architecture)
                 existing_row.pricing = json.dumps(model_data.pricing)
                 existing_row.sats_pricing = None
+                existing_row.image_pricing = (
+                    json.dumps(model_data.image_pricing)
+                    if model_data.image_pricing
+                    else None
+                )
                 existing_row.per_request_limits = (
                     json.dumps(model_data.per_request_limits)
                     if model_data.per_request_limits is not None
@@ -770,6 +782,11 @@ async def batch_override_provider_models(
                     architecture=json.dumps(model_data.architecture),
                     pricing=json.dumps(model_data.pricing),
                     sats_pricing=None,
+                    image_pricing=(
+                        json.dumps(model_data.image_pricing)
+                        if model_data.image_pricing
+                        else None
+                    ),
                     per_request_limits=(
                         json.dumps(model_data.per_request_limits)
                         if model_data.per_request_limits is not None

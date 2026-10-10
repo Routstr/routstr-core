@@ -41,7 +41,14 @@ from .payment.helpers import (
     create_upstream_error_response,
     get_max_cost_for_model,
 )
+from .payment.image_pricing import (
+    ImageRequestRefused,
+    image_reservation_msats,
+    quote_image_endpoint,
+    requested_image_count,
+)
 from .payment.models import Model
+from .payment.price import sats_usd_price
 from .upstream import BaseUpstreamProvider
 from .upstream.cooldown import (
     candidate_model_identity,
@@ -51,6 +58,7 @@ from .upstream.cooldown import (
 )
 from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
+from .upstream.image_generation import is_image_generation_path
 from .upstream.model_paths import (
     ModelPathSelector,
     apply_model_path_pricing,
@@ -157,6 +165,48 @@ def _candidate_for_selector(
             continue
         return model_obj, upstream
     return None
+
+
+_TEXT_GENERATION_PATHS = frozenset(
+    {"chat/completions", "completions", "responses", "messages"}
+)
+
+
+def _image_only(model: Model) -> bool:
+    outputs = model.architecture.output_modalities
+    return "image" in outputs and "text" not in outputs
+
+
+def _price_image_candidate(
+    body: dict,
+    model: Model,
+    upstream: BaseUpstreamProvider,
+    path: str,
+) -> tuple[Model, BaseUpstreamProvider] | str:
+    """The candidate priced for an image request, or why it cannot be.
+
+    OpenRouter serves a model from several endpoints at different prices, so
+    the request is quoted on one endpoint and pinned there. A quote above the
+    node's per-request budget is refused like one that cannot be bounded.
+    """
+    try:
+        requested_image_count(body)
+        if is_openrouter_base_url(upstream.base_url):
+            model = quote_image_endpoint(body, model, path)
+    except ImageRequestRefused as refused:
+        return str(refused)
+    reserved = image_reservation_msats(body, model, path)
+    if reserved is None:
+        return f"Model '{model.id}' cannot be priced for this request on this node"
+    budget = settings.image_max_request_usd
+    if budget > 0:
+        try:
+            reserved_usd = reserved / 1000 * sats_usd_price()
+        except ValueError:
+            return "Image requests cannot be priced until the exchange rate is known"
+        if reserved_usd > budget:
+            return "Image quote exceeds the node's per-request budget"
+    return model, upstream
 
 
 async def _price_pinned_endpoint(
@@ -327,6 +377,16 @@ _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     # response's usage exactly like embeddings.
     "systemone": frozenset({"POST"}),
     "decisions": frozenset({"POST"}),
+    # Image generation: the OpenAI images API plus Venice's native routes,
+    # billed per image by ``handle_image_generation``. Bodies must be JSON;
+    # multipart uploads to edits/variations are refused before routing.
+    "images/generations": frozenset({"POST"}),
+    "images/edits": frozenset({"POST"}),
+    "images/variations": frozenset({"POST"}),
+    "image/generate": frozenset({"POST"}),
+    "image/edit": frozenset({"POST"}),
+    "image/inpaint": frozenset({"POST"}),
+    "image/upscale": frozenset({"POST"}),
     "models": frozenset({"GET"}),
     "attestation": frozenset({"GET"}),
     "tee/attestation": frozenset({"GET"}),
@@ -778,6 +838,51 @@ async def _proxy(
                 request=request,
             )
 
+    single_dispatch = is_image_generation_path(path)
+    if _canonical_api_path(path) in _TEXT_GENERATION_PATHS:
+        # An image-only model has no token price, so a text route would serve
+        # its generations free. It is refused whatever its capabilities say.
+        candidates = [
+            (model, upstream)
+            for model, upstream in candidates
+            if not _image_only(model)
+        ]
+        if not candidates:
+            return create_error_response(
+                "unsupported_request",
+                f"Model '{model_id}' requires the images API",
+                400,
+                request=request,
+            )
+    if single_dispatch:
+        # Settlement buffers the whole response and bills the images it counts,
+        # so a stream would be billed as one image whatever it carried.
+        if request_body_dict.get("stream"):
+            return create_error_response(
+                "unsupported_request",
+                "Streaming is not supported for image generation",
+                400,
+                request=request,
+            )
+        priced_candidates: list[tuple[Model, BaseUpstreamProvider]] = []
+        refusals: list[str] = []
+        for model, upstream in candidates:
+            priced = _price_image_candidate(request_body_dict, model, upstream, path)
+            if isinstance(priced, str):
+                refusals.append(priced)
+            else:
+                priced_candidates.append(priced)
+        candidates = priced_candidates
+        if not candidates:
+            return create_error_response(
+                "unsupported_request",
+                refusals[0]
+                if refusals
+                else f"Model '{model_id}' cannot be priced for this request on this node",
+                400,
+                request=request,
+            )
+
     # A provider that just failed this model repeatedly is skipped while some
     # other candidate can serve it. An explicit route is never rerouted.
     if selector is None:
@@ -792,6 +897,13 @@ async def _proxy(
         if healthy:
             candidates = healthy
 
+    if single_dispatch:
+        # A generation is a purchase. Once dispatched, an ambiguous failure
+        # (lost response, timeout, gateway error) is no proof the upstream did
+        # not charge for it, so no second provider is tried and no 5xx is
+        # re-sent: one candidate, one POST, settle or refund.
+        candidates = candidates[:1]
+
     # Reserve/max-cost checks use the best-ranked candidate; the failover loop
     # below rebinds (model_obj, upstream) per candidate so forwarding and
     # settlement always use the model of the provider actually being tried.
@@ -801,7 +913,7 @@ async def _proxy(
         model=model_id, session=session, model_obj=model_obj
     )
     max_cost_for_model = await calculate_discounted_max_cost(
-        _max_cost_for_model, request_body_dict, model_obj=model_obj
+        _max_cost_for_model, request_body_dict, model_obj=model_obj, path=path
     )
 
     check_token_balance(headers, request_body_dict, max_cost_for_model)
@@ -977,7 +1089,7 @@ async def _proxy(
                 model=model_id, session=session, model_obj=model_obj
             )
             candidate_max = await calculate_discounted_max_cost(
-                candidate_max, request_body_dict, model_obj=model_obj
+                candidate_max, request_body_dict, model_obj=model_obj, path=path
             )
             if candidate_max > max_cost_for_model:
                 await revert_pay_for_request(
@@ -1001,7 +1113,7 @@ async def _proxy(
         # Only once the candidate is actually tried: a fallback skipped for its
         # reservation must not take over the last attempted upstream's line.
         _attribute_request(request, model_obj, upstream)
-        retries_left = settings.upstream_5xx_retry_attempts
+        retries_left = 0 if single_dispatch else settings.upstream_5xx_retry_attempts
         retry_index = 0
         headers = upstream.prepare_headers(dict(request.headers))
 
@@ -1106,8 +1218,10 @@ async def _proxy(
                     )
                     raise
 
-                # Same-provider recovery must not relax an explicit route.
-                if response.status_code == 400 and not is_ehbp:
+                # Same-provider recovery must not relax an explicit route, and
+                # must not re-send an image request the reservation priced as
+                # sent.
+                if response.status_code == 400 and not is_ehbp and not single_dispatch:
                     correction = correct_request(
                         request_body,
                         extract_error_message(response),

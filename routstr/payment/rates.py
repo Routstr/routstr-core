@@ -18,6 +18,7 @@ BILLABLE_PRICING_FIELDS = (
     "completion",
     "request",
     "image",
+    "image_output",
     "web_search",
     "internal_reasoning",
     "input_cache_read",

@@ -1209,6 +1209,7 @@ async def _adjust_payment_for_tokens(
     model_obj: "Model | None" = None,
     provider_fee: float | None = None,
     reservation_snapshot: ReservationSnapshot | None = None,
+    precomputed_cost: CostData | None = None,
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
@@ -1285,8 +1286,14 @@ async def _adjust_payment_for_tokens(
                     extra={"error": str(e), "fee_msats": fee_msats},
                 )
 
-    calculated_cost = await calculate_cost(
-        response_data, deducted_max_cost, model_obj, provider_fee
+    # A flat per-unit charge is priced by the caller; its response carries no
+    # usage object for ``calculate_cost`` to read.
+    calculated_cost: CostData | CostDataError = (
+        precomputed_cost
+        if precomputed_cost is not None
+        else await calculate_cost(
+            response_data, deducted_max_cost, model_obj, provider_fee
+        )
     )
     if isinstance(calculated_cost, CostDataError):
         # Content was already served, so release instead of raising a 400.
@@ -1645,6 +1652,7 @@ async def adjust_payment_for_tokens(
     model_obj: "Model | None" = None,
     provider_fee: float | None = None,
     reservation_snapshot: ReservationSnapshot | None = None,
+    precomputed_cost: CostData | None = None,
 ) -> dict:
     """Settle payment while exposing latency for every import path."""
     started = time.perf_counter()
@@ -1659,6 +1667,7 @@ async def adjust_payment_for_tokens(
             model_obj,
             provider_fee,
             reservation_snapshot,
+            precomputed_cost,
         )
         succeeded = True
         return result
