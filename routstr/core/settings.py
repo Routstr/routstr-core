@@ -489,6 +489,13 @@ class SettingsService:
             env_resolved = resolve_bootstrap()
 
             if row is None:
+                # bootstrap_secrets may have generated/imported an identity that
+                # is absent from env. Use its authoritative live nsec, just as
+                # in the existing-row path, before persisting or applying npub.
+                if settings.nsec:
+                    derived_npub = derive_npub_from_nsec(settings.nsec)
+                    if derived_npub:
+                        env_resolved.npub = derived_npub
                 await db_session.exec(  # type: ignore
                     text(
                         "INSERT INTO settings (id, data, updated_at) VALUES (1, :data, :updated_at)"

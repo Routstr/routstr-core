@@ -49,9 +49,11 @@ cp .env.example .env
 Edit `.env` with your configuration:
 
 ```bash
-# Minimum required for development
+# Minimum required for development. The upstream pair is optional: without it the
+# node starts with no provider and you add one in the dashboard. Set it here (or
+# point it at a mock) when you want a provider on the first boot.
 UPSTREAM_BASE_URL=https://api.openai.com/v1
-UPSTREAM_API_KEY=your-api-key  # Optional for mock testing
+UPSTREAM_API_KEY=your-api-key
 ADMIN_PASSWORD=development-password
 DATABASE_URL=sqlite+aiosqlite:///dev.db
 ```
