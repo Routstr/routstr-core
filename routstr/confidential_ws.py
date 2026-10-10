@@ -79,14 +79,16 @@ _PROOF_RE = re.compile(r"^(pi_c1|pi_n|pi_c2|pi_c3|twopc|zkchan|pi_nk|pi_c2s|pi_c
 _WS_MAX_SIZE = 64 << 20
 
 # Limits: concurrent sessions per process, time to the setup frame, a whole
-# session's lifetime, and the largest request body a setup may declare.
+# session's lifetime (counted from the WebSocket accept), and the largest
+# request body a setup may declare.
 MAX_SESSIONS = 32
 SETUP_TIMEOUT_S = 15.0
 SESSION_TIMEOUT_S = 600.0
 MAX_BODY_LEN = 8 << 20
 
 _active_sessions = 0
-# Unused sessions (setup accepted, credential not yet written) per client address.
+# Unused sessions per client address: counted from the WebSocket accept (before
+# the setup frame) until the sidecar reports ``head_written`` or the session ends.
 _unused_by_ip: dict[str, int] = {}
 
 
