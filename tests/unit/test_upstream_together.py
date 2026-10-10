@@ -1,9 +1,10 @@
 """Unit tests for ``TogetherUpstreamProvider.fetch_models``.
 
-Together's ``/models`` prices text per million tokens and image models per
-megapixel or per image when it says so; otherwise image models are priced
-from the published table or the operator's ``provider_settings.image_prices``
-and dropped when none has them.
+Together's ``/models`` prices text per million tokens. Exact image
+``price_per_megapixel`` rates are accepted, while non-bounding
+``example_price`` values are ignored; otherwise image models are priced from
+the published table or the operator's ``provider_settings.image_prices`` and
+dropped when none has them.
 """
 
 from __future__ import annotations
@@ -105,6 +106,18 @@ CATALOG: list[dict[str, Any]] = [
         "pricing": {"image_pixel": {"price_per_megapixel": 0.09, "min_steps": 50}},
     },
     {
+        "id": "black-forest-labs/FLUX.2-dev",
+        "object": "model",
+        "created": 1,
+        "type": "image",
+        "pricing": {
+            "image": {
+                "example_price": 0.0154,
+                "example_description": "lowest resolution",
+            }
+        },
+    },
+    {
         "id": "togethercomputer/m2-bert-80M-8k-retrieval",
         "object": "model",
         "created": 1,
@@ -170,20 +183,26 @@ def test_published_image_prices_become_books() -> None:
     )
 
 
-def test_catalog_prices_list_models_and_beat_the_table() -> None:
+def test_exact_catalog_prices_beat_the_table_but_starting_prices_do_not() -> None:
     models, _ = _fetch()
     by_id = {m.id: m for m in models}
-    lite = by_id["ByteDance/Seedream-5.0-lite"]
-    assert lite.image_pricing is not None
-    assert lite.image_pricing.unit == "image"
-    assert lite.pricing.image_output == pytest.approx(0.035)
 
-    # The table says 0.07/MP; the catalog's 0.09/MP wins.
+    # The table says 0.07/MP; the catalog's exact 0.09/MP wins.
     flux_max = by_id["black-forest-labs/FLUX.2-max"]
     assert flux_max.image_pricing is not None
     assert flux_max.image_pricing.unit == "megapixel"
     assert flux_max.image_pricing.megapixel_usd == pytest.approx(0.09)
     assert flux_max.image_pricing.default_steps == 50
+
+    # ``example_price`` is only a starting price. It must not replace the
+    # table's scalable per-megapixel ceiling for a known model.
+    flux_dev = by_id["black-forest-labs/FLUX.2-dev"]
+    assert flux_dev.image_pricing is not None
+    assert flux_dev.image_pricing.unit == "megapixel"
+    assert flux_dev.image_pricing.megapixel_usd == pytest.approx(0.0154)
+
+    # An unknown model with only a starting price cannot be bounded safely.
+    assert "ByteDance/Seedream-5.0-lite" not in by_id
 
 
 def test_operator_prices_beat_catalog_prices() -> None:
@@ -198,6 +217,7 @@ def test_unknown_image_models_and_other_families_are_dropped() -> None:
     models, _ = _fetch()
     ids = {m.id for m in models}
     assert "someone/brand-new-image" not in ids
+    assert "ByteDance/Seedream-5.0-lite" not in ids
     assert "some/audio" not in ids
     assert "togethercomputer/m2-bert-80M-8k-retrieval" in ids
 

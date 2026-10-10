@@ -1,11 +1,12 @@
 """Upstream provider for the Together AI API.
 
 Together is OpenAI-compatible for chat and images. Its ``/models`` listing
-prices text per million tokens and, for image models, carries either a per
-megapixel rate (``pricing.image_pixel.price_per_megapixel``) or a per-image
-starting price (``pricing.image.example_price``). Models the listing leaves
-unpriced fall back to a table of published prices; the operator can override
-any of it per model through ``provider_settings.image_prices``.
+prices text per million tokens and may publish an exact image rate in
+``pricing.image_pixel.price_per_megapixel``. The catalog's
+``pricing.image.example_price`` is only a starting price, so it cannot bound a
+prepaid request and is ignored. Models without an exact catalog rate fall back
+to a table of published prices; the operator can override any of it per model
+through ``provider_settings.image_prices``.
 """
 
 from __future__ import annotations
@@ -84,9 +85,10 @@ def _catalog_book(
 ) -> ImagePricing | None:
     """A book from the price the ``/models`` entry itself carries.
 
-    ``image_pixel.price_per_megapixel`` is exact. ``image.example_price`` is
-    the upstream's "starting" per-image price, so a model priced by tier may
-    settle above it; operators can pin a ceiling through ``image_prices``.
+    Only ``image_pixel.price_per_megapixel`` is exact. The catalog's
+    ``image.example_price`` is a starting price and must not become a quote:
+    higher resolutions may cost more than it reserves. Known models instead
+    use the published table; unknown models require an operator override.
     """
     per_pixel = pricing_raw.get("image_pixel")
     if isinstance(per_pixel, dict):
@@ -103,11 +105,6 @@ def _catalog_book(
             return static_image_book(
                 float(usd), "megapixel", default_steps=catalog_steps
             )
-    per_image = pricing_raw.get("image")
-    if isinstance(per_image, dict):
-        usd = per_image.get("example_price")
-        if isinstance(usd, (int, float)) and not isinstance(usd, bool) and usd > 0:
-            return static_image_book(float(usd), "image")
     return None
 
 
@@ -196,7 +193,7 @@ class TogetherUpstreamProvider(BaseUpstreamProvider):
     def image_book(
         self, model_id: str, pricing_raw: dict[str, Any] | None = None
     ) -> ImagePricing | None:
-        """Operator price for ``model_id``, else the catalog's, else the table's."""
+        """Operator price, else an exact catalog rate, else the safe table."""
         key = model_id.lower()
         override = _override_book(self.image_prices.get(key))
         if override is not None:
