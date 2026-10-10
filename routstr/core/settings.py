@@ -78,6 +78,23 @@ class Settings(BaseSettings):
     confidential_max_unused_per_ip: int = Field(
         default=3, env="CONFIDENTIAL_MAX_UNUSED_PER_IP"
     )
+    # Pricing of confidential sessions (all off by default). A session moves
+    # ~22 MB of 2PC data and costs the node ~0.5 s of CPU before the provider
+    # sees anything. The session fee is added to a completed request (and to
+    # a provider refusal, 4xx/503); the abandon fee (never below the session
+    # fee, defaulting to it) is charged instead when a session the sidecar
+    # accepted ends without a request reaching the provider (anti-DoS for
+    # armed, pre-warmed sessions). The surcharge raises the per-token rates
+    # of the signed offer. All are published in the signed offer.
+    confidential_session_fee_msat: int = Field(
+        default=0, ge=0, env="CONFIDENTIAL_SESSION_FEE_MSAT"
+    )
+    confidential_abandon_fee_msat: int = Field(
+        default=0, ge=0, env="CONFIDENTIAL_ABANDON_FEE_MSAT"
+    )
+    confidential_rate_surcharge_pct: float = Field(
+        default=0.0, ge=0, env="CONFIDENTIAL_RATE_SURCHARGE_PCT"
+    )
     # Peers (reverse proxies) whose client-address header is believed. Any
     # other peer is identified by its own address. "self" adds this host's or
     # container's own addresses, which is where a rootless container port
