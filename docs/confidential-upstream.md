@@ -96,6 +96,9 @@ cannot read (cf. EHBP), at rates fixed when the session starts:
 | Env | Meaning | Default |
 |---|---|---|
 | `CONFIDENTIAL_SIDECAR_URL` | cu-sidecar base URL; empty disables the mode | `""` |
+| `CONFIDENTIAL_MAX_UNUSED_PER_IP` | refuse (429) a new session from a client address that already has this many unused sessions (set up, credential record not yet written; pre-warmed sessions count); 0 disables | `3` |
+| `CONFIDENTIAL_TRUSTED_PROXIES` | comma-separated peers whose client-address header is believed; `self` adds the node's own addresses (where a rootless container port forwarder connects from; enable only behind a reverse proxy that always sets the header) | `127.0.0.1,::1` |
+| `CONFIDENTIAL_CLIENT_IP_HEADER` | header a trusted proxy puts the client address in; for `X-Forwarded-For` the rightmost entry is used | `x-forwarded-for` |
 | `NSEC` | node key; signs offer, attestation and receipt (required) | |
 
 Accepted mints, pricing and refunds are the node's existing settings.
@@ -105,3 +108,13 @@ Accepted mints, pricing and refunds are the node's existing settings.
 ```bash
 .venv/bin/python -m pytest tests/unit/test_confidential.py -q
 ```
+
+## Client addresses
+
+The per-address limit identifies clients by the TCP peer address, or, when the peer is a trusted
+proxy, by the proxy's header. Without a reverse proxy nothing needs configuring, as long as the node
+sees real peer addresses. A container port forwarder that rewrites them (rootless podman/docker
+publishing a port) makes every client look like the node itself: put a reverse proxy in front and set
+`CONFIDENTIAL_TRUSTED_PROXIES=127.0.0.1,::1,self`, or raise or disable the limit. Never trust `self`
+without such a proxy, since any client could then name its own address. Tor clients all arrive from the
+Tor daemon and share one limit.
