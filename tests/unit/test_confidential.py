@@ -448,6 +448,36 @@ def test_ws_proxy_rejects_bad_version(
             assert msg["code"] == 1008
 
 
+def test_ws_proxy_requires_the_sidecar_protocol_version(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """A v2 (two-party handshake) sidecar refuses v1 clients, and vice versa."""
+
+    async def v2_offer() -> dict[str, Any]:
+        return {"upstream_host": "api.venice.ai", "max_tokens_cap": 4096, "v": 2}
+
+    holder: dict[str, int] = {}
+    with MockSidecar(_sidecar_script(holder, [])) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        monkeypatch.setattr(cws, "cached_sidecar_offer", v2_offer)
+        client = TestClient(_app())
+        with client.websocket_connect(
+            f"/v1/confidential/ws?session_id={uuid.uuid4()}&v=1"
+        ) as ws:
+            msg = ws.receive()
+            assert msg["type"] == "websocket.close"
+            assert msg["code"] == 1008
+            assert "version 2" in msg.get("reason", "")
+
+
+def test_sidecar_protocol_version() -> None:
+    assert conf.sidecar_protocol_version({}) == 1
+    assert conf.sidecar_protocol_version({"v": 2}) == 2
+    assert conf.sidecar_protocol_version({"v": "2"}) == 2
+    assert conf.sidecar_protocol_version({"v": 9}) == 1
+    assert conf.sidecar_protocol_version({"v": "x"}) == 1
+
+
 def test_ws_proxy_rejects_non_uuid_session(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
