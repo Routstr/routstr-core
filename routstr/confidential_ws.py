@@ -18,9 +18,11 @@
 
   When the session ends without settlement, the reservation is released if
   the upstream never received the complete request, and charged in full
-  otherwise (the client withheld its usage disclosure). Every refusal or
-  failure is reported as ``{"type": "error", "status", "reason", "detail"}``
-  before the socket closes.
+  otherwise (the client withheld its usage disclosure). With an abandon fee
+  (``CONFIDENTIAL_ABANDON_FEE_MSAT``, or the session fee), a session the
+  sidecar accepted (``ready``) is charged that fee instead of being released
+  for free: the node did the 2PC work either way. Every refusal or failure is reported as
+  ``{"type": "error", "status", "reason", "detail"}`` before the socket closes.
 
 * ``GET /v1/confidential/zk?proof=<pi_*>&session_id=<sid>``: a byte proxy for
   one ZK proof (``twopc``: the v2 two-party handshake; ``zkchan``: the v2
@@ -49,8 +51,10 @@ from .confidential import (
     BillingError,
     cached_sidecar_offer,
     canonical_json,
+    charge_fee,
     charge_reservation,
     node_pubkey_hex,
+    pricing_fields,
     release,
     reserve,
     settle,
@@ -102,6 +106,9 @@ class SessionState:
         self.unused_ip: str | None = None
         self.sid: str | None = None
         self.body_released = False
+        # The sidecar accepted the setup (``ready``): from here on the node is
+        # doing the session's 2PC work and an abandoned session keeps its fee.
+        self.engaged = False
         # Set once the reservation is charged or released; ``lock`` makes
         # settlement and abort handling finalize it exactly once.
         self.finalized = False
@@ -170,6 +177,10 @@ def validate_setup(msg: Any, max_tokens_cap: int) -> None:
         raise SetupError(400, "setup.offer_sig must be a hex string")
     if not isinstance(msg.get("auth", ""), str):
         raise SetupError(400, "setup.auth must be a string")
+    for name in ("session_fee_msat", "abandon_fee_msat"):
+        fee = msg.get(name)
+        if fee is not None and (not _is_int(fee) or fee < 0):
+            raise SetupError(400, f"setup.{name} must be a non-negative integer")
 
 
 # ---------------------------------------------------------------------------
@@ -341,9 +352,16 @@ async def _open_session(
         validate_setup(msg, cap)
         auth = msg.pop("auth", "") or ""
         offer_sig = msg.pop("offer_sig", None)
+        accepted_fee = msg.pop("session_fee_msat", None)
+        accepted_abandon = msg.pop("abandon_fee_msat", None)
         try:
             state.billing = await reserve(
-                auth, msg["model"], msg["max_tokens"], offer_sig
+                auth,
+                msg["model"],
+                msg["max_tokens"],
+                offer_sig,
+                accepted_fee_msat=accepted_fee,
+                accepted_abandon_fee_msat=accepted_abandon,
             )
         except BillingError as exc:
             # Same status codes as the normal proxy (e.g. 402 insufficient
@@ -439,6 +457,7 @@ async def _on_sidecar_text(
     kind = msg.get("type") if isinstance(msg, dict) else None
     if kind == "ready":
         state.sid = msg.get("sid")
+        state.engaged = True
         msg.pop("offer", None)
         msg["pubkey"] = node_pubkey_hex()
         msg["sig_scheme"] = "schnorr-secp256k1"
@@ -472,6 +491,22 @@ async def _on_sidecar_text(
     return frame
 
 
+def _fee(billing: Billing, name: str) -> int:
+    """``session_fee_msat`` or ``abandon_fee_msat`` of the frozen offer, ≤ reserved."""
+    fee = getattr(billing, name, 0) or 0
+    if name == "abandon_fee_msat":
+        fee = max(fee, getattr(billing, "session_fee_msat", 0) or 0)
+    return max(0, min(fee, billing.reserved_msats))
+
+
+async def _release_keeping_fee(billing: Billing, name: str) -> tuple[int, int | None]:
+    """Release the reservation but keep one fee: (cost, balance)."""
+    fee = _fee(billing, name)
+    if fee == 0:
+        return 0, await release(billing)
+    return fee, await charge_fee(billing, fee)
+
+
 async def _apply_settlement(
     billing: Billing, usage: dict[str, Any]
 ) -> tuple[int, int | None]:
@@ -479,7 +514,10 @@ async def _apply_settlement(
     error_status = usage.get("error_status")
     if _is_int(error_status):
         if error_status in UNBILLED_ERROR_STATUSES:
-            return 0, await release(billing)
+            # The provider refused before doing inference, but the request
+            # reached it and the node did the session's 2PC: the session fee
+            # (not the abandon fee) is charged, if any.
+            return await _release_keeping_fee(billing, "session_fee_msat")
         # 500/502/504 …: work may have been billed upstream.
         return billing.reserved_msats, await charge_reservation(billing)
     if usage.get("model") != billing.model_id:
@@ -525,6 +563,11 @@ async def _settle(
         "reserved_msats": billing.reserved_msats,
         "balance_msats": balance,
         "rates": billing.rates,
+        **pricing_fields(
+            getattr(billing, "session_fee_msat", 0),
+            getattr(billing, "abandon_fee_msat", 0),
+            getattr(billing, "rate_surcharge_pct", 0.0),
+        ),
         "notary_pubkey": node_pubkey_hex(),
         "attestation_hash": state.attestation_hash,
         "time": int(time.time()),
@@ -559,6 +602,13 @@ async def _finalize_unsettled(state: SessionState) -> str | None:
             # The upstream got the complete request but no usage was settled.
             await charge_reservation(billing)
             outcome = "charged_reservation"
+        elif state.engaged and _fee(billing, "abandon_fee_msat") > 0:
+            # π_C2 never verified, so the upstream never received a complete
+            # request, but the sidecar ran the session (armed and never used,
+            # aborted, client gone): the abandon fee is charged, the rest of
+            # the reservation is released.
+            cost, _ = await _release_keeping_fee(billing, "abandon_fee_msat")
+            outcome = f"charged_abandon_fee:{cost}"
         else:
             # π_C2 never verified: the upstream never received a complete request.
             await release(billing)

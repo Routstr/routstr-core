@@ -240,10 +240,16 @@ class _Ledger:
         self.offer_sig: str | None = None
 
         async def reserve(
-            auth: str, model: str, max_tokens: int, offer_sig: str | None = None
+            auth: str,
+            model: str,
+            max_tokens: int,
+            offer_sig: str | None = None,
+            accepted_fee_msat: int | None = None,
+            accepted_abandon_fee_msat: int | None = None,
         ) -> Any:
             self.auth = auth
             self.offer_sig = offer_sig
+            self.accepted_fee = accepted_fee_msat
             self.calls.append("reserve")
             if reserve_error is not None:
                 raise reserve_error
@@ -1118,3 +1124,284 @@ def test_ws_proxy_limits_unused_sessions_per_address(
                 assert msg["type"] == "websocket.close" and msg["code"] == 1013
         finally:
             cws._unused_by_ip.clear()
+
+
+# ---------------------------------------------------------------------------
+# session fee, abandon fee and rate surcharge (CONFIDENTIAL_SESSION_FEE_MSAT,
+# CONFIDENTIAL_ABANDON_FEE_MSAT, CONFIDENTIAL_RATE_SURCHARGE_PCT)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def fee_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "confidential_session_fee_msat", 2000)
+    monkeypatch.setattr(settings, "confidential_abandon_fee_msat", 10000)
+    monkeypatch.setattr(settings, "confidential_rate_surcharge_pct", 20.0)
+
+
+async def _offer_with(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    async def side() -> dict[str, Any]:
+        return {"upstream_host": "api.venice.ai", "head_template": "x"}
+
+    monkeypatch.setattr(conf, "cached_sidecar_offer", side)
+    monkeypatch.setattr(conf, "offered_models", lambda s: {"m": object()})
+    monkeypatch.setattr(conf, "price_entry", lambda mid, c: dict(RATES))
+    return await conf.build_offer()
+
+
+async def test_defaults_off_offer_has_no_pricing_fields(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    offer = await _offer_with(monkeypatch)
+    payload = json.loads(offer["sig_payload"])
+    for field in ("session_fee_msat", "abandon_fee_msat", "rate_surcharge_pct"):
+        assert field not in payload
+    assert payload["price_list"]["m"] == RATES
+    terms = conf.signed_offer_terms(offer["sig"])
+    assert terms is not None
+    assert terms.session_fee_msat == 0 and terms.abandon_fee_msat == 0
+
+
+async def test_offer_publishes_fees_and_surcharged_rates(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    fee_settings: None,
+) -> None:
+    _secret, pub_hex = node_identity
+    offer = await _offer_with(monkeypatch)
+    assert _verify_schnorr(offer["sig_payload"], offer["sig"], pub_hex)
+    payload = json.loads(offer["sig_payload"])
+    # Signed: the client verifies the fees and the surcharge with the offer.
+    assert payload["session_fee_msat"] == 2000
+    assert payload["abandon_fee_msat"] == 10000
+    assert payload["rate_surcharge_pct"] == 20.0
+    # The price list carries the billed (surcharged) rates.
+    assert payload["price_list"]["m"] == {
+        k: pytest.approx(v * 1.2) for k, v in RATES.items()
+    }
+    terms = conf.signed_offer_terms(offer["sig"])
+    assert terms is not None
+    assert (
+        terms.session_fee_msat,
+        terms.abandon_fee_msat,
+        terms.rate_surcharge_pct,
+    ) == (2000, 10000, 20.0)
+    assert conf.signed_offer_rates(offer["sig"], "m") == payload["price_list"]["m"]
+
+
+def test_abandon_fee_defaults_to_and_never_undercuts_the_session_fee(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "confidential_session_fee_msat", 2000)
+    monkeypatch.setattr(settings, "confidential_abandon_fee_msat", 0)
+    assert conf.abandon_fee_msat() == 2000
+    monkeypatch.setattr(settings, "confidential_abandon_fee_msat", 500)
+    assert conf.abandon_fee_msat() == 2000
+    monkeypatch.setattr(settings, "confidential_session_fee_msat", 0)
+    assert conf.abandon_fee_msat() == 500  # an abandon fee alone is allowed
+
+
+async def test_models_field_carries_the_pricing(
+    monkeypatch: pytest.MonkeyPatch, fee_settings: None
+) -> None:
+    async def side() -> dict[str, Any]:
+        return {"upstream_host": "api.venice.ai", "v": 2}
+
+    monkeypatch.setattr(conf, "cached_sidecar_offer", side)
+    monkeypatch.setattr(conf, "priced_models", lambda s: {"m": None})
+    fields = await conf.models_fields()
+    assert fields["m"]["session_fee_msat"] == 2000
+    assert fields["m"]["abandon_fee_msat"] == 10000
+    assert fields["m"]["rate_surcharge_pct"] == 20.0
+
+
+async def test_reserve_requires_the_client_to_accept_the_fees(
+    billing_db: Any, fee_settings: None
+) -> None:
+    conf._remember_offer(
+        "ab" * 64,
+        conf.OfferTerms(
+            {"ctx-model": {**RATES}}, session_fee_msat=2000, abandon_fee_msat=10000
+        ),
+    )
+    for accepted in ((None, None), (2000, None), (None, 10000), (2000, 9999)):
+        with pytest.raises(conf.BillingError) as exc:
+            await conf.reserve("hk", "ctx-model", 8, "ab" * 64, *accepted)
+        assert exc.value.status == 409
+        detail: Any = exc.value.detail
+        assert detail["error"]["type"] == "session_fee_not_accepted"
+        assert detail["error"]["session_fee_msat"] == 2000
+        assert detail["error"]["abandon_fee_msat"] == 10000
+    key = await billing_db.key()
+    assert key.reserved_balance == 0  # nothing reserved for a refused setup
+    billing = await conf.reserve("hk", "ctx-model", 8, "ab" * 64, 2000, 10000)
+    assert (billing.session_fee_msat, billing.abandon_fee_msat) == (2000, 10000)
+
+
+async def test_reservation_includes_the_larger_fee_and_surcharge(
+    billing_db: Any, fee_settings: None
+) -> None:
+    # Without an offer_sig the current settings apply (+20 %, fees 2000/10000).
+    billing = await conf.reserve("hk", "ctx-model", 8, None, 2000, 10000)
+    assert billing.rates["in"] == pytest.approx(12_000.0)
+    # (100000 * 12 + 8 * 120) msats + max(2000, 10000)
+    assert billing.reserved_msats == 1_200_960 + 10000
+    key = await billing_db.key()
+    assert key.reserved_balance == billing.reserved_msats
+
+
+async def test_signed_offer_terms_win_over_current_settings(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any
+) -> None:
+    conf._remember_offer(
+        "ab" * 64,
+        conf.OfferTerms({"ctx-model": dict(RATES)}, session_fee_msat=500),
+    )
+    monkeypatch.setattr(settings, "confidential_session_fee_msat", 9999)
+    # An offer with only a session fee: the abandon fee equals it.
+    billing = await conf.reserve("hk", "ctx-model", 8, "ab" * 64, 500, 500)
+    assert billing.session_fee_msat == 500 and billing.rates == RATES
+    assert billing.abandon_fee_msat == 500
+
+
+async def test_settlement_is_usage_plus_session_fee_capped(
+    billing_db: Any, fee_settings: None
+) -> None:
+    billing = await conf.reserve("hk", "ctx-model", 8, None, 2000, 10000)
+    usage = {
+        "model": "ctx-model",
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 8},
+    }
+    out = await conf.settle(billing, usage)
+    # 1000*12 + 8*120 = 12960 msats at the surcharged rates, + 2000 session fee
+    # (the abandon fee is not charged for a completed request).
+    assert out["cost_msats"] == 12_960 + 2000
+    key = await billing_db.key()
+    assert key.reserved_balance == 0 and key.total_spent == 14_960
+
+    billing = await conf.reserve("hk", "ctx-model", 8, None, 2000, 10000)
+    zero = {"model": "ctx-model", "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+    assert (await conf.settle(billing, zero))["cost_msats"] == 2000
+    billing = await conf.reserve("hk", "ctx-model", 8, None, 2000, 10000)
+    huge = {
+        "model": "ctx-model",
+        "usage": {"prompt_tokens": 10**7, "completion_tokens": 10**6},
+    }
+    assert (await conf.settle(billing, huge))["cost_msats"] == billing.reserved_msats
+
+
+async def test_charge_fee_charges_exactly_the_fee(
+    billing_db: Any, fee_settings: None
+) -> None:
+    billing = await conf.reserve("hk", "ctx-model", 8, None, 2000, 10000)
+    balance = await conf.charge_fee(billing, billing.abandon_fee_msat)
+    assert balance == 3_000_000 - 10000
+    key = await billing_db.key()
+    assert key.reserved_balance == 0 and key.total_spent == 10000
+
+
+class _FeeBilling(_Billing):
+    def __init__(self) -> None:
+        super().__init__()
+        self.session_fee_msat = 2000
+        self.abandon_fee_msat = 5000
+        self.rate_surcharge_pct = 20.0
+
+
+def _fee_ledger(monkeypatch: pytest.MonkeyPatch) -> _Ledger:
+    ledger = _Ledger(monkeypatch)
+
+    async def reserve(*args: Any, **kwargs: Any) -> Any:
+        ledger.calls.append("reserve")
+        ledger.accepted = (  # type: ignore[attr-defined]
+            kwargs.get("accepted_fee_msat"),
+            kwargs.get("accepted_abandon_fee_msat"),
+        )
+        return _FeeBilling()
+
+    async def charge_fee(billing: Any, fee: int) -> int:
+        ledger.calls.append(f"charge_fee:{fee}")
+        return 98000
+
+    monkeypatch.setattr(cws, "reserve", reserve)
+    monkeypatch.setattr(cws, "charge_fee", charge_fee)
+    return ledger
+
+
+_FEE_SETUP = {**_SETUP, "session_fee_msat": 2000, "abandon_fee_msat": 5000}
+
+
+def test_fees_are_accepted_at_setup_and_never_reach_the_sidecar(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _fee_ledger(monkeypatch)
+    holder, got = _run_session(monkeypatch, [_READY, _ATTEST, _USAGE], 3, _FEE_SETUP)
+    assert ledger.accepted == (2000, 5000)  # type: ignore[attr-defined]
+    assert "session_fee_msat" not in holder["setup"]
+    assert "abandon_fee_msat" not in holder["setup"]
+    receipt = got[-1]["receipt"]
+    # The receipt names the fees and the surcharge of the frozen offer.
+    assert receipt["session_fee_msat"] == 2000
+    assert receipt["abandon_fee_msat"] == 5000
+    assert receipt["rate_surcharge_pct"] == 20.0
+    assert ledger.calls == ["reserve", "settle"]
+
+
+def test_receipt_has_no_pricing_fields_by_default(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    _Ledger(monkeypatch)
+    _, got = _run_session(monkeypatch, [_READY, _ATTEST, _USAGE], 3)
+    receipt = got[-1]["receipt"]
+    for field in ("session_fee_msat", "abandon_fee_msat", "rate_surcharge_pct"):
+        assert field not in receipt
+
+
+def test_abandoned_armed_session_pays_the_abandon_fee(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Armed (sidecar ready), never used: exactly the abandon fee is charged."""
+    ledger = _fee_ledger(monkeypatch)
+    _run_session(monkeypatch, [_READY], 1, _FEE_SETUP)
+    assert ledger.calls == ["reserve", "charge_fee:5000"]
+
+
+def test_session_the_sidecar_never_accepted_is_released(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """No ``ready`` (the sidecar refused the setup): no 2PC work, no fee."""
+    ledger = _fee_ledger(monkeypatch)
+    refusal = {"type": "error", "status": 503, "reason": "sidecar busy"}
+    _run_session(monkeypatch, [refusal], 1, _FEE_SETUP)
+    assert ledger.calls == ["reserve", "release"]
+
+
+def test_abort_after_release_with_fees_charges_the_reservation(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _fee_ledger(monkeypatch)
+    _run_session(monkeypatch, [_READY, {"type": "body_released"}], 2, _FEE_SETUP)
+    assert ledger.calls == ["reserve", "charge"]
+
+
+@pytest.mark.parametrize("status", [400, 429, 503])
+def test_upstream_refusal_charges_the_session_fee(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], status: int
+) -> None:
+    """The request reached the provider: the session fee, not the abandon fee."""
+    ledger = _fee_ledger(monkeypatch)
+    usage = {"type": "usage", "sid": SID, "usage": {"error_status": status}}
+    _, got = _run_session(
+        monkeypatch, [_READY, {"type": "body_released"}, usage], 3, _FEE_SETUP
+    )
+    assert ledger.calls == ["reserve", "charge_fee:2000"]
+    receipt = got[-1]["receipt"]
+    assert receipt["cost_msats"] == 2000 and receipt["balance_msats"] == 98000
+
+
+def test_setup_rejects_bad_fee_fields() -> None:
+    for name in ("session_fee_msat", "abandon_fee_msat"):
+        for bad in (-1, "2000", 1.5, True):
+            with pytest.raises(cws.SetupError):
+                cws.validate_setup({**_SETUP, name: bad}, 4096)
+    cws.validate_setup({**_SETUP, "session_fee_msat": 0, "abandon_fee_msat": 0}, 4096)
