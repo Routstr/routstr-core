@@ -61,15 +61,73 @@ cannot read (cf. EHBP), at rates fixed when the session starts:
    reservation, the frozen rates and the new balance.
 6. An upstream HTTP error is disclosed under π_C3 from the response's status
    line and headers only; the node learns the status and those headers, never
-   the error body. A 4xx or 503 releases the reservation; other 5xx charge it.
+   the error body. A 4xx or 503 releases the reservation (less the session fee,
+   if set; below); other 5xx charge it.
 7. An abort before the sidecar released the final body record releases the
-   reservation, because the upstream never had a complete request. After the
+   reservation (less the abandon fee, if set; below), because the upstream
+   never had a complete request. After the
    release, a missing usage disclosure charges the reservation. (EHBP can
    charge nothing in that case because the node reads the usage itself; here
    the client controls the disclosure.) If settlement fails, the same rule
    applies and the client gets an error frame. Each reservation is finalized
    exactly once.
 8. Unused balance is withdrawn with the existing `/v1/wallet/refund`.
+
+### Session fees and rate surcharge (optional, off by default)
+
+A confidential session costs the node far more than a plain request: about
+22 MB of 2PC data and ~0.5 s of CPU per session, before the provider sees
+anything, and a pre-warmed session does all of it before a request exists.
+Three settings price that work; all are 0 by default, and then the offer, the
+setup, the receipt and every charge are exactly as above.
+
+- `CONFIDENTIAL_RATE_SURCHARGE_PCT` raises the per-token rates of confidential
+  sessions by that percentage. The signed offer's `price_list` carries the
+  surcharged rates (the ones billed), so the client's rate check is
+  unchanged; the offer also states `rate_surcharge_pct`.
+- `CONFIDENTIAL_SESSION_FEE_MSAT` (`session_fee_msat`): a flat fee on top of
+  the usage of a **completed** request.
+- `CONFIDENTIAL_ABANDON_FEE_MSAT` (`abandon_fee_msat`): the anti-DoS deposit,
+  charged instead when a session ends **without** a request reaching the
+  provider. It is never below the session fee; unset (0), it equals the
+  session fee. The node cannot tell a pre-warmed session from a cold one and
+  does not need to: any session that ends that way pays it.
+
+Both fees go into the signed offer (and, like the surcharge, into the model
+listing's `confidential_upstream` field, so clients can size their deposit):
+
+| Session outcome | Charge |
+|---|---|
+| completed (usage disclosed and verified) | usage at the (surcharged) rates + session fee, capped at the reservation |
+| provider refused (4xx or 503, disclosed under π_C3) | session fee: the request reached the provider and the node did the 2PC, but no inference ran |
+| ended before the final body record was released, after the sidecar accepted the setup (`ready`): armed and never used, aborted, failed proof, client gone | abandon fee; the rest of the reservation is released |
+| the sidecar never accepted the setup (unreachable, refused) | nothing |
+| other 5xx, or no disclosure after the body was released | the reservation, as before |
+
+- **Acceptance.** A client accepts the fees by echoing `session_fee_msat` and
+  `abandon_fee_msat` in its `setup`. A setup that does not echo exactly the
+  frozen offer's fees is refused before anything is reserved (`409` /
+  `session_fee_not_accepted`), so a client that does not know about fees is
+  never charged one silently. The node bills at the terms of the offer named
+  by `offer_sig` (fees and rates), even if the settings changed since.
+- **Reservation** = the usual reservation (at the surcharged rates) +
+  max(session fee, abandon fee).
+- **Receipts** carry `session_fee_msat`, `abandon_fee_msat` and
+  `rate_surcharge_pct` (only when set). Clients check
+  `cost ≤ ceil((in·prompt + out·completion)/1000) + session fee` at the signed
+  rates, and `cost ≤ session fee` for a 4xx/503. An abandoned session gets no
+  receipt; its charge (the abandon fee) shows in the balance.
+
+Example: abandon fee 10 sat, session fee 2 sat. A pre-warmed session that is
+used costs its usage + 2 sat (the other 8 sat of the deposit are released with
+the reservation); one that is never used costs 10 sat.
+
+The fees combine with the per-address unused-session limit
+(`CONFIDENTIAL_MAX_UNUSED_PER_IP`): the limit caps how many sessions one
+address can hold unused at a time, the abandon fee makes each one cost money.
+Without fees, an armed and abandoned session is free for the client. Clients
+that pre-warm (routstrd, the SDK) arm at most one session for a node that
+charges an abandon fee, and none when it exceeds their `maxSessionFeeMsat`.
 
 ## Session limits
 
@@ -98,10 +156,20 @@ cannot read (cf. EHBP), at rates fixed when the session starts:
 | `CONFIDENTIAL_SIDECAR_URL` | cu-sidecar base URL; empty disables the mode | `""` |
 | `CONFIDENTIAL_MAX_UNUSED_PER_IP` | refuse (429) a new session from a client address that already has this many unused sessions (set up, credential record not yet written; pre-warmed sessions count); 0 disables | `3` |
 | `CONFIDENTIAL_TRUSTED_PROXIES` | comma-separated peers whose client-address header is believed; `self` adds the node's own addresses (where a rootless container port forwarder connects from; enable only behind a reverse proxy that always sets the header) | `127.0.0.1,::1` |
+| `CONFIDENTIAL_SESSION_FEE_MSAT` | fee (msat) on top of the usage of a completed confidential request, and the charge for a provider refusal (4xx/503); published in the signed offer; clients must accept it at setup | `0` (off) |
+| `CONFIDENTIAL_ABANDON_FEE_MSAT` | fee (msat) for a session the sidecar accepted that ends without a request reaching the provider (armed and never used, aborted, client gone): the anti-DoS deposit, reserved at setup; never below the session fee (0 = equal to it) | `0` (off) |
+| `CONFIDENTIAL_RATE_SURCHARGE_PCT` | percentage added to the per-token rates of confidential sessions; the signed offer's `price_list` carries the surcharged rates | `0` (off) |
 | `CONFIDENTIAL_CLIENT_IP_HEADER` | header a trusted proxy puts the client address in; for `X-Forwarded-For` the rightmost entry is used | `x-forwarded-for` |
 | `NSEC` | node key; signs offer, attestation and receipt (required) | |
 
-Accepted mints, pricing and refunds are the node's existing settings.
+Accepted mints, pricing and refunds are the node's existing settings. Like
+the node's other settings, these are persisted in its database on first start:
+afterwards a value in the database wins over the environment, so change them
+with the admin settings API (`PATCH /admin/api/settings`, e.g.
+`{"confidential_session_fee_msat": 2000, "confidential_abandon_fee_msat": 10000}`)
+or the dashboard. Clients pick up a
+change with the next offer; sessions set up on an older signed offer (up to
+10 minutes) keep its terms.
 
 ## Tests
 
