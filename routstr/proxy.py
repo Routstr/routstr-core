@@ -191,6 +191,7 @@ def _price_image_candidate(
     """
     try:
         requested_image_count(body)
+        upstream.check_image_request(body)
         if is_openrouter_base_url(upstream.base_url):
             model = quote_image_endpoint(body, model, path)
     except ImageRequestRefused as refused:

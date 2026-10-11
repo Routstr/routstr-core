@@ -227,6 +227,12 @@ def test_openrouter_pins_image_generations_to_one_provider() -> None:
     assert json.loads(out)["provider"] == {"order": ["X"], "allow_fallbacks": False}
 
 
+def test_openrouter_sends_image_generations_to_its_native_images_route() -> None:
+    provider = OpenRouterUpstreamProvider(api_key="k")
+    assert provider.normalize_request_path("v1/images/generations") == "images"
+    assert provider.normalize_request_path("v1/chat/completions") == "chat/completions"
+
+
 def test_openrouter_leaves_chat_routing_alone() -> None:
     provider = OpenRouterUpstreamProvider(api_key="k")
     body = json.dumps({"model": "test-model", "messages": []}).encode()

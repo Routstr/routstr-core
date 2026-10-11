@@ -22,8 +22,10 @@ from routstr.core.db import ApiKey
 from routstr.core.settings import settings
 from routstr.payment.image_pricing import (
     ImageRequestRefused,
+    ImageUsage,
     image_reservation_msats,
     quote_image_endpoint,
+    settle_image_sats,
 )
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream.image_catalog import (
@@ -124,6 +126,26 @@ def test_each_uniquely_tagged_endpoint_gets_its_own_book() -> None:
     assert book.endpoints["a"].parameters == {"seed": {"type": "boolean"}}
     assert book.endpoints["b"].max_usd == pytest.approx(0.02)
     assert book.endpoint_tag is None
+
+
+def test_a_variant_endpoint_holds_the_dearest_and_bills_the_cheapest_without_cost() -> (
+    None
+):
+    """seedream-5-0-pro lists 0.045, or 0.09 for ``high_resolution``."""
+    model = _model(
+        _endpoint(
+            "seed", _per_image(0.045), _per_image(0.09, variant="high_resolution")
+        )
+    )
+    quoted = quote_image_endpoint({"prompt": "x"}, model)
+
+    assert image_reservation_msats({"prompt": "x"}, quoted) == _msats(0.09)
+    no_cost = ImageUsage(image_count=2)
+    assert settle_image_sats(quoted, {}, no_cost) == pytest.approx(2 * 45.0)
+    zero_cost = ImageUsage(image_count=1, upstream_cost_usd=0.0)
+    assert settle_image_sats(quoted, {}, zero_cost) == pytest.approx(45.0)
+    reported = ImageUsage(image_count=1, upstream_cost_usd=0.09)
+    assert settle_image_sats(quoted, {}, reported) == pytest.approx(90.0)
 
 
 def test_a_tag_listed_twice_is_not_quotable() -> None:

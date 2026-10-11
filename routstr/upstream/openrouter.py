@@ -92,6 +92,12 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
             base_url=self.default_base_url, api_key=api_key, provider_fee=provider_fee
         )
 
+    def normalize_request_path(self, path: str, model_obj: Model | None = None) -> str:
+        path = super().normalize_request_path(path, model_obj)
+        # OpenRouter documents only its native Images API, so map the
+        # OpenAI-compatible route onto it instead of relying on an alias.
+        return "images" if path == "images/generations" else path
+
     def prepare_request_body(
         self,
         body: bytes | None,

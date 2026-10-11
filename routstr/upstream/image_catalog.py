@@ -190,13 +190,14 @@ def _quotable_endpoint_book(endpoint: dict[str, Any]) -> ImagePricing | None:
     Token and megapixel lines depend on quantities the node cannot cap before
     dispatch, and a billable line listed in two units is ambiguous. Variants
     are alternatives that no request field reliably names, so the dearest one
-    is reserved.
+    is reserved and the cheapest one is billed when no cost is reported.
     """
     lines = endpoint.get("pricing")
     if not isinstance(lines, list) or not lines:
         return None
     units: dict[str, str] = {}
     rates: dict[tuple[str, str], float] = {}
+    cheapest_output_usd: float | None = None
     for line in lines:
         if not isinstance(line, dict):
             return None
@@ -207,6 +208,10 @@ def _quotable_endpoint_book(endpoint: dict[str, Any]) -> ImagePricing | None:
         if units.setdefault(billable, unit) != unit:
             return None
         rates[(billable, unit)] = max(rates.get((billable, unit), 0.0), rate)
+        if billable == "output_image" and unit == "image":
+            cheapest_output_usd = (
+                rate if cheapest_output_usd is None else min(cheapest_output_usd, rate)
+            )
 
     output_usd = 0.0
     reference_usd = 0.0
@@ -227,6 +232,7 @@ def _quotable_endpoint_book(endpoint: dict[str, Any]) -> ImagePricing | None:
         unit="image",
         input_image_usd=reference_usd,
         trust_upstream_cost=True,
+        unreported_cost_usd=cheapest_output_usd,
         parameters={
             str(name): descriptor
             for name, descriptor in supported.items()

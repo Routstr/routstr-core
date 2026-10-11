@@ -823,6 +823,9 @@ class BaseUpstreamProvider:
             return True
         return "openrouter.ai" in (self.base_url or "")
 
+    def check_image_request(self, body: dict) -> None:
+        """Raise ``ImageRequestRefused`` for options the image quote does not cover."""
+
     def prepare_request_body(
         self,
         body: bytes | None,
@@ -3435,6 +3438,8 @@ class BaseUpstreamProvider:
             Response or StreamingResponse from upstream with cost tracking
         """
         completion_path = _openai_completion_path(path)
+        # Classify on the client route: providers may remap it upstream.
+        image_generation = is_image_generation_path(path)
         path = self.normalize_request_path(path, model_obj)
 
         if (
@@ -3697,7 +3702,7 @@ class BaseUpstreamProvider:
             if reservation_snapshot is None:
                 reservation_snapshot = await get_reservation_snapshot(key, session)
 
-            if is_image_generation_path(path) and response.status_code == 200:
+            if image_generation and response.status_code == 200:
                 try:
                     return await self.handle_image_generation(
                         response,

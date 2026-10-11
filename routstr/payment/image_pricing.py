@@ -146,6 +146,9 @@ class ImagePricing(BaseModel):
     # parameter it accepts (``{"type": "enum" | "range" | ..., ...}``).
     endpoint_tag: str | None = None
     parameters: dict[str, dict] = {}
+    # On an endpoint's book: USD per image billed when the response reports no
+    # cost. Variants stay unnamed in the request, so this is the cheapest one.
+    unreported_cost_usd: float | None = None
 
     class Config:
         extra = "ignore"
@@ -443,8 +446,9 @@ def settle_image_sats(
        plus the reference-image surcharge.
 
     Step 3 is the contract for ``image`` and ``megapixel`` books without
-    ``trust_upstream_cost``, and for an endpoint's book that got no cost: it
-    lists one per-image price, so that price is the bill. Any other book that
+    ``trust_upstream_cost``. An endpoint's book that got no cost bills its
+    cheapest listed variant per image: the request does not name the variant,
+    so anything dearer could overcharge the key. Any other book that
     trusts the upstream's cost but got none, or a ``token`` book whose response reports no usable tokens, cannot
     be metered; ``None`` tells the caller to release the reservation rather
     than bill an estimate as if it were authoritative.
@@ -463,6 +467,10 @@ def settle_image_sats(
             return rate * usage.upstream_cost_usd
         if book.trust_upstream_cost and book.endpoint_tag is None:
             return None
+        if book.endpoint_tag is not None and book.unreported_cost_usd is not None:
+            return usage.image_count * rate * book.unreported_cost_usd + (
+                reference_images_sats(model, body)
+            )
         if book.unit == "token":
             if usage.output_image_tokens <= 0:
                 return None

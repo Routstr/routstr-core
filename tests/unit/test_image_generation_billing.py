@@ -24,6 +24,7 @@ from routstr.payment.helpers import calculate_discounted_max_cost
 from routstr.payment.image_pricing import ImagePriceTier, ImagePricing
 from routstr.payment.models import Architecture, Model, Pricing, _row_to_model
 from routstr.upstream.base import BaseUpstreamProvider
+from routstr.upstream.venice import VeniceUpstreamProvider
 
 from .proxy_test_utils import mock_request_stream, patch_proxy_session
 
@@ -107,14 +108,16 @@ async def _forward(
     upstream: httpx.Response,
     model: Model = IMAGE_MODEL,
     body: dict | None = None,
+    provider: BaseUpstreamProvider | None = None,
+    send: AsyncMock | None = None,
 ) -> tuple[bytes, ReservationSnapshot]:
-    provider = BaseUpstreamProvider(
+    provider = provider or BaseUpstreamProvider(
         base_url="http://upstream", api_key="k", provider_fee=1.0
     )
     request = MagicMock()
     request.method = "POST"
     request.query_params = {}
-    send = AsyncMock(return_value=upstream)
+    send = send or AsyncMock(return_value=upstream)
 
     async with AsyncSession(engine, expire_on_commit=False) as session:
         key = ApiKey(hashed_key="key", balance=BALANCE)
@@ -186,6 +189,35 @@ async def test_images_are_charged_per_returned_image(
     expected_msats = int(expected_images * SATS_PER_IMAGE * 1000)
     assert spent == expected_msats
     assert balance == BALANCE - expected_msats
+    assert reserved == 0
+    assert status == "charged"
+
+
+class _NativeImagesProvider(BaseUpstreamProvider):
+    def normalize_request_path(self, path: str, model_obj: Model | None = None) -> str:
+        path = super().normalize_request_path(path, model_obj)
+        return "images" if path == "images/generations" else path
+
+
+@pytest.mark.asyncio
+async def test_images_remapped_upstream_are_still_charged() -> None:
+    engine = await _engine()
+    payload = {"data": [{"b64_json": "a"}]}
+    upstream = _upstream(json.dumps(payload).encode(), "application/json")
+    send = AsyncMock(return_value=upstream)
+    provider = _NativeImagesProvider(
+        base_url="http://upstream", api_key="k", provider_fee=1.0
+    )
+
+    out, snapshot = await _forward(
+        engine, "v1/images/generations", upstream, provider=provider, send=send
+    )
+
+    assert send.await_args is not None
+    assert str(send.await_args.args[0].url) == "http://upstream/images"
+    assert json.loads(out) == payload
+    _, spent, reserved, status = await _ledger(engine, snapshot)
+    assert spent == int(SATS_PER_IMAGE * 1000)
     assert reserved == 0
     assert status == "charged"
 
@@ -364,3 +396,36 @@ async def test_image_route_refuses_what_it_cannot_bill(
 
     assert response.status_code == 400
     upstream.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra",
+    [{"enhance_prompt": True}, {"enable_web_search": True}],
+)
+async def test_venice_refuses_options_it_charges_extra_credits_for(
+    extra: dict,
+) -> None:
+    upstream = VeniceUpstreamProvider(api_key="k")
+    request = MagicMock(method="POST", headers={"authorization": "Bearer sk-x"})
+    request.state.request_id = "req-image"
+    mock_request_stream(request, json.dumps({**BODY, **extra}).encode())
+
+    with (
+        patch.object(
+            proxy_module, "get_candidates", return_value=[(IMAGE_MODEL, upstream)]
+        ),
+        patch.object(upstream, "forward_request", AsyncMock()) as forward,
+        patch_proxy_session(MagicMock()),
+    ):
+        response = await proxy_module.proxy(request, "v1/image/generate")
+
+    assert response.status_code == 400
+    assert next(iter(extra)) in bytes(response.body).decode()
+    forward.assert_not_awaited()
+
+
+def test_venice_forwards_those_options_when_disabled() -> None:
+    upstream = VeniceUpstreamProvider(api_key="k")
+    upstream.check_image_request({"enhance_prompt": False, "enable_web_search": False})
+    upstream.check_image_request({"prompt": "a cat"})

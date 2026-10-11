@@ -7,7 +7,7 @@ import httpx
 
 from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
-from ..payment.image_pricing import ImagePriceTier, ImagePricing
+from ..payment.image_pricing import ImagePriceTier, ImagePricing, ImageRequestRefused
 from ..payment.models import Architecture, Model, Pricing, TopProvider
 from . import messages_dispatch
 from .base import BaseUpstreamProvider
@@ -39,6 +39,9 @@ _ARCHITECTURES: dict[str, tuple[str, list[str], list[str]]] = {
     "upscale": ("image->image", ["image"], ["image"]),
     "embedding": ("text->embedding", ["text"], ["embedding"]),
 }
+
+# Image options Venice bills as extra, unpublished credits.
+_UNPRICED_IMAGE_OPTIONS = ("enhance_prompt", "enable_web_search")
 
 # Venice runs search itself and reports it back through ``venice_parameters``;
 # it has no Anthropic-shaped server tool and rejects the ``web_search_options``
@@ -256,6 +259,17 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
 
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("venice/")
+
+    def check_image_request(self, body: dict) -> None:
+        enabled = sorted(
+            field
+            for field in _UNPRICED_IMAGE_OPTIONS
+            if body.get(field) not in (None, False)
+        )
+        if enabled:
+            raise ImageRequestRefused(
+                f"Unsupported image request fields: {', '.join(enabled)}"
+            )
 
     def transform_messages_stream(
         self, stream: AsyncIterator[Any]
