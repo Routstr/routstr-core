@@ -43,8 +43,12 @@ _UNSUPPORTED_PARAM_RE = re.compile(
 )
 
 # Same, with the param after a label, e.g. "Unsupported parameter: temperature".
+# A nested path ("reasoning.summary", "tools[0].strict") names a field inside a
+# top-level param and must not match: stripping the parent drops far more than
+# the upstream rejected.
 _UNSUPPORTED_PARAM_PREFIX_RE = re.compile(
-    r"unsupported\s+parameter:\s*[`'\"]?(?P<param>[a-zA-Z_][a-zA-Z0-9_]*)",
+    r"unsupported\s+parameter:\s*[`'\"]?(?P<param>[a-zA-Z_][a-zA-Z0-9_]*)"
+    r"(?![\w.\[])",
     re.IGNORECASE,
 )
 
@@ -103,8 +107,9 @@ def error_message_from_body(body: bytes | str) -> str:
                 return msg
         elif isinstance(err, str):
             return err
-        if isinstance(data.get("message"), str):
-            return data["message"]
+        for key in ("message", "detail"):
+            if isinstance(data.get(key), str):
+                return data[key]
     return ""
 
 
@@ -122,6 +127,13 @@ _SPEND_SHAPING_PARAMS = frozenset(
         "n",
         "best_of",
     }
+)
+
+# An error naming one of these ("model is not supported") is about the request
+# itself, not an optional knob. Stripping it would send a different request,
+# e.g. a model-less body that an upstream serves with its default model.
+_REQUEST_IDENTITY_PARAMS = frozenset(
+    {"model", "provider", "messages", "input", "stream"}
 )
 
 # Output caps are interchangeable spellings of the same limit, so moving the
@@ -187,7 +199,7 @@ def strip_unsupported_param(body: dict, error_message: str) -> tuple[dict, str] 
     if not match:
         return None
     param = match.group("param")
-    if param not in body:
+    if param not in body or param.lower() in _REQUEST_IDENTITY_PARAMS:
         return None
     if param.lower() in _SPEND_SHAPING_PARAMS:
         logger.warning(

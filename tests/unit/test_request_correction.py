@@ -156,6 +156,31 @@ class TestStripUnsupportedParam:
             assert result is not None, message
             assert result == ({"model": "m", "messages": []}, "temperature")
 
+    def test_prefix_form_declines_nested_param_paths(self) -> None:
+        body = {
+            "model": "m",
+            "messages": [],
+            "reasoning": {"effort": "low"},
+            "tools": [{"type": "function"}],
+        }
+        for message in (
+            "Codex error: Unsupported parameter: reasoning.summary",
+            "Unsupported parameter: 'tools[0].strict'",
+            "Unsupported parameter: messages[0].name",
+        ):
+            assert strip_unsupported_param(body, message) is None, message
+
+    def test_never_strips_request_identity_params(self) -> None:
+        body = {"model": "m", "messages": [], "input": "x", "stream": False}
+        for message in (
+            "The 'gpt-6-luna' model is not supported when using Codex",
+            "Unsupported parameter: model",
+            "stream is not supported on this endpoint",
+            "Unsupported parameter: messages",
+            "'input' is not supported",
+        ):
+            assert strip_unsupported_param(body, message) is None, message
+
     def test_prefix_form_never_strips_spend_shaping_params(self) -> None:
         body = {"model": "m", "max_tokens": 4}
         assert (
@@ -380,6 +405,14 @@ class TestExtractErrorMessage:
 class TestErrorMessageFromBody:
     def test_extracts_from_raw_json_text(self) -> None:
         body = '{"error":{"message":"Codex error: Unsupported parameter: temperature"}}'
+        assert (
+            error_message_from_body(body)
+            == "Codex error: Unsupported parameter: temperature"
+        )
+
+    def test_extracts_top_level_detail(self) -> None:
+        """FastAPI-style ``{"detail": ...}`` error bodies."""
+        body = '{"detail":"Codex error: Unsupported parameter: temperature"}'
         assert (
             error_message_from_body(body)
             == "Codex error: Unsupported parameter: temperature"
