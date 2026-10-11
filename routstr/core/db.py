@@ -190,6 +190,25 @@ async def reset_all_reserved_balances(session: AsyncSession) -> None:
     logger.info("Reset reserved balances on startup")
 
 
+async def reset_reservations_on_startup(
+    session: AsyncSession, stale_after_seconds: int
+) -> None:
+    """Clear reservations a previous process left behind.
+
+    SQLite serves one process, so everything still active belonged to the one
+    that exited and can go. PostgreSQL is how several workers share a node: a
+    respawned worker must leave its live siblings' reservations alone, so only
+    leases that stopped being renewed are released.
+    """
+    if session.get_bind().dialect.name == "postgresql":
+        released = await release_stale_reservations(session, stale_after_seconds)
+        logger.info(
+            "Released stale reservations on startup", extra={"released": released}
+        )
+        return
+    await reset_all_reserved_balances(session)
+
+
 async def _transition_stale_reservation(
     session: AsyncSession, reservation_id: str, cutoff: int
 ) -> bool:
@@ -1009,6 +1028,25 @@ class AdminSession(SQLModel, table=True):  # type: ignore
     created_at: int = Field(
         default_factory=lambda: int(time.time()), sa_type=UnixTimestamp
     )
+
+
+class UpstreamModelSnapshot(SQLModel, table=True):  # type: ignore
+    """Last good model catalog fetched from one provider, shared by every worker.
+
+    Each worker used to keep only the catalog it fetched itself, so one failed
+    or rate-limited fetch left that worker answering every request with
+    "model not found" while its siblings served the full list.
+    """
+
+    __tablename__ = "upstream_model_snapshots"
+    # No foreign key: a snapshot must never block deleting its provider, and
+    # ``config_hash`` already rejects one left behind by a different provider.
+    upstream_provider_id: int = Field(
+        primary_key=True, sa_column_kwargs={"autoincrement": False}
+    )
+    config_hash: str = Field()
+    models_json: str = Field()
+    fetched_at: int = Field(sa_type=UnixTimestamp)
 
 
 async def accumulate_routstr_fee(session: AsyncSession, amount_msats: int) -> None:

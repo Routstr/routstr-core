@@ -345,14 +345,19 @@ replicas behind one load balancer, point them all at one PostgreSQL database:
 
 ```bash
 DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/routstr
-RESET_RESERVED_BALANCE_ON_STARTUP=false
 ```
 
 - Every worker runs the schema migrations on startup; on PostgreSQL they queue on
   an advisory lock, so an empty database can be brought up by all workers at once.
-- `RESET_RESERVED_BALANCE_ON_STARTUP` defaults to `true` and clears every in-flight
-  reservation when a process starts. With more than one worker a restarted worker
-  would wipe the reservations the others still hold, so turn it off.
+- `RESET_RESERVED_BALANCE_ON_STARTUP` (default `true`) clears reservations a
+  previous process left behind. On SQLite that is every active reservation. On
+  PostgreSQL only reservations whose lease stopped being renewed are released,
+  so a respawned worker never touches the requests its siblings are billing.
+- Each provider's model catalog is stored in the database after a successful
+  fetch. Workers reuse a recent copy instead of fetching it again, and a worker
+  whose fetch fails or is rate limited serves the last good catalog rather than
+  answering "model not found". A worker that still has no models retries after
+  30 seconds, backing off up to `MODELS_REFRESH_INTERVAL_SECONDS`.
 - Dashboard logins are stored in the database, so a session issued by one worker
   is valid on all of them.
 - Pool sizing is per worker: `DATABASE_POOL_SIZE` and `DATABASE_MAX_OVERFLOW`

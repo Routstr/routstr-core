@@ -110,9 +110,11 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             await bootstrap_secrets(session)
             s = await SettingsService.initialize(session)
             if s.reset_reserved_balance_on_startup:
-                from .db import reset_all_reserved_balances
+                from .db import reset_reservations_on_startup
 
-                await reset_all_reserved_balances(session)
+                await reset_reservations_on_startup(
+                    session, s.stale_reservation_timeout_seconds
+                )
 
         # Apply app metadata from settings
         try:

@@ -55,7 +55,7 @@ def _render(element: Any, dialect: Any) -> str:
 
 # Tables created after the widening migration, whose own migration already
 # declares BIGINT; there is nothing for the ALTER list to widen.
-BORN_WIDE_TABLES = {"admin_sessions"}
+BORN_WIDE_TABLES = {"admin_sessions", "upstream_model_snapshots"}
 
 
 def test_migration_and_models_widen_the_same_columns() -> None:
@@ -162,6 +162,7 @@ NARROW_INTEGER_COLUMNS = {
     ("routstr_fees", "id"),
     ("secrets", "id"),
     ("upstream_providers", "id"),
+    ("upstream_model_snapshots", "upstream_provider_id"),
 }
 
 

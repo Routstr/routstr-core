@@ -221,6 +221,7 @@ def test_no_column_that_holds_money_or_time_is_int4(migrated_postgres: str) -> N
         "secrets.id",
         "settings.id",
         "upstream_providers.id",
+        "upstream_model_snapshots.upstream_provider_id",
     }
     assert narrow <= allowed, f"still INT4: {sorted(narrow - allowed)}"
 
@@ -475,6 +476,48 @@ async def test_fresh_reservations_survive_the_sweep(pg_session: AsyncSession) ->
     await pg_session.commit()
 
     assert await release_stale_reservations(pg_session, max_age_seconds=3_600) == 0
+
+
+@pytest.mark.asyncio
+async def test_restarted_worker_keeps_its_siblings_reservations(
+    pg_session: AsyncSession,
+) -> None:
+    """Startup reset on PostgreSQL must not wipe what live workers are billing.
+
+    The global reset released every active reservation, so a worker respawning
+    mid-traffic left its siblings' in-flight requests unable to claim theirs.
+    """
+    from routstr.core.db import (
+        ApiKey,
+        ReservationRelease,
+        reset_reservations_on_startup,
+    )
+
+    now = int(time.time())
+    await _new_key(pg_session, "busy", balance=10_000, reserved_balance=3_000)
+    for rid, created_at, msats in (("live", now, 1_000), ("dead", now - 3_600, 2_000)):
+        pg_session.add(
+            ReservationRelease(
+                id=rid,
+                key_hash="busy",
+                billing_key_hash="busy",
+                reserved_msats=msats,
+                status="active",
+                created_at=created_at,
+            )
+        )
+    await pg_session.commit()
+
+    await reset_reservations_on_startup(pg_session, stale_after_seconds=60)
+
+    statuses = {
+        r.id: r.status
+        for r in (await pg_session.exec(select(ReservationRelease))).all()
+    }
+    assert statuses == {"live": "active", "dead": "released"}
+    pg_session.expire_all()
+    key = await pg_session.get(ApiKey, "busy")
+    assert key is not None and key.reserved_balance == 1_000
 
 
 @pytest.mark.asyncio

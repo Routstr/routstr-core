@@ -135,6 +135,14 @@ async def get_all_models_with_overrides(
     return list(all_models.values())
 
 
+EMPTY_CATALOG_RETRY_SECONDS = 30
+
+
+def _serves_no_models(upstream: BaseUpstreamProvider) -> bool:
+    get_cached = getattr(upstream, "get_cached_models", None)
+    return callable(get_cached) and not get_cached()
+
+
 async def refresh_upstreams_models_periodically(
     upstreams_provider: (
         Callable[[], list[BaseUpstreamProvider]] | list[BaseUpstreamProvider]
@@ -162,6 +170,7 @@ async def refresh_upstreams_models_periodically(
             return upstreams_provider()
         return upstreams_provider
 
+    empty_streak = 0
     while True:
         try:
             for upstream in _resolve_upstreams():
@@ -191,9 +200,18 @@ async def refresh_upstreams_models_periodically(
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
 
+        delay = float(interval)
+        if any(_serves_no_models(u) for u in _resolve_upstreams()):
+            # A worker whose first fetch failed would otherwise answer "model not
+            # found" for a whole interval while its siblings serve the catalog.
+            # Back off so a provider that is down everywhere is not hammered.
+            delay = min(delay, EMPTY_CATALOG_RETRY_SECONDS * 2**empty_streak)
+            empty_streak += 1
+        else:
+            empty_streak = 0
         try:
-            jitter = max(0.0, float(interval) * 0.1)
-            await asyncio.sleep(interval + random.uniform(0, jitter))
+            jitter = max(0.0, delay * 0.1)
+            await asyncio.sleep(delay + random.uniform(0, jitter))
         except asyncio.CancelledError:
             break
 
