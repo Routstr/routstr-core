@@ -711,12 +711,16 @@ class CashuSwap(SQLModel, table=True):  # type: ignore
     )
     source_mint: str = Field()
     source_unit: str = Field()
-    source_amount: int = Field(description="Gross amount leaving the source mint")
+    source_amount: int = Field(
+        sa_type=BigInteger, description="Gross amount leaving the source mint"
+    )
     destination_mint: str = Field()
     destination_unit: str = Field()
-    destination_amount: int = Field(description="Net amount minted at the destination")
-    fee_reserve: int = Field(default=0)
-    input_fees: int = Field(default=0)
+    destination_amount: int = Field(
+        sa_type=BigInteger, description="Net amount minted at the destination"
+    )
+    fee_reserve: int = Field(default=0, sa_type=BigInteger)
+    input_fees: int = Field(default=0, sa_type=BigInteger)
     mint_quote_id: str | None = Field(default=None)
     melt_quote_id: str | None = Field(default=None)
     token: str | None = Field(default=None, description="Issued token (out swaps)")
@@ -725,9 +729,15 @@ class CashuSwap(SQLModel, table=True):  # type: ignore
         description="Unused inbound melt fee reserve returned on the source mint",
     )
     error: str | None = Field(default=None)
-    claimed_at: int | None = Field(default=None, description="Reconciler lease")
-    created_at: int = Field(default_factory=lambda: int(time.time()))
-    updated_at: int = Field(default_factory=lambda: int(time.time()))
+    claimed_at: int | None = Field(
+        default=None, sa_type=UnixTimestamp, description="Reconciler lease"
+    )
+    created_at: int = Field(
+        default_factory=lambda: int(time.time()), sa_type=UnixTimestamp
+    )
+    updated_at: int = Field(
+        default_factory=lambda: int(time.time()), sa_type=UnixTimestamp
+    )
 
 
 async def store_cashu_transaction(
@@ -987,7 +997,27 @@ class CliToken(SQLModel, table=True):  # type: ignore
     )
 
 
+class AdminSession(SQLModel, table=True):  # type: ignore
+    """Short-lived dashboard login, shared by every worker and replica.
+
+    Only a hash is stored, so a database read cannot replay the session.
+    """
+
+    __tablename__ = "admin_sessions"
+    token_hash: str = Field(primary_key=True)
+    expires_at: int = Field(sa_type=UnixTimestamp)
+    created_at: int = Field(
+        default_factory=lambda: int(time.time()), sa_type=UnixTimestamp
+    )
+
+
 async def accumulate_routstr_fee(session: AsyncSession, amount_msats: int) -> None:
+    if session.get_bind().dialect.name == "postgresql":
+        # Every billed request increments this one row, so its commits are
+        # serialized and each one otherwise waits for its own WAL flush. The
+        # charge itself was already committed durably; a crash can only lose
+        # the last few milliseconds of this running total.
+        await session.exec(text("SET LOCAL synchronous_commit TO OFF"))  # type: ignore[call-overload]
     stmt = (
         update(RoutstrFee)
         .where(col(RoutstrFee.id) == 1)

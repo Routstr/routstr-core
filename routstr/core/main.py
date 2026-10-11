@@ -131,9 +131,24 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         _initialize_upstreams_task = asyncio.create_task(initialize_upstreams())
 
         # ensure both setup tasks complete
-        await asyncio.gather(
+        startup_results = await asyncio.gather(
             _update_prices_task, _initialize_upstreams_task, return_exceptions=True
         )
+        for step, outcome in zip(
+            ("price update", "upstream initialization"), startup_results
+        ):
+            if isinstance(outcome, BaseException):
+                # A worker that fails here keeps serving, so the cause has to be
+                # visible: an unexpected exception otherwise leaves it with no
+                # upstreams and every model request answered 400.
+                logger.error(
+                    "Startup task failed",
+                    extra={
+                        "step": step,
+                        "error": str(outcome),
+                        "error_type": type(outcome).__name__,
+                    },
+                )
 
         btc_price_task = asyncio.create_task(update_prices_periodically())
         pricing_task = asyncio.create_task(update_sats_pricing())

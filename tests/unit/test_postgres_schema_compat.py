@@ -53,6 +53,11 @@ def _render(element: Any, dialect: Any) -> str:
     return str(element.compile(dialect=dialect))
 
 
+# Tables created after the widening migration, whose own migration already
+# declares BIGINT; there is nothing for the ALTER list to widen.
+BORN_WIDE_TABLES = {"admin_sessions"}
+
+
 def test_migration_and_models_widen_the_same_columns() -> None:
     """The ALTER list and the ORM must not drift apart.
 
@@ -84,6 +89,7 @@ def test_migration_and_models_widen_the_same_columns() -> None:
     in_models = {
         (table.name, column.name)
         for table in SQLModel.metadata.tables.values()
+        if table.name not in BORN_WIDE_TABLES
         for column in table.columns
         if isinstance(column.type, BigInteger)
     }
@@ -146,20 +152,47 @@ def test_timestamp_columns_survive_2038_on_postgresql(
     assert _render(column.type, POSTGRES_DIALECT) == "BIGINT"
 
 
+# Surrogate keys, foreign keys and bounded magnitudes. Every other integer
+# column is money, a counter or a clock and must be BIGINT.
+NARROW_INTEGER_COLUMNS = {
+    ("model_paths", "id"),
+    ("model_paths", "upstream_provider_id"),
+    ("models", "upstream_provider_id"),
+    ("models", "context_length"),
+    ("routstr_fees", "id"),
+    ("secrets", "id"),
+    ("upstream_providers", "id"),
+}
+
+
 def test_identifier_columns_stay_narrow() -> None:
     """Widening is deliberate, not a blanket sweep over every integer."""
-    for table_name, column_name in [
-        ("upstream_providers", "id"),
-        ("model_paths", "id"),
-        ("model_paths", "upstream_provider_id"),
-        ("models", "upstream_provider_id"),
-        ("models", "context_length"),
-    ]:
+    for table_name, column_name in NARROW_INTEGER_COLUMNS:
         column = _table(table_name).columns[column_name]
         assert isinstance(column.type, Integer)
         assert not isinstance(column.type, BigInteger), (
             f"{table_name}.{column_name} was widened unnecessarily"
         )
+
+
+def test_every_integer_column_is_classified() -> None:
+    """A new table must not slip an INT4 money or timestamp column in.
+
+    The drift check above only compares columns already typed BIGINT, so a
+    new model that declares ``amount: int`` passes it and lands as INT4.
+    """
+    unclassified = sorted(
+        f"{table.name}.{column.name}"
+        for table in SQLModel.metadata.tables.values()
+        for column in table.columns
+        if isinstance(column.type, Integer)
+        and not isinstance(column.type, BigInteger)
+        and (table.name, column.name) not in NARROW_INTEGER_COLUMNS
+    )
+    assert unclassified == [], (
+        "type these as BIGINT and add them to the widening migration, or list "
+        f"them in NARROW_INTEGER_COLUMNS: {unclassified}"
+    )
 
 
 def test_nsec_state_does_not_require_a_native_postgres_enum() -> None:

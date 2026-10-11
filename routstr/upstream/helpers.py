@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
     from ..core.settings import Settings
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from ..core import get_logger
@@ -210,8 +211,14 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
         existing_providers = result.all()
 
         if not existing_providers:
-            await _seed_providers_from_settings(session, settings)
-            await session.commit()
+            try:
+                await _seed_providers_from_settings(session, settings)
+                await session.commit()
+            except IntegrityError:
+                # Workers booting together all see an empty table and seed the
+                # same providers; the unique constraint lets exactly one win,
+                # and the rest load its rows below.
+                await session.rollback()
             result = await session.exec(select(UpstreamProviderRow))
             existing_providers = result.all()
             if existing_providers:

@@ -338,6 +338,32 @@ isn't persisted, the key is gone on the next start and a node with a stored nsec
 refuses to boot with `ROUTSTR_SECRET_KEY is not set`. Set `ROUTSTR_SECRET_KEY`, or
 point `ROUTSTR_SECRET_KEY_FILE` at a persistent path.
 
+### PostgreSQL and Multiple Workers
+
+SQLite serves a single process. To run several uvicorn workers (`--workers N`) or
+replicas behind one load balancer, point them all at one PostgreSQL database:
+
+```bash
+DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/routstr
+RESET_RESERVED_BALANCE_ON_STARTUP=false
+```
+
+- Every worker runs the schema migrations on startup; on PostgreSQL they queue on
+  an advisory lock, so an empty database can be brought up by all workers at once.
+- `RESET_RESERVED_BALANCE_ON_STARTUP` defaults to `true` and clears every in-flight
+  reservation when a process starts. With more than one worker a restarted worker
+  would wipe the reservations the others still hold, so turn it off.
+- Dashboard logins are stored in the database, so a session issued by one worker
+  is valid on all of them.
+- Pool sizing is per worker: `DATABASE_POOL_SIZE` and `DATABASE_MAX_OVERFLOW`
+  (defaults 10 and 20) are multiplied by the worker count on the server side.
+
+An existing SQLite database moves over with
+`uv run python scripts/migrate_sqlite_to_postgres.py --source keys.db --target <url>`.
+It copies into an empty database inside one transaction, verifies every row, and
+refuses to drop data silently; run it with `--dry-run` first. Keep the same
+`ROUTSTR_SECRET_KEY`, or the copied encrypted secrets cannot be read.
+
 ---
 
 ## Models

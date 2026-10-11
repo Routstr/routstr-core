@@ -1,7 +1,7 @@
 """widen money and timestamp columns to 64-bit
 
 Revision ID: 3b1965ea9cea
-Revises: a73d19b6c204
+Revises: 424bb59871d4
 Create Date: 2026-09-30 23:13:38.295444
 
 Balances are millisatoshis and every clock column is a unix timestamp, so both
@@ -25,7 +25,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "3b1965ea9cea"
-down_revision = "a73d19b6c204"
+down_revision = "424bb59871d4"
 branch_labels = None
 depends_on = None
 
@@ -45,6 +45,13 @@ WIDENED_COLUMNS: tuple[tuple[str, str, bool], ...] = (
     ("cashu_transactions", "amount", False),
     ("cashu_transactions", "created_at", False),
     ("cashu_transactions", "sweep_started_at", True),
+    ("cashu_swaps", "source_amount", False),
+    ("cashu_swaps", "destination_amount", False),
+    ("cashu_swaps", "fee_reserve", False),
+    ("cashu_swaps", "input_fees", False),
+    ("cashu_swaps", "claimed_at", True),
+    ("cashu_swaps", "created_at", False),
+    ("cashu_swaps", "updated_at", False),
     ("cli_tokens", "created_at", False),
     ("cli_tokens", "last_used_at", True),
     ("cli_tokens", "expires_at", True),

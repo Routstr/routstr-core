@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -874,3 +875,289 @@ async def test_postgres_migration_errors_never_stamp_head(
             .all()
         )
     assert versions == (["unknown_revision"] if unknown_revision else [])
+
+
+# --------------------------------------------------------------------------
+# Several workers or replicas booting against one database
+# --------------------------------------------------------------------------
+
+BOOTING_WORKERS = 6
+
+# Interpreter start-up and imports jitter by hundreds of milliseconds, far more
+# than the race window itself, so every worker finishes importing and then
+# waits for one shared sentinel before the racing call.
+_BARRIER = """
+import os, time
+while not os.path.exists(os.environ["BOOT_BARRIER"]):
+    time.sleep(0.005)
+"""
+
+_ALEMBIC_UPGRADE = (
+    """
+from alembic.config import main
+"""
+    + _BARRIER
+    + """
+main(["upgrade", "head"])
+"""
+)
+
+_INITIALIZE_SETTINGS = (
+    """
+import asyncio
+from routstr.core.db import create_session
+from routstr.core.settings import SettingsService
+
+async def main():
+    async with create_session() as session:
+        await SettingsService.initialize(session)
+"""
+    + _BARRIER
+    + """
+asyncio.run(main())
+"""
+)
+
+_INITIALIZE_UPSTREAMS = (
+    """
+import asyncio
+from routstr.upstream.helpers import init_upstreams
+"""
+    + _BARRIER
+    + """
+asyncio.run(init_upstreams())
+"""
+)
+
+
+def _spawn_together(
+    code: str, env_overrides: dict[str, str] | None = None
+) -> list[subprocess.CompletedProcess[str]]:
+    """Run ``code`` in several interpreters released together, as uvicorn workers."""
+    barrier = Path(tempfile.gettempdir()) / f"routstr-boot-barrier-{uuid.uuid4().hex}"
+    argv = [sys.executable, "-c", code]
+    env = os.environ.copy()
+    env["DATABASE_URL"] = POSTGRES_URL
+    env["BOOT_BARRIER"] = str(barrier)
+    env.update(env_overrides or {})
+    procs = [
+        subprocess.Popen(
+            argv,
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(BOOTING_WORKERS)
+    ]
+    time.sleep(2.0)  # long enough for every interpreter to reach the barrier
+    barrier.touch()
+    results = []
+    try:
+        for proc in procs:
+            out, err = proc.communicate(timeout=120)
+            results.append(subprocess.CompletedProcess(argv, proc.returncode, out, err))
+    finally:
+        barrier.unlink(missing_ok=True)
+    return results
+
+
+def test_concurrent_workers_migrate_an_empty_database() -> None:
+    """Racing ``upgrade head`` on an empty schema must not crash any worker.
+
+    Without serialization each one creates ``alembic_version`` and all but one
+    fail with a duplicate ``pg_type`` row, taking that worker's startup down.
+    """
+    asyncio.run(_reset_schema())
+    try:
+        results = _spawn_together(_ALEMBIC_UPGRADE)
+        failures = [r.stderr[-400:] for r in results if r.returncode != 0]
+        assert failures == []
+        head = ScriptDirectory.from_config(
+            Config(str(ROOT / "alembic.ini"))
+        ).get_current_head()
+        assert _current_revision() == head
+    finally:
+        asyncio.run(_reset_schema())
+
+
+def test_concurrent_workers_bootstrap_one_settings_row(migrated_postgres: str) -> None:
+    """Every worker's first boot inserts settings id=1; only one may win, none crash."""
+    results = _spawn_together(_INITIALIZE_SETTINGS)
+    failures = [r.stderr[-400:] for r in results if r.returncode != 0]
+    assert failures == []
+
+    async def _rows() -> int:
+        engine = create_async_engine(migrated_postgres)
+        try:
+            async with engine.connect() as conn:
+                return int(
+                    (
+                        await conn.execute(text("SELECT count(*) FROM settings"))
+                    ).scalar_one()
+                )
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(_rows()) == 1
+
+
+def test_concurrent_workers_seed_upstream_providers_once(
+    migrated_postgres: str,
+) -> None:
+    """Every worker's first boot seeds the env-configured upstream provider.
+
+    All of them see an empty table and insert the same row; the unique
+    constraint lets one win, and the others must load it instead of failing.
+    A worker that fails here keeps serving, with no upstreams at all.
+    """
+    # Only the custom upstream may be seeded; a developer shell can carry real
+    # provider keys that would otherwise be written and probed.
+    scrubbed = {key: "" for key in os.environ if key.endswith("_API_KEY")}
+    scrubbed.update(
+        {
+            "UPSTREAM_BASE_URL": "http://127.0.0.1:9/v1",
+            "UPSTREAM_API_KEY": "seed-race",
+            "OLLAMA_BASE_URL": "",
+        }
+    )
+    results = _spawn_together(_INITIALIZE_UPSTREAMS, scrubbed)
+    failures = [r.stderr[-400:] for r in results if r.returncode != 0]
+    assert failures == []
+
+    async def _rows() -> list[str]:
+        engine = create_async_engine(migrated_postgres)
+        try:
+            async with engine.connect() as conn:
+                return [
+                    row[0]
+                    for row in await conn.execute(
+                        text("SELECT base_url FROM upstream_providers")
+                    )
+                ]
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(_rows()) == ["http://127.0.0.1:9/v1"]
+
+
+# --------------------------------------------------------------------------
+# SQLite -> PostgreSQL data migration script
+# --------------------------------------------------------------------------
+
+
+def _migrate_script(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "scripts/migrate_sqlite_to_postgres.py", *args],
+        cwd=ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_sqlite_data_moves_to_postgres_without_loss(tmp_path: Path) -> None:
+    """Every row and every value, including ones only BIGINT can hold, survives."""
+    import sqlite3
+
+    source = tmp_path / "keys.db"
+    _alembic("upgrade", "head", url=f"sqlite+aiosqlite:///{source}")
+    con = sqlite3.connect(source)
+    con.execute(
+        "INSERT INTO api_keys (hashed_key, balance, reserved_balance, total_spent,"
+        " total_requests, key_expiry_time, refund_mint_url, refund_currency)"
+        " VALUES ('k1', ?, 0, ?, 7, ?, ?, 'sat')",
+        (HUGE_MSATS, HUGE_MSATS - 1, POST_2038, MINT),
+    )
+    con.execute("UPDATE routstr_fees SET accumulated_msats = 19065 WHERE id = 1")
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL,"
+        " updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    )
+    con.execute(
+        "INSERT OR REPLACE INTO settings VALUES (1, ?, '2026-10-10 12:00:00.123456+00:00')",
+        (json.dumps({"name": "node"}),),
+    )
+    con.commit()
+    con.close()
+
+    asyncio.run(_reset_schema())
+    try:
+        report_path = tmp_path / "report.json"
+        result = _migrate_script(
+            "--source",
+            str(source),
+            "--target",
+            POSTGRES_URL,
+            "--report",
+            str(report_path),
+        )
+        assert result.returncode == 0, result.stderr[-800:]
+        report = json.loads(report_path.read_text())
+        assert all(t["fingerprint_match"] for t in report["tables"].values())
+
+        async def _read() -> tuple[Any, ...]:
+            engine = create_async_engine(POSTGRES_URL)
+            try:
+                async with engine.connect() as conn:
+                    key = (
+                        await conn.execute(
+                            text(
+                                "SELECT balance, total_spent, key_expiry_time"
+                                " FROM api_keys WHERE hashed_key = 'k1'"
+                            )
+                        )
+                    ).one()
+                    fees = (
+                        (
+                            await conn.execute(
+                                text("SELECT accumulated_msats FROM routstr_fees")
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    data = (
+                        await conn.execute(text("SELECT data FROM settings"))
+                    ).scalar_one()
+                    return tuple(key), fees, data
+            finally:
+                await engine.dispose()
+
+        key, fees, data = asyncio.run(_read())
+        assert key == (HUGE_MSATS, HUGE_MSATS - 1, POST_2038)
+        # The migration-seeded singleton is replaced, not duplicated.
+        assert fees == [19065]
+        assert json.loads(data) == {"name": "node"}
+
+        again = _migrate_script("--source", str(source), "--target", POSTGRES_URL)
+        assert again.returncode == 1
+        assert "target is not empty" in again.stderr
+    finally:
+        asyncio.run(_reset_schema())
+
+
+def test_migration_refuses_to_drop_data_the_target_cannot_hold(tmp_path: Path) -> None:
+    import sqlite3
+
+    source = tmp_path / "keys.db"
+    _alembic("upgrade", "head", url=f"sqlite+aiosqlite:///{source}")
+    con = sqlite3.connect(source)
+    con.execute("ALTER TABLE api_keys ADD COLUMN from_another_branch TEXT")
+    con.execute(
+        "INSERT INTO api_keys (hashed_key, balance, reserved_balance, total_spent,"
+        " total_requests, from_another_branch) VALUES ('k1', 1, 0, 0, 0, 'keep me')"
+    )
+    con.commit()
+    con.close()
+
+    asyncio.run(_reset_schema())
+    try:
+        result = _migrate_script(
+            "--source", str(source), "--target", POSTGRES_URL, "--dry-run"
+        )
+        assert result.returncode == 1
+        assert "api_keys.from_another_branch holds data" in result.stderr
+    finally:
+        asyncio.run(_reset_schema())

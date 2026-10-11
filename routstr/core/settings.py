@@ -454,6 +454,8 @@ class SettingsRow(BaseModel):
 # Single, concrete settings instance that callers import directly
 settings: Settings = resolve_bootstrap()
 
+SETTINGS_BOOTSTRAP_LOCK_KEY = 0x726F757473747222
+
 
 class SettingsService:
     _current: Settings | None = None
@@ -470,6 +472,14 @@ class SettingsService:
         async with cls._lock:
             from sqlmodel import text
 
+            if db_session.get_bind().dialect.name == "postgresql":
+                # cls._lock only covers one process. Workers booting together
+                # would otherwise all see no row and race to insert id=1.
+                await db_session.exec(  # type: ignore
+                    text("SELECT pg_advisory_xact_lock(:key)").bindparams(
+                        key=SETTINGS_BOOTSTRAP_LOCK_KEY
+                    )
+                )
             await db_session.exec(  # type: ignore
                 text(
                     "CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
