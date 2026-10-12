@@ -22,8 +22,17 @@ Everything here is **additive and off by default**: with
 The **cu-sidecar** (Rust, separate process on loopback; source, build and the
 protocol paper: <https://github.com/jooray/routstr-confidential>, `crypto/relay`)
 holds the provider key, verifies the relayed handshake, runs the node side of the proofs, holds
-the record that completes the request body until π_C2 verifies, and writes the
+the record that completes the request body until π_C2S verifies, and writes the
 credential record.
+
+**Protocol version.** The node speaks only protocol v2 (the two-party TLS
+handshake, π_NK/π_C2S/π_C3S): its offer advertises `v = min_v = max_v = 2`,
+`/v1/confidential/ws` refuses any other `v` (a v1 client is closed with
+`1008`), `/v1/confidential/zk` accepts only `twopc`, `zkchan`, `pi_nk`,
+`pi_c2s` and `pi_c3s`, and a sidecar whose offer does not name `v = 2` is
+refused (no offer, no `confidential_upstream` models field). Protocol v1 (the
+client ran the handshake alone; π_C1/π_N/π_C2/π_C3) is retired; it remains on
+the `confidential-upstream` branch for reference.
 
 ## Billing (the node's normal path)
 
@@ -52,7 +61,7 @@ cannot read (cf. EHBP), at rates fixed when the session starts:
    fixed-pricing deployments reserve their fixed per-request cost. The bearer
    and `offer_sig` are not forwarded to the sidecar; the reservation id binds
    the session id instead.
-4. On the π_C3-verified usage the node charges exactly
+4. On the π_C3S-verified usage the node charges exactly
    `ceil((in*(prompt-cached) + min(cached_in,in)*cached + out*completion)/1000)`,
    capped at the reservation, where `cached` is
    `usage.prompt_tokens_details.cached_tokens`. This never exceeds
@@ -71,7 +80,7 @@ cannot read (cf. EHBP), at rates fixed when the session starts:
    sidecar's signature is passed along as `sidecar_sig`). The client checks
    the node's signature and that the session id and transcript hashes are
    its own.
-6. An upstream HTTP error is disclosed under π_C3 from the response's status
+6. An upstream HTTP error is disclosed under π_C3S from the response's status
    line and headers only; the node learns the status and those headers, never
    the error body. A 4xx or 503 releases the reservation (less the session fee,
    if set; below); other 5xx charge it.
@@ -111,7 +120,7 @@ listing's `confidential_upstream` field, so clients can size their deposit):
 | Session outcome | Charge |
 |---|---|
 | completed (usage disclosed and verified) | usage at the (surcharged) rates + session fee, capped at the reservation |
-| provider refused (4xx or 503, disclosed under π_C3) | session fee: the request reached the provider and the node did the 2PC, but no inference ran |
+| provider refused (4xx or 503, disclosed under π_C3S) | session fee: the request reached the provider and the node did the 2PC, but no inference ran |
 | ended before the final body record was released, after the sidecar accepted the setup (`ready`): armed and never used, aborted, failed proof, client gone | abandon fee; the rest of the reservation is released |
 | the sidecar never accepted the setup (unreachable, refused) | nothing |
 | other 5xx, or no disclosure after the body was released | the reservation, as before |
