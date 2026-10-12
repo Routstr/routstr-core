@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     # http://127.0.0.1:7443). Empty disables the mode: no offer, no websocket
     # routes, no /v1/models field.
     confidential_sidecar_url: str = Field(default="", env="CONFIDENTIAL_SIDECAR_URL")
+    # Shared secret the node sends to the sidecar (``Authorization: Bearer``).
+    # The sidecar does not check client credentials itself: whoever reaches it
+    # spends the provider key, so it requires this token unless it listens on
+    # loopback only. Env-only: never persisted, redacted in the admin API.
+    confidential_sidecar_token: str = Field(
+        default="", env="CONFIDENTIAL_SIDECAR_TOKEN"
+    )
     # Denial-of-service limit: confidential sessions per client address that
     # have not been used yet (from the WebSocket accept, before the setup
     # frame, until the credential record is written). Pre-warmed sessions
@@ -369,6 +376,9 @@ ENV_ONLY_FIELDS = frozenset(
         # Boot-time provisioning switch: read before the DB is available and
         # must not be toggled from the persisted settings blob.
         "auto_generate_nsec",
+        # A credential shared with the cu-sidecar: kept out of the settings
+        # blob so it is never stored in plaintext or shadowed by a stale copy.
+        "confidential_sidecar_token",
     }
 )
 
