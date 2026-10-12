@@ -365,6 +365,10 @@ async def test_database_url(tmp_path: Any) -> str:
 @pytest_asyncio.fixture
 async def integration_engine(test_database_url: str) -> AsyncGenerator[Any, None]:
     """Create an async engine for integration tests"""
+    from routstr.core.settings import settings
+
+    # Match the production engine's busy timeout; sqlite3's 5s default makes
+    # concurrency tests flake with "database is locked" on slow CI runners.
     engine = create_async_engine(
         test_database_url,
         echo=False,
@@ -372,6 +376,7 @@ async def integration_engine(test_database_url: str) -> AsyncGenerator[Any, None
         pool_pre_ping=True,
         pool_size=5,
         max_overflow=10,
+        connect_args={"timeout": settings.database_busy_timeout},
     )
 
     # Initialize database schema

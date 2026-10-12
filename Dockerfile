@@ -28,6 +28,9 @@ ENV GIT_COMMIT=${GIT_COMMIT}
 ENV GIT_TAG=${GIT_TAG}
 ENV PORT=8000
 ENV PYTHONUNBUFFERED=1
+# routstr is not installed into the venv (--no-install-project); make it importable
+# for `python scripts/<name>.py` run via `docker compose exec`.
+ENV PYTHONPATH=/app
 
 EXPOSE 8000
 

@@ -123,7 +123,10 @@ async def get_all_models_with_overrides(
             if model_key is not None and model_key in overrides_by_key:
                 override_row, provider_fee = overrides_by_key[model_key]
                 all_models[(model.id.lower(), provider_key)] = _row_to_model(
-                    override_row, apply_provider_fee=True, provider_fee=provider_fee
+                    override_row,
+                    apply_provider_fee=True,
+                    provider_fee=provider_fee,
+                    provider_type=upstream.provider_type,
                 )
             elif model.enabled:
                 all_models[(model.id.lower(), provider_key)] = model
@@ -272,6 +275,7 @@ async def _seed_providers_from_settings(
         ("PERPLEXITY_API_KEY", "perplexity", None, None),
         ("FIREWORKS_API_KEY", "fireworks", None, None),
         ("XAI_API_KEY", "xai", None, None),
+        ("DEEPSEEK_API_KEY", "deepseek", None, None),
         ("TINFOIL_API_KEY", "tinfoil", None, None),
         ("TYPESAFE_API_KEY", "typesafe", None, None),
     ]

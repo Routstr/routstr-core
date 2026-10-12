@@ -409,7 +409,9 @@ class TestDataIntegrity:
 
         # Should fail
         assert response.status_code == 400
-        assert "Balance too small to refund" in response.json()["detail"]
+        error = response.json()["detail"]["error"]
+        assert error["code"] == "balance_too_small_to_refund"
+        assert "Balance too small to refund" in error["message"]
 
         # Verify balance unchanged
         await integration_session.refresh(api_key)

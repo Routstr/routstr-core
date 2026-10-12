@@ -134,7 +134,10 @@ async def test_zero_balance_refund_handling(
     response = await integration_client.post("/v1/wallet/refund")
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "No balance to refund"
+    error = response.json()["detail"]["error"]
+    assert error["code"] == "no_balance_to_refund"
+    assert error["message"] == "No balance to refund"
+    assert error["type"] == "invalid_request_error"
 
     # Key should still exist
     result = await integration_session.execute(
@@ -585,7 +588,9 @@ async def test_refund_error_handling(
     response = await integration_client.post("/v1/wallet/refund")
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "No balance to refund"
+    error = response.json()["detail"]["error"]
+    assert error["code"] == "no_balance_to_refund"
+    assert error["message"] == "No balance to refund"
 
 
 @pytest.mark.integration

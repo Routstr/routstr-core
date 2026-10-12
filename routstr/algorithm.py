@@ -239,7 +239,10 @@ def create_model_mappings(
                 override_row, provider_fee = overrides_by_key[model_key]
                 try:
                     model_to_use = _row_to_model(
-                        override_row, apply_provider_fee=True, provider_fee=provider_fee
+                        override_row,
+                        apply_provider_fee=True,
+                        provider_fee=provider_fee,
+                        provider_type=upstream.provider_type,
                     )
                 except Exception as exc:
                     # Stored pricing is JSON from whatever wrote the row, so
@@ -315,7 +318,10 @@ def create_model_mappings(
 
         try:
             model_to_use = _row_to_model(
-                override_row, apply_provider_fee=True, provider_fee=provider_fee
+                override_row,
+                apply_provider_fee=True,
+                provider_fee=provider_fee,
+                provider_type=upstream_for_override.provider_type,
             )
         except Exception as exc:
             logger.warning(
