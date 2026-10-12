@@ -3393,6 +3393,7 @@ class BaseUpstreamProvider:
                         code=rate_limit.code if rate_limit else None,
                         details=rate_limit.as_details() if rate_limit else None,
                         from_upstream_response=True,
+                        upstream_body=body_preview,
                     )
 
                 try:
@@ -3769,6 +3770,7 @@ class BaseUpstreamProvider:
                         code=rate_limit.code if rate_limit else None,
                         details=rate_limit.as_details() if rate_limit else None,
                         from_upstream_response=True,
+                        upstream_body=body_preview,
                     )
 
                 try:
