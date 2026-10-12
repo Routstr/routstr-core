@@ -611,7 +611,7 @@ class BaseUpstreamProvider:
             self._fold_cache_into_input_tokens(nested_response["usage"])
 
         # Unified Routstr metadata
-        response_json["metadata"] = response_json.get("metadata", {})
+        response_json["metadata"] = response_json.get("metadata") or {}
         response_json["metadata"]["routstr"] = {
             "cost": cost_dict,
             "sats_cost": sats_cost,
@@ -1654,7 +1654,7 @@ class BaseUpstreamProvider:
             published_cost = _published_cost(cost_data)
             published_cost["sats_cost"] = published_cost["total_msats"] // 1000
             published_cost["remaining_balance_msats"] = remaining_balance_msats
-            response_json["metadata"] = response_json.get("metadata", {})
+            response_json["metadata"] = response_json.get("metadata") or {}
             response_json["metadata"]["routstr"] = {"cost": published_cost.copy()}
             response_json["cost"] = published_cost
 
@@ -2115,7 +2115,7 @@ class BaseUpstreamProvider:
             published_cost = _published_cost(cost_data)
             published_cost["sats_cost"] = published_cost["total_msats"] // 1000
             published_cost["remaining_balance_msats"] = remaining_balance_msats
-            response_json["metadata"] = response_json.get("metadata", {})
+            response_json["metadata"] = response_json.get("metadata") or {}
             response_json["metadata"]["routstr"] = {"cost": published_cost.copy()}
             response_json["cost"] = published_cost
 
@@ -3557,6 +3557,7 @@ class BaseUpstreamProvider:
                         code=rate_limit.code if rate_limit else None,
                         details=rate_limit.as_details() if rate_limit else None,
                         from_upstream_response=True,
+                        upstream_body=body_preview,
                     )
 
                 try:
@@ -3948,6 +3949,7 @@ class BaseUpstreamProvider:
                         code=rate_limit.code if rate_limit else None,
                         details=rate_limit.as_details() if rate_limit else None,
                         from_upstream_response=True,
+                        upstream_body=body_preview,
                     )
 
                 try:
