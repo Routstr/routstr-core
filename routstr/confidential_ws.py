@@ -1,6 +1,6 @@
 """Confidential-upstream websocket proxies (node side).
 
-* ``GET /v1/confidential/ws?session_id=<uuid>&v=<n>``: the session control
+* ``GET /v1/confidential/ws?session_id=<uuid>&v=2``: the session control
   and TLS-record channel to the cu-sidecar. The first client frame must be
   ``setup`` (within ``SETUP_TIMEOUT_S``). It carries the client's ordinary
   bearer (``auth``: an ``sk-`` key or a Cashu token) and optionally the
@@ -12,7 +12,7 @@
   - ``ready``: announces the node's Nostr key (the sidecar's offer is dropped:
     the node-signed offer is the only one);
   - ``body_released``: the upstream now has the complete request;
-  - ``usage``: the π_C3-verified usage (or upstream error status) for this
+  - ``usage``: the π_C3S-verified usage (or upstream error status) for this
     session's sid; the node settles it and returns a signed receipt;
   - ``attestation``: re-signed with the node's key.
 
@@ -25,7 +25,7 @@
   ``{"type": "error", "status", "reason", "detail"}`` before the socket closes.
 
 * ``GET /v1/confidential/zk?proof=<pi_*>&session_id=<sid>``: a byte proxy for
-  one ZK proof (``twopc``: the v2 two-party handshake; ``zkchan``: the v2
+  one ZK proof (``twopc``: the two-party handshake; ``zkchan``: the
   session's long-lived proof channel, which carries π_NK, π_C2S and π_C3S
   over correlations set up while the session is armed).
 """
@@ -59,7 +59,6 @@ from .confidential import (
     reserve,
     settle,
     sidecar_headers,
-    sidecar_protocol_version,
     sign_payload,
     to_ws_url,
 )
@@ -76,7 +75,8 @@ _UUID_RE = re.compile(
 # The zk route is keyed by the protocol sid (a 32-byte hex digest).
 _SID_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
-_PROOF_RE = re.compile(r"^(pi_c1|pi_n|pi_c2|pi_c3|twopc|zkchan|pi_nk|pi_c2s|pi_c3s)$")
+# Protocol v2 only (v1's pi_c1/pi_n/pi_c2/pi_c3 are retired).
+_PROOF_RE = re.compile(r"^(twopc|zkchan|pi_nk|pi_c2s|pi_c3s)$")
 # The proof/2PC channel carries mux frames of at most 1 MiB; the session
 # channel carries TLS records (≤ 16.6 KiB each), which a client may batch, at
 # most a whole declared body (8 MiB).
@@ -209,17 +209,14 @@ async def confidential_session_proxy(
         await websocket.close(code=1008, reason="invalid session_id")
         return
     if not CONFIDENTIAL_MIN_V <= version <= CONFIDENTIAL_MAX_V:
-        await websocket.close(code=1008, reason=f"unsupported protocol version {v}")
-        return
-    try:
-        sidecar_version = sidecar_protocol_version(await cached_sidecar_offer())
-    except Exception:
-        sidecar_version = CONFIDENTIAL_MIN_V
-    if version != sidecar_version:
+        # A v1 client (protocol v1 is retired) or an unknown version.
         await websocket.close(
-            code=1008, reason=f"this node speaks protocol version {sidecar_version}"
+            code=1008,
+            reason=f"unsupported protocol version {v}; this node speaks only v{CONFIDENTIAL_MAX_V}",
         )
         return
+    # The sidecar's own version needs no check here: ``fetch_sidecar_offer``
+    # refuses a sidecar that does not speak v2.
     if not node_pubkey_hex():
         await websocket.close(code=1011, reason="node has no signing identity")
         return
@@ -611,14 +608,14 @@ async def _finalize_unsettled(state: SessionState) -> str | None:
             await charge_reservation(billing)
             outcome = "charged_reservation"
         elif state.engaged and _fee(billing, "abandon_fee_msat") > 0:
-            # π_C2 never verified, so the upstream never received a complete
+            # π_C2S never verified, so the upstream never received a complete
             # request, but the sidecar ran the session (armed and never used,
             # aborted, client gone): the abandon fee is charged, the rest of
             # the reservation is released.
             cost, _ = await _release_keeping_fee(billing, "abandon_fee_msat")
             outcome = f"charged_abandon_fee:{cost}"
         else:
-            # π_C2 never verified: the upstream never received a complete request.
+            # π_C2S never verified: the upstream never received a complete request.
             await release(billing)
             outcome = "released"
     except Exception:
