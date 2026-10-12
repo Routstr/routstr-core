@@ -8,7 +8,7 @@ node never sees the prompt or the response.
 Billing reuses the node's normal path, like the EHBP/Tinfoil opaque-body flow:
 the client authenticates with an ordinary bearer (``sk-`` key or Cashu token),
 the node reserves the full-context prompt plus the pinned completion cap with
-``pay_for_request``, charges the π_C3-verified usage at the rates frozen at
+``pay_for_request``, charges the π_C3S-verified usage at the rates frozen at
 setup (the signed offer's) and releases the reservation when the upstream
 never ran. Refunds of unused balance are the existing ``/v1/wallet/refund``.
 
@@ -53,12 +53,13 @@ from .core.settings import settings
 
 logger = get_logger(__name__)
 
-# Wire-protocol version; the offer's min_v/max_v is the only negotiation.
-CONFIDENTIAL_VERSION = 1
-CONFIDENTIAL_MIN_V = 1
+# Wire-protocol version; the offer's min_v/max_v is the only negotiation. Only
+# protocol v2 (the two-party handshake) is supported: v1 is retired.
+CONFIDENTIAL_VERSION = 2
+CONFIDENTIAL_MIN_V = 2
 CONFIDENTIAL_MAX_V = 2
 
-# Upstream HTTP errors settled at zero cost once disclosed under π_C3: client
+# Upstream HTTP errors settled at zero cost once disclosed under π_C3S: client
 # errors, rate limiting and "overloaded" are answered before any work starts.
 UNBILLED_ERROR_STATUSES = frozenset(range(400, 500)) | {503}
 
@@ -208,6 +209,20 @@ async def fetch_sidecar_offer() -> dict[str, Any]:
             "confidential mode is disabled until it does"
         )
         raise OfferError("the confidential sidecar does not run with --node-settles")
+    version = sidecar_protocol_version(data)
+    if version != CONFIDENTIAL_VERSION:
+        # A sidecar running the retired protocol v1: offering it would hand
+        # clients a version they refuse (and this node no longer relays).
+        logger.error(
+            "confidential: the sidecar speaks protocol v%s; only v%s is supported "
+            "(v1 is retired); confidential mode is disabled",
+            version,
+            CONFIDENTIAL_VERSION,
+        )
+        raise OfferError(
+            f"the confidential sidecar speaks protocol v{version}; "
+            f"this node supports only v{CONFIDENTIAL_VERSION}"
+        )
     return data
 
 
@@ -399,12 +414,12 @@ def _remember_offer(sig: str, terms: OfferTerms | dict[str, Any]) -> None:
 
 
 def sidecar_protocol_version(side: dict[str, Any]) -> int:
-    """The protocol version the sidecar speaks (1 if it does not say)."""
+    """The protocol version the sidecar's offer names (1, the retired v1, if it
+    names none; 0 if it is not an integer)."""
     try:
-        v = int(side.get("v", CONFIDENTIAL_VERSION))
+        return int(side.get("v", 1))
     except (TypeError, ValueError):
-        return CONFIDENTIAL_VERSION
-    return v if CONFIDENTIAL_MIN_V <= v <= CONFIDENTIAL_MAX_V else CONFIDENTIAL_VERSION
+        return 0
 
 
 def signed_offer_terms(sig: str) -> OfferTerms | None:
@@ -445,10 +460,10 @@ async def build_offer() -> dict[str, Any]:
     margin = reserve_margin_tokens()
     terms = OfferTerms(prices, fee, pct, abandon, margin)
     offer: dict[str, Any] = {
-        # The sidecar runs one protocol version (v2: the two-party handshake).
-        "v": sidecar_protocol_version(side),
-        "min_v": sidecar_protocol_version(side),
-        "max_v": sidecar_protocol_version(side),
+        # Protocol v2 (the two-party handshake) only; v1 is retired.
+        "v": CONFIDENTIAL_VERSION,
+        "min_v": CONFIDENTIAL_MIN_V,
+        "max_v": CONFIDENTIAL_MAX_V,
         "upstream_host": str(side.get("upstream_host", "")),
         "ws": confidential_ws_public_url(),
         "notary_pubkey": node_pubkey_hex() or "",
@@ -500,7 +515,7 @@ async def models_fields() -> dict[str, dict[str, Any]]:
     except Exception:
         return {}
     field = {
-        "v": sidecar_protocol_version(side),
+        "v": CONFIDENTIAL_VERSION,
         "offer_url": confidential_offer_url(),
         # Lets a client size its deposit before it fetches the offer.
         **pricing_fields(session_fee_msat(), abandon_fee_msat(), rate_surcharge_pct()),
@@ -645,7 +660,7 @@ async def reserve(
     """Validate the bearer, freeze the rates and reserve the worst case.
 
     The prompt is opaque to the node, so the reservation covers the model's
-    full context length plus the pinned ``max_tokens`` (which π_C2 enforces
+    full context length plus the pinned ``max_tokens`` (which π_C2S enforces
     before the upstream starts) and the offer's completion margin (a provider
     may bill slightly past the cap), at the frozen rates. Without a known context length it
     is the model's undiscounted maximum cost; fixed-pricing deployments keep
@@ -693,8 +708,7 @@ async def reserve(
             max_cost = max(
                 settings.min_request_msat,
                 math.ceil(
-                    (limit * rates["in"] + (max_tokens + margin) * rates["out"])
-                    / 1000
+                    (limit * rates["in"] + (max_tokens + margin) * rates["out"]) / 1000
                 ),
             )
         max_cost += max(fee, abandon)
@@ -716,7 +730,7 @@ async def reserve(
 
 
 async def settle(billing: Billing, usage_event: dict[str, Any]) -> dict[str, Any]:
-    """Charge the π_C3-verified usage at the frozen rates, plus the session fee.
+    """Charge the π_C3S-verified usage at the frozen rates, plus the session fee.
 
     Returns ``{"cost_msats", "balance_msats"}``. The cost is capped at the
     reservation (which includes the fee). A usage event without token counts
