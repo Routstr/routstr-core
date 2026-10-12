@@ -25,6 +25,12 @@ larger of the two. A client accepts both by echoing the signed offer's
 ``session_fee_msat`` and ``abandon_fee_msat`` in its setup; a setup that does
 not is refused, so an older client is never charged a fee it does not check.
 
+``CONFIDENTIAL_RESERVE_MARGIN_TOKENS`` (default 16) completion tokens are
+reserved beyond the pinned cap, because a provider may bill a few more than
+``max_tokens`` and the charge is capped at the reservation. The margin only
+enlarges the hold (it is in the signed offer, so a client can size its
+balance); the charge is still the usage the provider reported.
+
 Inert unless ``CONFIDENTIAL_SIDECAR_URL`` is set.
 """
 
@@ -82,6 +88,14 @@ def abandon_fee_msat() -> int:
     except (TypeError, ValueError):
         fee = 0
     return max(fee, session_fee_msat())
+
+
+def reserve_margin_tokens() -> int:
+    """Completion tokens reserved beyond the pinned cap (≥ 0)."""
+    try:
+        return max(0, int(settings.confidential_reserve_margin_tokens or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def rate_surcharge_pct() -> float:
@@ -355,12 +369,14 @@ def confidential_offer_url() -> str:
 
 @dataclass(frozen=True)
 class OfferTerms:
-    """What a signed offer fixes for billing: rates, fees, surcharge."""
+    """What a signed offer fixes for billing: rates, fees, surcharge and the
+    reservation's completion margin."""
 
     price_list: dict[str, Any]
     session_fee_msat: int = 0
     rate_surcharge_pct: float = 0.0
     abandon_fee_msat: int = 0
+    reserve_margin_tokens: int = 0
 
 
 # sig -> (monotonic time last served, terms), oldest first.
@@ -426,7 +442,8 @@ async def build_offer() -> dict[str, Any]:
     prices = {
         mid: surcharged(entry, pct) for mid, (_c, entry) in priced_models(side).items()
     }
-    terms = OfferTerms(prices, fee, pct, abandon)
+    margin = reserve_margin_tokens()
+    terms = OfferTerms(prices, fee, pct, abandon, margin)
     offer: dict[str, Any] = {
         # The sidecar runs one protocol version (v2: the two-party handshake).
         "v": sidecar_protocol_version(side),
@@ -445,6 +462,8 @@ async def build_offer() -> dict[str, Any]:
         "mints": settings.cashu_mints,
         **pricing_fields(fee, abandon, pct),
     }
+    if margin > 0:
+        offer["reserve_margin_tokens"] = margin
     payload = canonical_json(offer).decode("utf-8")
     last = _LAST_OFFER["offer"]
     if last is not None and _LAST_OFFER["payload"] == payload:
@@ -562,6 +581,12 @@ def frozen_cost_msats(
         <= usage.keys()
     ):
         return None
+    # Counts that are not plain integers bill as if absent: the reservation.
+    if not all(
+        isinstance(usage[k], int) and not isinstance(usage[k], bool) and usage[k] >= 0
+        for k in ("prompt_tokens", "completion_tokens")
+    ):
+        return None
     prompt = parse_token_count(usage["prompt_tokens"])
     completion = parse_token_count(usage["completion_tokens"])
     details = usage.get("prompt_tokens_details")
@@ -621,7 +646,8 @@ async def reserve(
 
     The prompt is opaque to the node, so the reservation covers the model's
     full context length plus the pinned ``max_tokens`` (which π_C2 enforces
-    before the upstream starts), at the frozen rates. Without a known context length it
+    before the upstream starts) and the offer's completion margin (a provider
+    may bill slightly past the cap), at the frozen rates. Without a known context length it
     is the model's undiscounted maximum cost; fixed-pricing deployments keep
     their per-request reservation. The larger of the frozen offer's session
     and abandon fees is added on top; the client must have accepted exactly
@@ -642,8 +668,10 @@ async def reserve(
             raise _offer_expired(model_id)
         fee, pct = terms.session_fee_msat, terms.rate_surcharge_pct
         abandon = max(terms.abandon_fee_msat, fee)
+        margin = terms.reserve_margin_tokens
     else:
         fee, abandon, pct = session_fee_msat(), abandon_fee_msat(), rate_surcharge_pct()
+        margin = reserve_margin_tokens()
         base = usable_price_entry(model_id, cand)
         if base is None:
             raise BillingError(f"model {model_id!r} has no usable pricing")
@@ -664,7 +692,10 @@ async def reserve(
         else:
             max_cost = max(
                 settings.min_request_msat,
-                math.ceil((limit * rates["in"] + max_tokens * rates["out"]) / 1000),
+                math.ceil(
+                    (limit * rates["in"] + (max_tokens + margin) * rates["out"])
+                    / 1000
+                ),
             )
         max_cost += max(fee, abandon)
         try:

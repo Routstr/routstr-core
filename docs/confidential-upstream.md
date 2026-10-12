@@ -43,9 +43,11 @@ cannot read (cf. EHBP), at rates fixed when the session starts:
    `offer_sig` the current rates are frozen.
 3. The prompt is opaque to the node, so `pay_for_request` reserves the
    full-context prompt plus the pinned `max_tokens` at the frozen rates:
-   `max(MIN_REQUEST_MSAT, ceil((prompt_limit*in + max_tokens*out)/1000))`,
-   where `prompt_limit` is the model's context length minus its maximum
-   completion tokens (the same context logic as normal requests). A model
+   `max(MIN_REQUEST_MSAT, ceil((prompt_limit*in + (max_tokens+margin)*out)/1000))`,
+   where `prompt_limit` is the model's full context length (a prompt cap
+   smaller than that would leave part of an accepted prompt unreserved) and
+   `margin` is the offer's `reserve_margin_tokens` (providers may bill a few
+   completion tokens past the cap; the charge is still the usage). A model
    without a known context length reserves its undiscounted maximum cost;
    fixed-pricing deployments reserve their fixed per-request cost. The bearer
    and `offer_sig` are not forwarded to the sidecar; the reservation id binds
@@ -185,6 +187,7 @@ sessions at once; parallel coding agents need several.
 | `CONFIDENTIAL_SESSION_FEE_MSAT` | fee (msat) on top of the usage of a completed confidential request, and the charge for a provider refusal (4xx/503); published in the signed offer; clients must accept it at setup | `0` (off) |
 | `CONFIDENTIAL_ABANDON_FEE_MSAT` | fee (msat) for a session the sidecar accepted that ends without a request reaching the provider (armed and never used, aborted, client gone): the anti-DoS deposit, reserved at setup; never below the session fee (0 = equal to it) | `0` (off) |
 | `CONFIDENTIAL_RATE_SURCHARGE_PCT` | percentage added to the per-token rates of confidential sessions; the signed offer's `price_list` carries the surcharged rates | `0` (off) |
+| `CONFIDENTIAL_RESERVE_MARGIN_TOKENS` | completion tokens reserved beyond the pinned `max_tokens` (a provider may bill a few more than the cap, and the charge never exceeds the reservation); only the hold grows, the charge is the reported usage; published in the signed offer as `reserve_margin_tokens` | `16` |
 | `CONFIDENTIAL_CLIENT_IP_HEADER` | header a trusted proxy puts the client address in; for `X-Forwarded-For` the rightmost entry is used | `x-forwarded-for` |
 | `NSEC` | node key; signs offer, attestation and receipt (required) | |
 

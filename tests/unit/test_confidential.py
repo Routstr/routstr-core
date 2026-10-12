@@ -894,6 +894,9 @@ def test_frozen_cost() -> None:
     assert conf.frozen_cost_msats(pricey, over, 10**9) == 10_800
     assert conf.frozen_cost_msats(rates, {"total_tokens": 3}, 10**9) is None
     assert conf.frozen_cost_msats(rates, None, 10**9) is None
+    for bad in (None, "12", 1.5, -1, True):
+        odd = {"prompt_tokens": bad, "completion_tokens": 3}
+        assert conf.frozen_cost_msats(rates, odd, 10**9) is None
     # Never above the client's bound ceil((in*prompt + out*completion)/1000).
     bound = math.ceil((rates["in"] * 1000 + rates["out"] * 8) / 1000)
     cost = conf.frozen_cost_msats(pricey, usage, 10**9)
@@ -962,6 +965,9 @@ async def billing_db(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
     monkeypatch.setattr(settings, "fixed_pricing", False)
     monkeypatch.setattr(settings, "tolerance_percentage", 0)
     monkeypatch.setattr(settings, "min_request_msat", 1)
+    # The sums below reserve exactly the pinned cap; the completion margin
+    # has its own tests.
+    monkeypatch.setattr(settings, "confidential_reserve_margin_tokens", 0)
 
     async with create_session() as session:
         session.add(ApiKey(hashed_key="hk", balance=3_000_000))
@@ -1066,6 +1072,46 @@ async def test_reserve_at_the_signed_offer_rates(billing_db: Any) -> None:
     assert exc.value.status == 409
     detail: Any = exc.value.detail
     assert detail["error"]["type"] == "offer_expired"
+
+
+async def test_reservation_covers_a_provider_overshoot_of_the_cap(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any
+) -> None:
+    """A provider may bill a few completion tokens past max_tokens. The charge
+    is capped at the reservation, so without a margin a full-context prompt
+    plus that overshoot would go partly unbilled."""
+    usage = {
+        "model": "ctx-model",
+        "usage": {"prompt_tokens": 100_000 - 3, "completion_tokens": 6},
+    }
+    # 99997*10 + 6*100 msats
+    full = 1_000_570
+
+    billing = await conf.reserve("hk", "ctx-model", 3)
+    assert billing.reserved_msats == 1_000_300
+    assert (await conf.settle(billing, usage))["cost_msats"] < full
+
+    monkeypatch.setattr(settings, "confidential_reserve_margin_tokens", 16)
+    billing = await conf.reserve("hk", "ctx-model", 3)
+    # 100000*10 + (3 + 16)*100 msats
+    assert billing.reserved_msats == 1_001_900
+    out = await conf.settle(billing, usage)
+    assert out["cost_msats"] == full  # the usage, not the larger hold
+    key = await billing_db.key()
+    assert key.reserved_balance == 0
+
+
+async def test_signed_offer_freezes_the_reserve_margin(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any
+) -> None:
+    conf._remember_offer(
+        "ab" * 64,
+        conf.OfferTerms({"ctx-model": dict(RATES)}, reserve_margin_tokens=4),
+    )
+    monkeypatch.setattr(settings, "confidential_reserve_margin_tokens", 500)
+    billing = await conf.reserve("hk", "ctx-model", 8, "ab" * 64)
+    # 100000*1 + (8 + 4)*2 msats at the signed rates
+    assert billing.reserved_msats == 100_024
 
 
 async def test_zero_cost_releases_and_reports_balance(billing_db: Any) -> None:
@@ -1294,6 +1340,22 @@ async def test_offer_publishes_fees_and_surcharged_rates(
         terms.rate_surcharge_pct,
     ) == (2000, 10000, 20.0)
     assert conf.signed_offer_rates(offer["sig"], "m") == payload["price_list"]["m"]
+
+
+async def test_offer_publishes_the_reserve_margin(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    offer = await _offer_with(monkeypatch)
+    payload = json.loads(offer["sig_payload"])
+    assert payload["reserve_margin_tokens"] == 16  # the default
+    terms = conf.signed_offer_terms(offer["sig"])
+    assert terms is not None and terms.reserve_margin_tokens == 16
+
+    monkeypatch.setattr(settings, "confidential_reserve_margin_tokens", 0)
+    offer = await _offer_with(monkeypatch)
+    assert "reserve_margin_tokens" not in json.loads(offer["sig_payload"])
+    terms = conf.signed_offer_terms(offer["sig"])
+    assert terms is not None and terms.reserve_margin_tokens == 0
 
 
 def test_abandon_fee_defaults_to_and_never_undercuts_the_session_fee(
