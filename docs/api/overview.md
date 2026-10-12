@@ -105,6 +105,7 @@ Standard OpenAI-compatible endpoints:
 - **Chat Completions**: `/v1/chat/completions`
 - **Embeddings**: `/v1/embeddings`
 - **System One**: `/v1/systemone` (TypeSafe decision models)
+- **Decisions**: `/v1/decisions` (OpenAI Decisions API)
 - **Completions**: `/v1/completions` *(planned)*
 - **Images**: `/v1/images/generations` *(planned)*
 - **Audio**: `/v1/audio/transcriptions` *(planned)*

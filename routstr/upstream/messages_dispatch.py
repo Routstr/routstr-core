@@ -485,6 +485,76 @@ def compute_refund(amount: int, unit: str, cost_msats: int) -> int:
     raise ValueError(f"Invalid unit: {unit}")
 
 
+_MAX_UPSTREAM_MESSAGE_CHARS = 300
+
+
+def collapse_litellm_message(message: str) -> str:
+    """Keep the innermost provider message and cap its length."""
+    tail = message.rsplit("Original exception:", 1)[-1].strip()
+    while True:
+        stripped = tail.removeprefix("litellm.")
+        head, _, rest = stripped.partition(": ")
+        if rest and head.endswith(("Error", "Exception")):
+            stripped = rest.strip()
+        if stripped == tail:
+            break
+        tail = stripped
+    if len(tail) > _MAX_UPSTREAM_MESSAGE_CHARS:
+        tail = tail[: _MAX_UPSTREAM_MESSAGE_CHARS - 1].rstrip() + "…"
+    return tail
+
+
+def is_provider_exception(exc: BaseException) -> bool:
+    """Distinguish SDK failures from bugs in our stream handling."""
+    return type(exc).__module__.split(".", 1)[0] in {"litellm", "openai"}
+
+
+def upstream_error_from_exception(
+    exc: Exception,
+    *,
+    log_message: str,
+    log_extra: dict[str, Any] | None = None,
+) -> UpstreamError:
+    """Redact and classify provider failures, including mid-stream errors."""
+    raw_message = getattr(exc, "message", None) or str(exc) or repr(exc)
+    # Redact provider account ids before the message reaches logs or the client.
+    exc_message = collapse_litellm_message(redact_org_ids(raw_message))
+    exc_status = getattr(exc, "status_code", None)
+    exc_response = getattr(exc, "response", None)
+    response_text = None
+    if exc_response is not None:
+        try:
+            response_text = redact_org_ids(
+                getattr(exc_response, "text", str(exc_response))
+            )
+        except Exception:
+            response_text = "<unreadable>"
+    status_for_classify = exc_status if isinstance(exc_status, int) else 502
+    rate_limit = classify_rate_limit(
+        status_for_classify, exc_message, getattr(exc, "headers", None)
+    )
+    logger.error(
+        log_message,
+        extra={
+            "error": exc_message,
+            "error_type": type(exc).__name__,
+            "status_code": exc_status,
+            "error_code": rate_limit.code if rate_limit else None,
+            "llm_provider": getattr(exc, "llm_provider", None),
+            "body": redact_org_ids(str(getattr(exc, "body", "") or "")) or None,
+            "response_text": response_text,
+            **(log_extra or {}),
+        },
+    )
+    return UpstreamError(
+        f"Upstream error via litellm: {exc_message}",
+        status_code=status_for_classify,
+        code=rate_limit.code if rate_limit else None,
+        details=rate_limit.as_details() if rate_limit else None,
+        from_upstream_response=True,
+    )
+
+
 async def dispatch_anthropic_messages(
     *,
     request_body: bytes | None,
@@ -606,44 +676,10 @@ async def dispatch_anthropic_messages(
     try:
         result = await litellm.anthropic.messages.acreate(**kwargs)
     except Exception as exc:
-        raw_message = getattr(exc, "message", None) or str(exc) or repr(exc)
-        # Redact provider account identifiers before the message reaches logs
-        # or the surfaced error.
-        exc_message = redact_org_ids(raw_message)
-        exc_status = getattr(exc, "status_code", None)
-        exc_response = getattr(exc, "response", None)
-        response_text = None
-        if exc_response is not None:
-            try:
-                response_text = redact_org_ids(
-                    getattr(exc_response, "text", str(exc_response))
-                )
-            except Exception:
-                response_text = "<unreadable>"
-        status_for_classify = exc_status if isinstance(exc_status, int) else 502
-        rate_limit = classify_rate_limit(
-            status_for_classify, exc_message, getattr(exc, "headers", None)
-        )
-        logger.error(
-            "litellm dispatch failed",
-            extra={
-                "error": exc_message,
-                "error_type": type(exc).__name__,
-                "status_code": exc_status,
-                "error_code": rate_limit.code if rate_limit else None,
-                "llm_provider": getattr(exc, "llm_provider", None),
-                "body": redact_org_ids(str(getattr(exc, "body", "") or "")) or None,
-                "response_text": response_text,
-                "model": litellm_model,
-                "api_base": base_url,
-            },
-        )
-        raise UpstreamError(
-            f"Upstream error via litellm: {exc_message}",
-            status_code=status_for_classify,
-            code=rate_limit.code if rate_limit else None,
-            details=rate_limit.as_details() if rate_limit else None,
-            from_upstream_response=True,
+        raise upstream_error_from_exception(
+            exc,
+            log_message="litellm dispatch failed",
+            log_extra={"model": litellm_model, "api_base": base_url},
         ) from exc
 
     if transform_stream is not None and hasattr(result, "__aiter__"):
@@ -661,6 +697,13 @@ async def dispatch_anthropic_messages(
                 cast(AsyncIterator[Any], result)
             )
         except Exception as exc:
+            if is_provider_exception(exc):
+                # Upstream failed part-way through, not an aggregation bug.
+                raise upstream_error_from_exception(
+                    exc,
+                    log_message="Upstream stream failed mid-flight",
+                    log_extra={"model": litellm_model, "api_base": base_url},
+                ) from exc
             logger.error(
                 "Failed to aggregate streamed events into message",
                 extra={

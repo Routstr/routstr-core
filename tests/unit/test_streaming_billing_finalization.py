@@ -364,7 +364,7 @@ async def test_aborted_generic_stream_still_records_its_settlement() -> None:
         patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
         patch("routstr.upstream.base.create_session", return_value=session_context),
     ):
-        response = provider._generic_streaming_response(
+        response = await provider._generic_streaming_response(
             upstream_response,
             "key-hash",
             500,
@@ -396,7 +396,7 @@ async def test_streaming_response_closes_iterator_when_downstream_send_is_cancel
     reservation = MagicMock(spec=ReservationSnapshot)
     upstream_response.status_code = 201
     upstream_response.headers = {"x-upstream": "preserved"}
-    response = provider._generic_streaming_response(
+    response = await provider._generic_streaming_response(
         upstream_response,
         "key-hash",
         500,
@@ -458,7 +458,7 @@ async def test_generic_stream_settles_when_response_start_fails() -> None:
     upstream_response.status_code = 201
     upstream_response.headers = {"x-upstream": "preserved"}
     reservation = MagicMock(spec=ReservationSnapshot)
-    response = provider._generic_streaming_response(
+    response = await provider._generic_streaming_response(
         upstream_response,
         "key-hash",
         500,
@@ -788,6 +788,11 @@ async def test_stream_closed_before_first_chunk_still_records_its_settlement(
         status_code=200, headers={"content-type": "text/event-stream"}
     )
     upstream_response.aclose = AsyncMock()
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield b"data: {}\n\n"
+
+    upstream_response.aiter_bytes = aiter_bytes
     key = MagicMock(spec=ApiKey)
     key.hashed_key = f"{api}-never-started"
     key.balance = 10_000
@@ -1198,12 +1203,12 @@ async def test_native_messages_error_event_still_records_its_settlement() -> Non
             True,
             {"input_tokens": 10, "output_tokens": 0},
             {"output_tokens": 5},
-            3,
+            15,
             (10, 5),
             ("reported", "reported"),
         ),
         (False, {}, {}, 3, (3, 0), ("estimated", "estimated")),
-        (True, {}, {"output_tokens": 5}, 3, (3, 5), ("estimated", "reported")),
+        (True, {}, {"output_tokens": 5}, 5, (0, 5), ("missing", "reported")),
     ],
 )
 async def test_native_messages_stats_ignore_network_chunk_boundaries(
@@ -1282,7 +1287,8 @@ async def test_native_messages_stats_ignore_network_chunk_boundaries(
             async for _ in response.body_iterator:
                 pass
 
-        # Billing keeps its existing parser and charge; stats retain reported usage.
+        # The stream guard hands billing whole SSE events, so neither billing
+        # nor stats depend on where the network split them.
         async with sessions() as session:
             stored_key = await session.get(ApiKey, key.hashed_key)
             assert stored_key is not None
@@ -1298,11 +1304,96 @@ async def test_native_messages_stats_ignore_network_chunk_boundaries(
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_native_messages_hang_up_does_not_report_start_output() -> None:
+    engine = await _engine()
+
+    @asynccontextmanager
+    async def sessions() -> AsyncGenerator[AsyncSession, None]:
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            yield session
+
+    async def chunks() -> AsyncGenerator[bytes, None]:
+        # message_start carries a placeholder output count; the real one only
+        # arrives in message_delta, which this client never waits for.
+        yield (
+            b'event: message_start\ndata: {"type":"message_start","message":'
+            b'{"model":"test-model","usage":{"input_tokens":10,"output_tokens":1}}}\n\n'
+        )
+        yield (
+            b'event: message_delta\ndata: {"type":"message_delta","delta":'
+            b'{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}\n\n'
+        )
+
+    upstream_response = MagicMock(
+        status_code=200, headers={"content-type": "text/event-stream"}
+    )
+    upstream_response.aiter_bytes = chunks
+    upstream_response.aclose = AsyncMock()
+    writer = MagicMock()
+    provider = BaseUpstreamProvider("https://unused.example", "test-key")
+    try:
+        async with sessions() as session:
+            key = ApiKey(hashed_key="messages-hang-up", balance=1_000)
+            session.add(key)
+            await session.commit()
+            await pay_for_request(key, 100, session)
+            reservation = await get_reservation_snapshot(key, session)
+
+        with (
+            patch("routstr.upstream.base.create_session", sessions),
+            patch(
+                "routstr.upstream.base.adjust_payment_for_tokens",
+                auth_module.adjust_payment_for_tokens,
+            ),
+            patch("routstr.core.terminal_outcomes.terminal_outcome_writer", writer),
+            patch(
+                "routstr.payment.cost_calculation._get_pricing_rates",
+                return_value=(1_000.0, 1_000.0, 1_000.0, 1_000.0, "configured"),
+            ),
+            patch(
+                "routstr.payment.cost_calculation.sats_usd_price", return_value=0.0005
+            ),
+            patch("routstr.auth.ROUTSTR_FEE_PERCENT", 0),
+            patch("routstr.upstream.count_tokens._count_with_litellm", return_value=3),
+            patch(
+                "routstr.upstream.count_tokens._count_text_with_litellm", return_value=0
+            ),
+        ):
+            response = await provider.handle_streaming_messages_completion(
+                upstream_response,
+                key,
+                100,
+                reservation_snapshot=reservation,
+                terminal_outcome=TerminalOutcomeContext(
+                    "messages-hang-up", "test-model"
+                ),
+            )
+            body = cast(AsyncGenerator[bytes, None], response.body_iterator)
+            await anext(body)
+            await body.aclose()
+
+        writer.submit.assert_called_once()
+        outcome = writer.submit.call_args.args[0]
+        assert (outcome.input_tokens, outcome.input_source) == (10, "reported")
+        assert outcome.output_source == "estimated"
+    finally:
+        await engine.dispose()
+
+
 def test_stream_cut_inside_a_character_does_not_raise() -> None:
     state = TerminalOutcomeState()
     tail = 'data: {"delta":{"text":"日本'.encode()[:-1]
 
     assert observe_terminal_sse_bytes(state, b"", tail, final=True) == b""
+
+
+def test_deeply_nested_event_does_not_raise() -> None:
+    state = TerminalOutcomeState()
+    event = b"data: " + b"[" * 200_000 + b"]" * 200_000 + b"\n\n"
+
+    assert observe_terminal_sse_bytes(state, b"", event, final=True) == b""
+    assert state.usage is None
 
 
 def test_routstr_upstream_cost_event_is_not_provider_usage() -> None:

@@ -1080,6 +1080,22 @@ async def test_single_configured_relay_can_deliver_without_a_manifest(
 
 
 @pytest.mark.asyncio
+async def test_non_public_relays_are_skipped_instead_of_disabling_delivery(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    delivery = AnalyticsV2Delivery(
+        session_factory,
+        operator_relays=(RELAYS[0], "ws://umbrel.local:4848", "wss://relay.lan"),
+    )
+    assert delivery._targets == (RelayTarget(RELAYS[0]),)
+
+    with pytest.raises(AnalyticsV2DeliveryError, match="At least one"):
+        AnalyticsV2Delivery(
+            session_factory, operator_relays=("ws://umbrel.local:4848",)
+        )
+
+
+@pytest.mark.asyncio
 async def test_frame_limit_uses_the_required_relay_quorum_and_caches_each_pass(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -96,18 +96,25 @@ class NormalizedUsage(BaseModel):
 
 
 def parse_token_count(value: object) -> int:
-    """Parse a token count from various formats (int, float, str, bool)."""
+    """Parse a token count from various formats (int, float, str, bool).
+
+    ``json.loads`` accepts bare ``Infinity``/``NaN`` and overflows ``1e999`` to
+    ``inf``, so an upstream can put them on the wire. ``int()`` raises on both,
+    which would turn a billing path into a 500; reject them like
+    ``is_usable_rate`` does instead.
+    """
     if isinstance(value, bool):
         return 0
     if isinstance(value, int):
         return max(0, value)
     if isinstance(value, float):
-        return max(0, int(value))
+        return max(0, int(value)) if math.isfinite(value) else 0
     if isinstance(value, str):
         try:
-            return max(0, int(float(value)))
-        except ValueError:
+            parsed = float(value)
+        except (ValueError, OverflowError):
             return 0
+        return max(0, int(parsed)) if math.isfinite(parsed) else 0
     return 0
 
 
