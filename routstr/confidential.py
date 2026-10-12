@@ -184,6 +184,16 @@ async def fetch_sidecar_offer() -> dict[str, Any]:
         data = resp.json()
     if not isinstance(data, dict) or "head_template" not in data:
         raise OfferError("sidecar offer is malformed")
+    if data.get("node_settles") is False:
+        # The sidecar would sign stub receipts itself and never send the
+        # ``usage`` frame this node settles on: every session would end
+        # "released, no disclosure" and be charged its full reservation.
+        # Refuse to offer confidential mode rather than take that money.
+        logger.error(
+            "confidential: the sidecar runs without --node-settles; "
+            "confidential mode is disabled until it does"
+        )
+        raise OfferError("the confidential sidecar does not run with --node-settles")
     return data
 
 
@@ -514,15 +524,21 @@ class BillingError(Exception):
 
 
 def prompt_token_limit(model_obj: Any) -> int | None:
-    """The largest prompt the model accepts, as ``calculate_discounted_max_cost``
-    derives it (``payment/helpers.py``); ``None`` when no context is known."""
+    """The largest prompt the node must reserve for: the model's context length.
+
+    The prompt is opaque, so nothing smaller is safe. In particular the
+    visible-body helper's ``context_length - max_completion_tokens`` is *not*
+    a bound here: the completion cap pinned by the suffix is usually far below
+    the model's own completion limit, so the provider accepts a prompt up to
+    ``context_length - max_tokens`` and the difference would go unreserved
+    (and, since the charge is capped at the reservation, unbilled).
+    ``None`` when no context length is known (the caller then falls back to
+    the model's undiscounted maximum cost).
+    """
     top = getattr(model_obj, "top_provider", None)
     cl = getattr(top, "context_length", None) if top else None
-    mct = getattr(top, "max_completion_tokens", None) if top else None
-    if cl or mct:
-        if cl and mct:
-            return max(0, cl - mct)
-        return cl if cl else 0
+    if cl:
+        return int(cl)
     return getattr(model_obj, "context_length", None) or None
 
 
@@ -604,8 +620,8 @@ async def reserve(
     """Validate the bearer, freeze the rates and reserve the worst case.
 
     The prompt is opaque to the node, so the reservation covers the model's
-    full context plus the pinned ``max_tokens`` (which π_C2 enforces before the
-    upstream starts), at the frozen rates. Without a known context length it
+    full context length plus the pinned ``max_tokens`` (which π_C2 enforces
+    before the upstream starts), at the frozen rates. Without a known context length it
     is the model's undiscounted maximum cost; fixed-pricing deployments keep
     their per-request reservation. The larger of the frozen offer's session
     and abandon fees is added on top; the client must have accepted exactly
