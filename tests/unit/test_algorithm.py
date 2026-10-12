@@ -272,7 +272,14 @@ def test_create_model_mappings_applies_custom_provider_fees_before_advertising(
         2: SimpleNamespace(id="shared-model", upstream_provider_id=2, enabled=True),
     }
 
-    def fake_row_to_model(row, *, apply_provider_fee, provider_fee) -> Model:  # type: ignore[no-untyped-def]
+    def fake_row_to_model(
+        row: SimpleNamespace,
+        *,
+        apply_provider_fee: bool,
+        provider_fee: float,
+        provider_type: str,
+    ) -> Model:
+        assert provider_type == providers[row.upstream_provider_id - 1].provider_type
         assert apply_provider_fee is True
         return create_test_model(
             row.id,
@@ -943,7 +950,10 @@ def test_create_model_mappings_uppercase_prefixed_base_keeps_top_tier() -> None:
         "prefixed", "https://prefixed.example/v1", db_id=1, models=[prefixed_cheap]
     )
     forwarded_provider = create_test_provider(
-        "forwarded", "https://forwarded.example/v1", db_id=2, models=[forwarded_expensive]
+        "forwarded",
+        "https://forwarded.example/v1",
+        db_id=2,
+        models=[forwarded_expensive],
     )
 
     _, provider_map, unique_models = create_model_mappings(

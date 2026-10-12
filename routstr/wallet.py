@@ -24,7 +24,6 @@ from sqlmodel import col, select, update
 from .cashu_compat import install_cashu_httpx_shim
 from .checkstate import filter_unspent_proofs
 from .core import db, get_logger
-from .core.db import store_cashu_transaction_with_retry as store_cashu_transaction
 from .core.settings import settings
 from .mint import (
     MINT_TRANSPORT_EXCEPTIONS,
@@ -208,6 +207,37 @@ class UntrustedSourceMintError(ValueError):
     """The token names a mint outside primary_mint/cashu_mints."""
 
 
+class ForeignMintSwapError(ValueError):
+    """A cross-mint swap was refused before any proof was spent.
+
+    The token is still fully usable by its holder: fees exceeded its value, the
+    unit is unsupported, or the issuing mint rejected the quote.
+    """
+
+
+class ForeignMintUnavailableError(MintConnectionError):
+    """The issuing mint did not answer within the foreign-mint budget.
+
+    Nothing was spent. Unlike trusted mints there is no retry: the sender, not
+    the operator, picked this mint.
+    """
+
+
+class ForeignMintBusyError(ForeignMintUnavailableError):
+    """Another swap holds this foreign mint's slot. Nothing was spent; retry."""
+
+
+SWAP_BUSY_RETRY_AFTER_SECONDS = 5
+
+
+class SwapPendingError(Exception):
+    """The swap's Lightning leg was dispatched but its outcome is not yet known.
+
+    The token must not be retried: its proofs may already be spent. The journal
+    row keeps the quote ids and the reconciler credits or fails it later.
+    """
+
+
 class TokenConsumedError(Exception):
     """A failure that happened AFTER the token's proofs were spent (melt
     succeeded, or redemption already returned) — e.g. minting on the primary
@@ -242,6 +272,10 @@ def is_mint_timeout(error: BaseException) -> bool:
         if isinstance(current, _MINT_TIMEOUT_EXCEPTIONS):
             return True
     return False
+
+
+def is_swap_busy(error: BaseException) -> bool:
+    return any(isinstance(e, ForeignMintBusyError) for e in _exception_chain(error))
 
 
 def is_source_mint_connection_error(error: BaseException) -> bool:
@@ -313,6 +347,36 @@ def classify_redemption_error(
             400,
             "Cashu token was issued by a mint this node does not accept",
             "cashu_untrusted_source_mint",
+        )
+    if isinstance(error, SwapPendingError):
+        return (
+            "swap_pending",
+            409,
+            "Cross-mint swap was dispatched and is awaiting confirmation; do not "
+            "resend this token, the balance is credited once the mint confirms",
+            "cashu_swap_pending",
+        )
+    if isinstance(error, ForeignMintSwapError):
+        return (
+            "mint_error",
+            422,
+            "Cashu token cannot be swapped into this node's mint; nothing was spent",
+            "cashu_foreign_mint_swap_failed",
+        )
+    if isinstance(error, ForeignMintBusyError):
+        return (
+            "swap_busy",
+            503,
+            "Cross-mint swaps are busy (this token's mint or the node-wide "
+            "limit); nothing was spent, retry in a few seconds",
+            "cashu_swap_busy",
+        )
+    if isinstance(error, ForeignMintUnavailableError):
+        return (
+            "mint_unreachable",
+            503,
+            "The mint that issued this Cashu token did not answer in time; retry later",
+            "cashu_source_mint_unreachable",
         )
     if is_mint_rate_limited(error):
         return (
@@ -878,15 +942,36 @@ async def execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, str
         return await _execute_bolt11_payment(plan)
 
 
+async def select_melt_inputs(
+    wallet: Wallet, proofs: list[Proof], needed: int
+) -> list[Proof]:
+    """Select proofs covering ``needed`` plus the input fee the mint will charge.
+
+    cashu's coinselect sums fractional per-proof fees and only checks the bare
+    amount, so it can return a selection the mint rejects as underfunded.
+    """
+    target = needed
+    for _ in range(3):
+        selected, _ = await wallet.select_to_send(
+            proofs, target, set_reserved=False, include_fees=True
+        )
+        shortfall = (
+            needed
+            + wallet.get_fees_for_proofs(selected)
+            - sum(proof.amount for proof in selected)
+        )
+        if shortfall <= 0:
+            return selected
+        target += shortfall
+    raise ValueError("Coin selection cannot cover the melt and its input fees")
+
+
 async def _execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, str]:
     # Select unreserved, mirroring send_token: a selection failure must not
     # strand proofs that were never handed to the mint.
     try:
-        selected, _ = await plan.wallet.select_to_send(
-            plan.proofs,
-            plan.quote.amount + plan.quote.fee_reserve,
-            set_reserved=False,
-            include_fees=True,
+        selected = await select_melt_inputs(
+            plan.wallet, plan.proofs, plan.quote.amount + plan.quote.fee_reserve
         )
     except Exception as e:
         raise Bolt11PaymentNotAttempted(f"Coin selection failed: {e}") from e
@@ -1009,6 +1094,15 @@ def token_mint_url(token: str, fallback: str | None = None) -> str:
         return fallback
 
 
+def preferred_trusted_mint() -> str:
+    """Return the first configured trusted mint in operator priority order."""
+    for mint_url in settings.cashu_mints:
+        candidate = mint_url.strip()
+        if candidate:
+            return candidate
+    raise ValueError("No trusted mint is configured")
+
+
 async def find_trusted_mint_with_funds(
     amount: int,
     unit: str,
@@ -1090,97 +1184,18 @@ async def _credit_balance_locked(
             if isinstance(key.refund_currency, str)
             else None,
         )
-        original_amount = amount
-        original_unit = unit
         logger.info(
             "credit_balance: Token redeemed successfully",
             extra={"amount": amount, "unit": unit, "mint_url": mint_url},
         )
-
-        if unit == "sat":
-            amount = _sats_to_msats(amount)
-            logger.info(
-                "credit_balance: Converted to msat", extra={"amount_msat": amount}
-            )
-
-        # Guard against zero/negative redemptions (empty or dust tokens, or
-        # swap-to-primary-mint amounts that net to <= 0 after fees). Raising here
-        # — before the UPDATE/commit below — leaves any freshly-created, still
-        # uncommitted ApiKey row to be rolled back when the request session
-        # closes, instead of persisting an orphan key with balance 0.
-        if amount <= 0:
-            logger.error(
-                "credit_balance: Redeemed amount is zero or negative; refusing to credit",
-                extra={"amount": amount, "unit": unit, "mint_url": mint_url},
-            )
-            raise ValueError(
-                f"Redeemed token amount must be positive, got {amount} msats"
-            )
-
-        logger.info(
-            "credit_balance: Updating balance",
-            extra={"old_balance": key.balance, "credit_amount": amount},
-        )
-
-        # The token is already redeemed (spent) here, so any crediting failure
-        # is post-redemption and non-retryable — surface it as TokenConsumedError
-        # (a key that vanished mid-flight, or an unexpected DB fault), never a
-        # retryable/token-error taxonomy.
-        try:
-            # Atomic UPDATE to prevent race conditions during concurrent topups.
-            updates: dict[str, object] = {
-                "balance": db.ApiKey.balance + amount,
-            }
-            # Legacy keys may predate refund provenance. Pin them to the
-            # destination used for this credit before exposing the balance.
-            if key.refund_mint_url is None:
-                updates["refund_mint_url"] = mint_url
-            if key.refund_currency is None:
-                updates["refund_currency"] = unit
-            stmt = (
-                update(db.ApiKey)
-                .where(col(db.ApiKey.hashed_key) == key.hashed_key)
-                .values(**updates)
-            )
-            result = await session.exec(stmt)  # type: ignore[call-overload]
-            # If pruning removed this key after redemption, do not commit a no-op
-            # balance update and pretend the top-up succeeded.
-            if (getattr(result, "rowcount", 0) or 0) == 0:
-                raise TokenConsumedError(
-                    "Token redeemed but the API key disappeared before the "
-                    "credit could be recorded"
-                )
-            await session.commit()
-            await session.refresh(key)
-            # refresh() starts a read transaction; release it before the
-            # transaction-history write opens its own session below.
-            await session.commit()
-        except TokenConsumedError:
-            raise
-        except Exception as db_error:
-            raise TokenConsumedError(
-                "Token redeemed but crediting the balance failed"
-            ) from db_error
-
-        logger.info(
-            "credit_balance: Balance updated successfully",
-            extra={"new_balance": key.balance},
-        )
-
-        await store_cashu_transaction(
-            token=cashu_token,
-            amount=original_amount,
-            unit=original_unit,
+        return await _apply_credit_locked(
+            key,
+            session,
+            amount=amount,
+            unit=unit,
             mint_url=mint_url,
-            typ="in",
-            source="apikey",
-            api_key_hashed_key=key.hashed_key,
+            token=cashu_token,
         )
-        logger.debug(
-            "Cashu token successfully redeemed and stored",
-            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
-        )
-        return amount
     except Exception as e:
         classification = classify_redemption_error(e)
         expected_codes = {
@@ -1204,6 +1219,104 @@ async def _credit_balance_locked(
             },
         )
         raise
+
+
+async def _apply_credit_locked(
+    key: db.ApiKey,
+    session: db.AsyncSession,
+    *,
+    amount: int,
+    unit: str,
+    mint_url: str,
+    token: str,
+    refund_mint_url: str | None = None,
+    swap_id: str | None = None,
+) -> int:
+    """Atomically credit a redeemed amount and record its ledger row.
+
+    ``amount`` is in ``unit``. ``refund_mint_url`` overrides the mint pinned as
+    the key's refund destination when the key has none yet. When ``swap_id`` is
+    present, the same transaction also claims the swap's ``minted`` state, so
+    reconciliation can never apply one minted quote twice.
+    """
+    original_amount = amount
+    if unit == "sat":
+        amount = _sats_to_msats(amount)
+        logger.info("credit_balance: Converted to msat", extra={"amount_msat": amount})
+
+    if amount <= 0:
+        logger.error(
+            "credit_balance: Redeemed amount is zero or negative; refusing to credit",
+            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
+        )
+        raise ValueError(f"Redeemed token amount must be positive, got {amount} msats")
+
+    logger.info(
+        "credit_balance: Updating balance",
+        extra={"old_balance": key.balance, "credit_amount": amount},
+    )
+
+    try:
+        updates: dict[str, object] = {"balance": db.ApiKey.balance + amount}
+        if key.refund_mint_url is None:
+            updates["refund_mint_url"] = refund_mint_url or mint_url
+        if key.refund_currency is None:
+            updates["refund_currency"] = unit
+        result = await session.exec(  # type: ignore[call-overload]
+            update(db.ApiKey)
+            .where(col(db.ApiKey.hashed_key) == key.hashed_key)
+            .values(**updates)
+        )
+        if (getattr(result, "rowcount", 0) or 0) == 0:
+            raise TokenConsumedError(
+                "Token redeemed but the API key disappeared before the "
+                "credit could be recorded"
+            )
+
+        if swap_id is not None:
+            claimed = await session.exec(  # type: ignore[call-overload]
+                update(db.CashuSwap)
+                .where(col(db.CashuSwap.id) == swap_id)
+                .where(col(db.CashuSwap.status) == "minted")
+                .values(status="credited", error=None, updated_at=int(time.time()))
+            )
+            if (getattr(claimed, "rowcount", 0) or 0) != 1:
+                raise TokenConsumedError(
+                    "Swapped funds were already credited or their journal vanished"
+                )
+
+        session.add(
+            db.CashuTransaction(
+                token=token,
+                amount=original_amount,
+                unit=unit,
+                mint_url=mint_url,
+                type="in",
+                source="apikey",
+                api_key_hashed_key=key.hashed_key,
+            )
+        )
+        await session.flush()
+        await session.refresh(key)
+        await session.commit()
+    except TokenConsumedError:
+        await session.rollback()
+        raise
+    except Exception as db_error:
+        await session.rollback()
+        raise TokenConsumedError(
+            "Token redeemed but crediting the balance failed"
+        ) from db_error
+
+    logger.info(
+        "credit_balance: Balance updated successfully",
+        extra={"new_balance": key.balance},
+    )
+    logger.debug(
+        "Cashu token successfully redeemed and stored",
+        extra={"amount": amount, "unit": unit, "mint_url": mint_url},
+    )
+    return amount
 
 
 _wallets: dict[str, Wallet] = {}
@@ -1329,22 +1442,62 @@ _BALANCE_FETCH_RETRY_SECONDS = 60.0
 _MINT_UNITS_CACHE_SECONDS = 300.0
 _balance_fetch_failures: dict[tuple[str, str], tuple[float, str, str]] = {}
 _balance_fetch_locks: dict[str, asyncio.Lock] = {}
-_mint_supported_units: dict[str, tuple[float, list[str]]] = {}
+_mint_supported_units: dict[tuple[str, str | None], tuple[float, list[str]]] = {}
 
 
-async def _get_supported_mint_units(mint_url: str) -> list[str]:
+def _bolt11_units(wallet: Wallet, nut_number: int) -> set[str] | None:
+    mint_info = wallet.mint_info
+    nuts = mint_info.nuts if mint_info is not None else None
+    nut = (nuts.get(nut_number) or nuts.get(str(nut_number))) if nuts else None
+    if not isinstance(nut, dict) or "methods" not in nut:
+        return None
+    if nut.get("disabled") is True:
+        return set()
+    methods = nut.get("methods")
+    if not isinstance(methods, list):
+        return set()
+    return {
+        str(method.get("unit"))
+        for method in methods
+        if isinstance(method, dict)
+        and method.get("method") == "bolt11"
+        and method.get("unit")
+        and method.get("disabled") is not True
+    }
+
+
+async def get_supported_mint_units(
+    mint_url: str, *, bolt11_operation: str | None = None
+) -> list[str]:
+    """Discover active units without activating a unit-specific wallet."""
+    if bolt11_operation not in (None, "mint", "melt"):
+        raise ValueError(f"Unsupported Bolt11 operation: {bolt11_operation}")
+    cache_key = (mint_url, bolt11_operation)
     now = time.monotonic()
-    cached = _mint_supported_units.get(mint_url)
+    cached = _mint_supported_units.get(cache_key)
     if cached is not None and now < cached[0]:
         return cached[1]
 
-    # A metadata load populates Cashu's shared keyset cache for all units.
-    wallet = await get_wallet(
-        mint_url,
-        settings.primary_mint_unit,
-        retry_on_rate_limit=False,
-        load_proofs=False,
-    )
+    # Wallet construction requires a unit, but keyset discovery does not. Avoid
+    # load_mint(), which activates that bootstrap unit before we know the mint's
+    # supported units.
+    wallet = await get_wallet(mint_url, "sat", load=False)
+    lock = _mint_metadata_load_locks.setdefault(mint_url, asyncio.Lock())
+    async with lock:
+        await run_mint_operation(
+            wallet.load_mint_keysets,
+            op_name="discover_mint_keysets",
+            mint_url=mint_url,
+            retry_on_rate_limit=False,
+        )
+        if bolt11_operation is not None:
+            await run_mint_operation(
+                lambda: wallet.load_mint_info(reload=True),
+                op_name="discover_mint_info",
+                mint_url=mint_url,
+                retry_on_rate_limit=False,
+            )
+
     keysets = await get_cashu_keysets(mint_url=wallet.url, db=wallet.db)
     units: list[str] = []
     for keyset in keysets:
@@ -1353,16 +1506,27 @@ async def _get_supported_mint_units(mint_url: str) -> list[str]:
         unit = keyset.unit if isinstance(keyset.unit, str) else keyset.unit.name
         if unit and unit not in units:
             units.append(unit)
-    if not units:
-        units = [settings.primary_mint_unit]
-    elif settings.primary_mint_unit in units:
-        units.remove(settings.primary_mint_unit)
-        units.insert(0, settings.primary_mint_unit)
 
-    _mint_supported_units[mint_url] = (
+    if bolt11_operation is not None:
+        nut_number = 4 if bolt11_operation == "mint" else 5
+        bolt11_units = _bolt11_units(wallet, nut_number)
+        if bolt11_units is not None:
+            units = [unit for unit in units if unit in bolt11_units]
+
+    _mint_supported_units[cache_key] = (
         time.monotonic() + _MINT_UNITS_CACHE_SECONDS,
         units,
     )
+    return units
+
+
+async def _get_supported_mint_units(mint_url: str) -> list[str]:
+    units = await get_supported_mint_units(mint_url)
+    if not units:
+        return [settings.primary_mint_unit]
+    if settings.primary_mint_unit in units:
+        units = [settings.primary_mint_unit, *units]
+        units = list(dict.fromkeys(units))
     return units
 
 
@@ -1878,6 +2042,8 @@ async def _refund_sweep_once(cutoff: int) -> None:
         refunds = results.all()
 
     for refund in refunds:
+        if refund.mint_url and resolve_trusted_source_mint(refund.mint_url) is None:
+            continue
         reclaimed_stale_claim = refund.sweep_started_at is not None
         claim_started_at = int(time.time())
         claimed = await _set_refund_sweep_state(

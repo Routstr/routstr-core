@@ -123,6 +123,32 @@ async def test_balance_chat_completion_uses_shared_cost_contract() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_completion_with_null_metadata() -> None:
+    """Upstreams (e.g. Venice) may send ``"metadata": null``; it must not crash."""
+    provider = _provider()
+    with patch(
+        "routstr.upstream.base.adjust_payment_for_tokens",
+        new=AsyncMock(return_value=dict(COST_DATA)),
+    ):
+        response = await provider.handle_non_streaming_chat_completion(
+            _upstream_response(
+                {
+                    "model": "test-model",
+                    "metadata": None,
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+                }
+            ),
+            _key(),
+            _session(),
+            deducted_max_cost=10_000,
+        )
+
+    _assert_cost_contract(response)
+    body = json.loads(response.body)
+    assert body["metadata"]["routstr"]["cost"]["total_msats"] == 1_500
+
+
+@pytest.mark.asyncio
 async def test_balance_responses_completion_uses_shared_cost_contract() -> None:
     provider = _provider()
     with patch(

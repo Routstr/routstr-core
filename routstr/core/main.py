@@ -18,6 +18,7 @@ from ..auth import (
 )
 from ..balance import balance_router, deprecated_wallet_router
 from ..cashu_compat import install_cashu_httpx_shim
+from ..foreign_mint_swap import periodic_swap_reconcile
 from ..lightning import (
     lightning_router,
     periodic_invoice_watcher,
@@ -34,7 +35,6 @@ from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..refund import periodic_refund_reconcile
 from ..upstream.auto_topup import periodic_auto_topup
-from ..upstream.deepseek_v4_pricing_shim import register_deepseek_v4_pricing
 from ..upstream.http_client import close_upstream_http_client
 from ..upstream.litellm_routing import configure_litellm
 from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
@@ -76,6 +76,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     auto_topup_task = None
     refund_sweep_task = None
     refund_reconcile_task = None
+    swap_reconcile_task = None
     routstr_fee_task = None
     invoice_watcher_task = None
 
@@ -89,11 +90,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # Apply litellm-wide settings (drop_params, chat-completions URL,
         # debug logging) before any upstream provider dispatches a request.
         configure_litellm()
-
-        # TEMPORARY: backfill DeepSeek V4 pricing missing from litellm's cost
-        # map (BerriAI/litellm#30430). Remove this call and
-        # deepseek_v4_pricing_shim.py once litellm ships these models.
-        register_deepseek_v4_pricing()
 
         # Run database migrations on startup
         run_migrations()
@@ -169,6 +165,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         auto_topup_task = asyncio.create_task(periodic_auto_topup())
         refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
         refund_reconcile_task = asyncio.create_task(periodic_refund_reconcile())
+        swap_reconcile_task = asyncio.create_task(periodic_swap_reconcile())
         routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
         invoice_watcher_task = asyncio.create_task(periodic_invoice_watcher())
 
@@ -214,6 +211,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             refund_sweep_task.cancel()
         if refund_reconcile_task is not None:
             refund_reconcile_task.cancel()
+        if swap_reconcile_task is not None:
+            swap_reconcile_task.cancel()
         if routstr_fee_task is not None:
             routstr_fee_task.cancel()
         if invoice_watcher_task is not None:
@@ -249,6 +248,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(refund_sweep_task)
             if refund_reconcile_task is not None:
                 tasks_to_wait.append(refund_reconcile_task)
+            if swap_reconcile_task is not None:
+                tasks_to_wait.append(swap_reconcile_task)
             if routstr_fee_task is not None:
                 tasks_to_wait.append(routstr_fee_task)
             if invoice_watcher_task is not None:
@@ -346,6 +347,21 @@ async def providers() -> RedirectResponse:
 
 UI_DIST_PATH = Path(__file__).parent.parent.parent / "ui_out"
 
+# Every `ui/app/**/page.tsx` route needs an entry, or a direct load 404s.
+UI_PAGES = (
+    "dashboard",
+    "login",
+    "model",
+    "providers",
+    "providers/certification",
+    "settings",
+    "transactions",
+    "balances",
+    "logs",
+    "usage",
+    "unauthorized",
+)
+
 if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     logger.info(f"Serving static UI from {UI_DIST_PATH}")
 
@@ -368,18 +384,6 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     # with a slash (e.g. `/login/`). The proxy router catches `/{path:path}`
     # before FastAPI's `redirect_slashes` logic can normalize the URL, so we
     # must register both the with-slash and without-slash variants here.
-    UI_PAGES = (
-        "dashboard",
-        "login",
-        "model",
-        "providers",
-        "settings",
-        "transactions",
-        "balances",
-        "logs",
-        "usage",
-        "unauthorized",
-    )
 
     def _register_ui_page(name: str) -> None:
         page_dir = UI_DIST_PATH / name

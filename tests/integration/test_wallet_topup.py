@@ -141,15 +141,19 @@ async def test_topup_with_invalid_token(
             "/v1/wallet/topup", params={"cashu_token": invalid_token}
         )
 
-        # Should fail with 400
-        assert response.status_code == 400, (
-            f"Token {invalid_token[:20]}... should be invalid"
+        # Locally malformed tokens return 400. A decodable token naming an
+        # untrusted mint reaches the automatic swap path and can fail safely
+        # with the documented 422 foreign-swap error instead.
+        assert response.status_code in (400, 422), (
+            f"Token {invalid_token[:20]}... should fail without being credited"
         )
 
         # Validate error response
         validator = ResponseValidator()
         error_validation = validator.validate_error_response(
-            response, expected_status=400, expected_error_key="detail"
+            response,
+            expected_status=response.status_code,
+            expected_error_key="detail",
         )
         assert error_validation["valid"]
 

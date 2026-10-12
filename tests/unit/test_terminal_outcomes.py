@@ -525,9 +525,12 @@ def test_record_wrapper_never_raises_on_invalid_or_failed_submission(
         "invalid settled terminal outcome",
         "invalid settled terminal outcome",
         "terminal outcome submission raised",
-        "terminal outcome submission raised",
     ]
-    assert writer.submissions[0].model_identifier is None
+    submitted = {o.outcome_id: o for o in writer.submissions}
+    unreadable = submitted[outcomes_module._outcome_id("request-unreadable-usage")]
+    assert (unreadable.input_tokens, unreadable.cache_read_input_tokens) == (100, 0)
+    unknown = submitted[outcomes_module._outcome_id("request-unknown-model")]
+    assert unknown.model_identifier is None
 
 
 def test_reported_usage_replaces_only_the_counts_it_reports(

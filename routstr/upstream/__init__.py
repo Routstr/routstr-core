@@ -1,6 +1,7 @@
 from .anthropic import AnthropicUpstreamProvider
 from .azure import AzureUpstreamProvider
 from .base import BaseUpstreamProvider
+from .deepseek import DeepSeekUpstreamProvider
 from .fireworks import FireworksUpstreamProvider
 from .gemini import GeminiUpstreamProvider
 from .generic import GenericUpstreamProvider
@@ -19,6 +20,7 @@ from .xai import XAIUpstreamProvider
 upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
     AnthropicUpstreamProvider,
     AzureUpstreamProvider,
+    DeepSeekUpstreamProvider,
     FireworksUpstreamProvider,
     GeminiUpstreamProvider,
     GenericUpstreamProvider,
