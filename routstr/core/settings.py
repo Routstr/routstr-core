@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     confidential_rate_surcharge_pct: float = Field(
         default=0.0, ge=0, env="CONFIDENTIAL_RATE_SURCHARGE_PCT"
     )
+    # Completion tokens reserved beyond the pinned max_tokens: providers may
+    # bill a few tokens more than the cap, and the charge is capped at the
+    # reservation. Only the hold grows; the charge is still the usage.
+    confidential_reserve_margin_tokens: int = Field(
+        default=16, ge=0, env="CONFIDENTIAL_RESERVE_MARGIN_TOKENS"
+    )
     # Peers (reverse proxies) whose client-address header is believed. Any
     # other peer is identified by its own address. "self" adds this host's or
     # container's own addresses, which is where a rootless container port
