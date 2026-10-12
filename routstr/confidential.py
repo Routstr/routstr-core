@@ -127,6 +127,12 @@ def to_ws_url(url: str) -> str:
     return urlunsplit(parts._replace(scheme=scheme))
 
 
+def sidecar_headers() -> dict[str, str]:
+    """The node's credential for the sidecar (empty when no token is set)."""
+    token = settings.confidential_sidecar_token
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 # ---------------------------------------------------------------------------
 # Signing (node Nostr key)
 # ---------------------------------------------------------------------------
@@ -173,7 +179,7 @@ async def fetch_sidecar_offer() -> dict[str, Any]:
     if not base:
         raise OfferError("confidential sidecar is not configured")
     async with httpx.AsyncClient(timeout=_SIDECAR_TIMEOUT) as client:
-        resp = await client.get(f"{base}/offer")
+        resp = await client.get(f"{base}/offer", headers=sidecar_headers())
         resp.raise_for_status()
         data = resp.json()
     if not isinstance(data, dict) or "head_template" not in data:

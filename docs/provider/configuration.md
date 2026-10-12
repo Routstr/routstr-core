@@ -185,6 +185,7 @@ process ([routstr-confidential](https://github.com/jooray/routstr-confidential),
 | Env | Description |
 | --- | ----------- |
 | `CONFIDENTIAL_SIDECAR_URL` | Base URL of the cu-sidecar (e.g. `http://127.0.0.1:7443`). Empty (default) disables the mode. |
+| `CONFIDENTIAL_SIDECAR_TOKEN` | Shared secret the node sends to the sidecar (its `CU_SIDECAR_TOKEN`). Required when the sidecar is not on loopback. Env-only; never stored in the database. |
 
 Requires `NSEC` (the node signs its offer and receipts). Billing, mints and
 refunds use your normal settings. See [Confidential upstream](../confidential-upstream.md).
