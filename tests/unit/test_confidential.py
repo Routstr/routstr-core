@@ -752,6 +752,45 @@ async def test_sidecar_offer_failure_is_negatively_cached(
     assert len(fetches) == 1
 
 
+@pytest.mark.parametrize("node_settles", [True, False, None])
+async def test_sidecar_without_node_settles_is_refused(
+    monkeypatch: pytest.MonkeyPatch, node_settles: bool | None
+) -> None:
+    """A sidecar that signs its own stub receipts never hands the node the
+    usage it settles on, so every session would be charged its reservation."""
+    offer: dict[str, Any] = {"upstream_host": "api.venice.ai", "head_template": "x"}
+    if node_settles is not None:
+        offer["node_settles"] = node_settles
+
+    class Resp:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, Any]:
+            return offer
+
+    class Client:
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "Client":
+            return self
+
+        async def __aexit__(self, *a: Any) -> None:
+            pass
+
+        async def get(self, *a: Any, **k: Any) -> Resp:
+            return Resp()
+
+    monkeypatch.setattr(settings, "confidential_sidecar_url", "http://127.0.0.1:7444")
+    monkeypatch.setattr(conf.httpx, "AsyncClient", Client)
+    if node_settles is False:
+        with pytest.raises(conf.OfferError):
+            await conf.fetch_sidecar_offer()
+    else:  # older sidecars do not say; they are run with the flag
+        assert await conf.fetch_sidecar_offer() == offer
+
+
 async def test_last_good_sidecar_offer_survives_a_failed_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -959,6 +998,23 @@ async def test_reservation_covers_the_full_context(billing_db: Any) -> None:
         billing_db.model,
     )
     assert metadata_only < 10_000 < billing.reserved_msats
+
+
+async def test_reservation_ignores_the_models_completion_limit(
+    billing_db: Any,
+) -> None:
+    """A pinned cap below the model's completion limit must not shrink the
+    prompt reservation: the provider accepts a prompt up to context - cap, and
+    the charge is capped at the reservation, so the difference would be free."""
+    billing_db.model.top_provider.max_completion_tokens = 50_000
+    billing = await conf.reserve("hk", "ctx-model", 8)
+    # 100000 tokens * 10 msats + 8 tokens * 100 msats, not (100000 - 50000) * 10
+    assert billing.reserved_msats == 1_000_800
+    assert conf.prompt_token_limit(billing_db.model) == 100_000
+    # Only a completion limit, no context length: fall back to the max cost.
+    billing_db.model.top_provider.context_length = None
+    billing_db.model.context_length = None
+    assert conf.prompt_token_limit(billing_db.model) is None
 
 
 async def test_reservation_without_context_uses_the_max_cost(
