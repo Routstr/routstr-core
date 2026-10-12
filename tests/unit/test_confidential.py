@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
+import httpx
 import pytest
 import websockets
 from coincurve import PublicKeyXOnly
@@ -1041,6 +1042,51 @@ def test_zk_proxy_passes_bytes(monkeypatch: pytest.MonkeyPatch, proof: str) -> N
             payload = b"\x00\x01\x02zkmux\xff" * 100
             ws.send_bytes(payload)
             assert ws.receive_bytes() == payload
+
+
+@pytest.mark.parametrize("token", ["", "t0k3n-shared-with-the-sidecar"])
+def test_zk_proxy_sends_the_sidecar_token(
+    monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    seen: list[str | None] = []
+
+    async def record(ws: Any) -> None:
+        seen.append(ws.request_headers.get("Authorization"))
+        async for frame in ws:
+            await ws.send(frame)
+
+    monkeypatch.setattr(settings, "confidential_sidecar_token", token)
+    with MockSidecar(record) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        client = TestClient(_app())
+        url = f"/v1/confidential/zk?proof=zkchan&session_id={SID}"
+        with client.websocket_connect(url) as ws:
+            ws.send_bytes(b"x")
+            assert ws.receive_bytes() == b"x"
+    assert seen == [f"Bearer {token}" if token else None]
+
+
+async def test_sidecar_offer_fetch_sends_the_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str | None] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("Authorization"))
+        return httpx.Response(200, json={"head_template": "x"})
+
+    real_client = httpx.AsyncClient
+
+    def mocked_client(**kw: Any) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(answer), **kw)
+
+    monkeypatch.setattr(conf.httpx, "AsyncClient", mocked_client)
+    monkeypatch.setattr(settings, "confidential_sidecar_url", "http://cu-sidecar:7444")
+    monkeypatch.setattr(settings, "confidential_sidecar_token", "abc")
+    await conf.fetch_sidecar_offer()
+    monkeypatch.setattr(settings, "confidential_sidecar_token", "")
+    await conf.fetch_sidecar_offer()
+    assert seen == ["Bearer abc", None]
 
 
 def test_zk_proxy_rejects_bad_proof(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -147,6 +147,10 @@ sessions at once; parallel coding agents need several.
 
 - The node dials the sidecar only after a valid `setup` has been reserved.
   The `setup` must arrive within 15 s of the websocket opening.
+- The sidecar does not check client credentials, so it must be reachable
+  only by the node: every node request to it carries
+  `CONFIDENTIAL_SIDECAR_TOKEN`, and a sidecar off loopback refuses requests
+  without it (and refuses to start without a token).
 - `setup` is validated before anything is reserved: `model` a non-empty
   string, `max_tokens` an integer in `[1, max_tokens_cap]`, `len` (the request
   body size) an integer in `[1, 8 MiB]`, `nonce_c` 64 hex characters.
@@ -175,6 +179,7 @@ sessions at once; parallel coding agents need several.
 | Env | Meaning | Default |
 |---|---|---|
 | `CONFIDENTIAL_SIDECAR_URL` | cu-sidecar base URL; empty disables the mode | `""` |
+| `CONFIDENTIAL_SIDECAR_TOKEN` | shared secret sent to the sidecar as `Authorization: Bearer` (the sidecar's `CU_SIDECAR_TOKEN`); required when the sidecar is not on loopback, since it does not check client credentials itself; env-only, never stored in the database | `""` |
 | `CONFIDENTIAL_MAX_UNUSED_PER_IP` | refuse (429) a new session from a client address that already has this many unused sessions (connected, credential record not yet written; counted from the websocket accept, before the setup; pre-warmed sessions count); 0 disables | `12` |
 | `CONFIDENTIAL_TRUSTED_PROXIES` | comma-separated peers whose client-address header is believed; `self` adds the node's own addresses (where a rootless container port forwarder connects from; enable only behind a reverse proxy that always sets the header) | `127.0.0.1,::1` |
 | `CONFIDENTIAL_SESSION_FEE_MSAT` | fee (msat) on top of the usage of a completed confidential request, and the charge for a provider refusal (4xx/503); published in the signed offer; clients must accept it at setup | `0` (off) |
