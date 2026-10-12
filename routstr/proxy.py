@@ -19,6 +19,7 @@ from .core import get_logger
 from .core.db import (
     ApiKey,
     AsyncSession,
+    ModelPathRow,
     ModelRow,
     UpstreamProviderRow,
     create_session,
@@ -52,6 +53,7 @@ from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
 from .upstream.model_paths import (
     ModelPathSelector,
+    apply_model_path_pricing,
     decode_model_path,
     is_openrouter_base_url,
     public_model_id,
@@ -155,6 +157,44 @@ def _candidate_for_selector(
             continue
         return model_obj, upstream
     return None
+
+
+async def _price_pinned_endpoint(
+    session: AsyncSession,
+    selector: ModelPathSelector,
+    model_obj: Model,
+    upstream: BaseUpstreamProvider,
+) -> Model:
+    """Reprice ``model_obj`` with the pinned endpoint's own rates.
+
+    An OpenRouter endpoint can cost more than the model's default listing, and
+    ``/v1/models/paths`` quotes that endpoint's price, so the reservation and
+    token billing must use it too. Without a stored path row or a sats price
+    the request keeps the model's default pricing.
+    """
+    from .payment import price as price_module
+
+    sats_to_usd = price_module.SATS_USD_PRICE
+    if upstream.db_id is None or not sats_to_usd:
+        return model_obj
+    rows = (
+        await session.exec(
+            select(ModelPathRow).where(
+                ModelPathRow.upstream_provider_id == upstream.db_id,
+                ModelPathRow.endpoint_tag == selector.endpoint_tag,
+            )
+        )
+    ).all()
+    row = next(
+        (r for r in rows if _model_ids_match(r.model_id, selector.model_id)), None
+    )
+    if row is None:
+        logger.warning(
+            "No stored path for pinned endpoint; billing the model's default pricing",
+            extra={"model": selector.model_id, "endpoint": selector.endpoint_tag},
+        )
+        return model_obj
+    return apply_model_path_pricing(model_obj, row, upstream.provider_fee, sats_to_usd)
 
 
 def get_model_instance(model_id: str) -> Model | None:
@@ -286,6 +326,7 @@ _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     # -> {answers, usage}. Non-streaming, JSON in/out; billed from the
     # response's usage exactly like embeddings.
     "systemone": frozenset({"POST"}),
+    "decisions": frozenset({"POST"}),
     "models": frozenset({"GET"}),
     "attestation": frozenset({"GET"}),
     "tee/attestation": frozenset({"GET"}),
@@ -702,6 +743,12 @@ async def _proxy(
                 },
             }
             request_body = json.dumps(request_body_dict).encode()
+            candidates = [
+                (
+                    await _price_pinned_endpoint(session, selector, *pinned),
+                    pinned[1],
+                )
+            ]
 
     if is_ehbp:
         candidates = [
@@ -713,6 +760,20 @@ async def _proxy(
             return create_error_response(
                 "unsupported_request",
                 f"No EHBP-capable provider found for model '{model_id}'",
+                400,
+                request=request,
+            )
+
+    if _canonical_api_path(path) == "decisions":
+        candidates = [
+            (model, upstream)
+            for model, upstream in candidates
+            if upstream.supports_decisions
+        ]
+        if not candidates:
+            return create_error_response(
+                "unsupported_request",
+                f"No Decisions-capable provider found for model '{model_id}'",
                 400,
                 request=request,
             )

@@ -45,6 +45,13 @@ class PerplexityUpstreamProvider(BaseUpstreamProvider):
         """Strip 'perplexity/' prefix for Perplexity API compatibility."""
         return model_id.removeprefix("perplexity/")
 
+    def prepare_headers(self, request_headers: dict[str, str]) -> dict[str, str]:
+        """Add Routstr attribution unless the caller supplied its own."""
+        headers = super().prepare_headers(request_headers)
+        if not any(name.lower() == "x-pplx-integration" for name in headers):
+            headers["X-Pplx-Integration"] = "routstr"
+        return headers
+
     async def fetch_models(self) -> list[Model]:
         """Fetch Perplexity models from OpenRouter API filtered by perplexity source."""
         models_data = await async_fetch_openrouter_models(source_filter="perplexity")

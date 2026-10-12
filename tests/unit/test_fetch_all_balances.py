@@ -137,11 +137,13 @@ async def test_supported_mint_units_come_from_active_keysets() -> None:
     usd = MagicMock(active=True)
     usd.unit.name = "usd"
     wallet = MagicMock(url="http://mint:3338", db=MagicMock())
+    wallet.load_mint_keysets = AsyncMock()
+    get_wallet = AsyncMock(return_value=wallet)
     get_keysets = AsyncMock(return_value=[usd, msat, sat])
 
     with (
         patch.object(settings, "primary_mint_unit", "sat"),
-        patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.wallet.get_wallet", get_wallet),
         patch("routstr.wallet.get_cashu_keysets", get_keysets),
     ):
         units = await _get_supported_mint_units("http://mint:3338")
@@ -149,7 +151,49 @@ async def test_supported_mint_units_come_from_active_keysets() -> None:
 
     assert units == ["sat", "usd"]
     assert cached_units == units
+    get_wallet.assert_awaited_once_with("http://mint:3338", "sat", load=False)
+    wallet.load_mint_keysets.assert_awaited_once()
     get_keysets.assert_awaited_once_with(mint_url=wallet.url, db=wallet.db)
+
+
+@pytest.mark.asyncio
+async def test_supported_mint_units_filter_bolt11_mint_methods() -> None:
+    from routstr.wallet import get_supported_mint_units
+
+    sat = MagicMock(active=True, unit="sat")
+    msat = MagicMock(active=True, unit="msat")
+    wallet = MagicMock(url="http://mint:3338", db=MagicMock())
+    wallet.load_mint_keysets = AsyncMock()
+    wallet.load_mint_info = AsyncMock()
+    wallet.mint_info.nuts = {
+        4: {
+            "methods": [
+                {"method": "bolt11", "unit": "sat"},
+                {"method": "bolt11", "unit": "msat", "disabled": True},
+            ]
+        },
+        5: {"methods": [{"method": "bolt11", "unit": "msat"}]},
+    }
+
+    with (
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+        patch(
+            "routstr.wallet.get_cashu_keysets",
+            AsyncMock(return_value=[sat, msat]),
+        ),
+    ):
+        mint_units = await get_supported_mint_units(
+            "http://mint:3338", bolt11_operation="mint"
+        )
+        melt_units = await get_supported_mint_units(
+            "http://mint:3338", bolt11_operation="melt"
+        )
+
+    assert mint_units == ["sat"]
+    assert melt_units == ["msat"]
+    assert wallet.load_mint_keysets.await_count == 2
+    assert wallet.load_mint_info.await_count == 2
+    wallet.load_mint_info.assert_awaited_with(reload=True)
 
 
 @pytest.mark.asyncio

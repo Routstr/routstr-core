@@ -61,6 +61,7 @@ from ..payment.models import (
     Pricing,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
+    allows_cache_pricing_backfill,
     backfill_cache_pricing,
     list_models,
 )
@@ -317,7 +318,7 @@ def _openai_completion_path(path: str) -> str | None:
 def _x_cashu_path_has_settlement_handler(path: str) -> bool:
     canonical = path.rstrip("/")
     return _openai_completion_path(canonical) is not None or canonical.endswith(
-        ("embeddings", "messages", "messages/count_tokens", "systemone")
+        ("embeddings", "messages", "messages/count_tokens", "systemone", "decisions")
     )
 
 
@@ -340,6 +341,7 @@ class BaseUpstreamProvider:
     platform_url: str | None = None
 
     supports_anthropic_messages: bool = False
+    supports_decisions: bool = False
     # When None, the prefix is detected from `base_url` at dispatch time
     # (see `get_litellm_provider_prefix`). Subclasses set this to lock the
     # provider regardless of URL.
@@ -588,7 +590,7 @@ class BaseUpstreamProvider:
             self._fold_cache_into_input_tokens(nested_response["usage"])
 
         # Unified Routstr metadata
-        response_json["metadata"] = response_json.get("metadata", {})
+        response_json["metadata"] = response_json.get("metadata") or {}
         response_json["metadata"]["routstr"] = {
             "cost": cost_dict,
             "sats_cost": sats_cost,
@@ -701,6 +703,32 @@ class BaseUpstreamProvider:
         """Build full upstream URL from normalized path."""
         clean_path = path.lstrip("/")
         return f"{self.get_request_base_url(path, model_obj)}/{clean_path}"
+
+    # Path segment the enclave expects between its base URL and the API path.
+    # Providers whose ``default_base_url`` already carries a version prefix
+    # (openai, groq, fireworks, ...) leave this empty: ``normalize_request_path``
+    # strips the client's ``v1/`` and the base URL re-adds its own. EHBP
+    # providers whose base URL does not carry one (tinfoil, ppqai) set it, so a
+    # client that spells the endpoint without ``v1/`` — which the node accepts
+    # as an equivalent spelling (``_canonical_api_path``) — still reaches the
+    # enclave's versioned route instead of a 404.
+    ehbp_path_prefix: str = ""
+
+    def build_ehbp_request_path(self, path: str, model_obj: Model | None = None) -> str:
+        """Build the EHBP forwarding path, restoring the provider's version prefix.
+
+        The node accepts an API endpoint with or without a leading ``v1/``, so
+        the client's spelling carries no information about what the upstream
+        serves. Normalize it away with the same hook the non-EHBP forwarding
+        path uses, then re-add this provider's prefix: only the provider knows
+        whether its enclave serves ``/v1/...``, ``/private/v1/...``, or an
+        unversioned path.
+        """
+        clean_path = self.normalize_request_path(path, model_obj).lstrip("/")
+        prefix = self.ehbp_path_prefix.strip("/")
+        if not prefix:
+            return clean_path
+        return f"{prefix}/{clean_path}"
 
     def prepare_responses_request_body(
         self, body: bytes | None, model_obj: Model
@@ -1610,7 +1638,7 @@ class BaseUpstreamProvider:
             published_cost = _published_cost(cost_data)
             published_cost["sats_cost"] = published_cost["total_msats"] // 1000
             published_cost["remaining_balance_msats"] = remaining_balance_msats
-            response_json["metadata"] = response_json.get("metadata", {})
+            response_json["metadata"] = response_json.get("metadata") or {}
             response_json["metadata"]["routstr"] = {"cost": published_cost.copy()}
             response_json["cost"] = published_cost
 
@@ -2079,7 +2107,7 @@ class BaseUpstreamProvider:
             published_cost = _published_cost(cost_data)
             published_cost["sats_cost"] = published_cost["total_msats"] // 1000
             published_cost["remaining_balance_msats"] = remaining_balance_msats
-            response_json["metadata"] = response_json.get("metadata", {})
+            response_json["metadata"] = response_json.get("metadata") or {}
             response_json["metadata"]["routstr"] = {"cost": published_cost.copy()}
             response_json["cost"] = published_cost
 
@@ -3485,6 +3513,7 @@ class BaseUpstreamProvider:
                 or path.endswith("messages")
                 or path.endswith("messages/count_tokens")
                 or path.endswith("systemone")
+                or path.endswith("decisions")
             ):
                 if path.endswith("messages"):
                     client_wants_streaming = False
@@ -5901,9 +5930,8 @@ class BaseUpstreamProvider:
     def _apply_provider_fee_to_model(self, model: Model) -> Model:
         """Apply provider fee to model's USD pricing and calculate max costs.
 
-        Cache rates missing from the upstream pricing feed are backfilled from
-        litellm's cost map first, so they carry the provider fee like every
-        other price component.
+        Providers with native price catalogs can disable generic cache-rate
+        backfill to avoid treating another provider's rates as their own.
 
         Args:
             model: Model object to update
@@ -5911,7 +5939,11 @@ class BaseUpstreamProvider:
         Returns:
             Model with provider fee applied to pricing and max costs calculated
         """
-        base_pricing = backfill_cache_pricing(model.id, model.pricing)
+        base_pricing = (
+            backfill_cache_pricing(model.id, model.pricing)
+            if allows_cache_pricing_backfill(self.provider_type)
+            else model.pricing
+        )
         adjusted_pricing = Pricing.parse_obj(
             {k: v * self.provider_fee for k, v in base_pricing.dict().items()}
         )
