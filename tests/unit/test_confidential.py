@@ -201,7 +201,7 @@ async def test_models_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(conf, "price_entry", lambda mid, c: dict(RATES))
     fields = await conf.models_fields()
     assert fields == {
-        "m": {"v": 1, "offer_url": "https://node.example.com/v1/confidential/offer"}
+        "m": {"v": 2, "offer_url": "https://node.example.com/v1/confidential/offer"}
     }
 
 
@@ -343,7 +343,7 @@ def _run_session(
         _use_sidecar(monkeypatch, mock.port)
         client = TestClient(_app())
         with client.websocket_connect(
-            f"/v1/confidential/ws?session_id={uuid.uuid4()}&v=1"
+            f"/v1/confidential/ws?session_id={uuid.uuid4()}&v=2"
         ) as ws:
             ws.send_text(json.dumps(setup if setup is not None else _SETUP))
             for _ in range(expect):
@@ -460,10 +460,10 @@ def test_ws_proxy_rejects_bad_version(
             assert msg["code"] == 1008
 
 
-def test_ws_proxy_requires_the_sidecar_protocol_version(
+def test_ws_proxy_refuses_v1_clients(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
-    """A v2 (two-party handshake) sidecar refuses v1 clients, and vice versa."""
+    """Protocol v1 is retired: a v1 client is refused before any setup."""
 
     async def v2_offer() -> dict[str, Any]:
         return {"upstream_host": "api.venice.ai", "max_tokens_cap": 4096, "v": 2}
@@ -479,15 +479,41 @@ def test_ws_proxy_requires_the_sidecar_protocol_version(
             msg = ws.receive()
             assert msg["type"] == "websocket.close"
             assert msg["code"] == 1008
-            assert "version 2" in msg.get("reason", "")
+            assert "only v2" in msg.get("reason", "")
 
 
 def test_sidecar_protocol_version() -> None:
+    # A sidecar that names no version predates versioning: protocol v1.
     assert conf.sidecar_protocol_version({}) == 1
     assert conf.sidecar_protocol_version({"v": 2}) == 2
     assert conf.sidecar_protocol_version({"v": "2"}) == 2
-    assert conf.sidecar_protocol_version({"v": 9}) == 1
-    assert conf.sidecar_protocol_version({"v": "x"}) == 1
+    assert conf.sidecar_protocol_version({"v": 9}) == 9
+    assert conf.sidecar_protocol_version({"v": "x"}) == 0
+
+
+@pytest.mark.parametrize("version", [None, 1, 3, "x"])
+async def test_sidecar_without_protocol_v2_is_refused(
+    monkeypatch: pytest.MonkeyPatch, version: Any
+) -> None:
+    """Protocol v1 is retired: a sidecar that does not speak v2 gets no offer."""
+    offer: dict[str, Any] = {"upstream_host": "api.venice.ai", "head_template": "x"}
+    if version is not None:
+        offer["v"] = version
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=offer)
+
+    real_client = httpx.AsyncClient
+
+    def mocked_client(**kw: Any) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(answer), **kw)
+
+    monkeypatch.setattr(conf.httpx, "AsyncClient", mocked_client)
+    monkeypatch.setattr(settings, "confidential_sidecar_url", "http://127.0.0.1:7444")
+    with pytest.raises(conf.OfferError, match="only v2"):
+        await conf.fetch_sidecar_offer()
+    offer["v"] = 2
+    assert await conf.fetch_sidecar_offer() == offer
 
 
 def test_ws_proxy_rejects_non_uuid_session(
@@ -498,7 +524,7 @@ def test_ws_proxy_rejects_non_uuid_session(
         _use_sidecar(monkeypatch, mock.port)
         client = TestClient(_app())
         with client.websocket_connect(
-            "/v1/confidential/ws?session_id=not-a-uuid&v=1"
+            "/v1/confidential/ws?session_id=not-a-uuid&v=2"
         ) as ws:
             msg = ws.receive()
             assert msg["type"] == "websocket.close"
@@ -525,7 +551,7 @@ class _ConnectRecorder:
 
 def _connect(client: TestClient) -> Any:
     return client.websocket_connect(
-        f"/v1/confidential/ws?session_id={uuid.uuid4()}&v=1"
+        f"/v1/confidential/ws?session_id={uuid.uuid4()}&v=2"
     )
 
 
@@ -758,7 +784,11 @@ async def test_sidecar_without_node_settles_is_refused(
 ) -> None:
     """A sidecar that signs its own stub receipts never hands the node the
     usage it settles on, so every session would be charged its reservation."""
-    offer: dict[str, Any] = {"upstream_host": "api.venice.ai", "head_template": "x"}
+    offer: dict[str, Any] = {
+        "upstream_host": "api.venice.ai",
+        "head_template": "x",
+        "v": 2,
+    }
     if node_settles is not None:
         offer["node_settles"] = node_settles
 
@@ -1130,7 +1160,7 @@ async def test_zero_cost_releases_and_reports_balance(billing_db: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("proof", ["pi_c1", "twopc", "zkchan", "pi_nk"])
+@pytest.mark.parametrize("proof", ["twopc", "zkchan", "pi_nk", "pi_c2s", "pi_c3s"])
 def test_zk_proxy_passes_bytes(monkeypatch: pytest.MonkeyPatch, proof: str) -> None:
     async def echo(ws: Any) -> None:
         async for frame in ws:
@@ -1175,7 +1205,7 @@ async def test_sidecar_offer_fetch_sends_the_token(
 
     def answer(request: httpx.Request) -> httpx.Response:
         seen.append(request.headers.get("Authorization"))
-        return httpx.Response(200, json={"head_template": "x"})
+        return httpx.Response(200, json={"head_template": "x", "v": 2})
 
     real_client = httpx.AsyncClient
 
@@ -1191,12 +1221,16 @@ async def test_sidecar_offer_fetch_sends_the_token(
     assert seen == ["Bearer abc", None]
 
 
-def test_zk_proxy_rejects_bad_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+# ``pi_c1``/``pi_n``/``pi_c2``/``pi_c3`` belonged to the retired protocol v1.
+@pytest.mark.parametrize("proof", ["nope", "pi_c1", "pi_n", "pi_c2", "pi_c3"])
+def test_zk_proxy_rejects_bad_proof(
+    monkeypatch: pytest.MonkeyPatch, proof: str
+) -> None:
     with MockSidecar(_sidecar_script({}, [])) as mock:
         _use_sidecar(monkeypatch, mock.port)
         client = TestClient(_app())
         with client.websocket_connect(
-            f"/v1/confidential/zk?proof=nope&session_id={SID}"
+            f"/v1/confidential/zk?proof={proof}&session_id={SID}"
         ) as ws:
             msg = ws.receive()
             assert msg["type"] == "websocket.close"
@@ -1269,7 +1303,7 @@ def test_ws_proxy_limits_unused_sessions_per_address(
         cws._unused_by_ip["testclient"] = 3
         try:
             with client.websocket_connect(
-                f"/v1/confidential/ws?session_id={uuid.uuid4()}&v=1"
+                f"/v1/confidential/ws?session_id={uuid.uuid4()}&v=2"
             ) as ws:
                 err = ws.receive_json()
                 assert err["type"] == "error" and err["status"] == 429
