@@ -77,7 +77,11 @@ _UUID_RE = re.compile(
 _SID_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 _PROOF_RE = re.compile(r"^(pi_c1|pi_n|pi_c2|pi_c3|twopc|zkchan|pi_nk|pi_c2s|pi_c3s)$")
+# The proof/2PC channel carries mux frames of at most 1 MiB; the session
+# channel carries TLS records (≤ 16.6 KiB each), which a client may batch, at
+# most a whole declared body (8 MiB).
 _WS_MAX_SIZE = 64 << 20
+_SESSION_WS_MAX_SIZE = 12 << 20
 
 # Limits: concurrent sessions per process, time to the setup frame, a whole
 # session's lifetime (counted from the WebSocket accept), and the largest
@@ -379,7 +383,7 @@ async def _open_session(
             upstream = await websockets.connect(
                 _sidecar_ws_url("/session", f"session_id={session_id}"),
                 extra_headers=sidecar_headers(),
-                max_size=_WS_MAX_SIZE,
+                max_size=_SESSION_WS_MAX_SIZE,
                 open_timeout=10,
             )
         except Exception as exc:
