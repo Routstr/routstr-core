@@ -58,6 +58,7 @@ from .confidential import (
     release,
     reserve,
     settle,
+    sidecar_headers,
     sidecar_protocol_version,
     sign_payload,
     to_ws_url,
@@ -377,6 +378,7 @@ async def _open_session(
         try:
             upstream = await websockets.connect(
                 _sidecar_ws_url("/session", f"session_id={session_id}"),
+                extra_headers=sidecar_headers(),
                 max_size=_WS_MAX_SIZE,
                 open_timeout=10,
             )
@@ -658,6 +660,7 @@ async def confidential_zk_proxy(
         # would kill a healthy session.
         upstream = await websockets.connect(
             _sidecar_ws_url("/zk", f"proof={proof}&sid={session_id}"),
+            extra_headers=sidecar_headers(),
             max_size=_WS_MAX_SIZE,
             open_timeout=10,
             ping_interval=None,

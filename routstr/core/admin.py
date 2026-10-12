@@ -256,6 +256,10 @@ async def get_settings(request: Request) -> dict:
         data["upstream_api_key"] = "[REDACTED]" if data["upstream_api_key"] else ""
     if "nsec" in data:
         data["nsec"] = "[REDACTED]" if data["nsec"] else ""
+    if "confidential_sidecar_token" in data:
+        data["confidential_sidecar_token"] = (
+            "[REDACTED]" if data["confidential_sidecar_token"] else ""
+        )
     return data
 
 
@@ -280,7 +284,7 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict:
     # Secrets are not editable through the general settings endpoint; they have
     # dedicated rotation paths and never reach the settings blob.
     settings_data = update.root.copy()
-    sensitive_fields = ["upstream_api_key", "nsec"]
+    sensitive_fields = ["upstream_api_key", "nsec", "confidential_sidecar_token"]
     for field in sensitive_fields:
         if field in settings_data:
             del settings_data[field]
@@ -299,6 +303,10 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict:
         data["upstream_api_key"] = "[REDACTED]" if data["upstream_api_key"] else ""
     if "nsec" in data:
         data["nsec"] = "[REDACTED]" if data["nsec"] else ""
+    if "confidential_sidecar_token" in data:
+        data["confidential_sidecar_token"] = (
+            "[REDACTED]" if data["confidential_sidecar_token"] else ""
+        )
     return data
 
 
