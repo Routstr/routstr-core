@@ -1645,6 +1645,9 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
         ),
         patch("routstr.upstream.base.store_cashu_transaction", new=AsyncMock()),
         patch.object(
+            provider, "send_refund", new=AsyncMock(return_value="cashuArefund")
+        ) as refund,
+        patch.object(
             provider,
             forward_attr,
             new=AsyncMock(side_effect=httpx.ConnectError("upstream down")),
@@ -1665,6 +1668,11 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
     assert body["error"]["type"] == "upstream_error"
     assert body["error"]["code"] == "UPSTREAM_UNAVAILABLE"
     assert body["error"]["code"] != "cashu_mint_unreachable"
+    assert response.headers["X-Cashu"] == "cashuArefund"
+    assert body["error"]["refund_token"] == "cashuArefund"
+    refund.assert_awaited_once_with(
+        5_000, "sat", "https://mint", request_id=getattr(request.state, "request_id", None)
+    )
 
 
 @pytest.mark.asyncio
