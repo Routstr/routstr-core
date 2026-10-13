@@ -208,6 +208,32 @@ export function ProviderFormFields({
         </div>
       )}
 
+      {formData.provider_type === 'anthropic' && (
+        <div className='grid gap-2'>
+          <Label htmlFor={`${idPrefix}workspace_id`}>
+            Workspace ID (optional)
+          </Label>
+          <Input
+            id={`${idPrefix}workspace_id`}
+            value={formData.provider_settings?.workspace_id || ''}
+            onChange={(e) =>
+              setFormData((prev) => ({
+                ...prev,
+                provider_settings: {
+                  ...prev.provider_settings,
+                  workspace_id: e.target.value,
+                },
+              }))
+            }
+            placeholder='wrk_...'
+          />
+          <p className='text-muted-foreground text-xs'>
+            Required for API keys that are not scoped to a workspace. Leave
+            blank for workspace-scoped keys.
+          </p>
+        </div>
+      )}
+
       {formData.provider_type === 'azure' && (
         <div className='grid gap-2'>
           <Label htmlFor={`${idPrefix}api_version`}>API Version</Label>
