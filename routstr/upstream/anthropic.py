@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from ..core.exceptions import UpstreamError
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
 
@@ -99,6 +100,50 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
             }
             headers["anthropic-workspace-id"] = self.workspace_id
         return headers
+
+    def _apply_reasoning_effort(self, data: dict, model_obj: Model) -> bool:
+        # Anthropic defaults are independent of OpenRouter's mandatory metadata.
+        if "reasoning_effort" not in data and "reasoning" not in data:
+            return False
+
+        reasoning = data.get("reasoning")
+        if reasoning is None:
+            reasoning = {}
+        if not isinstance(reasoning, dict) or set(reasoning) - {"effort"}:
+            raise UpstreamError(
+                "For Anthropic, reasoning must contain only effort",
+                status_code=400,
+            )
+        efforts: list[str] = []
+        for value in (data.get("reasoning_effort"), reasoning.get("effort")):
+            if value is None:
+                continue
+            if not isinstance(value, str) or value not in {
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            }:
+                raise UpstreamError("Unsupported Anthropic effort", status_code=400)
+            efforts.append(value)
+
+        if efforts:
+            config = data.get("output_config", {})
+            if not isinstance(config, dict):
+                raise UpstreamError(
+                    "Anthropic output_config must be an object", status_code=400
+                )
+            native_effort = config.get("effort")
+            if any(value != efforts[0] for value in efforts) or (
+                native_effort is not None and native_effort != efforts[0]
+            ):
+                raise UpstreamError("Conflicting Anthropic effort", status_code=400)
+            data["output_config"] = {**config, "effort": efforts[0]}
+
+        data.pop("reasoning_effort", None)
+        data.pop("reasoning", None)
+        return True
 
     async def _fetch_native_model_ids(self) -> set[str]:
         native_ids: set[str] = set()
