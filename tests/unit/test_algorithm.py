@@ -588,7 +588,7 @@ def test_models_endpoint_dedupes_case_insensitive_model_ids(
     response = TestClient(app).get("/v1/models")
 
     assert response.status_code == 200
-    assert [model["id"] for model in response.json()["data"]] == ["GPT-4o"]
+    assert [model["id"] for model in response.json()["data"]] == ["gpt-4o"]
 
     with patch(
         "routstr.upstream.model_paths.get_paths_for_model",
@@ -995,6 +995,44 @@ def test_create_model_mappings_advertises_winner_spelling_for_case_variants() ->
     assert provider_map["glm-5.3"][0] == (openrouter_model, openrouter)
     assert unique_models["glm-5.3"].id == "glm-5.3"
     assert unique_models["glm-5.3"].upstream_provider_id == "openrouter"
+
+
+def test_create_model_mappings_advertises_lowercase_ids_and_forwards_native() -> None:
+    """Mixed-case IDs publish lowercase, like OpenRouter, but forward as served."""
+    together_model = create_test_model(
+        "Qwen/Qwen2.5-72B", prompt_price=0.01, completion_price=0.01
+    )
+    together = create_test_provider(
+        "together", "https://api.together.xyz/v1", db_id=1, models=[together_model]
+    )
+
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[together],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert list(unique_models) == ["qwen2.5-72b"]
+    assert unique_models["qwen2.5-72b"].id == "qwen2.5-72b"
+    assert provider_map["qwen2.5-72b"][0][0].id == "Qwen/Qwen2.5-72B"
+    assert provider_map["qwen/qwen2.5-72b"][0][0].id == "Qwen/Qwen2.5-72B"
+
+
+def test_create_model_mappings_keeps_operator_forwarded_spelling() -> None:
+    """An operator-set Client Alias ID is published exactly as written."""
+    model = create_test_model("deployment-x")
+    model.forwarded_model_id = "Team-Model"
+    provider = create_test_provider(
+        "generic", "https://generic.example/v1", db_id=1, models=[model]
+    )
+
+    _, _, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert [m.id for m in unique_models.values()] == ["Team-Model"]
 
 
 def test_create_model_mappings_forwarded_key_keeps_its_public_id() -> None:
