@@ -80,6 +80,9 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
 
     def prepare_headers(self, request_headers: dict) -> dict:
         headers = super().prepare_headers(request_headers)
+        # Match Anthropic's SDK default API version while preserving client overrides.
+        if not any(name.lower() == "anthropic-version" for name in headers):
+            headers["anthropic-version"] = "2023-06-01"
         if self.workspace_id:
             # The configured upstream workspace takes precedence over client headers.
             headers = {
