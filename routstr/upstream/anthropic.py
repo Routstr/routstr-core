@@ -1,3 +1,4 @@
+import json
 from typing import TYPE_CHECKING
 
 from ..payment.models import Model, async_fetch_openrouter_models
@@ -16,20 +17,34 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
     supports_anthropic_messages = True
     litellm_provider_prefix = "anthropic/"
 
-    def __init__(self, api_key: str, provider_fee: float = 1.01):
+    def __init__(
+        self,
+        api_key: str,
+        provider_fee: float = 1.01,
+        workspace_id: str | None = None,
+    ):
         super().__init__(
             base_url=self.default_base_url,
             api_key=api_key,
             provider_fee=provider_fee,
         )
+        self.workspace_id = workspace_id.strip() if workspace_id else None
 
     @classmethod
     def _build_from_row(
         cls, provider_row: "UpstreamProviderRow"
     ) -> "AnthropicUpstreamProvider":
+        try:
+            settings = json.loads(provider_row.provider_settings or "{}")
+        except (TypeError, ValueError):
+            settings = {}
+        workspace_id = (
+            settings.get("workspace_id") if isinstance(settings, dict) else None
+        )
         return cls(
             api_key=provider_row.api_key,
             provider_fee=provider_row.provider_fee,
+            workspace_id=workspace_id if isinstance(workspace_id, str) else None,
         )
 
     @classmethod
@@ -62,6 +77,18 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
         if model_id in fixed_transforms:
             model_id = fixed_transforms[model_id]
         return model_id
+
+    def prepare_headers(self, request_headers: dict) -> dict:
+        headers = super().prepare_headers(request_headers)
+        if self.workspace_id:
+            # The configured upstream workspace takes precedence over client headers.
+            headers = {
+                name: value
+                for name, value in headers.items()
+                if name.lower() != "anthropic-workspace-id"
+            }
+            headers["anthropic-workspace-id"] = self.workspace_id
+        return headers
 
     async def fetch_models(self) -> list[Model]:
         """Fetch Anthropic models from OpenRouter API filtered by anthropic source."""
