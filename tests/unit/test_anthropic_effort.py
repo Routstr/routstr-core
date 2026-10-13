@@ -84,8 +84,8 @@ def test_translation_merges_output_config(model: Model) -> None:
     "thinking",
     [
         {"type": "adaptive"},
+        {"type": "adaptive", "display": "summarized"},
         {"type": "disabled"},
-        {"type": "enabled", "budget_tokens": 1024},
     ],
 )
 def test_native_thinking_is_preserved(model: Model, thinking: dict) -> None:

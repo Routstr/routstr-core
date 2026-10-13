@@ -630,6 +630,12 @@ class BaseUpstreamProvider:
             if headers.pop(header, None) is not None:
                 removed_headers.append(header)
 
+        # Anthropic and Azure SDKs send the node key in these instead of
+        # Authorization; forwarding it would hand the client's key upstream.
+        for name in [n for n in headers if n.lower() in {"x-api-key", "api-key"}]:
+            headers.pop(name)
+            removed_headers.append(f"{name.lower()} (client credential)")
+
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
             if headers.pop("authorization", None) is not None:
@@ -655,6 +661,10 @@ class BaseUpstreamProvider:
             },
         )
 
+        return headers
+
+    def prepare_body_headers(self, headers: dict, body: bytes | None) -> dict:
+        """Adjust upstream headers once the forwarded body is final."""
         return headers
 
     def prepare_params(
@@ -3312,6 +3322,10 @@ class BaseUpstreamProvider:
             model_obj,
             include_stream_usage=completion_path is not None,
         )
+        headers = self.prepare_body_headers(
+            headers,
+            transformed_body if transformed_body is not None else request_body,
+        )
 
         logger.debug(
             "Forwarding request to upstream",
@@ -4692,6 +4706,10 @@ class BaseUpstreamProvider:
             request_body,
             model_obj,
             include_stream_usage=completion_path is not None,
+        )
+        headers = self.prepare_body_headers(
+            headers,
+            transformed_body if transformed_body is not None else request_body,
         )
 
         logger.debug(
