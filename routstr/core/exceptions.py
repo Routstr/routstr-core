@@ -36,6 +36,9 @@ class UpstreamError(Exception):
     mapping happens at response construction. Proxy-chosen statuses (transport
     failure, timeout) may already be the caller-visible one — only read
     ``status_code`` as a provider status behind ``from_upstream_response``.
+
+    ``upstream_body`` holds the redacted upstream error body. It is internal
+    and never sent to the client.
     """
 
     def __init__(
@@ -46,6 +49,7 @@ class UpstreamError(Exception):
         details: dict[str, object] | None = None,
         from_upstream_response: bool = False,
         scope: str = ERROR_SCOPE_UPSTREAM,
+        upstream_body: str | None = None,
     ):
         self.message = message
         self.status_code = status_code
@@ -53,6 +57,7 @@ class UpstreamError(Exception):
         self.details = details
         self.from_upstream_response = from_upstream_response
         self.scope = scope
+        self.upstream_body = upstream_body
         super().__init__(message)
 
 
