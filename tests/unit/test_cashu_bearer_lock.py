@@ -3,7 +3,7 @@ import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import AsyncGenerator
+from typing import AsyncGenerator, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -67,7 +67,8 @@ async def test_existing_key_skips_guard_and_checks_balance(
             with pytest.raises(HTTPException) as exc:
                 await validate_bearer_key(bearer, session, min_cost=min_cost)
             assert exc.value.status_code == 402
-            assert exc.value.detail["error"]["code"] == "insufficient_balance"
+            detail = cast(dict[str, dict[str, str]], exc.value.detail)
+            assert detail["error"]["code"] == "insufficient_balance"
         else:
             key = await validate_bearer_key(bearer, session, min_cost=min_cost)
             assert key.hashed_key == KEY_HASH
