@@ -1,6 +1,8 @@
 import json
 from typing import TYPE_CHECKING
 
+import httpx
+
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
 
@@ -29,6 +31,7 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
             provider_fee=provider_fee,
         )
         self.workspace_id = workspace_id.strip() if workspace_id else None
+        self._native_model_names: dict[str, str] = {}
 
     @classmethod
     def _build_from_row(
@@ -61,6 +64,10 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
         """Strip 'anthropic/' prefix for Anthropic API compatibility and transform model names."""
         if model_id.startswith("anthropic/"):
             model_id = model_id[len("anthropic/") :]
+        if model_id in self._native_model_names:
+            return self._native_model_names[model_id]
+        if model_id in self._native_model_names.values():
+            return model_id
         fixed_transforms = {
             "claude-haiku-4.5": "claude-haiku-4-5-20251001",
             "claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
@@ -93,10 +100,52 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
             headers["anthropic-workspace-id"] = self.workspace_id
         return headers
 
+    async def _fetch_native_model_ids(self) -> set[str]:
+        native_ids: set[str] = set()
+        params: dict[str, str | int] = {"limit": 1000}
+        seen_cursors: set[str] = set()
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            while True:
+                response = await client.get(
+                    f"{self.base_url}/models",
+                    headers=self.prepare_headers({}),
+                    params=params,
+                )
+                response.raise_for_status()
+                page = response.json()
+                data = page["data"]
+                if not isinstance(data, list):
+                    raise ValueError("Invalid Anthropic models response")
+                native_ids.update(model["id"] for model in data)
+                if not page.get("has_more"):
+                    return native_ids
+                cursor = page.get("last_id")
+                if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+                    raise ValueError("Invalid Anthropic models pagination cursor")
+                seen_cursors.add(cursor)
+                params["after_id"] = cursor
+
     async def fetch_models(self) -> list[Model]:
-        """Fetch Anthropic models from OpenRouter API filtered by anthropic source."""
+        # Native IDs are authoritative; OpenRouter supplies pricing, not API names.
+        # Models keep their catalog ID so saved overrides stay keyed as before;
+        # the native ID is only an alias and the name sent upstream.
+        # A discovery failure raises so refresh_models_cache retains its last cache.
+        native_ids = await self._fetch_native_model_ids()
         models_data = await async_fetch_openrouter_models(source_filter="anthropic")
-        models = [Model(**model) for model in models_data]  # type: ignore
-        for model in models:
-            model.alias_ids = [self.transform_model_name(model.id)]
+        models: list[Model] = []
+        mappings: dict[str, str] = {}
+        for data in models_data:
+            model = Model(**data)
+            candidates = (
+                self.transform_model_name(model.id),
+                model.id,
+                model.id.replace(".", "-"),
+            )
+            native_id = next((name for name in candidates if name in native_ids), None)
+            if native_id is None:
+                continue
+            mappings[model.id] = native_id
+            model.alias_ids = [native_id]
+            models.append(model)
+        self._native_model_names = mappings
         return models
