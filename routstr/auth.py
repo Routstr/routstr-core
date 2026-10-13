@@ -52,7 +52,9 @@ payments_logger = get_logger("routstr.payments")
 ROUTSTR_FEE_PERCENT: float = 2.1
 ROUTSTR_LN_ADDRESS: str = "routstr-fees@rizful.com"
 ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS: int = 900
-ROUTSTR_FEE_DEFAULT_PAYOUT: int = 200
+# Minimum accrued fee (in sats) before the payout loop sends anything. This is a
+# floor, not a fixed amount: once reached, the whole accumulated balance is paid.
+ROUTSTR_FEE_DEFAULT_PAYOUT: int = 500
 
 
 def _format_msat_amount(amount: int) -> str:
