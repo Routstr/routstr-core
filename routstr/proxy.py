@@ -59,7 +59,12 @@ from .upstream.model_paths import (
     public_model_id,
     public_provider_url,
 )
-from .upstream.request_correction import correct_request, extract_error_message
+from .upstream.request_correction import (
+    Correction,
+    correct_request,
+    error_message_from_body,
+    extract_error_message,
+)
 
 logger = get_logger(__name__)
 
@@ -454,6 +459,44 @@ def _forwarding_allowed(path: str, method: str) -> bool:
 # deterministic rejection that fails identically on the next attempt.
 _RETRYABLE_UPSTREAM_5XX = frozenset({502, 503, 504})
 _UPSTREAM_5XX_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def _correct_rejected_request(
+    request_body: bytes,
+    error_message: str,
+    already_stripped: set[str],
+    request_body_dict: dict[str, Any],
+    pinned_route: bool,
+    upstream: BaseUpstreamProvider,
+    model_id: str,
+    path: str,
+) -> Correction | None:
+    """Fix a param the upstream rejected so the same upstream can be retried."""
+    correction = correct_request(request_body, error_message, already_stripped)
+    if correction is None:
+        return None
+    # Same-provider recovery must not relax an explicit route.
+    if pinned_route:
+        corrected_body = json.loads(correction.body)
+        if any(
+            corrected_body.get(field) != request_body_dict.get(field)
+            for field in ("model", "provider")
+        ):
+            return None
+    logger.warning(
+        "Upstream %s rejected param '%s' for model=%s; "
+        "correcting and retrying same upstream",
+        upstream.provider_type,
+        correction.label,
+        model_id,
+        extra={
+            "provider": upstream.provider_type,
+            "model": model_id,
+            "stripped_param": correction.label,
+            "path": path,
+        },
+    )
+    return correction
 
 
 def _counts_toward_cooldown(status_code: int) -> bool:
@@ -1056,6 +1099,23 @@ async def _proxy(
                             reservation_snapshot,
                         )
                 except UpstreamError as e:
+                    # Some upstreams report a rejected param as a 5xx. Fix the
+                    # body before retrying, or the retry fails the same way.
+                    if e.from_upstream_response and e.upstream_body and not is_ehbp:
+                        correction = _correct_rejected_request(
+                            request_body,
+                            error_message_from_body(e.upstream_body),
+                            already_stripped,
+                            request_body_dict,
+                            selector is not None,
+                            upstream,
+                            model_id,
+                            path,
+                        )
+                        if correction is not None:
+                            request_body = correction.body
+                            already_stripped.add(correction.label)
+                            continue
                     # Only a gateway status the upstream itself answered with:
                     # re-sending the buffered body cannot double-bill. A 502 this
                     # proxy invented for a transport error or timeout is not
@@ -1106,36 +1166,20 @@ async def _proxy(
                     )
                     raise
 
-                # Same-provider recovery must not relax an explicit route.
                 if response.status_code == 400 and not is_ehbp:
-                    correction = correct_request(
+                    correction = _correct_rejected_request(
                         request_body,
                         extract_error_message(response),
                         already_stripped,
+                        request_body_dict,
+                        selector is not None,
+                        upstream,
+                        model_id,
+                        path,
                     )
-                    if correction is not None and selector is not None:
-                        corrected_body = json.loads(correction.body)
-                        if any(
-                            corrected_body.get(field) != request_body_dict.get(field)
-                            for field in ("model", "provider")
-                        ):
-                            correction = None
                     if correction is not None:
-                        request_body, bad_param = correction.body, correction.label
-                        already_stripped.add(bad_param)
-                        logger.warning(
-                            "Upstream %s rejected param '%s' for model=%s; "
-                            "correcting and retrying same upstream",
-                            upstream.provider_type,
-                            bad_param,
-                            model_id,
-                            extra={
-                                "provider": upstream.provider_type,
-                                "model": model_id,
-                                "stripped_param": bad_param,
-                                "path": path,
-                            },
-                        )
+                        request_body = correction.body
+                        already_stripped.add(correction.label)
                         continue
                 break
 

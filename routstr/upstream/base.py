@@ -802,6 +802,9 @@ class BaseUpstreamProvider:
             return True
         return "openrouter.ai" in (self.base_url or "")
 
+    def _apply_reasoning_effort(self, data: dict, model_obj: Model) -> bool:
+        return apply_reasoning_effort(data, model_obj)
+
     def prepare_request_body(
         self,
         body: bytes | None,
@@ -889,7 +892,7 @@ class BaseUpstreamProvider:
             if inject_anthropic_cache_breakpoints(data):
                 changed = True
 
-        if apply_reasoning_effort(data, model_obj):
+        if self._apply_reasoning_effort(data, model_obj):
             changed = True
 
         if changed:
@@ -3497,6 +3500,7 @@ class BaseUpstreamProvider:
                         code=rate_limit.code if rate_limit else None,
                         details=rate_limit.as_details() if rate_limit else None,
                         from_upstream_response=True,
+                        upstream_body=body_preview,
                     )
 
                 try:
@@ -3882,6 +3886,7 @@ class BaseUpstreamProvider:
                         code=rate_limit.code if rate_limit else None,
                         details=rate_limit.as_details() if rate_limit else None,
                         from_upstream_response=True,
+                        upstream_body=body_preview,
                     )
 
                 try:
@@ -6075,6 +6080,10 @@ class BaseUpstreamProvider:
                 )
                 if not provider or not provider.id:
                     raise HTTPException(status_code=404, detail="Provider not found")
+                if not provider.enabled:
+                    self._models_cache = []
+                    self._models_by_id = {}
+                    return
 
                 db_models = await list_models(
                     session=session,
