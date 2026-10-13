@@ -966,6 +966,93 @@ def test_create_model_mappings_uppercase_prefixed_base_keeps_top_tier() -> None:
     assert unique_models["qwen2.5-72b"].upstream_provider_id == "prefixed"
 
 
+def test_create_model_mappings_advertises_winner_spelling_for_case_variants() -> None:
+    """A case-variant collision advertises the spelling of the provider that wins.
+
+    Non-OpenRouter providers are processed first, so ``GLM-5.3`` is seen before
+    OpenRouter's ``z-ai/glm-5.3``. When OpenRouter wins on price the catalog row
+    must not keep the losing provider's spelling.
+    """
+    together_model = create_test_model(
+        "GLM-5.3", prompt_price=0.01, completion_price=0.01
+    )
+    openrouter_model = create_test_model(
+        "z-ai/glm-5.3", prompt_price=0.001, completion_price=0.001
+    )
+    together = create_test_provider(
+        "together", "https://api.together.xyz/v1", db_id=1, models=[together_model]
+    )
+    openrouter = create_test_provider(
+        "openrouter", "https://openrouter.ai/api/v1", db_id=2, models=[openrouter_model]
+    )
+
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[together, openrouter],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert provider_map["glm-5.3"][0] == (openrouter_model, openrouter)
+    assert unique_models["glm-5.3"].id == "glm-5.3"
+    assert unique_models["glm-5.3"].upstream_provider_id == "openrouter"
+
+
+def test_create_model_mappings_forwarded_key_keeps_its_public_id() -> None:
+    """A forwarded public ID is not renamed to a winner's bare ID.
+
+    Renaming ``openai/gpt-6.1-sol`` to the OpenRouter winner's base
+    ``gpt-6.1-sol`` would duplicate the bare row's ID in ``/v1/models``.
+    """
+    deployment = create_test_model(
+        "gpt-6.1-sol", prompt_price=0.0001, completion_price=0.0001
+    )
+    deployment.forwarded_model_id = "openai/gpt-6.1-sol"
+    openrouter_model = create_test_model(
+        "openai/gpt-6.1-sol", prompt_price=0.01, completion_price=0.01
+    )
+    generic = create_test_provider(
+        "generic", "https://generic.example/v1", db_id=1, models=[deployment]
+    )
+    openrouter = create_test_provider(
+        "openrouter", "https://openrouter.ai/api/v1", db_id=2, models=[openrouter_model]
+    )
+
+    _, _, unique_models = create_model_mappings(
+        upstreams=[generic, openrouter],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    advertised = sorted(model.id for model in unique_models.values())
+    assert advertised == ["gpt-6.1-sol", "openai/gpt-6.1-sol"]
+
+
+def test_create_model_mappings_mixed_case_canonical_slug_keeps_its_tier() -> None:
+    """A mixed-case canonical slug still matches the lowercased requested alias."""
+    canonical = create_test_model(
+        "deployment-a", prompt_price=0.01, completion_price=0.01
+    )
+    canonical.canonical_slug = "Vendor/Foo-1"
+    alias_only = create_test_model(
+        "deployment-b", prompt_price=0.001, completion_price=0.001
+    )
+    alias_only.alias_ids = ["foo-1"]
+    canonical_provider = create_test_provider(
+        "canonical", "https://canonical.example/v1", db_id=1, models=[canonical]
+    )
+    alias_provider = create_test_provider(
+        "alias", "https://alias.example/v1", db_id=2, models=[alias_only]
+    )
+
+    _, provider_map, _ = create_model_mappings(
+        upstreams=[alias_provider, canonical_provider],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert provider_map["foo-1"][0] == (canonical, canonical_provider)
+
+
 def test_create_model_mappings_excludes_a_malformed_price() -> None:
     """A rate that is not a number must not be routable.
 

@@ -402,7 +402,7 @@ def create_model_mappings(
             return 3
         if model.canonical_slug:
             canonical_base = get_base_model_id(model.canonical_slug)
-            if canonical_base == alias:
+            if canonical_base.lower() == alias:
                 return 2
         return 1
 
@@ -435,6 +435,13 @@ def create_model_mappings(
         if not ranked_candidates:
             continue
         best_model, best_provider = ranked_candidates[0]
+        # Keys match case-insensitively, so the first-seen spelling can belong
+        # to a provider that lost on price. Advertise the winner's own spelling.
+        winner_forwarded_id = get_effective_forwarded_model_id(best_model)
+        for winner_id in (winner_forwarded_id, get_base_model_id(best_model.id)):
+            if winner_id and winner_id.lower() == unique_key:
+                advertised_id = winner_id
+                break
         unique_models[unique_key] = best_model.copy(
             update={
                 "id": advertised_id,
