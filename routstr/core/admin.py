@@ -1230,7 +1230,9 @@ async def get_provider_models(provider_id: str) -> dict[str, object]:
         )
 
         upstream_models = []
-        upstream_instance = _instantiate_provider(provider)
+        upstream_instance = (
+            _instantiate_provider(provider) if provider.enabled else None
+        )
         if upstream_instance:
             try:
                 raw_models = await upstream_instance.fetch_models()

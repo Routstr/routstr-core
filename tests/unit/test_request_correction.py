@@ -15,6 +15,7 @@ from fastapi.responses import Response
 from routstr.upstream.request_correction import (
     Correction,
     correct_request,
+    error_message_from_body,
     extract_error_message,
     rename_unsupported_param,
     strip_unsupported_param,
@@ -143,6 +144,48 @@ class TestStripUnsupportedParam:
     def test_spend_shaping_guard_is_case_insensitive(self) -> None:
         body = {"model": "m", "Max_Tokens": 4}
         assert strip_unsupported_param(body, "`Max_Tokens` is deprecated") is None
+
+    def test_strips_param_named_after_unsupported_parameter_prefix(self) -> None:
+        body = {"model": "m", "temperature": 0.2, "messages": []}
+        for message in (
+            "Codex error: Unsupported parameter: temperature",
+            "Unsupported parameter: 'temperature'",
+            "unsupported parameter:`temperature`",
+        ):
+            result = strip_unsupported_param(body, message)
+            assert result is not None, message
+            assert result == ({"model": "m", "messages": []}, "temperature")
+
+    def test_prefix_form_declines_nested_param_paths(self) -> None:
+        body = {
+            "model": "m",
+            "messages": [],
+            "reasoning": {"effort": "low"},
+            "tools": [{"type": "function"}],
+        }
+        for message in (
+            "Codex error: Unsupported parameter: reasoning.summary",
+            "Unsupported parameter: 'tools[0].strict'",
+            "Unsupported parameter: messages[0].name",
+        ):
+            assert strip_unsupported_param(body, message) is None, message
+
+    def test_never_strips_request_identity_params(self) -> None:
+        body = {"model": "m", "messages": [], "input": "x", "stream": False}
+        for message in (
+            "The 'gpt-6-luna' model is not supported when using Codex",
+            "Unsupported parameter: model",
+            "stream is not supported on this endpoint",
+            "Unsupported parameter: messages",
+            "'input' is not supported",
+        ):
+            assert strip_unsupported_param(body, message) is None, message
+
+    def test_prefix_form_never_strips_spend_shaping_params(self) -> None:
+        body = {"model": "m", "max_tokens": 4}
+        assert (
+            strip_unsupported_param(body, "Unsupported parameter: max_tokens") is None
+        )
 
 
 class TestRenameUnsupportedParam:
@@ -357,6 +400,27 @@ class TestExtractErrorMessage:
     def test_non_json_body_returns_preview(self) -> None:
         resp = Response(content=b"plain text error", status_code=400)
         assert extract_error_message(resp) == "plain text error"
+
+
+class TestErrorMessageFromBody:
+    def test_extracts_from_raw_json_text(self) -> None:
+        body = '{"error":{"message":"Codex error: Unsupported parameter: temperature"}}'
+        assert (
+            error_message_from_body(body)
+            == "Codex error: Unsupported parameter: temperature"
+        )
+
+    def test_extracts_top_level_detail(self) -> None:
+        """FastAPI-style ``{"detail": ...}`` error bodies."""
+        body = '{"detail":"Codex error: Unsupported parameter: temperature"}'
+        assert (
+            error_message_from_body(body)
+            == "Codex error: Unsupported parameter: temperature"
+        )
+
+    def test_empty_body_returns_empty_string(self) -> None:
+        assert error_message_from_body("") == ""
+        assert error_message_from_body(b"") == ""
 
 
 class TestEndToEndChaining:
