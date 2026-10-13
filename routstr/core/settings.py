@@ -70,7 +70,10 @@ class Settings(BaseSettings):
 
     # Confidential-upstream mode: base URL of the cu-sidecar (e.g.
     # http://127.0.0.1:7443). Empty disables the mode: no offer, no websocket
-    # routes, no /v1/models field.
+    # routes, no /v1/models field. Env-only and read at startup (the routes
+    # are mounted at import), so the admin API cannot half-enable the mode.
+    # The mode keeps per-process state (signed offers, live sessions, the
+    # per-address limit): run the node as a single worker process.
     confidential_sidecar_url: str = Field(default="", env="CONFIDENTIAL_SIDECAR_URL")
     # Shared secret the node sends to the sidecar (``Authorization: Bearer``).
     # The sidecar does not check client credentials itself: whoever reaches it
@@ -105,17 +108,25 @@ class Settings(BaseSettings):
     )
     # Completion tokens reserved beyond the pinned max_tokens: providers may
     # bill a few tokens more than the cap, and the charge is capped at the
-    # reservation. Only the hold grows; the charge is still the usage.
+    # reservation. Only the hold grows; the charge is still the usage. Usage
+    # beyond the reservation (a provider overshooting by more than this, or
+    # accepting a prompt longer than the model's listed context length) is
+    # not charged to the client: the node pays it. Size this for the provider.
     confidential_reserve_margin_tokens: int = Field(
         default=16, ge=0, env="CONFIDENTIAL_RESERVE_MARGIN_TOKENS"
     )
     # Peers (reverse proxies) whose client-address header is believed. Any
-    # other peer is identified by its own address. "self" adds this host's or
-    # container's own addresses, which is where a rootless container port
-    # forwarder connects from: enable it only if a proxy in front of that
-    # forwarder always sets the header.
+    # other peer is identified by its own address. Empty by default: a peer
+    # listed here can name any client address, so list only a proxy that
+    # always sets the header, e.g. "127.0.0.1,::1" for nginx on the same host.
+    # Never list an address that something else also connects from without
+    # overwriting the header (a Tor daemon or another local process forwarding
+    # to the node's loopback port). "self" adds this host's or container's own
+    # addresses, which is where a rootless container port forwarder connects
+    # from: enable it only if a proxy in front of that forwarder always sets
+    # the header.
     confidential_trusted_proxies: list[str] = Field(
-        default_factory=lambda: ["127.0.0.1", "::1"],
+        default_factory=list,
         env="CONFIDENTIAL_TRUSTED_PROXIES",
     )
     # Header a trusted proxy puts the client address in. For X-Forwarded-For the
@@ -389,6 +400,9 @@ ENV_ONLY_FIELDS = frozenset(
         # A credential shared with the cu-sidecar: kept out of the settings
         # blob so it is never stored in plaintext or shadowed by a stale copy.
         "confidential_sidecar_token",
+        # Decides at import whether the confidential routes are mounted; a
+        # live or persisted value could only disagree with the mounted routes.
+        "confidential_sidecar_url",
     }
 )
 
