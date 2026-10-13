@@ -56,11 +56,16 @@ cannot read (cf. EHBP), at rates fixed when the session starts:
    where `prompt_limit` is the model's full context length (a prompt cap
    smaller than that would leave part of an accepted prompt unreserved) and
    `margin` is the offer's `reserve_margin_tokens` (providers may bill a few
-   completion tokens past the cap; the charge is still the usage). A model
-   without a known context length reserves its undiscounted maximum cost;
-   fixed-pricing deployments reserve their fixed per-request cost. The bearer
-   and `offer_sig` are not forwarded to the sidecar; the reservation id binds
-   the session id instead.
+   completion tokens past the cap; the charge is still the usage). Usage
+   beyond the reservation (an overshoot larger than the margin, or a prompt
+   longer than the listed context length) is paid by the node, so size the
+   margin for the provider. A model without a known context length reserves
+   its undiscounted maximum cost (no `TOLERANCE_PERCENTAGE` discount) plus the
+   margin; a model whose metadata lists a negative context length is refused;
+   fixed-pricing deployments reserve their fixed per-request cost. Only the
+   setup fields the sidecar uses are forwarded (`nonce_c`, `model`,
+   `max_tokens`, `len`, `armed`); the bearer, `offer_sig` and the fees are
+   not, and the reservation id binds the session id instead.
 4. On the π_C3S-verified usage the node charges exactly
    `ceil((in*(prompt-cached) + min(cached_in,in)*cached + out*completion)/1000)`,
    capped at the reservation, where `cached` is
@@ -182,17 +187,31 @@ sessions at once; parallel coding agents need several.
   failed fetch is remembered for 10 s, and the last good offer is served for
   up to 10 minutes while the sidecar cannot be reached, so `/v1/models` never
   waits on it for long.
+  A sidecar that answers with an offer the node refuses (malformed, not run
+  with `--node-settles`, another protocol version) is not served from that
+  cache: the mode is off until the sidecar is fixed.
 - The offer's `ws` URL is built from `HTTP_URL` (`https`→`wss`); without it the
   offer carries the relative path `/v1/confidential/ws`.
+- `/v1/confidential/zk` admits only the sid of a session that is live on the
+  same node process (announced by the sidecar's `ready`), at most 192 proof
+  connections at once; any other sid never reaches the sidecar.
+- The reservation's lease (its expiry and heartbeat) covers the 10-minute
+  session plus 60 s for settlement, even when `MAX_REQUEST_LIFETIME_SECONDS`
+  is shorter, so the stale-reservation sweeper never releases it mid-session.
+- The signed offers, the live sessions and the per-address counts are kept
+  per process: run the node as a single worker process (one uvicorn worker).
+  With several, an offer signed by one worker is unknown to another (`409`),
+  `/zk` connections reaching another worker are refused, and the limits
+  multiply.
 
 ## Configuration
 
 | Env | Meaning | Default |
 |---|---|---|
-| `CONFIDENTIAL_SIDECAR_URL` | cu-sidecar base URL; empty disables the mode | `""` |
+| `CONFIDENTIAL_SIDECAR_URL` | cu-sidecar base URL; empty disables the mode; env-only, read at startup (the routes are mounted then), never stored in the database | `""` |
 | `CONFIDENTIAL_SIDECAR_TOKEN` | shared secret sent to the sidecar as `Authorization: Bearer` (the sidecar's `CU_SIDECAR_TOKEN`); required when the sidecar is not on loopback, since it does not check client credentials itself; env-only, never stored in the database | `""` |
 | `CONFIDENTIAL_MAX_UNUSED_PER_IP` | refuse (429) a new session from a client address that already has this many unused sessions (connected, credential record not yet written; counted from the websocket accept, before the setup; pre-warmed sessions count); 0 disables | `12` |
-| `CONFIDENTIAL_TRUSTED_PROXIES` | comma-separated peers whose client-address header is believed; `self` adds the node's own addresses (where a rootless container port forwarder connects from; enable only behind a reverse proxy that always sets the header) | `127.0.0.1,::1` |
+| `CONFIDENTIAL_TRUSTED_PROXIES` | comma-separated peers whose client-address header is believed (e.g. `127.0.0.1,::1` for nginx on the same host); `self` adds the node's own addresses (where a rootless container port forwarder connects from; enable only behind a reverse proxy that always sets the header) | empty (no peer is trusted) |
 | `CONFIDENTIAL_SESSION_FEE_MSAT` | fee (msat) on top of the usage of a completed confidential request, and the charge for a provider refusal (4xx/503); published in the signed offer; clients must accept it at setup | `0` (off) |
 | `CONFIDENTIAL_ABANDON_FEE_MSAT` | fee (msat) for a session the sidecar accepted that ends without a request reaching the provider (armed and never used, aborted, client gone): the anti-DoS deposit, reserved at setup; never below the session fee (0 = equal to it) | `0` (off) |
 | `CONFIDENTIAL_RATE_SURCHARGE_PCT` | percentage added to the per-token rates of confidential sessions; the signed offer's `price_list` carries the surcharged rates | `0` (off) |
@@ -200,8 +219,10 @@ sessions at once; parallel coding agents need several.
 | `CONFIDENTIAL_CLIENT_IP_HEADER` | header a trusted proxy puts the client address in; for `X-Forwarded-For` the rightmost entry is used | `x-forwarded-for` |
 | `NSEC` | node key; signs offer, attestation and receipt (required) | |
 
-Accepted mints, pricing and refunds are the node's existing settings. Like
-the node's other settings, these are persisted in its database on first start:
+Accepted mints, pricing and refunds are the node's existing settings. Apart
+from the env-only `CONFIDENTIAL_SIDECAR_URL` and `CONFIDENTIAL_SIDECAR_TOKEN`,
+these are persisted in its database on first start, like the node's other
+settings:
 afterwards a value in the database wins over the environment, so change them
 with the admin settings API (`PATCH /admin/api/settings`, e.g.
 `{"confidential_session_fee_msat": 2000, "confidential_abandon_fee_msat": 10000}`)
@@ -224,3 +245,10 @@ publishing a port) makes every client look like the node itself: put a reverse p
 `CONFIDENTIAL_TRUSTED_PROXIES=127.0.0.1,::1,self`, or raise or disable the limit. Never trust `self`
 without such a proxy, since any client could then name its own address. Tor clients all arrive from the
 Tor daemon and share one limit.
+
+No peer is trusted by default. A reverse proxy on the same host (nginx connecting over loopback) needs
+`CONFIDENTIAL_TRUSTED_PROXIES=127.0.0.1,::1`; without it all its clients share the proxy's address and one
+limit. Trust an address only if every connection from it comes through a proxy that sets the header: a
+Tor daemon or any other local process that connects to the node's loopback port directly could otherwise
+name any client address. A node whose database already holds a value keeps it (the database wins over
+the environment); a new node starts with none.

@@ -27,7 +27,9 @@
 * ``GET /v1/confidential/zk?proof=<pi_*>&session_id=<sid>``: a byte proxy for
   one ZK proof (``twopc``: the two-party handshake; ``zkchan``: the
   session's long-lived proof channel, which carries π_NK, π_C2S and π_C3S
-  over correlations set up while the session is armed).
+  over correlations set up while the session is armed). Only the sid of a
+  live session on this process (announced by the sidecar's ``ready``) is
+  admitted, so the node must run as a single worker process.
 """
 
 from __future__ import annotations
@@ -63,6 +65,7 @@ from .confidential import (
     to_ws_url,
 )
 from .core import get_logger
+from .core.lifecycle import RequestLifetime, request_lifetime
 from .core.settings import settings
 
 logger = get_logger(__name__)
@@ -90,8 +93,21 @@ MAX_SESSIONS = 32
 SETUP_TIMEOUT_S = 15.0
 SESSION_TIMEOUT_S = 600.0
 MAX_BODY_LEN = 8 << 20
+# Time after the session limit for the final settlement or abort to finish.
+# The reservation's lease covers the session plus this, whatever
+# MAX_REQUEST_LIFETIME_SECONDS is: a lease that lapsed mid-session would let
+# the stale-reservation sweeper release it, and the final charge would fail.
+SETTLE_GRACE_S = 60.0
+# Concurrent /zk proxies per process: the sidecar allows 6 per session.
+MAX_ZK_CONNS = MAX_SESSIONS * 6
+# The setup fields the sidecar is sent (``escrow`` is set by the node).
+_SIDECAR_SETUP_FIELDS = ("type", "nonce_c", "model", "max_tokens", "len", "armed")
 
 _active_sessions = 0
+_active_zk = 0
+# Protocol sids of this process's live sessions (from the sidecar's ``ready``
+# until the session ends): only these may open a /zk proxy.
+_live_sids: dict[str, "SessionState"] = {}
 # Unused sessions per client address: counted from the WebSocket accept (before
 # the setup frame) until the sidecar reports ``head_written`` or the session ends.
 _unused_by_ip: dict[str, int] = {}
@@ -188,6 +204,27 @@ def validate_setup(msg: Any, max_tokens_cap: int) -> None:
         fee = msg.get(name)
         if fee is not None and (not _is_int(fee) or fee < 0):
             raise SetupError(400, f"setup.{name} must be a non-negative integer")
+    if not isinstance(msg.get("armed", False), bool):
+        raise SetupError(400, "setup.armed must be a boolean")
+
+
+def sidecar_setup(msg: dict[str, Any], escrow: str) -> dict[str, Any]:
+    """The setup forwarded to the sidecar: the known fields only, never the
+    credential, the offer signature or the fees, plus the node's escrow id."""
+    out = {k: msg[k] for k in _SIDECAR_SETUP_FIELDS if k in msg}
+    out["escrow"] = escrow
+    return out
+
+
+def _session_lifetime() -> RequestLifetime:
+    """The lifetime the session's reservation lease is derived from: the
+    session limit plus the settlement grace, never shorter than the HTTP
+    request lifetime."""
+    seconds = max(
+        float(settings.max_request_lifetime_seconds),
+        SESSION_TIMEOUT_S + SETTLE_GRACE_S,
+    )
+    return RequestLifetime(deadline=asyncio.get_running_loop().time() + seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -236,11 +273,19 @@ async def confidential_session_proxy(
     state.unused_ip = ip
     _unused_by_ip[ip] = _unused_by_ip.get(ip, 0) + 1
     _active_sessions += 1
+    lifetime = request_lifetime.set(_session_lifetime())
     try:
         await _run_session(websocket, session_id, state)
     finally:
+        request_lifetime.reset(lifetime)
         _active_sessions -= 1
         _mark_used(state)
+        _forget_sid(state)
+
+
+def _forget_sid(state: "SessionState") -> None:
+    if state.sid is not None and _live_sids.get(state.sid) is state:
+        del _live_sids[state.sid]
 
 
 def _mark_used(state: "SessionState") -> None:
@@ -375,7 +420,7 @@ async def _open_session(
             logger.exception("confidential ws: reservation failed")
             raise SetupError(500, "reservation failed") from exc
         # The sidecar binds sid to this value; it is unique and not a secret.
-        msg["escrow"] = state.billing.snapshot.release_id
+        msg = sidecar_setup(msg, state.billing.snapshot.release_id)
         try:
             upstream = await websockets.connect(
                 _sidecar_ws_url("/session", f"session_id={session_id}"),
@@ -461,8 +506,13 @@ async def _on_sidecar_text(
         return frame
     kind = msg.get("type") if isinstance(msg, dict) else None
     if kind == "ready":
-        state.sid = msg.get("sid")
+        sid = msg.get("sid")
+        state.sid = sid if isinstance(sid, str) else None
         state.engaged = True
+        if state.sid is not None and _SID_RE.match(state.sid):
+            # Registered before the client sees ``ready``, so its /zk
+            # connections (opened with this sid) are admitted.
+            _live_sids.setdefault(state.sid, state)
         msg.pop("offer", None)
         msg["pubkey"] = node_pubkey_hex()
         msg["sig_scheme"] = "schnorr-secp256k1"
@@ -650,10 +700,28 @@ async def _finalize(state: SessionState) -> None:
 async def confidential_zk_proxy(
     websocket: WebSocket, proof: str = "", session_id: str = ""
 ) -> None:
+    global _active_zk
     await websocket.accept()
     if not _SID_RE.match(session_id or "") or not _PROOF_RE.match(proof or ""):
         await websocket.close(code=1008, reason="invalid session_id or proof")
         return
+    # Only a session that passed setup (credential checked, reservation held)
+    # on this node may open proof channels; anything else never reaches the
+    # sidecar.
+    if session_id not in _live_sids:
+        await websocket.close(code=1008, reason="unknown session")
+        return
+    if _active_zk >= MAX_ZK_CONNS:
+        await _close(websocket, 1013, "too many proof connections")
+        return
+    _active_zk += 1
+    try:
+        await _zk_proxy(websocket, proof, session_id)
+    finally:
+        _active_zk -= 1
+
+
+async def _zk_proxy(websocket: WebSocket, proof: str, session_id: str) -> None:
     try:
         # No keepalive pings on this loopback hop: while the client's link is
         # slower than the sidecar's (the 2PC sends tens of MB), this proxy stops

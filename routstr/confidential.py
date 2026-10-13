@@ -189,26 +189,38 @@ class OfferError(Exception):
     """The node cannot assemble an offer (sidecar unreachable or malformed)."""
 
 
+class OfferRefused(OfferError):
+    """The sidecar answered, but with an offer this node must not serve
+    (malformed, not settling through the node, another protocol version).
+    Unlike an unreachable sidecar, this drops the last good offer at once."""
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def validate_sidecar_offer(data: Any) -> None:
+    """Shape checks on the fields the node reads from the sidecar offer."""
+    if not isinstance(data, dict) or not isinstance(data.get("head_template"), str):
+        raise OfferRefused("sidecar offer is malformed")
+    cap = data.get("max_tokens_cap", 4096)
+    if not _is_int(cap) or cap < 1:
+        raise OfferRefused("sidecar offer is malformed: max_tokens_cap")
+    key_length = data.get("key_length", 0)
+    if not _is_int(key_length) or key_length < 0:
+        raise OfferRefused("sidecar offer is malformed: key_length")
+    model_allowlist(data)  # raises OfferRefused when malformed
+
+
 async def fetch_sidecar_offer() -> dict[str, Any]:
     base = settings.confidential_sidecar_url.rstrip("/")
     if not base:
-        raise OfferError("confidential sidecar is not configured")
+        raise OfferRefused("confidential sidecar is not configured")
     async with httpx.AsyncClient(timeout=_SIDECAR_TIMEOUT) as client:
         resp = await client.get(f"{base}/offer", headers=sidecar_headers())
         resp.raise_for_status()
         data = resp.json()
-    if not isinstance(data, dict) or "head_template" not in data:
-        raise OfferError("sidecar offer is malformed")
-    if data.get("node_settles") is False:
-        # The sidecar would sign stub receipts itself and never send the
-        # ``usage`` frame this node settles on: every session would end
-        # "released, no disclosure" and be charged its full reservation.
-        # Refuse to offer confidential mode rather than take that money.
-        logger.error(
-            "confidential: the sidecar runs without --node-settles; "
-            "confidential mode is disabled until it does"
-        )
-        raise OfferError("the confidential sidecar does not run with --node-settles")
+    validate_sidecar_offer(data)
     version = sidecar_protocol_version(data)
     if version != CONFIDENTIAL_VERSION:
         # A sidecar running the retired protocol v1: offering it would hand
@@ -219,10 +231,22 @@ async def fetch_sidecar_offer() -> dict[str, Any]:
             version,
             CONFIDENTIAL_VERSION,
         )
-        raise OfferError(
+        raise OfferRefused(
             f"the confidential sidecar speaks protocol v{version}; "
             f"this node supports only v{CONFIDENTIAL_VERSION}"
         )
+    if data.get("node_settles") is not True:
+        # The sidecar would sign stub receipts itself and never send the
+        # ``usage`` frame this node settles on: every session would end
+        # "released, no disclosure" and be charged its full reservation.
+        # Refuse to offer confidential mode rather than take that money. Every
+        # sidecar that speaks protocol v2 and settles through the node says
+        # so explicitly; anything but ``true`` is refused.
+        logger.error(
+            "confidential: the sidecar runs without --node-settles; "
+            "confidential mode is disabled until it does"
+        )
+        raise OfferRefused("the confidential sidecar does not run with --node-settles")
     return data
 
 
@@ -234,6 +258,8 @@ async def cached_sidecar_offer() -> dict[str, Any]:
 
     When a refresh fails, the last good offer is served for up to 10 minutes
     (sessions still fail cleanly at the sidecar dial if it is really gone).
+    A sidecar that answers with an offer the node refuses (``OfferRefused``)
+    drops the last good offer immediately: it is up, but must not be used.
     """
     now = time.monotonic()
     offer = _SIDECAR_CACHE["offer"]
@@ -246,6 +272,8 @@ async def cached_sidecar_offer() -> dict[str, Any]:
             offer = await fetch_sidecar_offer()
         except (OfferError, httpx.HTTPError, ValueError) as exc:
             _SIDECAR_CACHE["failed_at"] = now
+            if isinstance(exc, OfferRefused):
+                _SIDECAR_CACHE["offer"] = offer = None
             logger.warning("confidential: sidecar offer fetch failed: %s", exc)
         else:
             _SIDECAR_CACHE.update(offer=offer, at=now, failed_at=None)
@@ -260,16 +288,20 @@ def model_allowlist(side_offer: dict[str, Any]) -> set[str]:
 
     ``model_allowlist`` is a list of ids; the earlier ``text_only_ok`` map
     (``{id: true}``) is still read. Models and prices otherwise come from the
-    node itself: the sidecar offer carries no prices.
+    node itself: the sidecar offer carries no prices. Anything else (a map
+    value that is not a boolean, a list entry that is not a string, another
+    type) raises ``OfferRefused``: a typo must not silently allow every model.
     """
     allow = side_offer.get("model_allowlist")
     if allow is None:
         allow = side_offer.get("text_only_ok")
-    if isinstance(allow, dict):
-        return {str(k) for k, v in allow.items() if v is True}
-    if isinstance(allow, list):
-        return {str(k) for k in allow}
-    return set()
+    if allow is None:
+        return set()
+    if isinstance(allow, dict) and all(isinstance(v, bool) for v in allow.values()):
+        return {str(k) for k, v in allow.items() if v}
+    if isinstance(allow, list) and all(isinstance(k, str) for k in allow):
+        return set(allow)
+    raise OfferRefused("sidecar offer is malformed: model_allowlist")
 
 
 def model_allowed(model: str, allowlist: set[str]) -> bool:
@@ -567,13 +599,43 @@ def prompt_token_limit(model_obj: Any) -> int | None:
     ``context_length - max_tokens`` and the difference would go unreserved
     (and, since the charge is capped at the reservation, unbilled).
     ``None`` when no context length is known (the caller then falls back to
-    the model's undiscounted maximum cost).
+    the model's undiscounted maximum cost). Only positive integers count: 0
+    means unknown, and a negative value (bad provider metadata) would shrink
+    the reservation, so ``reserve`` refuses such a model.
     """
+    for cl in _context_lengths(model_obj):
+        if _is_int(cl) and cl > 0:
+            return int(cl)
+    return None
+
+
+def _context_lengths(model_obj: Any) -> list[Any]:
     top = getattr(model_obj, "top_provider", None)
-    cl = getattr(top, "context_length", None) if top else None
-    if cl:
-        return int(cl)
-    return getattr(model_obj, "context_length", None) or None
+    return [
+        getattr(top, "context_length", None) if top else None,
+        getattr(model_obj, "context_length", None),
+    ]
+
+
+def _has_bad_context_length(model_obj: Any) -> bool:
+    """A context length that is set but neither a non-negative integer: the
+    model's derived maximum cost cannot be trusted either."""
+    return any(
+        cl is not None and not (_is_int(cl) and cl >= 0)
+        for cl in _context_lengths(model_obj)
+    )
+
+
+def _undiscounted_max_cost_msats(model_obj: Any) -> int | None:
+    """The model's maximum cost in msats without the tolerance discount that
+    ``get_max_cost_for_model`` applies to visible-body requests."""
+    sats = getattr(model_obj, "sats_pricing", None)
+    max_cost = getattr(sats, "max_cost", None) if sats is not None else None
+    if not isinstance(max_cost, (int, float)) or not math.isfinite(max_cost):
+        return None
+    if max_cost <= 0:
+        return None
+    return math.ceil(float(max_cost) * 1000)
 
 
 def frozen_cost_msats(
@@ -662,8 +724,9 @@ async def reserve(
     The prompt is opaque to the node, so the reservation covers the model's
     full context length plus the pinned ``max_tokens`` (which π_C2S enforces
     before the upstream starts) and the offer's completion margin (a provider
-    may bill slightly past the cap), at the frozen rates. Without a known context length it
-    is the model's undiscounted maximum cost; fixed-pricing deployments keep
+    may bill slightly past the cap), at the frozen rates. Without a known
+    context length it is the model's undiscounted maximum cost (no tolerance
+    discount) plus the same margin; fixed-pricing deployments keep
     their per-request reservation. The larger of the frozen offer's session
     and abandon fees is added on top; the client must have accepted exactly
     those fees.
@@ -701,7 +764,25 @@ async def reserve(
         except HTTPException as exc:
             raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
         limit = None if settings.fixed_pricing else prompt_token_limit(cand.model)
-        if limit is None:
+        if limit is None and not settings.fixed_pricing:
+            if _has_bad_context_length(cand.model):
+                raise BillingError(
+                    f"model {model_id!r} has an invalid context length", 503
+                )
+            undiscounted = _undiscounted_max_cost_msats(cand.model)
+            if undiscounted is None:
+                undiscounted = await get_max_cost_for_model(
+                    model_id, session, cand.model
+                )
+            # The full maximum (no tolerance discount: the body is opaque),
+            # plus the completion margin, like the context-length branch.
+            max_cost = max(
+                settings.min_request_msat,
+                math.ceil(
+                    undiscounted * (1.0 + pct / 100.0) + margin * rates["out"] / 1000
+                ),
+            )
+        elif limit is None:
             max_cost = await get_max_cost_for_model(model_id, session, cand.model)
             max_cost = math.ceil(max_cost * (1.0 + pct / 100.0))
         else:
