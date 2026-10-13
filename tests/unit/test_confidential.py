@@ -48,6 +48,8 @@ def _fresh_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(conf, "_SIGNED_OFFERS", conf.OrderedDict())
     monkeypatch.setattr(conf, "_LAST_OFFER", {"payload": None, "offer": None})
     monkeypatch.setattr(cws, "_active_sessions", 0)
+    monkeypatch.setattr(cws, "_active_zk", 0)
+    monkeypatch.setattr(cws, "_live_sids", {})
 
 
 @pytest.fixture()
@@ -513,6 +515,7 @@ async def test_sidecar_without_protocol_v2_is_refused(
     with pytest.raises(conf.OfferError, match="only v2"):
         await conf.fetch_sidecar_offer()
     offer["v"] = 2
+    offer["node_settles"] = True
     assert await conf.fetch_sidecar_offer() == offer
 
 
@@ -778,12 +781,14 @@ async def test_sidecar_offer_failure_is_negatively_cached(
     assert len(fetches) == 1
 
 
-@pytest.mark.parametrize("node_settles", [True, False, None])
+@pytest.mark.parametrize("node_settles", [True, False, None, 0, 1, "false", "true"])
 async def test_sidecar_without_node_settles_is_refused(
-    monkeypatch: pytest.MonkeyPatch, node_settles: bool | None
+    monkeypatch: pytest.MonkeyPatch, node_settles: Any
 ) -> None:
     """A sidecar that signs its own stub receipts never hands the node the
-    usage it settles on, so every session would be charged its reservation."""
+    usage it settles on, so every session would be charged its reservation.
+    Only an explicit ``true`` is accepted: a missing or merely falsy value is
+    refused too."""
     offer: dict[str, Any] = {
         "upstream_host": "api.venice.ai",
         "head_template": "x",
@@ -814,11 +819,11 @@ async def test_sidecar_without_node_settles_is_refused(
 
     monkeypatch.setattr(settings, "confidential_sidecar_url", "http://127.0.0.1:7444")
     monkeypatch.setattr(conf.httpx, "AsyncClient", Client)
-    if node_settles is False:
-        with pytest.raises(conf.OfferError):
-            await conf.fetch_sidecar_offer()
-    else:  # older sidecars do not say; they are run with the flag
+    if node_settles is True:
         assert await conf.fetch_sidecar_offer() == offer
+    else:
+        with pytest.raises(conf.OfferRefused):
+            await conf.fetch_sidecar_offer()
 
 
 async def test_last_good_sidecar_offer_survives_a_failed_refresh(
@@ -1007,7 +1012,7 @@ async def billing_db(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
         async with create_session() as session:
             return await session.get(ApiKey, "hk")
 
-    yield SimpleNamespace(model=model, key=key)
+    yield SimpleNamespace(model=model, key=key, create_session=create_session)
     for release_id in list(auth_module._reservation_heartbeats):
         await auth_module._stop_reservation_heartbeat(release_id)
     await engine.dispose()
@@ -1169,6 +1174,7 @@ def test_zk_proxy_passes_bytes(monkeypatch: pytest.MonkeyPatch, proof: str) -> N
     with MockSidecar(echo) as mock:
         _use_sidecar(monkeypatch, mock.port)
         client = TestClient(_app())
+        cws._live_sids[SID] = cws.SessionState()
         url = f"/v1/confidential/zk?proof={proof}&session_id={SID}"
         with client.websocket_connect(url) as ws:
             payload = b"\x00\x01\x02zkmux\xff" * 100
@@ -1191,6 +1197,7 @@ def test_zk_proxy_sends_the_sidecar_token(
     with MockSidecar(record) as mock:
         _use_sidecar(monkeypatch, mock.port)
         client = TestClient(_app())
+        cws._live_sids[SID] = cws.SessionState()
         url = f"/v1/confidential/zk?proof=zkchan&session_id={SID}"
         with client.websocket_connect(url) as ws:
             ws.send_bytes(b"x")
@@ -1205,7 +1212,9 @@ async def test_sidecar_offer_fetch_sends_the_token(
 
     def answer(request: httpx.Request) -> httpx.Response:
         seen.append(request.headers.get("Authorization"))
-        return httpx.Response(200, json={"head_template": "x", "v": 2})
+        return httpx.Response(
+            200, json={"head_template": "x", "v": 2, "node_settles": True}
+        )
 
     real_client = httpx.AsyncClient
 
@@ -1608,3 +1617,278 @@ def test_setup_rejects_bad_fee_fields() -> None:
             with pytest.raises(cws.SetupError):
                 cws.validate_setup({**_SETUP, name: bad}, 4096)
     cws.validate_setup({**_SETUP, "session_fee_msat": 0, "abandon_fee_msat": 0}, 4096)
+
+
+# ---------------------------------------------------------------------------
+# reservation lease, reservation sizing, sidecar offer validation, admission
+# ---------------------------------------------------------------------------
+
+
+async def _lease_expiry(billing_db: Any, release_id: str) -> int:
+    from routstr.core.db import ReservationRelease
+
+    async with billing_db.create_session() as session:
+        row = await session.get(ReservationRelease, release_id)
+        assert row is not None and row.expires_at is not None
+        return int(row.expires_at)
+
+
+async def test_reservation_lease_outlives_the_session(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any
+) -> None:
+    """A short request lifetime must not let the lease lapse mid-session:
+    the sweeper would release the reservation and the final charge fail."""
+    import time as _time
+
+    from routstr.core.lifecycle import request_lifetime
+
+    monkeypatch.setattr(settings, "max_request_lifetime_seconds", 60)
+    token = request_lifetime.set(cws._session_lifetime())
+    try:
+        billing = await conf.reserve("hk", "ctx-model", 8)
+    finally:
+        request_lifetime.reset(token)
+    expires_at = await _lease_expiry(billing_db, billing.snapshot.release_id)
+    assert expires_at > _time.time() + cws.SESSION_TIMEOUT_S + cws.SETTLE_GRACE_S
+    # The settlement at the end of the session still finds it active.
+    out = await conf.settle(
+        billing,
+        {"model": "ctx-model", "usage": {"prompt_tokens": 10, "completion_tokens": 1}},
+    )
+    assert out["cost_msats"] == 200
+
+
+async def test_session_lifetime_never_shortens_the_request_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(settings, "max_request_lifetime_seconds", 5000)
+    assert cws._session_lifetime().deadline >= loop.time() + 4999
+    monkeypatch.setattr(settings, "max_request_lifetime_seconds", 1)
+    floor = cws.SESSION_TIMEOUT_S + cws.SETTLE_GRACE_S
+    assert cws._session_lifetime().deadline >= loop.time() + floor - 1
+
+
+async def test_reservation_heartbeat_runs_for_the_session_lifetime(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any
+) -> None:
+    import routstr.auth as auth_module
+    from routstr.core.lifecycle import request_lifetime
+
+    monkeypatch.setattr(auth_module, "create_session", billing_db.create_session)
+    monkeypatch.setattr(settings, "max_request_lifetime_seconds", 0.2)
+    monkeypatch.setattr(settings, "stale_reservation_timeout_seconds", 3)
+
+    plain = await conf.reserve("hk", "ctx-model", 8)
+    token = request_lifetime.set(cws._session_lifetime())
+    try:
+        session = await conf.reserve("hk", "ctx-model", 8)
+    finally:
+        request_lifetime.reset(token)
+    await asyncio.sleep(1.3)  # one heartbeat interval, past the request lifetime
+    beats = auth_module._reservation_heartbeats
+    assert plain.snapshot.release_id not in beats  # the HTTP lifetime ended
+    assert not beats[session.snapshot.release_id].done()
+
+
+@pytest.mark.parametrize("bad", [-5, -1000])
+async def test_negative_context_length_does_not_shrink_the_reservation(
+    billing_db: Any, bad: int
+) -> None:
+    billing_db.model.top_provider.context_length = bad
+    # The model's own context length still counts.
+    billing = await conf.reserve("hk", "ctx-model", 8)
+    assert billing.reserved_msats == 1_000_800
+    await conf.release(billing)
+    # With no usable context length anywhere, the model is refused rather
+    # than reserved at a derived cost that the bad metadata also corrupts.
+    billing_db.model.context_length = bad
+    assert conf.prompt_token_limit(billing_db.model) is None
+    with pytest.raises(conf.BillingError):
+        await conf.reserve("hk", "ctx-model", 8)
+
+
+async def test_reservation_without_context_is_undiscounted_with_margin(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any
+) -> None:
+    """The visible-body tolerance discount does not apply to an opaque body,
+    and the completion margin is reserved as in the context-length branch."""
+    billing_db.model.top_provider = None
+    billing_db.model.context_length = 0
+    monkeypatch.setattr(settings, "tolerance_percentage", 1.0)
+    monkeypatch.setattr(settings, "confidential_reserve_margin_tokens", 10)
+    billing = await conf.reserve("hk", "ctx-model", 8)
+    # 1100 sats max cost + 10 tokens * 100 msats
+    assert billing.reserved_msats == 1_101_000
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"max_tokens_cap": "lots"},
+        {"max_tokens_cap": 0},
+        {"max_tokens_cap": True},
+        {"key_length": "42"},
+        {"key_length": -1},
+        {"head_template": 7},
+        {"model_allowlist": "m"},
+        {"model_allowlist": ["m", 3]},
+        {"model_allowlist": None, "text_only_ok": {"m": "true"}},
+        {"model_allowlist": None, "text_only_ok": {"m": 1}},
+    ],
+)
+async def test_malformed_sidecar_offer_is_refused(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], patch: Any
+) -> None:
+    offer: dict[str, Any] = {
+        "upstream_host": "api.venice.ai",
+        "head_template": "x",
+        "v": 2,
+        "node_settles": True,
+        **patch,
+    }
+    if offer.get("model_allowlist", ...) is None:
+        del offer["model_allowlist"]
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=offer)
+
+    real_client = httpx.AsyncClient
+
+    def mocked_client(**kw: Any) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(answer), **kw)
+
+    monkeypatch.setattr(conf.httpx, "AsyncClient", mocked_client)
+    monkeypatch.setattr(settings, "confidential_sidecar_url", "http://127.0.0.1:7444")
+    with pytest.raises(conf.OfferRefused):
+        await conf.fetch_sidecar_offer()
+    # The offer endpoint answers 502, not 500.
+    app = FastAPI()
+    app.include_router(conf.confidential_router)
+    resp = TestClient(app).get("/v1/confidential/offer")
+    assert resp.status_code == 502
+
+
+def test_model_allowlist_rejects_non_boolean_flags() -> None:
+    with pytest.raises(conf.OfferRefused):
+        conf.model_allowlist({"text_only_ok": {"m": "yes"}})
+    assert conf.model_allowlist({"text_only_ok": {"m": True, "x": False}}) == {"m"}
+
+
+async def test_refused_sidecar_offer_drops_the_last_good_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sidecar restarted without node settlement must not keep being used
+    on the strength of the last good offer (that is only for outages)."""
+    good = {"upstream_host": "api.venice.ai", "head_template": "x"}
+    state: dict[str, Any] = {"exc": None}
+
+    async def fetch() -> dict[str, Any]:
+        if state["exc"] is not None:
+            raise state["exc"]
+        return dict(good)
+
+    monkeypatch.setattr(conf, "fetch_sidecar_offer", fetch)
+    assert await conf.cached_sidecar_offer() == good
+    conf._SIDECAR_CACHE["at"] -= conf._SIDECAR_OFFER_TTL_S + 1
+    state["exc"] = httpx.ConnectError("down")
+    assert await conf.cached_sidecar_offer() == good  # an outage: still served
+    conf._SIDECAR_CACHE["failed_at"] -= conf._SIDECAR_FAILURE_TTL_S + 1
+    state["exc"] = conf.OfferRefused("no --node-settles")
+    with pytest.raises(conf.OfferError):
+        await conf.cached_sidecar_offer()
+
+
+def test_trusted_proxies_default_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without configuration no peer, not even loopback, can name the client
+    address by header."""
+    from routstr.core.settings import Settings
+
+    monkeypatch.delenv("CONFIDENTIAL_TRUSTED_PROXIES", raising=False)
+    default = Settings().confidential_trusted_proxies
+    assert default == []
+    monkeypatch.setattr(settings, "confidential_trusted_proxies", default)
+    monkeypatch.setattr(settings, "confidential_client_ip_header", "x-forwarded-for")
+    ws = _FakeWS("127.0.0.1", {"x-forwarded-for": "203.0.113.5"})
+    assert cws.client_address(ws) == "127.0.0.1"  # type: ignore[arg-type]
+
+
+def test_sidecar_url_is_env_only() -> None:
+    from routstr.core.settings import ENV_ONLY_FIELDS
+
+    assert "confidential_sidecar_url" in ENV_ONLY_FIELDS
+
+
+def test_zk_proxy_admits_only_live_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    dials: list[int] = []
+
+    async def echo(ws: Any) -> None:
+        dials.append(1)
+        async for frame in ws:
+            await ws.send(frame)
+
+    with MockSidecar(echo) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        client = TestClient(_app())
+        url = f"/v1/confidential/zk?proof=zkchan&session_id={SID}"
+        with client.websocket_connect(url) as ws:
+            msg = ws.receive()
+            assert msg["type"] == "websocket.close" and msg["code"] == 1008
+        assert dials == []  # never reached the sidecar
+        cws._live_sids[SID] = cws.SessionState()
+        monkeypatch.setattr(cws, "_active_zk", cws.MAX_ZK_CONNS)
+        with client.websocket_connect(url) as ws:
+            msg = ws.receive()
+            assert msg["type"] == "websocket.close" and msg["code"] == 1013
+        assert dials == []
+
+
+def test_session_registers_its_sid_for_the_zk_route(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    _Ledger(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    async def handler(ws: Any) -> None:
+        async for frame in ws:
+            if isinstance(frame, str) and json.loads(frame).get("type") == "setup":
+                await ws.send(json.dumps(_READY))
+                await asyncio.sleep(0.3)
+                return
+
+    with MockSidecar(handler) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        with _connect(TestClient(_app())) as ws:
+            ws.send_text(json.dumps(_SETUP))
+            assert json.loads(ws.receive_text())["type"] == "ready"
+            seen["live"] = SID in cws._live_sids
+    assert seen["live"] is True
+    assert SID not in cws._live_sids  # forgotten when the session ended
+
+
+def test_setup_forwards_only_known_fields(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    _Ledger(monkeypatch)
+    holder: dict[str, Any] = {}
+    setup = {**_SETUP, "armed": True, "escrow_e": 5, "extra": {"x": 1}}
+    with MockSidecar(_sidecar_script(holder, [_READY])) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        with _connect(TestClient(_app())) as ws:
+            ws.send_text(json.dumps(setup))
+            ws.receive_text()
+    assert holder["setup"] == {
+        "type": "setup",
+        "nonce_c": _SETUP["nonce_c"],
+        "model": "test-model",
+        "max_tokens": 12,
+        "len": 150,
+        "armed": True,
+        "escrow": "rel-123",
+    }
+
+
+def test_setup_armed_must_be_boolean() -> None:
+    bad = {**_SETUP, "armed": "yes"}
+    with pytest.raises(cws.SetupError):
+        cws.validate_setup(bad, 4096)
