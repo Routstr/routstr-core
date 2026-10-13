@@ -3,6 +3,7 @@ from unittest.mock import patch
 from routstr.upstream.anthropic import AnthropicUpstreamProvider
 from routstr.upstream.base import BaseUpstreamProvider
 from routstr.upstream.generic import GenericUpstreamProvider
+from routstr.upstream.model_paths import pinned_endpoint_context
 from routstr.upstream.openrouter import OpenRouterUpstreamProvider
 
 
@@ -77,6 +78,31 @@ def test_apply_provider_field_openrouter_warns_once_on_billed_payload() -> None:
 
     warning.assert_called_once()
     assert chunk["provider"] == completed["provider"] == "openrouter:unknown"
+
+
+def test_apply_provider_field_openrouter_falls_back_to_pinned_endpoint() -> None:
+    """With the request pinned to one endpoint, an unreported provider is that
+    endpoint, still logged; a reported one keeps winning."""
+    p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
+    token = pinned_endpoint_context.set("deepinfra/fp8")
+    try:
+        missing: dict = {"id": "gen-abc", "usage": {"prompt_tokens": 1}}
+        with patch("routstr.upstream.openrouter.logger.warning") as warning:
+            p._apply_provider_field(missing)
+            p._apply_provider_field(missing)
+        warning.assert_called_once()
+        assert warning.call_args.kwargs["extra"]["pinned_endpoint"] == "deepinfra/fp8"
+        assert missing["provider"] == "openrouter:deepinfra/fp8"
+
+        reported: dict = {"provider": "Fireworks"}
+        p._apply_provider_field(reported)
+        assert reported["provider"] == "openrouter:Fireworks"
+    finally:
+        pinned_endpoint_context.reset(token)
+
+    unpinned: dict = {"id": "gen-def"}
+    p._apply_provider_field(unpinned)
+    assert unpinned["provider"] == "openrouter:unknown"
 
 
 def test_apply_provider_field_openrouter_idempotent_no_double_prefix() -> None:
