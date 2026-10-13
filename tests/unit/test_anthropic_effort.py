@@ -21,6 +21,7 @@ def model() -> Model:
             input_modalities=["text"],
             output_modalities=["text"],
             tokenizer="Claude",
+            instruct_type=None,
         ),
         pricing=Pricing(prompt=1e-7, completion=5e-7),
         reasoning=Reasoning(
