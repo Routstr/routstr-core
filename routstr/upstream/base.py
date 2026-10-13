@@ -6074,6 +6074,10 @@ class BaseUpstreamProvider:
                 )
                 if not provider or not provider.id:
                     raise HTTPException(status_code=404, detail="Provider not found")
+                if not provider.enabled:
+                    self._models_cache = []
+                    self._models_by_id = {}
+                    return
 
                 db_models = await list_models(
                     session=session,
