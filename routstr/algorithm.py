@@ -212,8 +212,13 @@ def create_model_mappings(
         alias_candidates.append((model, provider))
 
     def record_unique_model_key(model: "Model") -> None:
-        """Record one case-insensitive public ID and its display spelling."""
-        base_id = get_base_model_id(model.id)
+        """Record one case-insensitive public ID and its display spelling.
+
+        Base IDs are advertised lowercase, matching OpenRouter's catalog, so
+        ``GLM-5.3`` and ``z-ai/glm-5.3`` publish as one ``glm-5.3``. An
+        operator-set forwarded ID is published as written.
+        """
+        base_id = get_base_model_id(model.id).lower()
         public_id = get_effective_forwarded_model_id(model) or base_id
         unique_model_keys.setdefault(public_id.lower(), public_id)
 
@@ -402,7 +407,7 @@ def create_model_mappings(
             return 3
         if model.canonical_slug:
             canonical_base = get_base_model_id(model.canonical_slug)
-            if canonical_base == alias:
+            if canonical_base.lower() == alias:
                 return 2
         return 1
 
@@ -435,6 +440,14 @@ def create_model_mappings(
         if not ranked_candidates:
             continue
         best_model, best_provider = ranked_candidates[0]
+        # Keys match case-insensitively, so the first-seen spelling can belong
+        # to a provider that lost on price. Advertise the winner's own spelling.
+        winner_forwarded_id = get_effective_forwarded_model_id(best_model)
+        winner_base_id = get_base_model_id(best_model.id).lower()
+        for winner_id in (winner_forwarded_id, winner_base_id):
+            if winner_id and winner_id.lower() == unique_key:
+                advertised_id = winner_id
+                break
         unique_models[unique_key] = best_model.copy(
             update={
                 "id": advertised_id,
