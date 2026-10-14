@@ -96,6 +96,14 @@ if typing.TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _decoded_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Let ASGI frame bodies that httpx decoded or Routstr annotated."""
+    excluded = {"content-length", "content-encoding", "transfer-encoding", "connection"}
+    return {
+        name: value for name, value in headers.items() if name.lower() not in excluded
+    }
+
+
 CostMetadata = CostData | MaxCostData | dict[str, Any]
 
 
@@ -1534,7 +1542,7 @@ class BaseUpstreamProvider:
                 await stream_finalizer.run()
 
         # Remove inaccurate encoding headers from upstream response
-        response_headers = dict(response.headers)
+        response_headers = _decoded_response_headers(response.headers)
         response_headers.pop("content-encoding", None)
         response_headers.pop("content-length", None)
 
@@ -1995,7 +2003,7 @@ class BaseUpstreamProvider:
                 await stream_finalizer.run()
 
         # Remove inaccurate encoding headers from upstream response
-        response_headers = dict(response.headers)
+        response_headers = _decoded_response_headers(response.headers)
         response_headers.pop("content-encoding", None)
         response_headers.pop("content-length", None)
 
@@ -2287,7 +2295,7 @@ class BaseUpstreamProvider:
             stream,
             finalizer=finalizer,
             status_code=response.status_code,
-            headers=dict(response.headers),
+            headers=_decoded_response_headers(response.headers),
         )
 
     async def handle_streaming_messages_completion(
@@ -2588,7 +2596,7 @@ class BaseUpstreamProvider:
             finally:
                 await stream_finalizer.run()
 
-        response_headers = dict(response.headers)
+        response_headers = _decoded_response_headers(response.headers)
         response_headers.pop("content-encoding", None)
         response_headers.pop("content-length", None)
 
@@ -3974,7 +3982,7 @@ class BaseUpstreamProvider:
                     request, path, response
                 )
 
-            response_headers = dict(response.headers)
+            response_headers = _decoded_response_headers(response.headers)
             response_headers.pop("content-encoding", None)
             response_headers.pop("content-length", None)
             return Response(
@@ -4198,7 +4206,7 @@ class BaseUpstreamProvider:
             },
         )
 
-        response_headers = dict(response.headers)
+        response_headers = _decoded_response_headers(response.headers)
         if "transfer-encoding" in response_headers:
             del response_headers["transfer-encoding"]
         if "content-encoding" in response_headers:
@@ -4444,7 +4452,7 @@ class BaseUpstreamProvider:
                     media_type="application/json",
                 )
 
-            response_headers = dict(response.headers)
+            response_headers = _decoded_response_headers(response.headers)
             if "transfer-encoding" in response_headers:
                 del response_headers["transfer-encoding"]
             if "content-encoding" in response_headers:
@@ -4532,7 +4540,7 @@ class BaseUpstreamProvider:
             return Response(
                 content=content_str,
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=_decoded_response_headers(response.headers),
                 media_type="application/json",
             )
 
@@ -4620,7 +4628,7 @@ class BaseUpstreamProvider:
             return ClosingStreamingResponse(
                 response.aiter_bytes(),
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=_decoded_response_headers(response.headers),
             )
 
     async def forward_x_cashu_request(
@@ -4822,7 +4830,7 @@ class BaseUpstreamProvider:
             return ClosingStreamingResponse(
                 OwnedUpstreamStream(response.aiter_bytes(), response, client),
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=_decoded_response_headers(response.headers),
             )
         except asyncio.CancelledError:
             await close_upstream_exchange(response, client)
@@ -5127,7 +5135,7 @@ class BaseUpstreamProvider:
             return ClosingStreamingResponse(
                 OwnedUpstreamStream(response.aiter_bytes(), response, client),
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=_decoded_response_headers(response.headers),
             )
         except asyncio.CancelledError:
             await close_upstream_exchange(response, client)
@@ -5239,7 +5247,7 @@ class BaseUpstreamProvider:
             return ClosingStreamingResponse(
                 response.aiter_bytes(),
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=_decoded_response_headers(response.headers),
             )
 
     async def handle_x_cashu_streaming_responses_response(
@@ -5269,7 +5277,7 @@ class BaseUpstreamProvider:
             },
         )
 
-        response_headers = dict(response.headers)
+        response_headers = _decoded_response_headers(response.headers)
         if "transfer-encoding" in response_headers:
             del response_headers["transfer-encoding"]
         if "content-encoding" in response_headers:
@@ -5501,7 +5509,7 @@ class BaseUpstreamProvider:
                     media_type="application/json",
                 )
 
-            response_headers = dict(response.headers)
+            response_headers = _decoded_response_headers(response.headers)
             if "transfer-encoding" in response_headers:
                 del response_headers["transfer-encoding"]
             if "content-encoding" in response_headers:
@@ -5589,7 +5597,7 @@ class BaseUpstreamProvider:
             return Response(
                 content=content_str,
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=_decoded_response_headers(response.headers),
                 media_type="application/json",
             )
 
