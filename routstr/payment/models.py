@@ -342,7 +342,7 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
 
 
 def allows_cache_pricing_backfill(provider_type: str | None) -> bool:
-    return provider_type not in {"ppqai", "venice"}
+    return provider_type not in {"ppqai", "venice", "together"}
 
 
 def _build_model_from_row(

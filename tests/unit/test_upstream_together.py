@@ -163,6 +163,26 @@ def test_text_pricing_is_per_token() -> None:
     assert llama.image_pricing is None
 
 
+@pytest.mark.parametrize(
+    "cached_input,expected",
+    [(0.2, 2e-7), ("0.2", 2e-7), (None, 0), (0, 0), (-1, 0), ("bad", 0)],
+)
+def test_native_cache_pricing(cached_input: Any, expected: float) -> None:
+    entry = {
+        "id": "vendor/model",
+        "type": "chat",
+        "pricing": {"input": 1, "output": 2, "cached_input": cached_input},
+    }
+    models, _ = _fetch([entry])
+    assert models[0].pricing.input_cache_read == pytest.approx(expected)
+    assert models[0].pricing.input_cache_write == 0
+    provider = TogetherUpstreamProvider(api_key="sk-test", provider_fee=1.1)
+    with patch("routstr.upstream.base.backfill_cache_pricing") as backfill:
+        adjusted = provider._apply_provider_fee_to_model(models[0])
+    backfill.assert_not_called()
+    assert adjusted.pricing.input_cache_read == pytest.approx(expected * 1.1)
+
+
 def test_published_image_prices_become_books() -> None:
     models, _ = _fetch()
     by_id = {m.id: m for m in models}
@@ -178,9 +198,7 @@ def test_published_image_prices_become_books() -> None:
     assert kontext.image_pricing.unit == "megapixel"
     assert kontext.image_pricing.megapixel_usd == pytest.approx(0.04)
     assert kontext.image_pricing.default_steps == 28
-    assert kontext.pricing.image_output == pytest.approx(
-        kontext.image_pricing.max_usd
-    )
+    assert kontext.pricing.image_output == pytest.approx(kontext.image_pricing.max_usd)
 
 
 def test_exact_catalog_prices_beat_the_table_but_starting_prices_do_not() -> None:
