@@ -53,7 +53,7 @@ def _session(row: ModelRow, provider_type: str) -> AsyncSession:
     )
 
 
-@pytest.mark.parametrize("provider_type", ["ppqai", "venice"])
+@pytest.mark.parametrize("provider_type", ["ppqai", "venice", "together"])
 @pytest.mark.parametrize("cache_rate", [0, 7e-7])
 def test_db_conversion_preserves_native_or_explicit_cache_prices(
     provider_type: str, cache_rate: float
@@ -74,7 +74,7 @@ def test_db_conversion_preserves_native_or_explicit_cache_prices(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider_type", ["ppqai", "venice"])
+@pytest.mark.parametrize("provider_type", ["ppqai", "venice", "together"])
 async def test_admin_listing_passes_provider_policy_to_database_conversion(
     provider_type: str,
 ) -> None:
@@ -89,7 +89,7 @@ async def test_admin_listing_passes_provider_policy_to_database_conversion(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider_type", ["ppqai", "venice"])
+@pytest.mark.parametrize("provider_type", ["ppqai", "venice", "together"])
 async def test_runtime_overrides_do_not_reintroduce_generic_cache_prices(
     provider_type: str,
 ) -> None:
@@ -120,7 +120,7 @@ async def test_runtime_overrides_do_not_reintroduce_generic_cache_prices(
     assert models[0].pricing.input_cache_read == 0
 
 
-@pytest.mark.parametrize("provider_type", ["ppqai", "venice"])
+@pytest.mark.parametrize("provider_type", ["ppqai", "venice", "together"])
 def test_path_sats_conversion_respects_native_cache_policy(provider_type: str) -> None:
     model: dict[str, Any] = {
         "id": "vendor/model",

@@ -19,6 +19,7 @@ import httpx
 from ..core.logging import get_logger
 from ..payment.image_pricing import ImagePricing
 from ..payment.models import Architecture, Model, Pricing, TopProvider
+from ..payment.rates import coerce_rate
 from .base import BaseUpstreamProvider
 from .image_catalog import attach_image_books, static_image_book
 
@@ -295,7 +296,12 @@ class TogetherUpstreamProvider(BaseUpstreamProvider):
             if prompt is None or completion is None:
                 return None
             modality = ("text->text", ["text"], ["text"])
-            pricing = Pricing(prompt=prompt, completion=completion)
+            pricing = Pricing(
+                prompt=prompt,
+                completion=completion,
+                input_cache_read=(coerce_rate(pricing_raw.get("cached_input")) or 0.0)
+                / _USD_PER_MILLION,
+            )
         else:
             return None
 
