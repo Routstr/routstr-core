@@ -158,6 +158,35 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
             model_id = fixed_transforms[model_id]
         return model_id
 
+    def prepare_request_body(
+        self,
+        body: bytes | None,
+        model_obj: Model,
+        include_stream_usage: bool = False,
+    ) -> bytes | None:
+        body = super().prepare_request_body(body, model_obj, include_stream_usage)
+        if not body:
+            return body
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return body
+        # Anthropic 400s when both caps are set. Keep the larger, matching the
+        # cap the reservation was priced against.
+        if (
+            isinstance(data, dict)
+            and "messages" in data
+            and data.get("max_tokens") is not None
+            and data.get("max_completion_tokens") is not None
+        ):
+            caps = [data.pop("max_tokens"), data.pop("max_completion_tokens")]
+            try:
+                data["max_tokens"] = max(caps, key=int)
+            except (TypeError, ValueError):
+                data["max_tokens"] = caps[0]
+            return json.dumps(data).encode()
+        return body
+
     def prepare_headers(self, request_headers: dict) -> dict:
         headers = super().prepare_headers(request_headers)
         # Match Anthropic's SDK default API version while preserving client overrides.
