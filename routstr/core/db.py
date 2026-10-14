@@ -610,6 +610,13 @@ class Refund(SQLModel, table=True):  # type: ignore
         default=None, description="Lightning address or LNURL, NULL for cashu"
     )
     amount_msats: int = Field(description="Balance debited when the claim opened")
+    sent_msats: int | None = Field(default=None, description="Lightning invoice amount")
+    input_msats: int | None = Field(
+        default=None, description="Selected melt input value"
+    )
+    spent_msats: int | None = Field(
+        default=None, description="Confirmed net wallet debit"
+    )
     unit: str = Field(description="Mint unit the payout is denominated in")
     mint_url: str = Field(description="Mint the payout is drawn from")
     status: str = Field(

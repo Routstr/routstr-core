@@ -25,6 +25,7 @@ from .core.logging import get_logger
 from .core.settings import settings
 from .payment.lnurl import (
     LNURLError,
+    LNURLPaymentReceipt,
     MeltOutcomeAmbiguousError,
     MeltUnpaidError,
     get_lnurl_data,
@@ -35,6 +36,7 @@ from .wallet import (
     is_mint_connection_error,
     is_swap_busy,
     preferred_trusted_mint,
+    recover_lnurl_payment_receipt,
     resolve_trusted_source_mint,
     send_to_lnurl,
     send_token,
@@ -207,6 +209,15 @@ async def record_quote(refund: Refund, quote_id: str, mint_url: str) -> None:
     refund.mint_url = mint_url
 
 
+def _validate_lightning_receipt(refund: Refund, receipt: LNURLPaymentReceipt) -> None:
+    if receipt.spent_msats > refund.amount_msats:
+        raise MeltOutcomeAmbiguousError("LNURL debit exceeds the refund budget")
+    if refund.sent_msats is not None and receipt.sent_msats != refund.sent_msats:
+        raise MeltOutcomeAmbiguousError("LNURL receipt does not match the invoice")
+    if refund.input_msats is not None and receipt.spent_msats > refund.input_msats:
+        raise MeltOutcomeAmbiguousError("LNURL debit exceeds the selected inputs")
+
+
 async def settle(
     session: AsyncSession,
     refund: Refund,
@@ -214,6 +225,7 @@ async def settle(
     quote_id: str | None = None,
     token: str | None = None,
     mint_url: str | None = None,
+    receipt: LNURLPaymentReceipt | None = None,
 ) -> bool:
     values: dict[str, Any] = {"status": "paid"}
     if quote_id is not None:
@@ -222,11 +234,24 @@ async def settle(
         values["token"] = token
     if mint_url is not None:
         values["mint_url"] = mint_url
+    if receipt is not None:
+        _validate_lightning_receipt(refund, receipt)
+        values.update(sent_msats=receipt.sent_msats, spent_msats=receipt.spent_msats)
     # The payout side knows the money moved, so a claim the reconciler gave up
     # on (stuck) is closed as paid too.
     settled = await _close(
         session, refund, from_statuses=REFUND_UNRESOLVED_STATUSES, **values
     )
+    if settled and receipt is not None:
+        # Credit in the same transaction as the terminal claim transition.
+        # A competing settlement/reconciler cannot credit it a second time.
+        await session.exec(  # type: ignore[call-overload]
+            update(ApiKey)
+            .where(col(ApiKey.hashed_key) == refund.api_key_hashed_key)
+            .values(
+                balance=col(ApiKey.balance) + refund.amount_msats - receipt.spent_msats
+            )
+        )
     await session.commit()
     if not settled:
         logger.warning(
@@ -275,6 +300,8 @@ async def hold(
     if token is not None:
         values["token"] = token
         values["mint_url"] = refund.mint_url
+    if refund.spent_msats is not None:
+        values.update(sent_msats=refund.sent_msats, spent_msats=refund.spent_msats)
     await _close(session, refund, **values)
     await session.commit()
 
@@ -367,6 +394,8 @@ async def latest_terminal(session: AsyncSession, key: ApiKey) -> Refund | None:
 
 def _delivered_amount_msats(refund: Refund) -> int:
     """Actual bearer-token value, which can be net of cross-mint fees."""
+    if refund.method == "lightning" and refund.sent_msats is not None:
+        return refund.sent_msats
     if not refund.token:
         return refund.amount_msats
     try:
@@ -391,6 +420,9 @@ def describe(refund: Refund) -> dict[str, str]:
         body["sats"] = str(delivered_msats // 1000)
     else:
         body["msats"] = str(delivered_msats)
+    if refund.method == "lightning" and refund.spent_msats is not None:
+        body["fee_msats"] = str(refund.spent_msats - delivered_msats)
+        body["remaining_msats"] = str(refund.amount_msats - refund.spent_msats)
     return body
 
 
@@ -398,14 +430,42 @@ async def _pay_lightning(session: AsyncSession, refund: Refund) -> bool:
     async def capture_quote(quote: str, mint_url: str) -> None:
         await record_quote(refund, quote, mint_url)
 
+    async def capture_inputs(sent_msats: int, input_msats: int) -> None:
+        async with create_session() as checkpoint_session:
+            result = await checkpoint_session.exec(  # type: ignore[call-overload]
+                update(Refund)
+                .where(col(Refund.id) == refund.id)
+                .where(col(Refund.status).in_(REFUND_OPEN_STATUSES))
+                .where(col(Refund.quote_id) == refund.quote_id)
+                .values(
+                    sent_msats=sent_msats,
+                    input_msats=input_msats,
+                    claimed_at=int(time.time()),
+                    updated_at=int(time.time()),
+                )
+            )
+            await checkpoint_session.commit()
+        if not result.rowcount:
+            raise LNURLError("Refund claim closed before melt inputs were recorded")
+        refund.sent_msats = sent_msats
+        refund.input_msats = input_msats
+
     try:
-        await send_to_lnurl(
+        receipt = await send_to_lnurl(
             amount_in_unit(refund.amount_msats, refund.unit),
             refund.unit,
             refund.mint_url,
             str(refund.destination),
             on_melt_quote=capture_quote,
+            on_melt_inputs=capture_inputs,
         )
+        if isinstance(receipt, LNURLPaymentReceipt):
+            _validate_lightning_receipt(refund, receipt)
+            refund.sent_msats = receipt.sent_msats
+            refund.spent_msats = receipt.spent_msats
+            return await settle(
+                session, refund, quote_id=refund.quote_id, receipt=receipt
+            )
     except MeltOutcomeAmbiguousError as e:
         await hold(session, refund, refund.quote_id)
         logger.error(
@@ -637,8 +697,32 @@ async def _reconcile(refund: Refund, now: int) -> None:
         refund.mint_url, refund.unit, refund.quote_id
     )
     if status == "paid":
+        receipt = None
+        if refund.sent_msats is not None and refund.input_msats is not None:
+            try:
+                if refund.spent_msats is not None:
+                    receipt = LNURLPaymentReceipt(refund.sent_msats, refund.spent_msats)
+                else:
+                    recovered = await recover_lnurl_payment_receipt(
+                        refund.mint_url,
+                        refund.unit,
+                        refund.quote_id,
+                        refund.sent_msats,
+                        refund.input_msats,
+                    )
+                    if not isinstance(recovered, LNURLPaymentReceipt):
+                        raise MeltOutcomeAmbiguousError(
+                            "Paid LNURL accounting unavailable"
+                        )
+                    receipt = recovered
+            except Exception:
+                logger.exception(
+                    "Paid Lightning refund still needs debit reconciliation",
+                    extra={"refund_id": refund.id},
+                )
+                return
         async with create_session() as session:
-            await settle(session, refund)
+            await settle(session, refund, receipt=receipt)
     elif status == "unpaid":
         # A fresh melt can report unpaid briefly; trust it only after a timeout.
         if refund.updated_at > now - settings.refund_claim_timeout_seconds:
