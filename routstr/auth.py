@@ -1223,6 +1223,7 @@ async def _adjust_payment_for_tokens(
     terminal_outcome: TerminalOutcomeContext | None = None,
     usage_presence: UsageFieldPresence | None = None,
     terminal_usage: dict | None = None,
+    precomputed_cost: CostData | None = None,
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
@@ -1336,12 +1337,18 @@ async def _adjust_payment_for_tokens(
                 usage=recorded_usage,
             )
 
-    calculated_cost = await calculate_cost(
-        response_data,
-        deducted_max_cost,
-        model_obj,
-        provider_fee,
-        usage_presence,
+    # A flat per-unit charge is priced by the caller; its response carries no
+    # usage object for ``calculate_cost`` to read.
+    calculated_cost: CostData | CostDataError = (
+        precomputed_cost
+        if precomputed_cost is not None
+        else await calculate_cost(
+            response_data,
+            deducted_max_cost,
+            model_obj,
+            provider_fee,
+            usage_presence,
+        )
     )
     if isinstance(calculated_cost, CostDataError):
         # Content was already served, so release instead of raising a 400.
@@ -1701,6 +1708,7 @@ async def adjust_payment_for_tokens(
     terminal_outcome: TerminalOutcomeContext | None = None,
     usage_presence: UsageFieldPresence | None = None,
     terminal_usage: dict | None = None,
+    precomputed_cost: CostData | None = None,
 ) -> dict:
     """Settle payment while exposing latency for every import path."""
     started = time.perf_counter()
@@ -1718,6 +1726,7 @@ async def adjust_payment_for_tokens(
             terminal_outcome,
             usage_presence,
             terminal_usage,
+            precomputed_cost,
         )
         succeeded = True
         return result

@@ -184,3 +184,26 @@ async def test_source_filter_and_free_models_are_still_applied(
     result = await async_fetch_openrouter_models(source_filter="openai")
 
     assert [model["id"] for model in result] == ["gpt-x"]
+
+
+@pytest.mark.asyncio
+async def test_image_only_models_are_fetched_and_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Image-only models are absent from /models and price no tokens."""
+    image_model = {
+        "id": "recraft/recraft-v4.1",
+        "name": "Recraft V4.1",
+        "pricing": {"prompt": "0", "completion": "0", "image_output": "0.0000016"},
+    }
+
+    def handler(url: str, attempt: int) -> httpx.Response:
+        if url.endswith("output_modalities=image"):
+            return _ok_response(url, {"data": [image_model, _model("vendor/model-a")]})
+        return _ok_response(url, _payload_for(url))
+
+    counts = _install_get(monkeypatch, handler)
+    models = await models_module.async_fetch_openrouter_models()
+    ids = [m["id"] for m in models]
+    assert ids == ["vendor/model-a", "vendor/embed-1", "recraft/recraft-v4.1"]
+    assert counts[MODELS_URL + "?output_modalities=image"] == 1

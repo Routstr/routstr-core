@@ -23,6 +23,7 @@ __all__ = [
     "CostMetadata",
     "MaxCostData",
     "calculate_cost",
+    "calculate_flat_cost",
     "cost_field",
     "parse_token_count",
 ]
@@ -119,6 +120,30 @@ def unpriced_cost(
         cost.cache_read_input_tokens = usage.cache_read_tokens
         cost.cache_creation_input_tokens = usage.cache_write_tokens
     return cost
+
+
+def calculate_flat_cost(units: int, sats_per_unit: float) -> CostData:
+    """Price a request billed per produced unit instead of per token.
+
+    Image generation is the case this exists for: no usage object, so the
+    token path would release the reservation and serve the request free.
+    """
+    if units <= 0 or not is_usable_rate(sats_per_unit) or sats_per_unit <= 0:
+        return _empty_cost()
+
+    total_sats = units * sats_per_unit
+    total_msats = math.ceil(total_sats * 1000)
+    try:
+        total_usd = total_sats * sats_usd_price()
+    except Exception:
+        total_usd = 0.0
+    return CostData(
+        base_msats=total_msats,
+        input_msats=0,
+        output_msats=total_msats,
+        total_msats=total_msats,
+        total_usd=total_usd,
+    )
 
 
 async def calculate_cost(

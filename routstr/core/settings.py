@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     upstream_5xx_retry_attempts: int = Field(
         default=1, ge=0, env="UPSTREAM_5XX_RETRY_ATTEMPTS"
     )
+    # Image generation: most USD (fee included) one request may be quoted at,
+    # 0 for no limit, and most bytes a buffered image response may carry.
+    image_max_request_usd: float = Field(default=0.0, ge=0, env="IMAGE_MAX_REQUEST_USD")
+    image_max_response_bytes: int = Field(
+        default=40 * 1024 * 1024, gt=0, env="IMAGE_MAX_RESPONSE_BYTES"
+    )
     # Streaming guards, off by default (0). A stream that never produces a
     # first chunk can still fail over; one that stalls later can only be
     # aborted and billed for what it delivered. Reasoning models can stay
