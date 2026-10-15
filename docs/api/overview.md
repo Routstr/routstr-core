@@ -107,7 +107,7 @@ Standard OpenAI-compatible endpoints:
 - **System One**: `/v1/systemone` (TypeSafe decision models)
 - **Decisions**: `/v1/decisions` (OpenAI Decisions API)
 - **Completions**: `/v1/completions` *(planned)*
-- **Images**: `/v1/images/generations` *(planned)*
+- **Images**: `/v1/images/generations`, `/v1/images/edits`, `/v1/images/variations` (plus Venice's native `/v1/image/*` routes)
 - **Audio**: `/v1/audio/transcriptions` *(planned)*
 
 ### Payment Endpoints
