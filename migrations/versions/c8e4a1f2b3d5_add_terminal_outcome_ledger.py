@@ -1,7 +1,7 @@
 """add terminal outcome ledger
 
 Revision ID: c8e4a1f2b3d5
-Revises: 424bb59871d4
+Revises: c8a1d2e3f4b5
 Create Date: 2026-08-31 00:00:00.000000
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "c8e4a1f2b3d5"
-down_revision = "424bb59871d4"
+down_revision = "c8a1d2e3f4b5"
 branch_labels = None
 depends_on = None
 

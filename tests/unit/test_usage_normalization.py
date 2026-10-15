@@ -74,6 +74,25 @@ from routstr.payment.usage import (
                 cache_write_tokens=2000,
             ),
         ),
+        # Together's top-level cached count is included in prompt_tokens.
+        (
+            {"prompt_tokens": 2000, "completion_tokens": 100, "cached_tokens": 800},
+            NormalizedUsage(
+                input_tokens=1200, output_tokens=100, cache_read_tokens=800
+            ),
+        ),
+        # Nested details take precedence; do not add duplicate cache counts.
+        (
+            {
+                "prompt_tokens": 2000,
+                "completion_tokens": 100,
+                "cached_tokens": 900,
+                "prompt_tokens_details": {"cached_tokens": 800},
+            },
+            NormalizedUsage(
+                input_tokens=1200, output_tokens=100, cache_read_tokens=800
+            ),
+        ),
         # Plain OpenAI without caching
         (
             {"prompt_tokens": 100, "completion_tokens": 50},

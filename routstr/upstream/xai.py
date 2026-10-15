@@ -2,6 +2,7 @@ from typing import TYPE_CHECKING
 
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
+from .image_catalog import attach_image_books
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -21,7 +22,9 @@ class XAIUpstreamProvider(BaseUpstreamProvider):
         )
 
     @classmethod
-    def _build_from_row(cls, provider_row: "UpstreamProviderRow") -> "XAIUpstreamProvider":
+    def _build_from_row(
+        cls, provider_row: "UpstreamProviderRow"
+    ) -> "XAIUpstreamProvider":
         return cls(
             api_key=provider_row.api_key,
             provider_fee=provider_row.provider_fee,
@@ -44,4 +47,7 @@ class XAIUpstreamProvider(BaseUpstreamProvider):
     async def fetch_models(self) -> list[Model]:
         """Fetch XAI models from OpenRouter API filtered by xai source."""
         models_data = await async_fetch_openrouter_models(source_filter="x-ai")
-        return [Model(**model) for model in models_data]  # type: ignore
+        models = [Model(**model) for model in models_data]  # type: ignore
+        # The OpenRouter feed prices Grok Imagine per token; without a per-image
+        # book those models would reserve and bill a fraction of a sat.
+        return attach_image_books(models, {}, source="xAI")
