@@ -27,6 +27,12 @@ DEFAULT_PORT = 8000
 COMPOSE = ("docker", "compose", "-f", "compose.node.yml")
 # The node saves these on first boot; afterwards the saved value wins over .env.
 SAVED_SETTING_KEYS = ("RECEIVE_LN_ADDRESS", "MIN_PAYOUT_SAT", "PAYOUT_INTERVAL_SECONDS")
+# A non-empty UPSTREAM_BASE_URL + UPSTREAM_API_KEY seeds an enabled "custom"
+# upstream provider on the node's first boot and saves the pair in Settings, so a
+# template placeholder would silently configure an upstream (and keep coming back
+# once the provider list is emptied). Upstreams belong to the dashboard, so the
+# .env we emit never activates this pair.
+DASHBOARD_ONLY_KEYS = ("UPSTREAM_BASE_URL", "UPSTREAM_API_KEY")
 
 
 def _env_value(text: str, key: str) -> str | None:
@@ -51,6 +57,17 @@ def _apply_overrides(text: str, overrides: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _comment_out(text: str, keys: tuple[str, ...]) -> str:
+    """Comment out live assignments to ``keys``, leaving commented lines as they are."""
+    pattern = re.compile(rf"^\s*({'|'.join(re.escape(key) for key in keys)})\s*=")
+    return (
+        "\n".join(
+            f"# {line}" if pattern.match(line) else line for line in text.splitlines()
+        )
+        + "\n"
+    )
+
+
 def _create_private(path: Path, content: str) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as handle:
@@ -66,7 +83,8 @@ def _write_private(path: Path, content: str) -> None:
 def prepare_env(root: Path, overrides: dict[str, str] | None = None) -> bool:
     """Create or update ``.env``; return True when it was created.
 
-    Only the keys in ``overrides`` are written. An existing ``.env`` is never
+    Only the keys in ``overrides`` are written, and ``DASHBOARD_ONLY_KEYS`` are
+    commented out in a newly created ``.env``. An existing ``.env`` is never
     blindly overwritten: identity/onion settings are refused outright and a
     conflicting ``HTTP_URL`` is an error, so an operator edit is never silently
     clobbered.
@@ -94,6 +112,7 @@ def prepare_env(root: Path, overrides: dict[str, str] | None = None) -> bool:
     # O_EXCL avoids overwriting an existing deployment or a concurrent first run.
     with (root / ".env.example").open() as source:
         content = _apply_overrides(source.read(), overrides)
+    content = _comment_out(content, DASHBOARD_ONLY_KEYS)
     try:
         _create_private(env, content)
     except BaseException:

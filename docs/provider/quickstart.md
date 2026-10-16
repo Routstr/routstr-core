@@ -23,8 +23,10 @@ admin password. The phases below cover the whole path.
 - An upstream API key (OpenAI, Anthropic, OpenRouter, …) to serve models. The node
   boots without one, but reports zero models until an upstream is configured.
 - **Public mode only**: a subdomain with a valid TLS certificate and a reverse
-  proxy forwarding it to `127.0.0.1:8000`, **plus a rule restricting `/admin`**
-  (IP allowlist or basic auth) — the bootstrap password is live from first boot.
+  proxy forwarding it to `127.0.0.1:8000`. The dashboard is protected by the
+  node's own admin password, so read the one-time bootstrap password and rotate
+  it. Restricting `/admin` at the proxy (IP allowlist or basic auth) is optional
+  defense-in-depth, not a setup requirement.
 
 Clone the repository and, for production, check out a reviewed release tag:
 
@@ -46,7 +48,7 @@ cd routstr-core
 
 | Phase | What you do |
 |-------|-------------|
-| **0** | Prepare the host: DNS, TLS, reverse proxy → `127.0.0.1:8000`, restrict `/admin` |
+| **0** | Prepare the host: DNS, TLS, reverse proxy → `127.0.0.1:8000` |
 | **1** | Start the node (`node_setup.py start`) — it generates secrets and publishes |
 | **2** | **Back up** the master key, database and wallet *before* configuring |
 | **3** | Configure via the dashboard: rotate password, add upstream, pricing |
@@ -63,7 +65,9 @@ cd routstr-core
 3. Run a reverse proxy on the **same host** forwarding
    `https://node.example` → `http://127.0.0.1:8000`. Only `443` should be
    publicly routed.
-4. Restrict `/admin` at the proxy (allowlist or basic auth).
+4. Optional: restrict `/admin` at the proxy (IP allowlist or basic auth) for an
+   extra layer. This is not required — the node already requires its admin
+   password. Reading and rotating the bootstrap password is the required step.
 
 **Private mode (opt-out).** Nothing to prepare; administer the node over an SSH
 tunnel (see Phase 1).
@@ -86,9 +90,11 @@ python3 scripts/node_setup.py start \
   answer before anything is published (a proxy `502` while the node boots is
   fine). Use `--private` if this fails;
 - writes `.env` from `.env.example` with owner-only (`0600`) permissions,
-  setting `HTTP_URL` and `RECEIVE_LN_ADDRESS`. An existing `.env` is never
-  blindly overwritten: a conflicting `HTTP_URL` is an error, and `NSEC` /
-  `ONION_URL` are refused (manage those elsewhere);
+  setting `HTTP_URL` and `RECEIVE_LN_ADDRESS` and leaving the template's upstream
+  pair commented, so the node boots with no upstream until you add one in the
+  dashboard. An existing `.env` is never blindly overwritten: a conflicting
+  `HTTP_URL` is an error, and `NSEC` / `ONION_URL` are refused (manage those
+  elsewhere);
 - builds and starts `compose.node.yml`: the API binds **`127.0.0.1` only**, there
   is no Tor service, and analytics sharing starts off (change it later in Settings);
 - **auto-generates the node's secrets** — the master key `routstr_secret.key` and

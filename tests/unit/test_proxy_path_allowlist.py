@@ -79,9 +79,7 @@ def test_unknown_paths_are_not_forwarded() -> None:
         "audio/speech",
         "audio/transcriptions",
         "audio/translations",
-        "images/generations",
-        "images/edits",
-        "images/variations",
+        "videos",
     ],
 )
 def test_unbilled_endpoints_are_not_forwarded_by_default(path: str) -> None:
@@ -142,6 +140,13 @@ def test_known_prefix_does_not_carry_an_unknown_endpoint(path: str) -> None:
         ("v1/messages", "POST"),
         ("v1/messages/count_tokens", "POST"),
         ("v1/embeddings", "POST"),
+        ("v1/images/generations", "POST"),
+        ("v1/images/edits", "POST"),
+        ("v1/images/variations", "POST"),
+        ("v1/image/generate", "POST"),
+        ("v1/image/edit", "POST"),
+        ("v1/image/inpaint", "POST"),
+        ("v1/image/upscale", "POST"),
         ("models", "GET"),
         ("attestation", "GET"),
         ("tee/attestation", "GET"),
@@ -156,6 +161,8 @@ def test_canonical_endpoints_are_forwarded(path: str, method: str) -> None:
     [
         ("chat/completions", "GET"),  # billed endpoints are POST-only
         ("v1/embeddings", "GET"),
+        ("v1/images/generations", "GET"),
+        ("v1/image/generate", "GET"),
         ("models", "POST"),  # read-only endpoints are GET-only
         ("attestation", "POST"),
         ("v1/chat/completions", "DELETE"),  # never routed here, refused anyway
