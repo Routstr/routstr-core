@@ -1,0 +1,22 @@
+{
+  "id": "46c2824bbfd86045982f291c725fb0c91c27b3dc7ce43a2f3b70f16b3fda5c3c",
+  "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+  "created_at": 1789689600,
+  "kind": 38422,
+  "tags": [
+    [
+      "d",
+      "routstr.analytics.v2:699b4243f30e4058:week:2026-09-14:epoch:3"
+    ],
+    [
+      "a",
+      "38421:4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa:provider"
+    ],
+    [
+      "w",
+      "2026-09-14"
+    ]
+  ],
+  "content": "{\"columns\":[\"completed_requests\",\"input_observed_requests\",\"output_observed_requests\",\"cache_read_observed_requests\",\"cache_creation_observed_requests\",\"input_tokens\",\"output_tokens\",\"cache_read_input_tokens\",\"cache_creation_input_tokens\",\"revenue_msats\",\"input_estimated_requests\",\"output_estimated_requests\",\"cache_read_estimated_requests\",\"cache_creation_estimated_requests\",\"input_missing_requests\",\"output_missing_requests\",\"cache_read_missing_requests\",\"cache_creation_missing_requests\",\"measured_token_requests\",\"measured_tokens\"],\"complete\":false,\"coverage_start\":\"2026-09-14\",\"daily_models\":{\"2026-09-14\":{\"_other\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"model/free\":[1,0,0,0,0,15,5,0,0,0,1,1,0,0,0,0,1,1,0,0],\"openai/gpt-test\":[1,1,1,1,1,120,40,6,4,2500,0,0,0,0,0,0,0,0,1,170]},\"2026-09-15\":{\"_other\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]},\"2026-09-16\":{\"_other\":[1,0,0,0,0,0,0,0,0,750,0,0,0,0,1,1,1,1,0,0]},\"2026-09-17\":{\"_other\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}},\"days\":{\"2026-09-14\":[2,1,1,1,1,135,45,6,4,2500,1,1,0,0,0,0,1,1,1,170],\"2026-09-15\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"2026-09-16\":[1,0,0,0,0,0,0,0,0,750,0,0,0,0,1,1,1,1,0,0],\"2026-09-17\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]},\"epoch\":3,\"schema\":\"routstr.analytics.v2\",\"through\":\"2026-09-17\",\"week\":\"2026-09-14\"}",
+  "sig": "f03350c4bcf6f7ab7b455352f95ccbb2a9a65215e291deacea9291b3c79972f8d8e59255836cde23491c2443a695e508b163b9f3c41d21e23b6f7b988b716638"
+}
