@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, col, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.auth import validate_bearer_key
@@ -118,6 +118,30 @@ async def test_existing_key_updates_persist_and_override_negative_cache(
     assert guard.entries == 0
 
 
+async def test_known_dead_token_is_rejected_without_guard(
+    session: AsyncSession,
+) -> None:
+    redemption_negative_cache.put(
+        KEY_HASH,
+        CachedRedemptionFailure(
+            status_code=400,
+            error_type="token_already_spent",
+            message="Cashu token already spent",
+            code="cashu_token_already_spent",
+        ),
+    )
+    guard = CountingGuard()
+    with (
+        patch("routstr.auth.wallet_operation_guard", guard),
+        patch("routstr.auth.credit_balance", new_callable=AsyncMock) as redeem,
+        pytest.raises(HTTPException) as exc,
+    ):
+        await validate_bearer_key(TOKEN, session)
+    assert exc.value.status_code == 400
+    assert guard.entries == 0
+    redeem.assert_not_awaited()
+
+
 async def _credit(token: str, key: ApiKey, session: AsyncSession) -> int:
     key.balance += 100
     await session.commit()
@@ -185,3 +209,41 @@ async def test_concurrent_first_use_rechecks_inside_guard(engine: AsyncEngine) -
     assert [key.balance for key in keys] == [100, 100]
     assert guard.entries == 2
     redeem.assert_awaited_once()
+
+
+async def test_new_key_holds_no_write_lock_during_redemption(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    # Another request reserving while this token is at the mint must not wait
+    # on SQLite: the new key is only written together with its credit.
+    other = create_async_engine(engine.url, connect_args={"timeout": 0.2})
+    async with AsyncSession(other) as other_session:
+        other_session.add(ApiKey(hashed_key="other", balance=1))
+        await other_session.commit()
+
+    async def receive_while_other_writes(
+        token: str, destination_unit: str | None = None
+    ) -> tuple[int, str, str]:
+        async with AsyncSession(other) as other_session:
+            await other_session.exec(
+                update(ApiKey)
+                .where(col(ApiKey.hashed_key) == "other")
+                .values(reserved_balance=1)
+            )
+            await other_session.commit()
+        return 100, "sat", "http://mint:3338"
+
+    try:
+        with (
+            patch(
+                "routstr.auth.deserialize_token_from_string",
+                return_value=SimpleNamespace(mint="http://mint:3338", unit="sat"),
+            ),
+            patch(
+                "routstr.wallet.recieve_token", side_effect=receive_while_other_writes
+            ),
+        ):
+            key = await validate_bearer_key(TOKEN, session)
+    finally:
+        await other.dispose()
+    assert key.balance == 100_000
