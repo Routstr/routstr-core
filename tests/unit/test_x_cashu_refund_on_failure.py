@@ -232,10 +232,11 @@ async def test_created_refund_survives_storage_failure(api: str) -> None:
         patch("routstr.upstream.base.build_x_cashu_client", return_value=client),
     ):
         result = await paid_request(provider, api)
-    assert result.status_code == 500
+    # The client holds a valid refund, so this reads as the upstream failure.
+    assert result.status_code == 424
     assert result.headers["X-Cashu"] == "cashuArefund"
     error = json.loads(await body(result))["error"]
-    assert error["code"] == "refund_failed"
+    assert error["code"] == "UPSTREAM_UNAVAILABLE"
     assert error["refund_token"] == "cashuArefund"
     send.assert_awaited_once_with(20, unit="sat", mint_url="mint")
 

@@ -177,7 +177,8 @@ class _XCashuRefund:
             pass
         upstream_status = getattr(error, "status_code", None)
         upstream_code = getattr(error, "code", None)
-        failed = self.error is not None
+        # A token minted before its ledger write failed still reaches the client.
+        failed = self.token is None
         details = upstream_status_details(None, upstream_status) if not failed else None
         return Response(
             content=json.dumps(
@@ -226,6 +227,29 @@ class _XCashuRefund:
     ) -> Response:
         if content is None:
             return await self.error_response(error, amount, unit, mint, request_id)
+        return await self.serve_body(
+            content,
+            response.status_code,
+            _decoded_response_headers(response.headers),
+            amount,
+            unit,
+            max_cost_for_model,
+            mint,
+            request_id,
+        )
+
+    async def serve_body(
+        self,
+        content: bytes,
+        status_code: int,
+        headers: dict[str, str],
+        amount: int,
+        unit: str,
+        max_cost_for_model: int,
+        mint: str | None,
+        request_id: str | None,
+        media_type: str | None = None,
+    ) -> Response:
         # The buffered body will be served, so charge at most the model's maximum.
         refund_amount = messages_dispatch.compute_refund(
             amount, unit, max_cost_for_model
@@ -235,17 +259,17 @@ class _XCashuRefund:
                 await self.send(refund_amount, unit, mint, request_id=request_id)
         except Exception:
             pass
-        headers = dict(response.headers)
-        for name in ("transfer-encoding", "content-encoding", "content-length"):
-            headers.pop(name, None)
         if self.token:
             headers["X-Cashu"] = self.token
-        if self.error is not None:
+        elif self.error is not None:
             # The payment covers at least the max cost, so serve what was paid
             # for; withholding it would push clients to pay again.
             headers[X_ROUTSTR_REFUND_ERROR_HEADER] = "refund_failed"
         return Response(
-            content=content, status_code=response.status_code, headers=headers
+            content=content,
+            status_code=status_code,
+            headers=headers,
+            media_type=media_type,
         )
 
 
@@ -3138,40 +3162,62 @@ class BaseUpstreamProvider:
         if requested_model and "model" in response_json:
             response_json["model"] = requested_model
 
-        cost_data = await self.get_x_cashu_cost(
-            response_json, max_cost_for_model, model_obj
-        )
-
-        if (
-            cost_data
-            and "usage" in response_json
-            and isinstance(response_json["usage"], dict)
-        ):
-            _inject_cost_into_usage(response_json, cost_data)
-            self._fold_cache_into_input_tokens(response_json["usage"])
-
         response_headers: dict[str, str] = {}
-        if cost_data:
-            _inject_cost_response_headers(response_headers, cost_data)
-            refund_amount = messages_dispatch.compute_refund(
-                amount, unit, cost_data.total_msats
+        try:
+            cost_data = await self.get_x_cashu_cost(
+                response_json, max_cost_for_model, model_obj
             )
-            if refund_amount > 0:
-                refund_token = await _refund.send(
-                    refund_amount,
-                    unit,
-                    mint,
-                    request_id=request_id,
+
+            if (
+                cost_data
+                and "usage" in response_json
+                and isinstance(response_json["usage"], dict)
+            ):
+                _inject_cost_into_usage(response_json, cost_data)
+                self._fold_cache_into_input_tokens(response_json["usage"])
+
+            if cost_data:
+                _inject_cost_response_headers(response_headers, cost_data)
+                refund_amount = messages_dispatch.compute_refund(
+                    amount, unit, cost_data.total_msats
                 )
-                response_headers["X-Cashu"] = refund_token
-                logger.info(
-                    "Refund processed for non-streaming /v1/messages via litellm",
-                    extra={
-                        "refund_amount": refund_amount,
-                        "unit": unit,
-                        "model": response_json.get("model", "unknown"),
-                    },
-                )
+                if refund_amount > 0:
+                    refund_token = await _refund.send(
+                        refund_amount,
+                        unit,
+                        mint,
+                        request_id=request_id,
+                    )
+                    response_headers["X-Cashu"] = refund_token
+                    logger.info(
+                        "Refund processed for non-streaming /v1/messages via litellm",
+                        extra={
+                            "refund_amount": refund_amount,
+                            "unit": unit,
+                            "model": response_json.get("model", "unknown"),
+                        },
+                    )
+        except Exception as exc:
+            logger.error(
+                "Error settling non-streaming /v1/messages",
+                extra={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "amount": amount,
+                    "unit": unit,
+                },
+            )
+            return await _refund.serve_body(
+                json.dumps(response_json).encode(),
+                200,
+                {},
+                amount,
+                unit,
+                max_cost_for_model,
+                mint,
+                request_id,
+                media_type="application/json",
+            )
 
         return Response(
             content=json.dumps(response_json).encode(),
@@ -3391,7 +3437,7 @@ class BaseUpstreamProvider:
         request_id: str | None,
         model_obj: Model | None = None,
         _refund: _XCashuRefund | None = None,
-    ) -> StreamingResponse:
+    ) -> StreamingResponse | Response:
         """Buffer a litellm stream end-to-end, compute cost, then replay.
 
         Note this is **not** true streaming — the full event sequence is
@@ -3531,8 +3577,17 @@ class BaseUpstreamProvider:
                         "unit": unit,
                     },
                 )
-
-                raise
+                return await _refund.serve_body(
+                    b"".join(annotated.sse_bytes for annotated in buffered),
+                    200,
+                    response_headers,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    request_id,
+                    media_type="text/event-stream",
+                )
 
         if cost_data:
             _inject_cost_response_headers(response_headers, cost_data)
