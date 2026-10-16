@@ -2220,6 +2220,7 @@ class BaseUpstreamProvider:
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
         path: str = "",
+        terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> Response:
         """Settle an image response on what it carried.
 
@@ -2254,6 +2255,7 @@ class BaseUpstreamProvider:
                 self.provider_fee,
                 reservation_snapshot,
                 precomputed_cost=calculate_flat_cost(1, max_cost_for_model / 1000),
+                terminal_outcome=terminal_outcome,
             )
             raise
         content_type = response.headers.get("content-type")
@@ -2314,6 +2316,7 @@ class BaseUpstreamProvider:
             precomputed_cost=calculate_flat_cost(
                 1 if usage.image_count > 0 else 0, total_sats
             ),
+            terminal_outcome=terminal_outcome,
         )
 
         logger.info(
@@ -3834,6 +3837,7 @@ class BaseUpstreamProvider:
                         reservation_snapshot=reservation_snapshot,
                         request_body=request_body,
                         path=path,
+                        terminal_outcome=terminal_outcome,
                     )
                 finally:
                     await response_handoff.close()

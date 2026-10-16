@@ -543,6 +543,22 @@ class TerminalOutcomeWriter:
                 ).first()
                 if live is not None:
                     return
+                newest = (
+                    await session.exec(
+                        select(TerminalOutcomeWriterRun)
+                        .order_by(col(TerminalOutcomeWriterRun.started_at_ms).desc())
+                        .limit(1)
+                    )
+                ).first()
+                # A restart later the same UTC day leaves too little unattended
+                # time to drop the whole day from coverage.
+                if (
+                    newest is not None
+                    and newest.status == "clean"
+                    and newest.closed_at_ms is not None
+                    and _utc_day_from_ms(newest.closed_at_ms) == _utc_day_from_ms(now)
+                ):
+                    return
                 last_clean_close = (
                     await session.exec(
                         select(TerminalOutcomeWriterRun.closed_at_ms)
