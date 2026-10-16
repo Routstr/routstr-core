@@ -614,6 +614,26 @@ async def test_clean_stop_then_downtime_excludes_unattended_days(
     assert await writer.stop(timeout=1)
 
 
+async def test_clean_restart_the_same_day_keeps_coverage(
+    ledger: tuple[AsyncEngine, SessionFactory],
+) -> None:
+    _, sessions = ledger
+    day = date(2026, 9, 1)
+    clock = MutableClock(_timestamp(day))
+    writer = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    assert await writer.start()
+    clock.value = _timestamp(day + timedelta(days=3), hour=10)
+    assert await writer.stop(timeout=1)
+    clock.value = _timestamp(day + timedelta(days=3), hour=11)
+    assert await writer.start()
+    async with sessions() as session:
+        epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
+    assert [(e.coverage_start_day, e.coverage_end_day) for e in epochs] == [
+        (day + timedelta(days=1), None)
+    ]
+    assert await writer.stop(timeout=1)
+
+
 @pytest.mark.parametrize("charge", [0, 1200])
 async def test_encrypted_settlement_persists_once_after_successful_debit(
     ledger: tuple[AsyncEngine, SessionFactory],
