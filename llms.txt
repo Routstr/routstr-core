@@ -6,47 +6,99 @@ standalone entry point for agents without an existing checkout. The commands,
 Compose file and detailed human steps live in the checked-out repository; read
 `docs/provider/quickstart.md` and `docs/provider/deployment.md` after cloning.
 
-## Boundaries
+## Who does what
 
-- Ask for approval of the target host, release tag, upstream type, public domain,
-  spending limit, Nostr publication and payout settings before those actions. A
-  local-only trial needs no domain or funded wallet.
-- The operator enters admin passwords, upstream keys, Cashu credentials and Nostr
-  secrets in their own trusted terminal/dashboard. Use an SSH tunnel to administer
-  a remote node. Never put secrets in chat, shell arguments, Git, captured logs or
-  generated reports. A clean agent session may validate the workflow without
-  seeing any credential.
-- Never run bare `docker compose up`: stock `compose.yml` publishes port 8000 on
-  all interfaces and starts Tor. Every Compose operation in this workflow uses
+The operator does exactly the items below. Everything else is the agent's job —
+including DNS records, TLS, the reverse proxy, installing Docker, cloning,
+checkout, `.env`, port selection, starting Compose, generating keys, dashboard
+configuration that takes no secret, `check`, verification and every report. Do
+not ask the operator to confirm or approve an agent step; do it and report it.
+
+Each phase marks its operator items and ends at a gate. At a gate, stop and wait
+for the operator's artifact. Report the blocker, not a fabricated success.
+
+### Operator items (closed list)
+
+- **O1 — Answer once, up front.** The domain or subdomain to serve
+  (`https://node.example`), or "private, no domain yet"; and the payout Lightning
+  address (`user@wallet.example`, `lnurl1…`, or an `https://` LNURL-pay endpoint).
+  Nothing else is needed to start. Naming a domain also approves publishing the
+  Nostr listing on first boot.
+- **O2 — Privileged access.** When an agent step needs host root (installing
+  Docker, DNS, TLS, the reverse proxy, the firewall), ask then; the operator
+  enters it or grants it.
+- **O3 — Provider secrets.** The operator picks and pays for the upstream
+  provider, pastes its API key into Providers themselves, and decides which model
+  to enable and its pricing. The agent guides and verifies; it never sees the key.
+- **O4 — Bootstrap password.** Read the one-time admin password from the node logs
+  in the operator's own terminal and rotate it in Settings → Admin Settings. The
+  agent supplies the exact command and URL and never reads that log line.
+- **O5 — Key backup.** Back up the master key and the NSEC off-host and test a
+  restore (Phase 2).
+- **O6 — Paid acceptance.** With model, mint, prompt and limit approved, run small
+  paid non-streaming and streaming tests with the operator's own funded client
+  credential — a consumer credential, not node funding and not an admin token.
+
+### Agent must never
+
+- Put secrets in chat, shell arguments, Git, captured logs or generated reports,
+  and never ask the operator for one — the admin password, provider API keys,
+  Cashu credentials, CLI tokens and the `nsec`. A credential the agent may *use*
+  but not *read* is `~/.routstr/config.json` (0600), which authorises the Routstr
+  CLI.
+- Run bare `docker compose up`: stock `compose.yml` publishes port 8000 on all
+  interfaces and starts Tor. Every Compose operation here uses
   `-f compose.node.yml`.
-- Stop at a human authentication, funding or external-publication gate. Report the
-  blocker, not a fabricated success.
+- Run the log command to read the bootstrap password, or paste raw Docker logs or
+  admin responses into a report.
+- Report a gate as passed without the operator's artifact.
 
 ## Default flow (public mode)
 
-The default assumes the operator already has a subdomain with HTTPS and a reverse
-proxy forwarding to `127.0.0.1:8000`. The node then publishes its Nostr listing on
-first boot. If there is no public URL yet, use private mode and publish later.
+The default assumes the operator names a subdomain with HTTPS and a reverse proxy
+forwarding to `127.0.0.1:8000`. The node then publishes its Nostr listing on first
+boot, which O1 approved. If there is no public URL yet, use private mode and
+publish later.
 
 ### Phase 0 — Host
 
-Confirm Docker with the Compose plugin, Python 3, available disk and durable
-storage. Ask the operator to select a reviewed release tag; for testing the
-current development branch, explicitly label it as unreviewed. Clone
-`https://github.com/Routstr/routstr-core.git`, check out that ref, and inspect the
-quickstart and deployment guide before running commands. Reuse an existing
-checkout and state; do not overwrite `.env` or recreate a wallet.
+**Agent**
 
-For public mode, verify **before** starting that DNS, TLS and a reverse proxy
-forward `https://<domain>` to `127.0.0.1:8000`. If any of that is missing, prefer
-private mode. The dashboard is protected by the node's own admin password
-(scrypt-hashed); restricting `/admin` at the proxy (IP allowlist or basic auth) is
-an optional extra layer, not a setup requirement. What matters is that the
-operator reads the one-time bootstrap password and rotates it.
+- Open by asking O1, before touching the host:
+  - Which domain or subdomain will serve this node (`https://node.example`), or do
+    they want a loopback-only node with no public URL yet? A named domain still
+    needs DNS, TLS and a reverse proxy forwarding to `127.0.0.1:8000`.
+  - Which payout Lightning address should receive settled earnings? It is passed to
+    `start` as `--ln-address` and saved in `.env`; get it now so Phase 1 needs no
+    rerun.
+- Confirm Docker with the Compose plugin, Python 3, available disk and durable
+  storage; install what is missing (O2 if root is needed).
+- Clone `https://github.com/Routstr/routstr-core.git` if there is no checkout,
+  check out the tag of the latest release, and inspect the quickstart and
+  deployment guide before running commands. Only if the operator asks to test the
+  current development branch, use that branch and explicitly label it as
+  unreviewed. Reuse an existing checkout and state; do not overwrite `.env` or
+  recreate a wallet.
+- For public mode, create the DNS record, TLS certificate and reverse proxy entry
+  for the O1 domain (O2 if root is needed), and verify **before** starting that
+  they forward that domain to `127.0.0.1:8000`. If any of that is missing, prefer
+  private mode. The dashboard is protected by the node's own admin password
+  (scrypt-hashed); restricting `/admin` at the proxy (IP allowlist or basic auth)
+  is an optional extra layer, not a setup requirement. The operator still reads
+  the one-time bootstrap password and rotates it (O4).
+
+**Operator**
+
+- O1: the domain (or "private") and the payout address.
+- O2: root, only if the agent asks.
+
+Gate G0 — Phases 0 and 1 need nothing beyond O1, plus O2 where root is required.
 
 ### Phase 1 — Start
 
-Check that the loopback port is free, then run (public):
+**Agent**
+
+- Check that the loopback port is free, then run (public):
 
 ```bash
 python3 scripts/node_setup.py start --public-url https://node.example --ln-address user@wallet.example
@@ -58,41 +110,71 @@ or private (nothing published):
 python3 scripts/node_setup.py start --private
 ```
 
-If another service owns port 8000, keep it untouched and pass `--port 18080`; use
-that port for `check`, the dashboard URL, the reverse proxy and later
-`ROUTSTR_NODE_PORT=18080 docker compose -f compose.node.yml …` commands.
+- If another service owns port 8000, keep it untouched and pass `--port 18080`; use
+  that port for `check`, the dashboard URL, the reverse proxy and later
+  `ROUTSTR_NODE_PORT=18080 docker compose -f compose.node.yml …` commands.
+- Report ref/version, port, reachability and model count.
 
 `start` prepares `.env` (never clobbering existing values), starts
 `compose.node.yml` (loopback only, no Tor, analytics off on first boot), waits for the local
 `/v1/info` and `/v1/models`, generates the master key and Nostr identity, and — in
-public mode — publishes the listing. It also mints a long-lived CLI token and
-writes it to `~/.routstr/config.json` (0600) for the Routstr CLI; skip that with
-`--no-cli-token`. If that file already points at another node, `start` leaves it
-alone and creates no token (see the Routstr CLI section below). A running API with zero models is **not configured**.
+public mode — publishes the listing (approved by O1). It also mints a long-lived
+CLI token and writes it to `~/.routstr/config.json` (0600) for the Routstr CLI;
+skip that with `--no-cli-token`. If that file already points at another node,
+`start` leaves it alone and creates no token (see the Routstr CLI section below).
+A running API with zero models is **not configured**.
 
-### Phase 2 — Back up (operator, before configuring)
+### Phase 2 — Back up
 
-The master key and identity exist as soon as the node boots. Have the operator
-copy `routstr_secret.key`, `keys.db` (with any `-wal`/`-shm` sidecars), `.wallet/`
-(created on first ecash activity, so absent on a fresh node) and `.env` into an encrypted off-host backup, with a tested isolated restore. The
-master key decrypts the `nsec` stored in `keys.db`; keep them together:
+**Agent**
+
+- Hand the operator the numbered list below, with the reveal command.
+- Afterwards verify that both artifacts exist at the backup target (name, size,
+  hash). Never read their contents.
+
+**Operator** (O5)
+
+The master key and identity exist as soon as the node boots. Back up exactly two
+things, off-host and encrypted:
+
+1. The NSEC — the node's Nostr identity key. In your own terminal:
 
 ```bash
 docker compose -f compose.node.yml exec routstr /.venv/bin/python scripts/reveal_nsec.py
 ```
 
-Do not ingest the revealed `nsec` or any logs into the agent context.
+2. `routstr_secret.key` — the master key file.
 
-### Phase 3 — Dashboard (operator)
+Test a restore once, somewhere isolated. Keep the two together: the master key
+decrypts the `nsec` stored in `keys.db`. Do not ingest the revealed `nsec` or any
+logs into the agent context.
 
-Hand the operator the dashboard address (`https://node.example/admin` in public
-mode, or `http://127.0.0.1:8000/admin` over an SSH tunnel). Have them read the
-generated password privately from
-`docker compose -f compose.node.yml logs routstr`, log in, and immediately rotate
-it in Settings → Admin Settings. Then add the upstream in Providers, enable at
-least one routable model, and review pricing, payout address, mints and relays.
+Gate G1 — "both items stored and restore tested."
+
+### Phase 3 — Dashboard
+
+**Agent**
+
+- Hand the operator the dashboard address (`https://node.example/admin` in public
+  mode, or `http://127.0.0.1:8000/admin` over an SSH tunnel).
+- After the operator acts, verify model routing, pricing, payout address, mints and
+  relays through the admin API, without printing provider records or secrets.
+
+**Operator**
+
+- O4: read the generated password privately from
+  `docker compose -f compose.node.yml logs routstr`, log in, and immediately rotate
+  it in Settings → Admin Settings.
+- O3: add the upstream in Providers with your own API key, enable at least one
+  routable model, and review pricing, payout address, mints and relays.
+
+Gate G2 — "password rotated, upstream added, at least one model enabled."
 
 ### Phase 4 — Verify and accept
+
+**Agent**
+
+- Run:
 
 ```bash
 python3 scripts/node_setup.py check --public-url https://node.example
@@ -102,20 +184,32 @@ Require exit code 0 and a nonzero public model count (exit code 2 means the API 
 running but not configured). If it fails, diagnose without printing provider
 records or secrets. This proves discovery only — it is **not** a paid-inference
 test.
+- Verify completion, accounting, upstream serving, refund status and payout
+  separately through the admin API.
 
-With explicit approval of model, mint, prompt and spending limit, have the
-operator run small paid non-streaming and streaming inference tests with a funded
-client credential (not an admin token). Verify completion, accounting, upstream
-serving, refund status and payout separately. Do not claim production acceptance
-without these checks.
+**Operator**
+
+- O6: with model, mint, prompt and limit approved, run small paid non-streaming and
+  streaming inference tests with your own funded client credential (not an admin
+  token).
+
+Gate G3 — paid-inference verification, or an explicit "discovery only" outcome.
+
+### Handoff
+
+Report ref/version, private/public reachability, whether password rotation was
+confirmed (never the password), model count, backup/restore status, paid-inference
+verification status and which gates passed. "Local API ready" and "production
+accepted" are separate outcomes. Never paste raw Docker logs or admin responses.
 
 ## Routstr CLI
 
 The setup writes a long-lived admin token to `~/.routstr/config.json` (0600), so
 the [Routstr CLI](https://github.com/routstr/routstr-cli) is ready to operate the
-node. If that file already pointed at another node, `start` left it alone and
-minted no token. The CLI only reads `$HOME/.routstr/config.json`, so re-run `start`
-with `--cli-config /some/dir/.routstr/config.json` and run the CLI as
+node. The agent may use that token but must never print or read it. If that file
+already pointed at another node, `start` left it alone and minted no token. The
+CLI only reads `$HOME/.routstr/config.json`, so re-run `start` with
+`--cli-config /some/dir/.routstr/config.json` and run the CLI as
 `HOME=/some/dir routstr …`:
 
 ```bash
@@ -141,11 +235,4 @@ Never paste the token, or the generated admin password, into a chat.
 Everything above holds, except `HTTP_URL` is unset: the node is loopback-only and
 publishes nothing. Administer it over an SSH tunnel, and promote it later by
 setting the public **HTTP URL** in the dashboard (the listing is then published
-automatically). Approve publication with the operator before doing so.
-
-## Handoff
-
-Report ref/version, private/public reachability, whether password rotation was
-confirmed (never the password), model count, backup/restore and paid-inference
-verification status, and remaining blockers. "Local API ready" and "production
-accepted" are separate outcomes. Never paste raw Docker logs or admin responses.
+automatically). Publication is an operator decision: ask before promoting.
