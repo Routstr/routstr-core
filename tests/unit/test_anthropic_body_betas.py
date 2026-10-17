@@ -29,6 +29,10 @@ def prepare(body: object, headers: dict | None = None) -> dict:
             {"messages": [{"role": "user", "content": "hi", "output_config": {}}]},
             "per-turn-control-2026-07-01",
         ),
+        (
+            {"thinking": {"type": "adaptive", "display": "updates"}},
+            "thinking-display-updates-2026-08-18",
+        ),
     ],
 )
 def test_missing_beta_is_added(body: dict, beta: str) -> None:
@@ -39,6 +43,7 @@ def test_all_claude_code_fields_add_all_betas() -> None:
     body = {
         "context_management": {"edits": []},
         "safeguards": {},
+        "thinking": {"type": "adaptive", "display": "updates"},
         "output_config": {"effort": "high"},
         "messages": [
             {"role": "user", "content": "hi"},
@@ -48,6 +53,7 @@ def test_all_claude_code_fields_add_all_betas() -> None:
     assert betas(prepare(body)) == [
         "context-management-2025-06-27",
         "dangerous-tool-use-2026-09-03",
+        "thinking-display-updates-2026-08-18",
         "per-turn-control-2026-07-01",
     ]
 

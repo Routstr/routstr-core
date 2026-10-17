@@ -135,14 +135,8 @@ def test_budgeted_thinking_is_kept_where_anthropic_accepts_it(native_id: str) ->
     assert "output_config" not in body
 
 
-@pytest.mark.parametrize("native_id", ADAPTIVE_ONLY + BUDGET_CAPABLE)
-def test_highlights_display_falls_back_to_omitted(native_id: str) -> None:
-    body = prepare(native_id, thinking={"type": "adaptive", "display": "highlights"})
-    assert body["thinking"] == {"type": "adaptive", "display": "omitted"}
-
-
 @pytest.mark.parametrize("display", ["summarized", "omitted", "updates"])
-def test_other_display_values_are_untouched(display: str) -> None:
+def test_display_values_are_untouched(display: str) -> None:
     thinking = {"type": "adaptive", "display": display}
     body = prepare("claude-sonnet-5-5", thinking=thinking)
     assert body["thinking"] == thinking

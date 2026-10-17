@@ -52,19 +52,15 @@ def _effort_for_budget(budget: int) -> str:
 def _normalize_thinking(data: dict) -> bool:
     """Rewrite client thinking shapes the native API rejects.
 
-    Clients that predate adaptive-only models still send budgeted thinking,
-    and Claude Code may ask for the ``highlights`` display, which the API only
-    serves to Anthropic-hosted sessions. Other providers (OpenRouter, the
-    litellm path) already translate both, so without this the same request
-    succeeds or fails depending on which provider the router picks.
+    Clients that predate adaptive-only models still send budgeted thinking.
+    Other providers (OpenRouter, the litellm path) already translate it, so
+    without this the same request succeeds or fails depending on which
+    provider the router picks.
     """
     thinking = data.get("thinking")
     if not isinstance(thinking, dict):
         return False
     normalized = dict(thinking)
-    if normalized.get("display") == "highlights":
-        # Same fallback Claude Code applies itself once the API rejects it.
-        normalized["display"] = "omitted"
     if normalized.get("type") == "enabled" and _rejects_budgeted_thinking(
         data.get("model")
     ):
@@ -183,6 +179,9 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
         if not isinstance(data, dict):
             return headers
         required = [beta for field, beta in _FIELD_BETAS if field in data]
+        thinking = data.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("display") == "updates":
+            required.append("thinking-display-updates-2026-08-18")
         messages = data.get("messages")
         if isinstance(messages, list):
             required += [
