@@ -21,7 +21,8 @@ if config.config_file_name is None:
 # Skip loading alembic's logging configuration to preserve our custom logging
 # fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", DATABASE_URL)
+# configparser interpolates "%", which %-encoded passwords and socket paths contain.
+config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
 
 target_metadata = SQLModel.metadata
 

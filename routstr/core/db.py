@@ -1468,7 +1468,8 @@ def run_migrations() -> None:
         alembic_cfg = Config(str(alembic_ini_path))
 
         # Set the database URL in the config
-        alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
+        # configparser interpolates "%", which %-encoded passwords and socket paths contain.
+        alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
 
         try:
             command.upgrade(alembic_cfg, "head")

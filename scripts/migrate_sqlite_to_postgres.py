@@ -140,7 +140,8 @@ def _upgrade_target_schema(target_url: str) -> None:
 
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "migrations"))
-    cfg.set_main_option("sqlalchemy.url", target_url)
+    # configparser interpolates "%", which render_as_string() emits for encoded paths.
+    cfg.set_main_option("sqlalchemy.url", target_url.replace("%", "%%"))
     command.upgrade(cfg, "head")
 
 
