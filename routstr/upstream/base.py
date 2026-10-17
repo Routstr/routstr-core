@@ -2724,7 +2724,7 @@ class BaseUpstreamProvider:
             total_cost: float = 0.0
             input_cost: float = 0.0
             output_cost: float = 0.0
-            terminal_sse_buffer = b""
+            terminal_sse_buffer = bytearray()
 
             def _coerce_usd(value: object) -> float:
                 if value is None or isinstance(value, bool):
@@ -4728,7 +4728,9 @@ class BaseUpstreamProvider:
         outcome_state = TerminalOutcomeState()
 
         # Stats observe both SSE prefix forms; billing keeps its existing parse.
-        observe_terminal_sse_bytes(outcome_state, b"", content_str.encode(), final=True)
+        observe_terminal_sse_bytes(
+            outcome_state, bytearray(), content_str.encode(), final=True
+        )
         lines = content_str.strip().split("\n")
         for line in lines:
             if line.startswith("data: "):
