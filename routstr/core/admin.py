@@ -21,7 +21,12 @@ from ..payment.models import (
 )
 from ..payment.rates import BILLABLE_PRICING_FIELDS, coerce_rate
 from ..proxy import get_candidates, refresh_model_maps, reinitialize_upstreams
-from ..wallet import fetch_all_balances, send_token, token_mint_url
+from ..wallet import (
+    get_cached_balances,
+    invalidate_balance_cache,
+    send_token,
+    token_mint_url,
+)
 from . import vault
 from .db import (
     ApiKey,
@@ -209,8 +214,10 @@ async def update_apikey(
 
 
 @admin_router.get("/api/balances", dependencies=[Depends(require_admin_api)])
-async def get_balances_api(request: Request) -> list[dict[str, object]]:
-    balance_details, _tw, _tu, _ow = await fetch_all_balances()
+async def get_balances_api(
+    request: Request, refresh: bool = False
+) -> list[dict[str, object]]:
+    balance_details, _tw, _tu, _ow = await get_cached_balances(force_refresh=refresh)
     return [dict(d) for d in balance_details]
 
 
@@ -458,6 +465,7 @@ async def withdraw(
         raise HTTPException(
             status_code=400, detail="Insufficient wallet balance"
         ) from error
+    invalidate_balance_cache()
     actual_mint = token_mint_url(token, effective_mint)
     await store_cashu_transaction(
         token=token,
