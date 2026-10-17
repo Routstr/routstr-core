@@ -99,6 +99,32 @@ def test_non_reasoning_models_omit_the_field() -> None:
     assert "reasoning" not in dumped
 
 
+def test_model_preserves_upstream_effort_map() -> None:
+    """A provider-published alias -> native map reaches /v1/models intact."""
+    model = _model(
+        reasoning={
+            "supported_efforts": ["xhigh", "high", "low"],
+            "effort_map": {"low": "low", "medium": "high", "high": "xhigh"},
+        }
+    )
+    assert model.reasoning is not None
+    assert model.reasoning.effort_map == {
+        "low": "low",
+        "medium": "high",
+        "high": "xhigh",
+    }
+    assert model.dict()["reasoning"]["effort_map"] == {
+        "low": "low",
+        "medium": "high",
+        "high": "xhigh",
+    }
+
+
+def test_effort_map_alone_is_not_an_empty_reasoning_object() -> None:
+    assert not Reasoning(effort_map={"medium": "high"}).is_empty()
+    assert Reasoning().is_empty()
+
+
 def test_malformed_reasoning_is_dropped_not_fatal() -> None:
     model = _model(reasoning=["not", "a", "dict"])
     assert model.reasoning is None
