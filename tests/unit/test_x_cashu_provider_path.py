@@ -21,13 +21,14 @@ async def test_x_cashu_chat_stream_reports_complete_provider_path() -> None:
     payload = {"model": "glm-4.5", "provider": "z.ai"}
     content = f"data: {json.dumps(payload)}\n"
 
-    response = await provider.handle_x_cashu_streaming_response(
-        content,
-        httpx.Response(200, headers={"content-type": "text/event-stream"}),
-        amount=1,
-        unit="sat",
-        max_cost_for_model=1,
-    )
+    with patch.object(provider, "send_refund", new=AsyncMock(return_value="cashuArefund")):
+        response = await provider.handle_x_cashu_streaming_response(
+            content,
+            httpx.Response(200, headers={"content-type": "text/event-stream"}),
+            amount=1,
+            unit="sat",
+            max_cost_for_model=1,
+        )
 
     event = json.loads((await _body(response)).decode().removeprefix("data: "))
     assert event["provider"] == "openrouter:z.ai"
@@ -63,13 +64,14 @@ async def test_x_cashu_messages_stream_carries_provider_to_later_events() -> Non
     ]
     content = "".join(f"data: {json.dumps(e)}\n" for e in events)
 
-    response = await provider.handle_x_cashu_streaming_response(
-        content,
-        httpx.Response(200, headers={"content-type": "text/event-stream"}),
-        amount=1,
-        unit="sat",
-        max_cost_for_model=1,
-    )
+    with patch.object(provider, "send_refund", new=AsyncMock(return_value="cashuArefund")):
+        response = await provider.handle_x_cashu_streaming_response(
+            content,
+            httpx.Response(200, headers={"content-type": "text/event-stream"}),
+            amount=1,
+            unit="sat",
+            max_cost_for_model=1,
+        )
 
     lines = (await _body(response)).decode().splitlines()
     stamped = [json.loads(line.removeprefix("data: ")) for line in lines if line]

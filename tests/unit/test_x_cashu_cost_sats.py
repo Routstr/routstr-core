@@ -167,7 +167,10 @@ async def test_streaming_includes_cost_sats_in_usage_chunk() -> None:
         "data: [DONE]",
     ])
 
-    with patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)):
+    with (
+        patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)),
+        patch.object(provider, "send_refund", new=AsyncMock(return_value="cashuA_refund_token")),
+    ):
         response = await provider.handle_x_cashu_streaming_response(
             content_str=content_str,
             response=_make_httpx_response(),
@@ -200,7 +203,10 @@ async def test_streaming_non_usage_chunks_unmodified() -> None:
         "data: [DONE]",
     ])
 
-    with patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)):
+    with (
+        patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)),
+        patch.object(provider, "send_refund", new=AsyncMock(return_value="cashuA_refund_token")),
+    ):
         response = await provider.handle_x_cashu_streaming_response(
             content_str=content_str,
             response=_make_httpx_response(),
