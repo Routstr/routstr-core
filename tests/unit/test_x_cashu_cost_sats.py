@@ -306,7 +306,13 @@ async def test_streaming_no_space_error_event_is_not_recorded() -> None:
     provider = _make_provider()
     record = MagicMock()
 
-    with patch("routstr.upstream.terminal_outcome_tracking.record_terminal_outcome", record):
+    with (
+        patch("routstr.upstream.terminal_outcome_tracking.record_terminal_outcome", record),
+        patch.object(
+            provider, "send_refund", new=AsyncMock(side_effect=RuntimeError("mint down"))
+        ),
+        pytest.raises(RuntimeError),
+    ):
         await provider.handle_x_cashu_streaming_response(
             content_str='data:{"type":"error","error":{"message":"failed"}}\n\n',
             response=_make_httpx_response(),
