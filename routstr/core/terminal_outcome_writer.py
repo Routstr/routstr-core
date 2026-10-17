@@ -27,6 +27,9 @@ _QUEUE_SIZE = 4096
 _RETRY_SECONDS = 1.0
 _HEARTBEAT_SECONDS = 15.0
 _LEASE_TIMEOUT_SECONDS = 90.0
+# A lost race means another writer moved on; one that keeps losing is broken.
+_RACE_ATTEMPTS = 10
+_PERSIST_ATTEMPTS = 30
 
 SessionFactory = Callable[[], AsyncContextManager[AsyncSession]]
 Clock = Callable[[], int]
@@ -275,7 +278,7 @@ class TerminalOutcomeWriter:
         self._stopping = False
 
     async def _ensure_epoch(self, now: int) -> None:
-        while True:
+        for _ in range(_RACE_ATTEMPTS):
             async with self._session_factory() as session:
                 current = await _current_epoch(session)
                 if current is not None:
@@ -302,6 +305,7 @@ class TerminalOutcomeWriter:
                     continue
                 self._epoch = next_epoch
                 return
+        raise RuntimeError("Terminal outcome epoch kept changing")
 
     async def _create_run(
         self,
@@ -455,7 +459,7 @@ class TerminalOutcomeWriter:
         return next_epoch
 
     async def _rotate_epoch(self, lost_day: date) -> None:
-        while True:
+        for _ in range(_RACE_ATTEMPTS):
             now = self._now_ms()
             async with self._session_factory() as session:
                 current = await _current_epoch(session)
@@ -473,9 +477,10 @@ class TerminalOutcomeWriter:
                     continue
                 self._epoch = next_epoch
                 return
+        raise RuntimeError("Terminal outcome epoch kept changing")
 
     async def _recover_pending_runs(self) -> None:
-        while True:
+        for _ in range(_RACE_ATTEMPTS):
             now = self._now_ms()
             async with self._session_factory() as session:
                 pending = (
@@ -517,13 +522,14 @@ class TerminalOutcomeWriter:
                     continue
                 self._epoch = next_epoch
                 return
+        raise RuntimeError("Terminal outcome epoch kept changing")
 
     async def _recover_stale_runs(self, now: int) -> None:
         await self._claim_stale_runs(now)
         await self._recover_pending_runs()
 
     async def _recover_unattended_coverage(self, now: int) -> None:
-        while True:
+        for _ in range(_RACE_ATTEMPTS):
             async with self._session_factory() as session:
                 current = await _current_epoch(session)
                 if current is None or current.coverage_start_day > _utc_day_from_ms(
@@ -583,6 +589,7 @@ class TerminalOutcomeWriter:
                     continue
                 self._epoch = next_epoch
                 return
+        raise RuntimeError("Terminal outcome epoch kept changing")
 
     async def _void_served_coverage(self, now: int) -> None:
         async with self._session_factory() as session:
@@ -619,17 +626,17 @@ class TerminalOutcomeWriter:
             return await self._reconcile(queued)
 
     async def _persist(self, queued: _QueuedOutcome) -> _PersistResult | None:
-        logged = False
-        while not self._loss_pending:
+        for attempt in range(_PERSIST_ATTEMPTS):
+            if self._loss_pending:
+                break
             result = await self._persist_once(queued)
             if result is not _PersistResult.RETRY:
                 return result
-            if not logged:
+            if attempt == 0:
                 logger.error(
                     "Terminal outcome persistence will be retried",
                     extra={"outcome_id": queued.outcome_id},
                 )
-                logged = True
             try:
                 await self._touch_run()
                 await self._recover_stale_runs(self._now_ms())
@@ -637,7 +644,7 @@ class TerminalOutcomeWriter:
                 pass
             await asyncio.sleep(self._retry_seconds)
         self.declare_loss(
-            "in-flight terminal outcome abandoned after continuity loss",
+            "in-flight terminal outcome abandoned",
             queued.terminal_day,
         )
         return None

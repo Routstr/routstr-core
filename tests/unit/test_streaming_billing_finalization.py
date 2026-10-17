@@ -1385,14 +1385,14 @@ def test_stream_cut_inside_a_character_does_not_raise() -> None:
     state = TerminalOutcomeState()
     tail = 'data: {"delta":{"text":"日本'.encode()[:-1]
 
-    assert observe_terminal_sse_bytes(state, b"", tail, final=True) == b""
+    assert observe_terminal_sse_bytes(state, bytearray(), tail, final=True) == b""
 
 
 def test_deeply_nested_event_does_not_raise() -> None:
     state = TerminalOutcomeState()
     event = b"data: " + b"[" * 200_000 + b"]" * 200_000 + b"\n\n"
 
-    assert observe_terminal_sse_bytes(state, b"", event, final=True) == b""
+    assert observe_terminal_sse_bytes(state, bytearray(), event, final=True) == b""
     assert state.usage is None
 
 
@@ -1409,7 +1409,7 @@ def test_routstr_upstream_cost_event_is_not_provider_usage() -> None:
         b'"cache_read_input_tokens":1000,"output_tokens":50}}\n\n'
     )
 
-    assert observe_terminal_sse_bytes(state, b"", stream, final=True) == b""
+    assert observe_terminal_sse_bytes(state, bytearray(), stream, final=True) == b""
     assert state.usage == {
         "input_tokens": 100,
         "cache_read_input_tokens": 1000,

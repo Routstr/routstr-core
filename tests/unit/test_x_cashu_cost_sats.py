@@ -242,7 +242,10 @@ async def test_streaming_includes_cost_sats_in_usage_chunk() -> None:
         "data: [DONE]",
     ])
 
-    with patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)):
+    with (
+        patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)),
+        patch.object(provider, "send_refund", new=AsyncMock(return_value="cashuA_refund_token")),
+    ):
         response = await provider.handle_x_cashu_streaming_response(
             content_str=content_str,
             response=_make_httpx_response(),
@@ -275,7 +278,10 @@ async def test_streaming_non_usage_chunks_unmodified() -> None:
         "data: [DONE]",
     ])
 
-    with patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)):
+    with (
+        patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)),
+        patch.object(provider, "send_refund", new=AsyncMock(return_value="cashuA_refund_token")),
+    ):
         response = await provider.handle_x_cashu_streaming_response(
             content_str=content_str,
             response=_make_httpx_response(),
@@ -300,7 +306,13 @@ async def test_streaming_no_space_error_event_is_not_recorded() -> None:
     provider = _make_provider()
     record = MagicMock()
 
-    with patch("routstr.upstream.terminal_outcome_tracking.record_terminal_outcome", record):
+    with (
+        patch("routstr.upstream.terminal_outcome_tracking.record_terminal_outcome", record),
+        patch.object(
+            provider, "send_refund", new=AsyncMock(side_effect=RuntimeError("mint down"))
+        ),
+        pytest.raises(RuntimeError),
+    ):
         await provider.handle_x_cashu_streaming_response(
             content_str='data:{"type":"error","error":{"message":"failed"}}\n\n',
             response=_make_httpx_response(),
