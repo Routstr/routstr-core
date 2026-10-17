@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Optional
 
 from fastapi import HTTPException
 from sqlalchemy import case, inspect
-from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select, update
 
 from .core import get_logger
@@ -179,6 +178,53 @@ def _maybe_cache_terminal_redemption_failure(hashed_key: str, error: Exception) 
     )
 
 
+def _validate_existing_cashu_key(
+    existing_key: ApiKey,
+    refund_address: Optional[str],
+    key_expiry_time: Optional[int],
+    min_cost: int,
+) -> ApiKey:
+    logger.info(
+        "Existing Cashu token found",
+        extra={
+            "key_hash": existing_key.hashed_key[:8] + "...",
+            "balance": existing_key.balance,
+            "total_requests": existing_key.total_requests,
+        },
+    )
+
+    if key_expiry_time is not None:
+        existing_key.key_expiry_time = key_expiry_time
+        logger.debug(
+            "Updated key expiry time for existing Cashu key",
+            extra={
+                "key_hash": existing_key.hashed_key[:8] + "...",
+                "expiry_time": key_expiry_time,
+            },
+        )
+
+    if refund_address is not None:
+        existing_key.refund_address = refund_address
+        logger.debug(
+            "Updated refund address for existing Cashu key",
+            extra={
+                "key_hash": existing_key.hashed_key[:8] + "...",
+                "refund_address_preview": refund_address[:20] + "..."
+                if len(refund_address) > 20
+                else refund_address,
+            },
+        )
+
+    # Early check: Billing balance check
+    if min_cost > 0 and existing_key.total_balance < min_cost:
+        raise HTTPException(
+            status_code=402,
+            detail=_model_balance_error(min_cost, existing_key.total_balance),
+        )
+
+    return existing_key
+
+
 async def validate_bearer_key(
     bearer_key: str,
     session: AsyncSession,
@@ -187,8 +233,20 @@ async def validate_bearer_key(
     min_cost: int = 0,
 ) -> ApiKey:
     if bearer_key.startswith("cashu"):
-        # Acquire before the first lookup/flush so concurrent token creation
-        # cannot hold SQLite write transactions while waiting to mutate proofs.
+        hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
+        with session.no_autoflush:
+            existing_key = await session.get(ApiKey, hashed_key)
+        if existing_key is not None:
+            return _validate_existing_cashu_key(
+                existing_key, refund_address, key_expiry_time, min_cost
+            )
+        if cached_failure := redemption_negative_cache.get(hashed_key):
+            raise _cached_failure_to_http_exception(cached_failure)
+
+        # Finish the lookup transaction before waiting for the wallet lock;
+        # concurrent creation must not hold SQLite writes while waiting to
+        # mutate proofs. The locked path re-checks existence before redeeming.
+        await session.commit()
         async with wallet_operation_guard():
             return await _validate_bearer_key_locked(
                 bearer_key,
@@ -341,47 +399,9 @@ async def _validate_bearer_key_locked(
             )
 
             if existing_key := await session.get(ApiKey, hashed_key):
-                logger.info(
-                    "Existing Cashu token found",
-                    extra={
-                        "key_hash": existing_key.hashed_key[:8] + "...",
-                        "balance": existing_key.balance,
-                        "total_requests": existing_key.total_requests,
-                    },
+                return _validate_existing_cashu_key(
+                    existing_key, refund_address, key_expiry_time, min_cost
                 )
-
-                if key_expiry_time is not None:
-                    existing_key.key_expiry_time = key_expiry_time
-                    logger.debug(
-                        "Updated key expiry time for existing Cashu key",
-                        extra={
-                            "key_hash": existing_key.hashed_key[:8] + "...",
-                            "expiry_time": key_expiry_time,
-                        },
-                    )
-
-                if refund_address is not None:
-                    existing_key.refund_address = refund_address
-                    logger.debug(
-                        "Updated refund address for existing Cashu key",
-                        extra={
-                            "key_hash": existing_key.hashed_key[:8] + "...",
-                            "refund_address_preview": refund_address[:20] + "..."
-                            if len(refund_address) > 20
-                            else refund_address,
-                        },
-                    )
-
-                # Early check: Billing balance check
-                if min_cost > 0 and existing_key.total_balance < min_cost:
-                    raise HTTPException(
-                        status_code=402,
-                        detail=_model_balance_error(
-                            min_cost, existing_key.total_balance
-                        ),
-                    )
-
-                return existing_key
 
             if cached_failure := redemption_negative_cache.get(hashed_key):
                 logger.info(
@@ -424,26 +444,11 @@ async def _validate_bearer_key_locked(
                 refund_currency=refund_currency,
                 refund_mint_url=refund_mint_url,
             )
+            # No flush: the INSERT is written together with the credit, after the
+            # mint replies. Flushing here would hold the SQLite write lock across
+            # mint I/O and stall every other request's reservation. The wallet
+            # lock and the re-check above already make this the only creator.
             session.add(new_key)
-
-            try:
-                await session.flush()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(
-                    "Concurrent key creation detected, fetching existing key",
-                    extra={"key_hash": hashed_key[:8] + "..."},
-                )
-                existing_key = await session.get(ApiKey, hashed_key)
-                if not existing_key:
-                    raise Exception("Failed to fetch existing key after IntegrityError")
-
-                if key_expiry_time is not None:
-                    existing_key.key_expiry_time = key_expiry_time
-                if refund_address is not None:
-                    existing_key.refund_address = refund_address
-
-                return existing_key
 
             logger.debug(
                 "New key created, starting token redemption",
