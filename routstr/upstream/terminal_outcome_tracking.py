@@ -124,13 +124,19 @@ def record_x_cashu_terminal_outcome(
 
 def observe_terminal_sse_bytes(
     state: TerminalOutcomeState,
-    buffered: bytes,
+    buffered: bytearray,
     chunk: bytes = b"",
     *,
     final: bool = False,
-) -> bytes:
+) -> bytearray:
     """Observe complete SSE events while preserving a split trailing event."""
-    pending = (buffered + chunk).replace(b"\r\n", b"\n")
+    # Only the new bytes, plus a CRLF pair split across chunks, can complete
+    # an event; rescanning the whole buffer per chunk is quadratic.
+    start = max(0, len(buffered) - 3)
+    buffered += chunk
+    if not final and b"\n\n" not in buffered[start:].replace(b"\r\n", b"\n"):
+        return buffered
+    pending = bytes(buffered).replace(b"\r\n", b"\n")
     events: list[bytes] = []
     while b"\n\n" in pending:
         event, pending = pending.split(b"\n\n", 1)
@@ -166,4 +172,4 @@ def observe_terminal_sse_bytes(
             continue
         if isinstance(parsed, dict):
             state.observe(parsed)
-    return pending
+    return bytearray(pending)

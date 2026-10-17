@@ -562,7 +562,12 @@ async def test_non_streaming_dispatches_via_litellm_and_returns_anthropic_respon
 
 
 @pytest.mark.asyncio
-async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
+@pytest.mark.parametrize(
+    "input_tokens,output_tokens,estimated", [(5, 7, False), (0, 0, True)]
+)
+async def test_streaming_emits_sse_and_reconciles_cost_at_end(
+    input_tokens: int, output_tokens: int, estimated: bool
+) -> None:
     provider = _make_provider()
     key = _make_key()
     model = _make_model()
@@ -578,7 +583,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
                 "role": "assistant",
                 "model": "openai/gpt-4o-mini",
                 "content": [],
-                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "usage": {"input_tokens": input_tokens, "output_tokens": 0},
             },
         }
         yield {
@@ -595,7 +600,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
         yield {
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 0},
+            "usage": {"output_tokens": output_tokens},
         }
         yield {"type": "message_stop"}
 
@@ -682,9 +687,9 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
     assert "event: cost" in joined
 
     combined = captured_cost_call["combined_data"]
-    assert combined["usage"]["input_tokens"] == 0
-    assert combined["usage"]["output_tokens"] == 0
-    assert combined["usage"]["estimated"] is True
+    assert combined["usage"]["input_tokens"] == input_tokens
+    assert combined["usage"]["output_tokens"] == output_tokens
+    assert combined["usage"].get("estimated", False) is estimated
     assert combined["model"] == "openai/gpt-4o-mini"
     assert captured_cost_call["reservation_snapshot"] is reservation
     assert captured_cost_call["usage_presence"].input_source == "reported"
@@ -902,6 +907,71 @@ async def test_x_cashu_non_streaming_no_refund_when_fully_consumed() -> None:
     assert isinstance(result, Response)
     assert "X-Cashu" not in result.headers
     mock_refund.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("failure", ["cost", "refund"])
+async def test_x_cashu_settlement_failure_still_serves_paid_body(
+    stream: bool, failure: str
+) -> None:
+    provider = _make_provider()
+
+    async def chunks() -> AsyncIterator[dict]:
+        yield {
+            "type": "message_start",
+            "message": {"id": "m", "usage": {"input_tokens": 5, "output_tokens": 0}},
+        }
+        yield {"type": "message_delta", "usage": {"output_tokens": 7}}
+        yield {"type": "message_stop"}
+
+    cost = CostData(base_msats=0, input_msats=0, output_msats=0, total_msats=1_000_000)
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(
+                return_value=chunks() if stream else _anthropic_non_stream_response()
+            ),
+        ),
+        patch.object(
+            provider,
+            "get_x_cashu_cost",
+            new=AsyncMock(
+                side_effect=RuntimeError("cost failed") if failure == "cost" else None,
+                return_value=cost,
+            ),
+        ),
+        patch.object(
+            provider,
+            "send_refund",
+            new=AsyncMock(
+                side_effect=RuntimeError("mint down") if failure == "refund" else None,
+                return_value="cashuREFUND",
+            ),
+        ) as refund,
+    ):
+        result = await provider._forward_x_cashu_messages_via_litellm(
+            request_body=_anthropic_request_body(stream=stream),
+            amount=5_000,
+            unit="sat",
+            max_cost_for_model=2_000_000,
+            model_obj=_make_model(),
+            mint="https://mint.example",
+            request_id="req-1",
+        )
+
+    assert result.status_code == 200
+    assert bytes(result.body).strip()
+    if failure == "cost":
+        # The charge is capped at the max cost: 5_000 - 2_000 sats.
+        refund.assert_awaited_once_with(
+            3_000, "sat", "https://mint.example", request_id="req-1"
+        )
+        assert result.headers["X-Cashu"] == "cashuREFUND"
+    else:
+        refund.assert_awaited_once()
+        assert result.headers["X-Routstr-Refund-Error"] == "refund_failed"
+        assert "X-Cashu" not in result.headers
 
 
 # ---------------------------------------------------------------------------
@@ -1666,6 +1736,9 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
         ),
         patch("routstr.upstream.base.store_cashu_transaction", new=AsyncMock()),
         patch.object(
+            provider, "send_refund", new=AsyncMock(return_value="cashuArefund")
+        ) as refund,
+        patch.object(
             provider,
             forward_attr,
             new=AsyncMock(side_effect=httpx.ConnectError("upstream down")),
@@ -1686,6 +1759,11 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
     assert body["error"]["type"] == "upstream_error"
     assert body["error"]["code"] == "UPSTREAM_UNAVAILABLE"
     assert body["error"]["code"] != "cashu_mint_unreachable"
+    assert response.headers["X-Cashu"] == "cashuArefund"
+    assert body["error"]["refund_token"] == "cashuArefund"
+    refund.assert_awaited_once_with(
+        5_000, "sat", "https://mint", request_id=getattr(request.state, "request_id", None)
+    )
 
 
 @pytest.mark.asyncio
