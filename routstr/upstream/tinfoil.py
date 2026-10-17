@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic.v1 import BaseModel
+from pydantic.v1 import BaseModel, validator
 
 from ..core.error_scope import (
     ERROR_SCOPE_HEADER,
@@ -16,7 +16,7 @@ from ..core.error_scope import (
 )
 from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
-from ..payment.models import Architecture, Model, Pricing
+from ..payment.models import Architecture, Model, Pricing, Reasoning
 from .base import BaseUpstreamProvider
 from .ehbp import (
     _ENCLAVE_URL_HEADER,
@@ -25,6 +25,7 @@ from .ehbp import (
     ConfidentialInferenceProfile,
     EHBPForwardingTarget,
 )
+from .reasoning_effort import EFFORT_RANK
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -39,16 +40,109 @@ class TinfoilModelPricing(BaseModel):
     requestPrice: float = 0.0
 
 
+class TinfoilReasoningParams(BaseModel):
+    """Reasoning metadata Tinfoil publishes for a model.
+
+    ``effort_map`` translates a caller-facing level (``low``/``medium``/``high``)
+    into the value the model's chat template accepts — for example DeepSeek V4.1
+    maps ``medium`` to ``high`` and rejects a literal ``medium``. ``params``
+    documents the per-route enable/disable body shapes, with ``$EFFORT`` standing
+    in for the mapped value.
+
+    Both fields are typed permissively on purpose: this is upstream metadata, and
+    a shape change here must not fail ``TinfoilModel`` parsing and drop the model
+    from the catalog. Only well-formed pairs survive into ``Reasoning``.
+    """
+
+    effort_map: dict[str, Any] | None = None
+    params: dict[str, Any] | None = None
+
+    @validator("effort_map", "params", pre=True)
+    def _object_or_none(cls, value: object) -> object:  # noqa: N805
+        return value if isinstance(value, dict) else None
+
+
 class TinfoilModel(BaseModel):
     id: str
     context_window: int = 0
     created: int = 0
     multimodal: bool = False
     reasoning: bool = False
+    # Declared for completeness; the quality scores have no ``Reasoning`` field.
+    intelligence: dict[str, Any] | None = None
+    reasoning_params: TinfoilReasoningParams | None = None
     tool_calling: bool = False
     type: str = "chat"
     pricing: TinfoilModelPricing = TinfoilModelPricing()
     endpoints: list[str] = []
+
+    @validator("intelligence", "reasoning_params", pre=True)
+    def _metadata_or_none(cls, value: object) -> object:  # noqa: N805
+        """Tolerate a metadata shape change instead of dropping the model."""
+        return value if isinstance(value, (dict, TinfoilReasoningParams)) else None
+
+
+def _clean_effort_map(
+    reasoning_params: TinfoilReasoningParams | None,
+) -> dict[str, str]:
+    """Return only caller-level -> native-effort pairs that are usable."""
+    if reasoning_params is None or not reasoning_params.effort_map:
+        return {}
+    return {
+        level: effort
+        for level, effort in reasoning_params.effort_map.items()
+        if isinstance(level, str)
+        and level.strip()
+        and isinstance(effort, str)
+        and effort.strip()
+    }
+
+
+def _ordered_efforts(effort_map: dict[str, str]) -> list[str]:
+    """Native effort values, deduplicated and highest-first."""
+    values = list(dict.fromkeys(effort_map.values()))
+    ranked = [effort for effort in EFFORT_RANK if effort in values]
+    ranked.extend(effort for effort in values if effort not in EFFORT_RANK)
+    return ranked
+
+
+def _reasoning_disableable(
+    reasoning_params: TinfoilReasoningParams | None,
+) -> bool:
+    """True when Tinfoil publishes a disable shape for any route."""
+    params = reasoning_params.params if reasoning_params else None
+    if not isinstance(params, dict):
+        return False
+    return any(
+        isinstance(route, dict) and "disable" in route for route in params.values()
+    )
+
+
+def _tinfoil_reasoning(tf: TinfoilModel) -> Reasoning | None:
+    """Translate a Tinfoil model's reasoning metadata into ``Reasoning``.
+
+    Tinfoil publishes an effort *map* rather than a flat allowlist, and no
+    default effort, so ``default_effort``/``default_enabled`` stay unset instead
+    of inventing values. ``supported_efforts`` lists the native values a caller
+    can send as-is (highest first); clients that offer the coarser
+    ``low``/``medium``/``high`` levels use ``effort_map`` for the exact spelling.
+
+    Models with no effort map (reasoning is a plain on/off toggle there) publish
+    no ``reasoning`` object, matching how Routstr already treats models without
+    effort metadata.
+    """
+    if not tf.reasoning:
+        return None
+    effort_map = _clean_effort_map(tf.reasoning_params)
+    if not effort_map:
+        return None
+    return Reasoning(
+        supported_efforts=_ordered_efforts(effort_map),
+        effort_map=effort_map,
+        # A published disable shape proves reasoning is optional; without one the
+        # answer is unknown rather than assumed mandatory.
+        mandatory=False if _reasoning_disableable(tf.reasoning_params) else None,
+    )
 
 
 class TinfoilUpstreamProvider(BaseUpstreamProvider):
@@ -267,6 +361,7 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
                                     input_cache_read=cached_price / 1_000_000,
                                     input_cache_write=input_price / 1_000_000,
                                 ),
+                                reasoning=_tinfoil_reasoning(tf),
                             )
                         )
                     except Exception as e:
