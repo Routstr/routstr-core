@@ -72,13 +72,21 @@ class TopProvider(BaseModel):
 
 
 class Reasoning(BaseModel):
-    """Per-model reasoning-effort metadata, matching OpenRouter's shape."""
+    """Per-model reasoning-effort metadata, matching OpenRouter's shape.
+
+    ``effort_map`` is a Routstr extension for upstreams (Tinfoil) that publish
+    a caller-level -> native-effort mapping instead of a flat allowlist: the
+    caller-facing levels a UI offers (``low``/``medium``/``high``) are the keys,
+    the exact spelling the upstream accepts is the value. ``supported_efforts``
+    carries those native values, so every advertised effort can be sent as-is.
+    """
 
     mandatory: bool | None = None
     default_enabled: bool | None = None
     supported_efforts: list[str] | None = None
     default_effort: str | None = None
     supports_max_tokens: bool | None = None
+    effort_map: dict[str, str] | None = None
 
     class Config:
         extra = "ignore"
@@ -91,6 +99,7 @@ class Reasoning(BaseModel):
                 self.supported_efforts,
                 self.default_effort,
                 self.supports_max_tokens is not None,
+                self.effort_map,
             )
         )
 

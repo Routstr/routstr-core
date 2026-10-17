@@ -230,9 +230,18 @@ class TestResolveEhbpTargetUrl:
     @pytest.mark.parametrize(
         ("enclave_base", "expected_url"),
         [
-            ("https://router-0.tinfoil.sh/v1", "https://router-0.tinfoil.sh/v1/chat/completions"),
-            ("https://router-0.tinfoil.sh/gateway/v1/", "https://router-0.tinfoil.sh/gateway/v1/chat/completions"),
-            ("https://router-0.tinfoil.sh/gateway", "https://router-0.tinfoil.sh/gateway/v1/chat/completions"),
+            (
+                "https://router-0.tinfoil.sh/v1",
+                "https://router-0.tinfoil.sh/v1/chat/completions",
+            ),
+            (
+                "https://router-0.tinfoil.sh/gateway/v1/",
+                "https://router-0.tinfoil.sh/gateway/v1/chat/completions",
+            ),
+            (
+                "https://router-0.tinfoil.sh/gateway",
+                "https://router-0.tinfoil.sh/gateway/v1/chat/completions",
+            ),
         ],
     )
     def test_override_with_base_path_does_not_duplicate_version(
@@ -242,9 +251,12 @@ class TestResolveEhbpTargetUrl:
         model_obj = MagicMock()
         model_obj.id = "tinfoil-deepseek-v4-1-flash"
         target = provider.get_ehbp_forwarding_target(path, model_obj)
-        assert _resolve_ehbp_target_url(
-            target.url, {"X-Tinfoil-Enclave-Url": enclave_base}, "tinfoil"
-        ) == expected_url
+        assert (
+            _resolve_ehbp_target_url(
+                target.url, {"X-Tinfoil-Enclave-Url": enclave_base}, "tinfoil"
+            )
+            == expected_url
+        )
 
     def test_override_lowercase_header_for_tinfoil(self) -> None:
         result = _resolve_ehbp_target_url(
@@ -984,6 +996,24 @@ class TestComputeEhbpActualCost:
 # ---------------------------------------------------------------------------
 
 
+async def _fetch_models_for(payload: dict) -> list:
+    """Run ``fetch_models`` against one mocked ``/v1/models`` entry."""
+    provider = TinfoilUpstreamProvider(api_key="test")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {"data": [payload]}
+
+    with patch("routstr.upstream.tinfoil.httpx.AsyncClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value = mock_client
+
+        return await provider.fetch_models()
+
+
 class TestTinfoilUpstreamProvider:
     def test_provider_type_and_defaults(self) -> None:
         assert TinfoilUpstreamProvider.provider_type == "tinfoil"
@@ -1171,6 +1201,128 @@ class TestTinfoilUpstreamProvider:
             models = await provider.fetch_models()
 
         assert models == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_models_exposes_reasoning_effort_metadata(self) -> None:
+        """Tinfoil's effort map becomes the catalog's reasoning metadata.
+
+        The native values (``xhigh``/``high``/``low``) are advertised as
+        supported efforts so anything published can be sent as-is, the map is
+        kept so a client offering the coarser ``low``/``medium``/``high``
+        levels can reach the exact spelling, and a published disable shape marks
+        reasoning as optional.
+        """
+        payload = {
+            "id": "deepseek-v4-1-flash",
+            "context_window": 1048576,
+            "reasoning": True,
+            "intelligence": {"off": 22, "low": 31, "medium": 36, "high": 39},
+            "reasoning_params": {
+                "effort_map": {"low": "low", "medium": "high", "high": "xhigh"},
+                "params": {
+                    "/v1/chat/completions": {
+                        "enable": {
+                            "chat_template_kwargs": {
+                                "reasoning_effort": "$EFFORT",
+                                "thinking": True,
+                            }
+                        },
+                        "disable": {"chat_template_kwargs": {"thinking": False}},
+                    }
+                },
+            },
+            "pricing": {
+                "inputTokenPricePer1M": 0.65,
+                "outputTokenPricePer1M": 1.45,
+            },
+        }
+
+        (model,) = await _fetch_models_for(payload)
+
+        assert model.reasoning is not None
+        assert model.reasoning.supported_efforts == ["xhigh", "high", "low"]
+        assert model.reasoning.effort_map == {
+            "low": "low",
+            "medium": "high",
+            "high": "xhigh",
+        }
+        assert model.reasoning.mandatory is False
+        # Tinfoil publishes no default effort, so none is invented.
+        assert model.reasoning.default_effort is None
+
+        dumped = model.dict()["reasoning"]
+        assert dumped["supported_efforts"] == ["xhigh", "high", "low"]
+        assert dumped["effort_map"] == {
+            "low": "low",
+            "medium": "high",
+            "high": "xhigh",
+        }
+        assert "default_effort" not in dumped
+
+    @pytest.mark.asyncio
+    async def test_fetch_models_omits_reasoning_without_effort_map(self) -> None:
+        """An on/off reasoning toggle publishes no effort metadata."""
+        payload = {
+            "id": "kimi-k3",
+            "context_window": 262144,
+            "reasoning": True,
+            "intelligence": {"on": 45},
+            "pricing": {
+                "inputTokenPricePer1M": 5.0,
+                "outputTokenPricePer1M": 25.0,
+            },
+        }
+
+        (model,) = await _fetch_models_for(payload)
+
+        assert model.id == "kimi-k3"
+        assert "reasoning" not in model.dict()
+
+    @pytest.mark.asyncio
+    async def test_fetch_models_survives_malformed_reasoning_metadata(self) -> None:
+        """Bad metadata must not drop the model from the catalog."""
+        payload = {
+            "id": "deepseek-v4-1-flash",
+            "context_window": 1048576,
+            "reasoning": True,
+            "intelligence": "not-a-dict",
+            "reasoning_params": {
+                "effort_map": {"medium": 3, "high": None, "low": "low"},
+                "params": ["not", "a", "dict"],
+            },
+            "pricing": {
+                "inputTokenPricePer1M": 0.65,
+                "outputTokenPricePer1M": 1.45,
+            },
+        }
+
+        (model,) = await _fetch_models_for(payload)
+
+        assert model.id == "deepseek-v4-1-flash"
+        assert model.reasoning is not None
+        # Only the well-formed pair survives; the disable shape is unknown.
+        assert model.reasoning.supported_efforts == ["low"]
+        assert model.reasoning.effort_map == {"low": "low"}
+        assert model.reasoning.mandatory is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_models_reasoning_disabled_publishes_no_metadata(self) -> None:
+        """A model that does not reason never advertises effort levels."""
+        payload = {
+            "id": "llama3-3-70b",
+            "reasoning": False,
+            "reasoning_params": {
+                "effort_map": {"low": "low", "medium": "high", "high": "xhigh"}
+            },
+            "pricing": {
+                "inputTokenPricePer1M": 1.75,
+                "outputTokenPricePer1M": 2.75,
+            },
+        }
+
+        (model,) = await _fetch_models_for(payload)
+
+        assert "reasoning" not in model.dict()
 
 
 # ---------------------------------------------------------------------------
