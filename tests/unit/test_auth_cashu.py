@@ -267,7 +267,12 @@ async def test_primary_msat_token_sets_provenance_without_cashu_mint_duplicate(
 ) -> None:
     token = "cashuAprimary_msat_token"
     token_obj = SimpleNamespace(mint="http://primary:3338", unit="msat")
-    credit = AsyncMock(return_value=1_000)
+
+    async def write_key(token: str, key: ApiKey, session: AsyncSession) -> int:
+        await session.flush()
+        return 1_000
+
+    credit = AsyncMock(side_effect=write_key)
 
     from routstr.core.settings import settings
 
