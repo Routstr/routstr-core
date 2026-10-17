@@ -24,7 +24,11 @@ from routstr.core.db import (
     store_cashu_transaction_with_retry,
     total_user_liability,
 )
-from routstr.payment.lnurl import LNURLError, MeltOutcomeAmbiguousError
+from routstr.payment.lnurl import (
+    LNURLError,
+    LNURLPaymentReceipt,
+    MeltOutcomeAmbiguousError,
+)
 
 KEY_HASH = "refundclaimkey"
 ADDRESS = "user@ln.example.com"
@@ -188,6 +192,7 @@ def _lnurl_stub(
         address: str,
         *,
         on_melt_quote: Callable[[str, str], Awaitable[None]] | None = None,
+        on_melt_inputs: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> int:
         if quoted and on_melt_quote is not None:
             await on_melt_quote("quote-123", mint)
@@ -196,6 +201,254 @@ def _lnurl_stub(
         return amount
 
     return send
+
+
+def _receipt_stub(
+    receipt: LNURLPaymentReceipt,
+    *,
+    failure: Exception | None = None,
+    checkpointed: Callable[[], Awaitable[None]] | None = None,
+) -> AsyncMock:
+    async def send(
+        amount: int,
+        unit: str,
+        mint: str,
+        address: str,
+        *,
+        on_melt_quote: Callable[[str, str], Awaitable[None]],
+        on_melt_inputs: Callable[[int, int], Awaitable[None]],
+    ) -> LNURLPaymentReceipt:
+        await on_melt_quote("receipt-quote", mint)
+        await on_melt_inputs(receipt.sent_msats, 64000)
+        if checkpointed is not None:
+            await checkpointed()
+        if failure is not None:
+            raise failure
+        return receipt
+
+    return AsyncMock(side_effect=send)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unit", ["sat", "msat"])
+@pytest.mark.parametrize("spent_msats", [1000, 2000])
+async def test_lightning_refund_preserves_unused_balance_and_reports_net_amount(
+    integration_session: AsyncSession,
+    patched_db_engine: None,
+    unit: str,
+    spent_msats: int,
+) -> None:
+    key = await _seed_key(integration_session, balance=3958, address=ADDRESS)
+    key.refund_currency = unit
+    integration_session.add(key)
+    await integration_session.commit()
+    claim = await refund.open_claim(
+        integration_session, key, method="lightning", destination=ADDRESS
+    )
+
+    async def inspect_checkpoint() -> None:
+        row = await _load_refund(integration_session, claim.id)
+        assert row.sent_msats == 1000
+        assert row.input_msats == 64000
+        assert row.status == "pending"
+        assert (await _load_key(integration_session)).balance == 0
+
+    receipt = LNURLPaymentReceipt(1000, spent_msats)
+    send = _receipt_stub(receipt, checkpointed=inspect_checkpoint)
+    with patch("routstr.refund.send_to_lnurl", send):
+        body = await refund.execute(integration_session, claim)
+    assert body["sats" if unit == "sat" else "msats"] == (
+        "1" if unit == "sat" else "1000"
+    )
+    assert body["fee_msats"] == str(spent_msats - 1000)
+    assert body["remaining_msats"] == str(3958 - spent_msats)
+    assert (await _load_key(integration_session)).balance == 3958 - spent_msats
+    persisted = await _load_refund(integration_session, claim.id)
+    assert persisted.spent_msats == spent_msats
+    assert persisted.sent_msats == 1000
+    assert not await refund.settle(integration_session, persisted, receipt=receipt)
+    assert not await refund.release(integration_session, persisted)
+    assert (await _load_key(integration_session)).balance == 3958 - spent_msats
+    send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reconciled_paid_refund_restores_unused_reserve_once(
+    integration_session: AsyncSession,
+    patched_db_engine: None,
+) -> None:
+    key = await _seed_key(integration_session, balance=3958)
+    claim = await refund.open_claim(
+        integration_session, key, method="lightning", destination=ADDRESS
+    )
+    receipt = LNURLPaymentReceipt(1000, 1000)
+    send = _receipt_stub(receipt, failure=MeltOutcomeAmbiguousError("response lost"))
+    with (
+        patch("routstr.refund.send_to_lnurl", send),
+        pytest.raises(HTTPException) as error,
+    ):
+        await refund.execute(integration_session, claim)
+    assert error.value.status_code == 502
+    assert (await _load_key(integration_session)).balance == 0
+    await _age_claim(integration_session, claim.id, 600)
+    with (
+        patch(
+            "routstr.refund.check_bolt11_payment_status", AsyncMock(return_value="paid")
+        ),
+        patch(
+            "routstr.refund.recover_lnurl_payment_receipt",
+            AsyncMock(return_value=receipt),
+        ) as recover,
+    ):
+        await refund.reconcile_once()
+        await refund.reconcile_once()
+    assert (await _load_key(integration_session)).balance == 2958
+    row = await _load_refund(integration_session, claim.id)
+    assert row.status == "paid" and row.spent_msats == 1000
+    assert refund.describe(row)["sats"] == "1"
+    recover.assert_awaited_once()
+    send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_settlement_persists_receipt_for_reconciliation(
+    integration_session: AsyncSession,
+    patched_db_engine: None,
+) -> None:
+    key = await _seed_key(integration_session, balance=3958)
+    claim = await refund.open_claim(
+        integration_session, key, method="lightning", destination=ADDRESS
+    )
+    claim_id = claim.id
+    send = _receipt_stub(LNURLPaymentReceipt(1000, 1000))
+    commit = integration_session.commit
+    attempted = False
+
+    async def fail_first_commit() -> None:
+        nonlocal attempted
+        if not attempted:
+            attempted = True
+            raise RuntimeError("commit failed")
+        await commit()
+
+    with (
+        patch("routstr.refund.send_to_lnurl", send),
+        patch.object(integration_session, "commit", side_effect=fail_first_commit),
+        pytest.raises(HTTPException) as error,
+    ):
+        await refund.execute(integration_session, claim)
+    assert error.value.status_code == 502
+    persisted = await _load_refund(integration_session, claim_id)
+    assert persisted.spent_msats == 1000
+    assert (await _load_key(integration_session)).balance == 0
+    await _age_claim(integration_session, claim_id, 600)
+    with (
+        patch(
+            "routstr.refund.check_bolt11_payment_status", AsyncMock(return_value="paid")
+        ),
+        patch(
+            "routstr.refund.recover_lnurl_payment_receipt",
+            AsyncMock(side_effect=AssertionError("use the persisted receipt")),
+        ),
+    ):
+        await refund.reconcile_once()
+    assert (await _load_key(integration_session)).balance == 2958
+    send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "receipt", [LNURLPaymentReceipt(2000, 2000), LNURLPaymentReceipt(1000, 4000)]
+)
+async def test_invalid_receipt_does_not_replace_checkpoint_or_credit_balance(
+    integration_session: AsyncSession,
+    patched_db_engine: None,
+    receipt: LNURLPaymentReceipt,
+) -> None:
+    key = await _seed_key(integration_session, balance=3958)
+    claim = await refund.open_claim(
+        integration_session, key, method="lightning", destination=ADDRESS
+    )
+
+    async def send(
+        *args: object,
+        on_melt_quote: Callable[[str, str], Awaitable[None]],
+        on_melt_inputs: Callable[[int, int], Awaitable[None]],
+    ) -> LNURLPaymentReceipt:
+        await on_melt_quote("receipt-quote", claim.mint_url)
+        await on_melt_inputs(1000, 64000)
+        return receipt
+
+    with (
+        patch("routstr.refund.send_to_lnurl", side_effect=send),
+        pytest.raises(HTTPException) as error,
+    ):
+        await refund.execute(integration_session, claim)
+    assert error.value.status_code == 502
+    row = await _load_refund(integration_session, claim.id)
+    assert row.status == "ambiguous"
+    assert row.sent_msats == 1000
+    assert row.spent_msats is None
+    assert (await _load_key(integration_session)).balance == 0
+
+
+@pytest.mark.asyncio
+async def test_paid_quote_without_debit_evidence_keeps_claim_unresolved(
+    integration_session: AsyncSession,
+    patched_db_engine: None,
+) -> None:
+    key = await _seed_key(integration_session, balance=3958)
+    claim = await refund.open_claim(
+        integration_session, key, method="lightning", destination=ADDRESS
+    )
+    with (
+        patch(
+            "routstr.refund.send_to_lnurl",
+            _receipt_stub(
+                LNURLPaymentReceipt(1000, 1000),
+                failure=MeltOutcomeAmbiguousError("lost"),
+            ),
+        ),
+        pytest.raises(HTTPException),
+    ):
+        await refund.execute(integration_session, claim)
+    await _age_claim(integration_session, claim.id, 600)
+    with (
+        patch(
+            "routstr.refund.check_bolt11_payment_status", AsyncMock(return_value="paid")
+        ),
+        patch(
+            "routstr.refund.recover_lnurl_payment_receipt",
+            AsyncMock(side_effect=MeltOutcomeAmbiguousError("no change evidence")),
+        ),
+    ):
+        await refund.reconcile_once()
+    assert (await _load_key(integration_session)).balance == 0
+    assert (await _load_refund(integration_session, claim.id)).status == "ambiguous"
+
+
+@pytest.mark.asyncio
+async def test_refund_credit_preserves_topup_while_payment_is_in_flight(
+    integration_session: AsyncSession,
+    patched_db_engine: None,
+) -> None:
+    key = await _seed_key(integration_session, balance=3958)
+    claim = await refund.open_claim(
+        integration_session, key, method="lightning", destination=ADDRESS
+    )
+
+    async def topup() -> None:
+        key = await _load_key(integration_session)
+        key.balance = 500
+        integration_session.add(key)
+        await integration_session.commit()
+
+    with patch(
+        "routstr.refund.send_to_lnurl",
+        _receipt_stub(LNURLPaymentReceipt(1000, 1000), checkpointed=topup),
+    ):
+        await refund.execute(integration_session, claim)
+    assert (await _load_key(integration_session)).balance == 3458
 
 
 @pytest.mark.asyncio
