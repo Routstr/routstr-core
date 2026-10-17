@@ -146,12 +146,6 @@ def _published_cost(cost_data: CostMetadata) -> dict[str, Any]:
     return cost
 
 
-def _headers_for_rewritten_body(headers: httpx.Headers) -> dict[str, str]:
-    """Upstream headers minus framing, which no longer matches a rewritten body."""
-    framing = {"transfer-encoding", "content-encoding", "content-length"}
-    return {k: v for k, v in headers.items() if k.lower() not in framing}
-
-
 def _inject_cost_response_headers(
     headers: dict[str, str], cost_data: CostMetadata
 ) -> None:

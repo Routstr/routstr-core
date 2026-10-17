@@ -375,10 +375,15 @@ def _count_prompt_token_ids(node: Any) -> int:
 def estimate_prompt_tokens(body: dict) -> int:
     """Conservatively estimate prompt tokens for the whole provider-bound body.
 
-    Every string counts, as do token IDs in legacy ``prompt`` arrays, so no
-    forwarded field can hide prompt weight and shrink its reservation.
+    Every string counts, as do token IDs in legacy ``prompt`` and embeddings
+    ``input`` arrays, so no forwarded field can hide prompt weight and shrink
+    its reservation.
     """
-    return _sum_string_chars(body) // 3 + _count_prompt_token_ids(body.get("prompt"))
+    return (
+        _sum_string_chars(body) // 3
+        + _count_prompt_token_ids(body.get("prompt"))
+        + _count_prompt_token_ids(body.get("input"))
+    )
 
 
 IMAGE_FETCH_TIMEOUT_SECONDS = 10.0

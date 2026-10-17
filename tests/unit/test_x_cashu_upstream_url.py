@@ -8,8 +8,11 @@ import pytest
 from fastapi.responses import Response
 
 from routstr.payment.models import Architecture, Model, Pricing
+from routstr.upstream.azure import AzureUpstreamProvider
 from routstr.upstream.base import BaseUpstreamProvider
+from routstr.upstream.gemini import GeminiUpstreamProvider
 from routstr.upstream.ollama import OllamaUpstreamProvider
+from routstr.upstream.routstr import RoutstrUpstreamProvider
 
 MODEL = Model(
     id="nimble:9b",
@@ -71,12 +74,18 @@ async def test_x_cashu_url_matches_api_key_url(path: str) -> None:
     for provider in (
         BaseUpstreamProvider(base_url="http://upstream/v1", api_key="k"),
         OllamaUpstreamProvider(base_url="http://ollama:11434"),
+        GeminiUpstreamProvider(api_key="k"),
+        AzureUpstreamProvider(
+            base_url="https://res.openai.azure.com", api_key="k", api_version="v1"
+        ),
+        RoutstrUpstreamProvider(base_url="https://node.example", api_key="k"),
     ):
         expected = provider.build_request_url(
             provider.normalize_request_path(path, MODEL), MODEL
         )
 
-        assert await _x_cashu_url(provider, path) == expected
+        url = httpx.URL(await _x_cashu_url(provider, path))
+        assert str(url.copy_with(query=None)) == expected
 
 
 @pytest.mark.asyncio

@@ -141,6 +141,30 @@ def test_measured_usage_is_never_replaced() -> None:
     assert response_json["usage"] == {"input_tokens": 7}
 
 
+def test_x_cashu_systemone_error_body_is_not_billed() -> None:
+    """A 200 that carries no answers generated nothing, like an empty chat reply."""
+    response_json: dict[str, Any] = {"error": {"message": "model is loading"}}
+
+    _apply_estimated_usage(
+        response_json, _body(_SYSTEMONE_BODY), None, 1000, "sat", "chat"
+    )
+
+    assert "usage" not in response_json
+
+
+def test_embedding_token_ids_are_counted() -> None:
+    body = {"model": "nomic-embed-text", "input": [list(range(3000))]}
+    estimator = MissingUsageEstimator(_body(body), None)
+    estimator.observe(
+        {"object": "list", "data": [{"object": "embedding", "embedding": [0.1]}]}
+    )
+
+    usage = estimator.estimated_usage("nomic-embed-text")
+
+    assert usage is not None
+    assert usage["input_tokens"] >= 3000
+
+
 @pytest.mark.parametrize(
     "path",
     [

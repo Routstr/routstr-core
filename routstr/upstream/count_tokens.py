@@ -237,7 +237,9 @@ class MissingUsageEstimator:
         self.model_name = _model_name(model_obj, self.body)
         self._output_parts: list[str] = []
         self._input_tokens: int | None = None
-        self._input_only = _is_decision_request(self.body)
+        # Set by ``observe`` from the response shape: a decision request whose
+        # 200 carries no ``answers`` (an error body) generated nothing to bill.
+        self._input_only = False
 
     def _estimate_input_tokens(self) -> int:
         if self._input_tokens is not None:
