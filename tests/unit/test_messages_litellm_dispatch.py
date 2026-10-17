@@ -562,7 +562,12 @@ async def test_non_streaming_dispatches_via_litellm_and_returns_anthropic_respon
 
 
 @pytest.mark.asyncio
-async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
+@pytest.mark.parametrize(
+    "input_tokens,output_tokens,estimated", [(5, 7, False), (0, 0, True)]
+)
+async def test_streaming_emits_sse_and_reconciles_cost_at_end(
+    input_tokens: int, output_tokens: int, estimated: bool
+) -> None:
     provider = _make_provider()
     key = _make_key()
     model = _make_model()
@@ -578,7 +583,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
                 "role": "assistant",
                 "model": "openai/gpt-4o-mini",
                 "content": [],
-                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "usage": {"input_tokens": input_tokens, "output_tokens": 0},
             },
         }
         yield {
@@ -595,7 +600,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
         yield {
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 0},
+            "usage": {"output_tokens": output_tokens},
         }
         yield {"type": "message_stop"}
 
@@ -682,9 +687,9 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
     assert "event: cost" in joined
 
     combined = captured_cost_call["combined_data"]
-    assert combined["usage"]["input_tokens"] == 0
-    assert combined["usage"]["output_tokens"] == 0
-    assert combined["usage"]["estimated"] is True
+    assert combined["usage"]["input_tokens"] == input_tokens
+    assert combined["usage"]["output_tokens"] == output_tokens
+    assert combined["usage"].get("estimated", False) is estimated
     assert combined["model"] == "openai/gpt-4o-mini"
     assert captured_cost_call["reservation_snapshot"] is reservation
     assert captured_cost_call["usage_presence"].input_source == "reported"
