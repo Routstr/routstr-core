@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.wallet import fetch_all_balances
+from routstr.wallet import BalanceDetail, fetch_all_balances
 
 
 @pytest.fixture(autouse=True)
@@ -589,7 +589,7 @@ async def test_rate_limited_discovery_is_not_retried_during_backoff() -> None:
 async def test_cached_balances_share_one_scan() -> None:
     from routstr import wallet
 
-    result = ([], 0, 0, 0)
+    result: tuple[list[BalanceDetail], int, int, int] = ([], 0, 0, 0)
     fetch = AsyncMock(return_value=result)
     with patch("routstr.wallet.fetch_all_balances", fetch):
         first = await wallet.get_cached_balances()

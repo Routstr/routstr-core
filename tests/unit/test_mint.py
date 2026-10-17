@@ -286,5 +286,6 @@ async def test_passive_reads_are_spaced_per_mint() -> None:
 
     assert operation.await_count == 2
     sleep.assert_awaited_once()
+    assert sleep.await_args is not None
     assert 0 < sleep.await_args.args[0] <= 0.05
     MintRateGuard._guards.pop(mint, None)
