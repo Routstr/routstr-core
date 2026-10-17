@@ -1,8 +1,8 @@
 """add upstream model snapshots
 
-Revision ID: 7e2a4c6b8d10
-Revises: 5c7d9e1f2a3b
-Create Date: 2026-10-11 18:00:00.000000
+Revision ID: 20cbae78521c
+Revises: f38b16f1a3dd
+Create Date: 2026-10-18 10:02:00.000000
 
 Every worker fetched each provider's model catalog on its own and kept it only in
 process memory. A fetch that failed or was rate limited left that worker with no
@@ -15,8 +15,8 @@ import sqlalchemy as sa
 import sqlmodel
 from alembic import op
 
-revision = "7e2a4c6b8d10"
-down_revision = "5c7d9e1f2a3b"
+revision = "20cbae78521c"
+down_revision = "f38b16f1a3dd"
 branch_labels = None
 depends_on = None
 

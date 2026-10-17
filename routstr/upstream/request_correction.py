@@ -1,6 +1,6 @@
 """Reactive request-correction layer.
 
-When an upstream rejects a request with a recoverable 4xx error, this layer
+When an upstream rejects a request for a bad param (usually a 400), this layer
 tries to *fix* the request body and let the caller retry the same upstream
 instead of failing outright. It is provider-agnostic: correctors key off the
 upstream's own error wording, so the same recovery works across every provider.
@@ -42,6 +42,16 @@ _UNSUPPORTED_PARAM_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Same, with the param after a label, e.g. "Unsupported parameter: temperature".
+# A nested path ("reasoning.summary", "tools[0].strict") names a field inside a
+# top-level param and must not match: stripping the parent drops far more than
+# the upstream rejected.
+_UNSUPPORTED_PARAM_PREFIX_RE = re.compile(
+    r"unsupported\s+parameter:\s*[`'\"]?(?P<param>[a-zA-Z_][a-zA-Z0-9_]*)"
+    r"(?![\w.\[])",
+    re.IGNORECASE,
+)
+
 
 # Matches upstream error text that rejects a param and names its replacement,
 # e.g. OpenAI's "Unsupported parameter: 'max_tokens' is not supported with this
@@ -76,13 +86,19 @@ class Correction:
 
 def extract_error_message(response: Response) -> str:
     """Best-effort extraction of an error message string from a proxy Response."""
-    body_bytes = getattr(response, "body", None)
-    if not body_bytes:
+    return error_message_from_body(getattr(response, "body", None) or b"")
+
+
+def error_message_from_body(body: bytes | str) -> str:
+    """Best-effort extraction of an error message string from a raw error body."""
+    if not body:
         return ""
     try:
-        data = json.loads(body_bytes)
+        data = json.loads(body)
     except Exception:
-        return body_bytes.decode("utf-8", errors="ignore")[:500]
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", errors="ignore")
+        return body[:500]
     if isinstance(data, dict):
         err = data.get("error")
         if isinstance(err, dict):
@@ -91,8 +107,9 @@ def extract_error_message(response: Response) -> str:
                 return msg
         elif isinstance(err, str):
             return err
-        if isinstance(data.get("message"), str):
-            return data["message"]
+        for key in ("message", "detail"):
+            if isinstance(data.get(key), str):
+                return data[key]
     return ""
 
 
@@ -110,6 +127,13 @@ _SPEND_SHAPING_PARAMS = frozenset(
         "n",
         "best_of",
     }
+)
+
+# An error naming one of these ("model is not supported") is about the request
+# itself, not an optional knob. Stripping it would send a different request,
+# e.g. a model-less body that an upstream serves with its default model.
+_REQUEST_IDENTITY_PARAMS = frozenset(
+    {"model", "provider", "messages", "input", "stream"}
 )
 
 # Output caps are interchangeable spellings of the same limit, so moving the
@@ -169,11 +193,13 @@ def strip_unsupported_param(body: dict, error_message: str) -> tuple[dict, str] 
     overcharge. When the upstream names such a field, decline so the original
     error propagates rather than silently resizing the request's cost.
     """
-    match = _UNSUPPORTED_PARAM_RE.search(error_message)
+    match = _UNSUPPORTED_PARAM_RE.search(
+        error_message
+    ) or _UNSUPPORTED_PARAM_PREFIX_RE.search(error_message)
     if not match:
         return None
     param = match.group("param")
-    if param not in body:
+    if param not in body or param.lower() in _REQUEST_IDENTITY_PARAMS:
         return None
     if param.lower() in _SPEND_SHAPING_PARAMS:
         logger.warning(

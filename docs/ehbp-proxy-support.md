@@ -138,6 +138,10 @@ helpers in `routstr/upstream/ehbp.py` were extended to:
   SDK sends it.
 - Finalize bearer billing with the dedicated EHBP actual-cost finalizer.
 - Compute X-Cashu refunds from actual cost instead of max cost.
+- Relay encrypted enclave error responses verbatim — status,
+  `Ehbp-Response-Nonce` and ciphertext body — instead of wrapping the
+  ciphertext in a proxy JSON envelope, so the EHBP client can decrypt the
+  provider's actual error.
 
 See `docs/tinfoil-direct-integration.md` for the full implementation notes.
 

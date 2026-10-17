@@ -28,7 +28,7 @@ MIGRATION = (
     ROOT
     / "migrations"
     / "versions"
-    / "3b1965ea9cea_widen_money_and_timestamp_columns_to_64_.py"
+    / "74d9ee257408_widen_money_and_timestamp_columns_to_64_.py"
 )
 
 # Built once here because SQLAlchemy's dialect constructors are untyped.

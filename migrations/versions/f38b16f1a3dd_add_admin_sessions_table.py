@@ -1,8 +1,8 @@
 """add admin sessions table
 
-Revision ID: 5c7d9e1f2a3b
-Revises: 3b1965ea9cea
-Create Date: 2026-10-10 23:30:00.000000
+Revision ID: f38b16f1a3dd
+Revises: 74d9ee257408
+Create Date: 2026-10-18 10:01:00.000000
 
 Dashboard logins used to live in a per-process dict, so with several uvicorn
 workers or replicas an admin call only succeeded on the worker that issued the
@@ -13,8 +13,8 @@ import sqlalchemy as sa
 import sqlmodel
 from alembic import op
 
-revision = "5c7d9e1f2a3b"
-down_revision = "3b1965ea9cea"
+revision = "f38b16f1a3dd"
+down_revision = "74d9ee257408"
 branch_labels = None
 depends_on = None
 

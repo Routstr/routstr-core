@@ -1,8 +1,8 @@
 """widen money and timestamp columns to 64-bit
 
-Revision ID: 3b1965ea9cea
-Revises: 424bb59871d4
-Create Date: 2026-09-30 23:13:38.295444
+Revision ID: 74d9ee257408
+Revises: c8a1d2e3f4b5
+Create Date: 2026-10-18 10:00:00.000000
 
 Balances are millisatoshis and every clock column is a unix timestamp, so both
 are 64-bit quantities. SQLite stores all INTEGER values as 64-bit, which is why
@@ -24,8 +24,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "3b1965ea9cea"
-down_revision = "424bb59871d4"
+revision = "74d9ee257408"
+down_revision = "c8a1d2e3f4b5"
 branch_labels = None
 depends_on = None
 
