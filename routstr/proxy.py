@@ -30,7 +30,7 @@ from .core.error_scope import (
     UPSTREAM_ERROR_STATUS,
     UPSTREAM_UNAVAILABLE,
 )
-from .core.exceptions import UpstreamError
+from .core.exceptions import EhbpEncryptedUpstreamError, UpstreamError
 from .core.middleware import mark
 from .core.not_found import build_not_found_response
 from .core.settings import settings
@@ -1417,6 +1417,12 @@ async def _proxy(
                 await revert_pay_for_request(
                     key, session, max_cost_for_model, reservation_snapshot
                 )
+                if isinstance(e, EhbpEncryptedUpstreamError):
+                    # The enclave encrypted its error body end-to-end. Only the
+                    # EHBP client can decrypt it, so relay the enclave reply
+                    # verbatim; a proxy envelope would hand the caller
+                    # ciphertext instead of the provider's actual error.
+                    return e.response
                 return create_upstream_error_response(e, request)
 
             # Otherwise loop continues to next provider
