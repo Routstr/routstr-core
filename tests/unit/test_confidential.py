@@ -180,6 +180,29 @@ def test_candidate_is_the_provider_behind_the_sidecar_host(
     assert conf.candidate_for("m", "api.example.com") is None
 
 
+def test_only_chat_models_are_offered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Image and embedding models (zero token rates) are never offered for chat."""
+    from types import SimpleNamespace
+
+    import routstr.proxy as proxy
+
+    def model(mid: str, out: list[str]) -> Any:
+        arch = SimpleNamespace(output_modalities=out)
+        return SimpleNamespace(id=mid, architecture=arch)
+
+    models = [
+        model("chat", ["text"]),
+        model("img", ["image"]),
+        model("emb", ["embedding"]),
+        SimpleNamespace(id="bare"),
+    ]
+    monkeypatch.setattr(proxy, "get_unique_models", lambda: models)
+    venice = (object(), _Up("https://api.venice.ai/api/v1"))
+    monkeypatch.setattr(proxy, "get_candidates", lambda mid: [venice])
+    offered = conf.offered_models({"upstream_host": "api.venice.ai"})
+    assert set(offered) == {"chat"}
+
+
 def test_model_allowlist_semantics() -> None:
     allow = conf.model_allowlist
     assert allow({}) == set() and allow({"model_allowlist": []}) == set()
