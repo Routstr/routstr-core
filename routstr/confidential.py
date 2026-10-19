@@ -902,12 +902,12 @@ def prompt_token_limit(model_obj: Any) -> int | None:
     ``None`` when no context length is known (the caller then falls back to
     the model's undiscounted maximum cost). Only positive integers count: 0
     means unknown, and a negative value (bad provider metadata) would shrink
-    the reservation, so ``reserve`` refuses such a model.
+    the reservation, so ``reserve`` refuses such a model. The model's own
+    context length and its catalogue's ``top_provider`` one can differ (the
+    latter may describe another provider): the larger is reserved.
     """
-    for cl in _context_lengths(model_obj):
-        if _is_int(cl) and cl > 0:
-            return int(cl)
-    return None
+    known = [int(cl) for cl in _context_lengths(model_obj) if _is_int(cl) and cl > 0]
+    return max(known) if known else None
 
 
 def _context_lengths(model_obj: Any) -> list[Any]:
