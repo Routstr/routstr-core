@@ -52,6 +52,7 @@ from .confidential import (
     CONFIDENTIAL_MAX_V,
     CONFIDENTIAL_MIN_V,
     IMAGE_MAX_COUNT,
+    PROVIDER_REFUSAL_STATUSES,
     UNBILLED_ERROR_STATUSES,
     Billing,
     BillingError,
@@ -706,10 +707,13 @@ async def _apply_settlement(
     error_status = usage.get("error_status")
     if _is_int(error_status):
         if error_status in UNBILLED_ERROR_STATUSES:
-            # The provider refused before doing inference, but the request
-            # reached it and the node did the session's 2PC: the session fee
-            # (not the abandon fee) is charged, if any.
-            return await _release_keeping_fee(billing, "session_fee_msat")
+            # The provider answered before doing inference. Its own state
+            # (rate limit, capacity) costs the client the session fee only;
+            # a request it rejected costs the abandon fee, since the node
+            # did the session's 2PC for a request that could not run.
+            if error_status in PROVIDER_REFUSAL_STATUSES:
+                return await _release_keeping_fee(billing, "session_fee_msat")
+            return await _release_keeping_fee(billing, "abandon_fee_msat")
         # 500/502/504 …: work may have been billed upstream.
         return billing.reserved_msats, await charge_reservation(billing)
     if images or usage.get("model") != billing.model_id:

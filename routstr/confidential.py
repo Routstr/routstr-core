@@ -74,9 +74,20 @@ IMAGE_IDLE_RANGE = (30, 600)
 IMAGE_FORMAT = "webp"
 DEFAULT_IMAGE_COUNT_KEY = "variants"
 
-# Upstream HTTP errors settled at zero cost once disclosed under π_C3S: client
-# errors, rate limiting and "overloaded" are answered before any work starts.
+# Upstream HTTP errors answered before any inference starts, so the request
+# itself is not billed once the error head is disclosed under π_C3S.
 UNBILLED_ERROR_STATUSES = frozenset(range(400, 500)) | {503}
+# Of those, the ones the provider's own state caused (rate limiting, at
+# capacity): only the session fee. Every other 4xx is a request the provider
+# rejected after the node did the session's 2PC, so the client pays the
+# abandon fee, as for a session it never used; otherwise a deliberately
+# invalid body would be a free way to make the node work.
+PROVIDER_REFUSAL_STATUSES = frozenset({429, 503})
+
+# A 4K image takes the provider long enough (a busy one took 44 s and 5.9 MB as
+# base64) that several in one response could outlast the provider's idle
+# limits or the response cap: such variants are offered one image at a time.
+IMAGE_MAX_COUNT_BY_RESOLUTION = {"4K": 1}
 
 # The offer fetch sits on the unauthenticated ``/v1/models`` path: keep it short,
 # remember failures briefly and serve the last good offer while it is not stale
@@ -521,14 +532,16 @@ def image_variants(model_obj: Any, space: dict[str, Any], pct: float) -> list[di
             msat = sats * 1000.0 * (1.0 + pct / 100.0)
             if not math.isfinite(msat) or msat <= 0:
                 continue
-            variants.append(
-                {
-                    "id": "-".join([v for _k, v in chosen] + [IMAGE_FORMAT]),
-                    "pins": [[k, v] for k, v in chosen] + [["format", IMAGE_FORMAT]],
-                    # Rounded first: float noise must not add a millisat.
-                    "msat_per_image": math.ceil(round(msat, 3)),
-                }
-            )
+            variant: dict[str, Any] = {
+                "id": "-".join([v for _k, v in chosen] + [IMAGE_FORMAT]),
+                "pins": [[k, v] for k, v in chosen] + [["format", IMAGE_FORMAT]],
+                # Rounded first: float noise must not add a millisat.
+                "msat_per_image": math.ceil(round(msat, 3)),
+            }
+            cap = IMAGE_MAX_COUNT_BY_RESOLUTION.get(dict(chosen).get("resolution", ""))
+            if cap is not None:
+                variant["max_count"] = cap
+            variants.append(variant)
     return variants
 
 
@@ -557,14 +570,29 @@ def priced_image_models(
         cand = candidate_for(model.id, host)
         if cand is None:
             continue
+        # The suffix pins the provider's own spelling: the node's public ids
+        # are lower-cased, and a provider may not accept that (Venice
+        # answers 404 for a mis-cased model).
+        upstream_id = upstream_model_id(cand.model)
+        if upstream_id is None:
+            continue
         try:
             variants = image_variants(cand.model, space, pct)
         except Exception:
             logger.debug("confidential: no image pricing", extra={"model": model.id})
             continue
         if variants:
-            out[model.id] = (cand, variants)
+            out[upstream_id] = (cand, variants)
     return out
+
+
+def upstream_model_id(model_obj: Any) -> str | None:
+    """The id the provider itself serves the model under, as the plain path
+    forwards it; ``None`` if it cannot be determined."""
+    mid = getattr(model_obj, "forwarded_model_id", None) or getattr(
+        model_obj, "id", None
+    )
+    return mid if isinstance(mid, str) and mid else None
 
 
 def images_offer_block(side_offer: dict[str, Any], pct: float) -> dict[str, Any] | None:
@@ -815,7 +843,9 @@ async def models_fields() -> dict[str, dict[str, Any]]:
     }
     out = {model_id: field for model_id in priced_models(side)}
     for model_id in priced_image_models(side, rate_surcharge_pct()):
-        out[model_id] = {**field, "kind": "images"}
+        # Keyed by the provider's spelling in the offer; /v1/models lists the
+        # node's lower-cased public id.
+        out[model_id] = out[model_id.lower()] = {**field, "kind": "images"}
     return out
 
 
@@ -1123,15 +1153,21 @@ async def reserve_image(
     if cand is None or terms is None or variant is None or terms.images is None:
         raise _offer_expired(model_id)
     max_count = int(terms.images.get("max_count", 1))
+    if _is_int(variant.get("max_count")):
+        max_count = min(max_count, variant["max_count"])
     if not _is_int(count) or not 1 <= count <= max_count:
         raise BillingError(f"count must be an integer in [1, {max_count}]")
+    raw_price: Any = variant.get("msat_per_image")
+    if not _is_int(raw_price) or raw_price <= 0:
+        # Signed prices are whole millisats; anything else is not ours.
+        raise _offer_expired(model_id)
+    per_image: int = raw_price
     fee = terms.session_fee_msat
     abandon = max(terms.abandon_fee_msat, fee)
     if (fee > 0 and accepted_fee_msat != fee) or (
         abandon > 0 and accepted_abandon_fee_msat != abandon
     ):
         raise _fee_not_accepted(fee, abandon)
-    per_image = int(variant["msat_per_image"])
     suffix = render_image_suffix(
         model_id,
         str(terms.images.get("count_key", DEFAULT_IMAGE_COUNT_KEY)),
