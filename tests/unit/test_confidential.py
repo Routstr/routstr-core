@@ -2077,6 +2077,39 @@ def _flat_book() -> Any:
     return ImagePricing(max_usd=0.01, tiers=[ImagePriceTier(usd=0.01)])
 
 
+def test_image_price_axes_come_from_the_tiers_too() -> None:
+    """A tier axis the book does not declare is still pinned per variant."""
+    from routstr.payment.image_pricing import ImagePriceTier, ImagePricing
+
+    space = {"resolution": ["1K", "2K"], "quality": ["low", "high"], "format": ["webp"]}
+    undeclared = ImagePricing(
+        max_usd=0.2,
+        tiers=[
+            ImagePriceTier(resolution="1K", quality="low", usd=0.05),
+            ImagePriceTier(resolution="1K", quality="high", usd=0.1),
+            ImagePriceTier(resolution="2K", quality="high", usd=0.2),
+        ],
+        default_resolution="1K",
+    )
+    variants = conf.image_variants(_image_model("q", undeclared, 200.0), space, 0)
+    pins = sorted(tuple(map(tuple, v["pins"])) for v in variants)
+    assert pins == sorted(
+        [
+            (("resolution", r), ("quality", q), ("format", "webp"))
+            for r in ("1K", "2K")
+            for q in ("low", "high")
+        ]
+    )
+    # Every variant pins both axes, and the 1K/low one is priced at its tier.
+    low = next(v for v in variants if v["id"] == "1K-low-webp")
+    assert low["msat_per_image"] == 50_000
+    # A tier axis the endpoint cannot pin keeps the model out of the offer.
+    no_quality = {"resolution": ["1K", "2K"], "format": ["webp"]}
+    assert (
+        conf.image_variants(_image_model("q", undeclared, 200.0), no_quality, 0) == []
+    )
+
+
 def test_image_suffix_matches_the_shared_vector() -> None:
     fixed = _IMAGES_EP["fixed_pins"]
     suffix = conf.render_image_suffix(
@@ -2101,6 +2134,13 @@ def test_image_suffix_matches_the_shared_vector() -> None:
         {"fixed_pins": [["format", "png"]]},  # collides with param_space
         {"param_space": {"format": "webp"}},
         {"count_key": ""},
+        {"response_idle_s": 0},
+        {"response_idle_s": 601},
+        {"response_idle_s": "300"},
+        {"max_count": 0},
+        {"max_count": True},
+        {"max_response_bytes": -1},
+        {"max_response_bytes": 1.5},
     ],
 )
 def test_malformed_images_endpoint_is_ignored(change: dict[str, Any]) -> None:
@@ -2203,6 +2243,7 @@ async def test_offer_publishes_signed_image_variants(
     assert images["response_shape"] == "venice"
     assert images["max_response_bytes"] == 64 << 20
     assert _verify_schnorr(offer["sig_payload"], offer["sig"], pub_hex)
+
     assert json.loads(offer["sig_payload"])["images"] == images
     terms = conf.signed_offer_terms(offer["sig"])
     assert terms is not None and terms.images == images
@@ -2211,6 +2252,19 @@ async def test_offer_publishes_signed_image_variants(
 
     fields = await conf.models_fields()
     assert fields["nano"]["kind"] == "images" and "kind" not in fields["chat-m"]
+
+
+async def test_offer_signs_the_sidecars_lower_image_count(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """A sidecar that allows fewer images never gets a setup it would refuse."""
+    side = {
+        "upstream_host": "api.venice.ai",
+        "head_template": "x",
+        "endpoints": {"images": {**_IMAGES_EP, "max_count": 1}},
+    }
+    _images_world(monkeypatch, side)
+    assert (await conf.build_offer())["images"]["max_count"] == 1
 
 
 async def test_offer_without_the_images_endpoint_is_unchanged(
