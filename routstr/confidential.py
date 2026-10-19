@@ -794,6 +794,12 @@ async def build_offer() -> dict[str, Any]:
         "mints": settings.cashu_mints,
         **pricing_fields(fee, abandon, pct),
     }
+    chat = side.get("chat")
+    if isinstance(chat, dict):
+        # The pinned chat suffix (docs/CHAT-SUFFIX.md in routstr-confidential):
+        # the sidecar renders it from this block and checked it at startup;
+        # clients render the same bytes from the signed copy.
+        offer["chat"] = chat
     if margin > 0:
         offer["reserve_margin_tokens"] = margin
     if images is not None:
