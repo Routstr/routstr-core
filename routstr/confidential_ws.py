@@ -3,8 +3,8 @@
 * ``GET /v1/confidential/ws?session_id=<uuid>&v=2``: the session control
   and TLS-record channel to the cu-sidecar. The first client frame must be
   ``setup`` (within ``SETUP_TIMEOUT_S``). It carries the client's ordinary
-  bearer (``auth``: an ``sk-`` key or a Cashu token) and optionally the
-  ``offer_sig`` of the signed offer the client verified. The node validates
+  bearer (``auth``: an ``sk-`` key or a Cashu token) and the ``offer_sig``
+  of the signed offer the client verified. The node validates
   the setup, freezes the rates, reserves, and only then dials the sidecar and
   forwards the setup *without* ``auth``/``offer_sig`` (the non-secret
   reservation id binds the session id instead). Afterwards it intercepts:
@@ -37,8 +37,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import socket
+import sys
+import tempfile
 import time
 from typing import Any, TypeGuard
 
@@ -113,6 +116,67 @@ _live_sids: dict[str, "SessionState"] = {}
 _unused_by_ip: dict[str, int] = {}
 
 
+# The open lock file that marks this process as the node's only worker.
+_worker_lock_fd: int | None = None
+
+
+def _configured_workers(argv: list[str], env: dict[str, str]) -> int:
+    """The worker count named by the launcher's arguments or environment
+    (uvicorn ``--workers``/``WEB_CONCURRENCY``, gunicorn ``-w``/``--workers``)."""
+    found = [env.get("WEB_CONCURRENCY", "")]
+    gunicorn = "gunicorn" in os.path.basename(argv[0] if argv else "") or (
+        "gunicorn" in env.get("SERVER_SOFTWARE", "")
+    )
+    args = argv[1:] + env.get("GUNICORN_CMD_ARGS", "").split()
+    for i, arg in enumerate(args):
+        if arg.startswith("--workers="):
+            found.append(arg.split("=", 1)[1])
+        elif arg == "--workers" or (arg == "-w" and gunicorn):
+            found.append(args[i + 1] if i + 1 < len(args) else "")
+    counts = [int(v) for v in found if v.strip().isdigit()]
+    return max(counts, default=1)
+
+
+def claim_single_worker(database_url: str) -> None:
+    """Fail closed unless this is the node's only worker process.
+
+    Signed offers, live sessions and the /zk admission are per process, so a
+    second worker would refuse other workers' offers and proof channels and
+    double every limit. A launcher that names more than one worker is refused,
+    and an exclusive lock (per sidecar and database) catches any other
+    process of the same node on this host. Raises ``RuntimeError``.
+    """
+    global _worker_lock_fd
+    workers = _configured_workers(sys.argv, dict(os.environ))
+    if workers > 1:
+        raise RuntimeError(
+            f"confidential mode needs a single worker process, but {workers} "
+            "are configured (--workers / WEB_CONCURRENCY); run one worker or "
+            "unset CONFIDENTIAL_SIDECAR_URL"
+        )
+    if _worker_lock_fd is not None:
+        return
+    try:
+        import fcntl
+    except ImportError:  # not POSIX: only the launcher check applies
+        return
+    key = f"{settings.confidential_sidecar_url}\n{database_url}".encode()
+    path = os.path.join(
+        tempfile.gettempdir(),
+        f"routstr-confidential-{hashlib.sha256(key).hexdigest()[:16]}.lock",
+    )
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise RuntimeError(
+            "confidential mode needs a single worker process, but another "
+            f"process of this node holds {path}; run one worker"
+        ) from None
+    _worker_lock_fd = fd
+
+
 def _sidecar_ws_url(path: str, query: str) -> str:
     base = to_ws_url(settings.confidential_sidecar_url.rstrip("/"))
     return f"{base}{path}?{query}"
@@ -137,6 +201,8 @@ class SessionState:
         self.finalized = False
         self.lock = asyncio.Lock()
         self.attestation_hash = ""
+        # Set when the session ends: its /zk proxies close with it.
+        self.ended = asyncio.Event()
 
 
 class SetupError(Exception):
@@ -193,11 +259,13 @@ def validate_setup(msg: Any, max_tokens_cap: int) -> None:
     nonce_c = msg.get("nonce_c")
     if not isinstance(nonce_c, str) or not _SID_RE.match(nonce_c):
         raise SetupError(400, "setup.nonce_c must be 64 hex characters")
+    # The session is billed at the rates of the signed offer the client
+    # verified, never at whatever the node's settings are at setup time.
     offer_sig = msg.get("offer_sig")
-    if offer_sig is not None and (
-        not isinstance(offer_sig, str) or not _HEX_RE.match(offer_sig)
-    ):
-        raise SetupError(400, "setup.offer_sig must be a hex string")
+    if not isinstance(offer_sig, str) or not _HEX_RE.match(offer_sig):
+        raise SetupError(
+            400, "setup.offer_sig must be the hex signature of the verified offer"
+        )
     if not isinstance(msg.get("auth", ""), str):
         raise SetupError(400, "setup.auth must be a string")
     for name in ("session_fee_msat", "abandon_fee_msat"):
@@ -284,6 +352,7 @@ async def confidential_session_proxy(
 
 
 def _forget_sid(state: "SessionState") -> None:
+    state.ended.set()
     if state.sid is not None and _live_sids.get(state.sid) is state:
         del _live_sids[state.sid]
 
@@ -400,7 +469,7 @@ async def _open_session(
             raise SetupError(503, "confidential sidecar unavailable") from exc
         validate_setup(msg, cap)
         auth = msg.pop("auth", "") or ""
-        offer_sig = msg.pop("offer_sig", None)
+        offer_sig = msg.pop("offer_sig")
         accepted_fee = msg.pop("session_fee_msat", None)
         accepted_abandon = msg.pop("abandon_fee_msat", None)
         try:
@@ -526,6 +595,14 @@ async def _on_sidecar_text(
         state.body_released = True
         return frame
     if kind == "attestation" and msg.get("a") is not None:
+        a = msg["a"]
+        if state.sid is None or not isinstance(a, dict) or a.get("sid") != state.sid:
+            # The node signs only an attestation of this session.
+            logger.warning(
+                "confidential ws: dropping an attestation for another sid",
+                extra={"sid": _short(state.sid)},
+            )
+            return None
         a_json = canonical_json(msg["a"])
         state.attestation_hash = hashlib.sha256(a_json).hexdigest()
         msg["a_json"] = a_json.decode("utf-8")
@@ -590,6 +667,13 @@ async def _settle(
         return
     raw = msg.get("usage")
     usage: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    if not state.attestation_hash:
+        # The sidecar attests before it accepts a disclosure; the receipt
+        # cannot be bound to the session, so the client will refuse it.
+        logger.error(
+            "confidential ws: usage without an attestation",
+            extra={"sid": _short(state.sid)},
+        )
     async with state.lock:
         if state.finalized:
             return
@@ -708,7 +792,8 @@ async def confidential_zk_proxy(
     # Only a session that passed setup (credential checked, reservation held)
     # on this node may open proof channels; anything else never reaches the
     # sidecar.
-    if session_id not in _live_sids:
+    state = _live_sids.get(session_id)
+    if state is None:
         await websocket.close(code=1008, reason="unknown session")
         return
     if _active_zk >= MAX_ZK_CONNS:
@@ -716,12 +801,14 @@ async def confidential_zk_proxy(
         return
     _active_zk += 1
     try:
-        await _zk_proxy(websocket, proof, session_id)
+        await _zk_proxy(websocket, proof, session_id, state.ended)
     finally:
         _active_zk -= 1
 
 
-async def _zk_proxy(websocket: WebSocket, proof: str, session_id: str) -> None:
+async def _zk_proxy(
+    websocket: WebSocket, proof: str, session_id: str, ended: asyncio.Event
+) -> None:
     try:
         # No keepalive pings on this loopback hop: while the client's link is
         # slower than the sidecar's (the 2PC sends tens of MB), this proxy stops
@@ -775,15 +862,19 @@ async def _zk_proxy(websocket: WebSocket, proof: str, session_id: str) -> None:
         asyncio.create_task(sidecar_to_client()),
     }
     # A pre-warmed session keeps its 2PC and proof channels open until it is
-    # claimed; the node ends sessions at 600 s anyway.
-    await asyncio.wait(tasks, timeout=630)
-    for task in tasks:
+    # claimed; the node ends sessions at 600 s anyway. A channel never
+    # outlives its session: when the session ends (settled, released or timed
+    # out) its proxies are closed too.
+    both = asyncio.create_task(asyncio.wait(tasks))
+    session_end = asyncio.create_task(ended.wait())
+    await asyncio.wait(
+        {both, session_end}, timeout=630, return_when=asyncio.FIRST_COMPLETED
+    )
+    for task in (*tasks, both, session_end):
         if not task.done():
             task.cancel()
-    try:
-        await upstream.close()
-    except Exception:
-        pass
+    await _close(upstream, 1000)
+    await _close(websocket, 1000)
 
 
 __all__ = ["confidential_ws_router"]
