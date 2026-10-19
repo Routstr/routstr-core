@@ -56,6 +56,7 @@ from ..payment.models import (
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
     allows_cache_pricing_backfill,
+    apply_native_anthropic_reasoning,
     backfill_cache_pricing,
     list_models,
 )
@@ -6310,6 +6311,13 @@ class BaseUpstreamProvider:
 
                 models_with_fees = [
                     self._apply_provider_fee_to_model(m) for m in models
+                ]
+                # Catalog feeds leave ``reasoning`` null for several native
+                # Anthropic models; publish the effort domain that provider
+                # enforces. A no-op for every other provider type.
+                models_with_fees = [
+                    apply_native_anthropic_reasoning(m, self.provider_type)
+                    for m in models_with_fees
                 ]
 
                 try:

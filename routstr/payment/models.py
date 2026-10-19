@@ -150,6 +150,55 @@ class Model(BaseModel):
         return data
 
 
+# The effort levels the native Anthropic Messages provider accepts in
+# ``output_config.effort``. The provider validates this set inline in
+# ``routstr.upstream.anthropic.AnthropicUpstreamProvider._apply_reasoning_effort``;
+# the constant is mirrored here (rather than imported) because that module is
+# owned separately. Keep the two in sync.
+NATIVE_ANTHROPIC_SUPPORTED_EFFORTS: tuple[str, ...] = (
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+)
+
+
+def apply_native_anthropic_reasoning(model: Model, provider_type: str | None) -> Model:
+    """Publish the native Anthropic effort domain on an Anthropic-served model.
+
+    The native Anthropic provider accepts exactly
+    ``NATIVE_ANTHROPIC_SUPPORTED_EFFORTS`` in ``output_config.effort``, but its
+    catalog entries come from OpenRouter, which carries no reasoning metadata
+    for several Claude models. Client integrations read the domain from
+    ``/v1/models`` to generate effort variants, so publish the allowlist the
+    provider already enforces instead of leaving ``reasoning`` null.
+
+    Scoped to ``provider_type == "anthropic"``: that is the only provider whose
+    Messages path takes ``output_config.effort``. A ``claude-*`` id served by a
+    chat-completions / litellm upstream is not this API, so the Anthropic
+    allowlist would be misleading there and is left alone.
+
+    Provider-sourced metadata wins: nothing is filled in when
+    ``supported_efforts`` is already present. ``default_effort`` and
+    ``default_enabled`` are deliberately left unset — the provider documents no
+    default effort and injects none when a request omits it, so a default would
+    be invented.
+    """
+    if provider_type != "anthropic":
+        return model
+    if model.reasoning is not None and model.reasoning.supported_efforts:
+        return model
+
+    reasoning = model.reasoning.copy() if model.reasoning is not None else Reasoning()
+    reasoning.supported_efforts = list(NATIVE_ANTHROPIC_SUPPORTED_EFFORTS)
+    if reasoning.mandatory is None:
+        # Effort is optional: a request without it is valid and defaults to the
+        # model's own thinking behaviour.
+        reasoning.mandatory = False
+    return model.copy(update={"reasoning": reasoning})
+
+
 def litellm_cost_entry(model_id: str) -> dict | None:
     """Look up ``model_id`` in litellm's bundled cost map.
 
@@ -410,6 +459,10 @@ def _build_model_from_row(
         if image_pricing_dict
         else None,
     )
+    # A stored row carries no reasoning metadata (there is no column for it), so
+    # an override on a native Anthropic model would otherwise drop the effort
+    # domain its discovery pass published.
+    model = apply_native_anthropic_reasoning(model, provider_type)
 
     if apply_provider_fee:
         (

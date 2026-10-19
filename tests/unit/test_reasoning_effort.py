@@ -19,6 +19,7 @@ from routstr.payment.models import (
     Model,
     Pricing,
     Reasoning,
+    apply_native_anthropic_reasoning,
     models_router,
 )
 from routstr.upstream import GenericUpstreamProvider
@@ -250,6 +251,33 @@ def test_v1_models_includes_reasoning_and_omits_when_absent(
         "none",
     ]
     assert "reasoning" not in by_id["openai/gpt-4o"]
+
+
+def test_v1_models_publishes_native_anthropic_effort_domain(
+    monkeypatch: Any,
+) -> None:
+    """Clients discover effort levels from /v1/models; native Claude needs them."""
+    native = apply_native_anthropic_reasoning(
+        _model(id="claude-sonnet-5.5"), "anthropic"
+    )
+    other = _model(id="glm-5.3")
+
+    import routstr.proxy as proxy
+
+    monkeypatch.setattr(
+        proxy, "_unique_models", {"claude-sonnet-5.5": native, "glm-5.3": other}
+    )
+    app = FastAPI()
+    app.include_router(models_router)
+    app.dependency_overrides[get_session] = lambda: None
+    response = TestClient(app).get("/v1/models")
+    assert response.status_code == 200
+    by_id = {row["id"]: row for row in response.json()["data"]}
+    assert by_id["claude-sonnet-5.5"]["reasoning"] == {
+        "mandatory": False,
+        "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+    }
+    assert "reasoning" not in by_id["glm-5.3"]
 
 
 def test_messages_thinking_becomes_reasoning_effort() -> None:
