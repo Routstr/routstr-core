@@ -51,6 +51,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from .confidential import (
     CONFIDENTIAL_MAX_V,
     CONFIDENTIAL_MIN_V,
+    IMAGE_MAX_COUNT,
     UNBILLED_ERROR_STATUSES,
     Billing,
     BillingError,
@@ -58,11 +59,14 @@ from .confidential import (
     canonical_json,
     charge_fee,
     charge_reservation,
+    images_endpoint,
     node_pubkey_hex,
     pricing_fields,
     release,
     reserve,
+    reserve_image,
     settle,
+    settle_flat,
     sidecar_headers,
     sign_payload,
     to_ws_url,
@@ -103,8 +107,10 @@ MAX_BODY_LEN = 8 << 20
 SETTLE_GRACE_S = 60.0
 # Concurrent /zk proxies per process: the sidecar allows 6 per session.
 MAX_ZK_CONNS = MAX_SESSIONS * 6
-# The setup fields the sidecar is sent (``escrow`` is set by the node).
+# The setup fields the sidecar is sent (``escrow`` is set by the node; for an
+# image session also ``kind``, ``count`` and the node-rendered ``suffix``).
 _SIDECAR_SETUP_FIELDS = ("type", "nonce_c", "model", "max_tokens", "len", "armed")
+_SETUP_KINDS = ("chat", "images")
 
 _active_sessions = 0
 _active_zk = 0
@@ -248,11 +254,29 @@ def validate_setup(msg: Any, max_tokens_cap: int) -> None:
     model = msg.get("model")
     if not isinstance(model, str) or not model:
         raise SetupError(400, "setup.model must be a non-empty string")
-    max_tokens = msg.get("max_tokens")
-    if not _is_int(max_tokens) or not 1 <= max_tokens <= max_tokens_cap:
-        raise SetupError(
-            400, f"setup.max_tokens must be an integer in [1, {max_tokens_cap}]"
-        )
+    kind = msg.get("kind", "chat")
+    if kind not in _SETUP_KINDS:
+        raise SetupError(400, "setup.kind must be chat or images")
+    if kind == "images":
+        variant = msg.get("variant")
+        if not isinstance(variant, str) or not variant:
+            raise SetupError(400, "setup.variant must be a non-empty string")
+        count = msg.get("count")
+        if not _is_int(count) or not 1 <= count <= IMAGE_MAX_COUNT:
+            raise SetupError(
+                400, f"setup.count must be an integer in [1, {IMAGE_MAX_COUNT}]"
+            )
+        if "max_tokens" in msg:
+            raise SetupError(400, "an image setup takes no max_tokens")
+        if msg.get("armed", False) is not False:
+            # Image requests are on demand only: never pre-armed.
+            raise SetupError(400, "an image session cannot be armed")
+    else:
+        max_tokens = msg.get("max_tokens")
+        if not _is_int(max_tokens) or not 1 <= max_tokens <= max_tokens_cap:
+            raise SetupError(
+                400, f"setup.max_tokens must be an integer in [1, {max_tokens_cap}]"
+            )
     length = msg.get("len")
     if not _is_int(length) or not 1 <= length <= MAX_BODY_LEN:
         raise SetupError(400, f"setup.len must be an integer in [1, {MAX_BODY_LEN}]")
@@ -276,11 +300,21 @@ def validate_setup(msg: Any, max_tokens_cap: int) -> None:
         raise SetupError(400, "setup.armed must be a boolean")
 
 
-def sidecar_setup(msg: dict[str, Any], escrow: str) -> dict[str, Any]:
+def sidecar_setup(
+    msg: dict[str, Any], escrow: str, billing: Billing | None = None
+) -> dict[str, Any]:
     """The setup forwarded to the sidecar: the known fields only, never the
-    credential, the offer signature or the fees, plus the node's escrow id."""
+    credential, the offer signature or the fees, plus the node's escrow id.
+
+    An image session adds ``kind``, ``count`` and the suffix the node rendered
+    from its own signed offer (never one the client sent)."""
     out = {k: msg[k] for k in _SIDECAR_SETUP_FIELDS if k in msg}
     out["escrow"] = escrow
+    if billing is not None and getattr(billing, "kind", "chat") == "images":
+        out.pop("max_tokens", None)
+        out["kind"] = "images"
+        out["count"] = billing.count
+        out["suffix"] = billing.suffix
     return out
 
 
@@ -468,19 +502,33 @@ async def _open_session(
             logger.warning("confidential ws: sidecar offer unavailable: %s", exc)
             raise SetupError(503, "confidential sidecar unavailable") from exc
         validate_setup(msg, cap)
+        images = msg.get("kind") == "images"
+        if images and images_endpoint(side) is None:
+            raise SetupError(400, "this node does not serve confidential images")
         auth = msg.pop("auth", "") or ""
         offer_sig = msg.pop("offer_sig")
         accepted_fee = msg.pop("session_fee_msat", None)
         accepted_abandon = msg.pop("abandon_fee_msat", None)
         try:
-            state.billing = await reserve(
-                auth,
-                msg["model"],
-                msg["max_tokens"],
-                offer_sig,
-                accepted_fee_msat=accepted_fee,
-                accepted_abandon_fee_msat=accepted_abandon,
-            )
+            if images:
+                state.billing = await reserve_image(
+                    auth,
+                    msg["model"],
+                    msg["variant"],
+                    msg["count"],
+                    offer_sig,
+                    accepted_fee_msat=accepted_fee,
+                    accepted_abandon_fee_msat=accepted_abandon,
+                )
+            else:
+                state.billing = await reserve(
+                    auth,
+                    msg["model"],
+                    msg["max_tokens"],
+                    offer_sig,
+                    accepted_fee_msat=accepted_fee,
+                    accepted_abandon_fee_msat=accepted_abandon,
+                )
         except BillingError as exc:
             # Same status codes as the normal proxy (e.g. 402 insufficient
             # balance), so the client's existing top-up/retry handling applies.
@@ -489,7 +537,7 @@ async def _open_session(
             logger.exception("confidential ws: reservation failed")
             raise SetupError(500, "reservation failed") from exc
         # The sidecar binds sid to this value; it is unique and not a secret.
-        msg = sidecar_setup(msg, state.billing.snapshot.release_id)
+        msg = sidecar_setup(msg, state.billing.snapshot.release_id, state.billing)
         try:
             upstream = await websockets.connect(
                 _sidecar_ws_url("/session", f"session_id={session_id}"),
@@ -640,9 +688,21 @@ async def _release_keeping_fee(billing: Billing, name: str) -> tuple[int, int | 
 
 
 async def _apply_settlement(
-    billing: Billing, usage: dict[str, Any]
+    billing: Billing, usage: dict[str, Any], model: Any = None
 ) -> tuple[int, int | None]:
-    """Finalize the reservation for a disclosed usage event: (cost, balance)."""
+    """Finalize the reservation for a disclosed usage event: (cost, balance).
+
+    ``model`` is the usage frame's top-level model (a flat image settlement
+    carries it there rather than in ``usage``)."""
+    images = getattr(billing, "kind", "chat") == "images"
+    if usage.get("flat") is True:
+        reported = usage.get("model", model)
+        if not images or (reported is not None and reported != billing.model_id):
+            # A flat settlement on a chat session (or for another model) is a
+            # protocol breach: the request reached the provider unpriced.
+            return billing.reserved_msats, await charge_reservation(billing)
+        settled = await settle_flat(billing)
+        return int(settled["cost_msats"]), settled["balance_msats"]
     error_status = usage.get("error_status")
     if _is_int(error_status):
         if error_status in UNBILLED_ERROR_STATUSES:
@@ -652,8 +712,10 @@ async def _apply_settlement(
             return await _release_keeping_fee(billing, "session_fee_msat")
         # 500/502/504 …: work may have been billed upstream.
         return billing.reserved_msats, await charge_reservation(billing)
-    if usage.get("model") != billing.model_id:
-        # The pinned suffix fixes the model; anything else is a protocol breach.
+    if images or usage.get("model") != billing.model_id:
+        # Image sessions settle flat or on an error head, never on token
+        # usage; and the pinned suffix fixes a chat session's model. Anything
+        # else is a protocol breach.
         return billing.reserved_msats, await charge_reservation(billing)
     settled = await settle(billing, usage)
     return int(settled["cost_msats"]), settled["balance_msats"]
@@ -678,7 +740,7 @@ async def _settle(
         if state.finalized:
             return
         try:
-            cost, balance = await _apply_settlement(billing, usage)
+            cost, balance = await _apply_settlement(billing, usage, msg.get("model"))
         except Exception:
             logger.exception(
                 "confidential ws: settlement failed",
@@ -693,7 +755,7 @@ async def _settle(
             )
             return
         state.finalized = True
-    receipt = {
+    receipt: dict[str, Any] = {
         "v": 1,
         "sid": state.sid,
         "model": billing.model_id,
@@ -701,7 +763,6 @@ async def _settle(
         "cost_msats": cost,
         "reserved_msats": billing.reserved_msats,
         "balance_msats": balance,
-        "rates": billing.rates,
         **pricing_fields(
             getattr(billing, "session_fee_msat", 0),
             getattr(billing, "abandon_fee_msat", 0),
@@ -711,6 +772,15 @@ async def _settle(
         "attestation_hash": state.attestation_hash,
         "time": int(time.time()),
     }
+    if getattr(billing, "kind", "chat") == "images":
+        receipt.update(
+            kind="images",
+            variant=billing.variant,
+            count=billing.count,
+            msat_per_image=billing.msat_per_image,
+        )
+    else:
+        receipt["rates"] = billing.rates
     try:
         await websocket.send_text(
             json.dumps(

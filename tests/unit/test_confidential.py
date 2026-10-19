@@ -2023,3 +2023,400 @@ def test_setup_armed_must_be_boolean() -> None:
     bad = {**_SETUP, "armed": "yes"}
     with pytest.raises(cws.SetupError):
         cws.validate_setup(bad, 4096)
+
+
+# ---------------------------------------------------------------------------
+# confidential image generation (kind "images")
+# ---------------------------------------------------------------------------
+
+_IMAGES_EP = {
+    "head_template": "POST /api/v1/image/generate HTTP/1.1\r\n\r\n",
+    "billing": "flat",
+    "response_shape": "venice",
+    "count_key": "variants",
+    "fixed_pins": [
+        ["return_binary", False],
+        ["enhance_prompt", False],
+        ["enable_web_search", False],
+        ["style_references", []],
+    ],
+    "param_space": {"resolution": ["1K", "2K", "4K"], "format": ["webp"]},
+    "max_response_bytes": 64 << 20,
+    "response_idle_s": 300,
+}
+
+
+def _image_model(mid: str, book: Any, ceiling_sats: float) -> Any:
+    return SimpleNamespace(
+        id=mid,
+        architecture=SimpleNamespace(
+            input_modalities=["text"], output_modalities=["image"]
+        ),
+        sats_pricing=SimpleNamespace(image_output=ceiling_sats),
+        image_pricing=book,
+    )
+
+
+def _tiered_book() -> Any:
+    from routstr.payment.image_pricing import ImagePriceTier, ImagePricing
+
+    return ImagePricing(
+        max_usd=0.18,
+        tiers=[
+            ImagePriceTier(resolution="1K", usd=0.15),
+            ImagePriceTier(resolution="2K", usd=0.18),
+        ],
+        resolutions=["1K", "2K"],
+        default_resolution="1K",
+    )
+
+
+def _flat_book() -> Any:
+    from routstr.payment.image_pricing import ImagePriceTier, ImagePricing
+
+    return ImagePricing(max_usd=0.01, tiers=[ImagePriceTier(usd=0.01)])
+
+
+def test_image_suffix_matches_the_shared_vector() -> None:
+    fixed = _IMAGES_EP["fixed_pins"]
+    suffix = conf.render_image_suffix(
+        "z-image-turbo", "variants", 2, fixed, [["format", "webp"]]
+    )
+    assert suffix == (
+        ',"model":"z-image-turbo","variants":2,"return_binary":false,'
+        '"enhance_prompt":false,"enable_web_search":false,"style_references":[],'
+        '"format":"webp"}'
+    )
+    # It closes the object the client's private part opened.
+    assert json.loads('{"prompt":"x"' + suffix)["variants"] == 2
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"billing": "metered"},
+        {"head_template": ""},
+        {"fixed_pins": [["variants", 1]]},  # the count key is pinned per request
+        {"fixed_pins": [["a", 1], ["a", 2]]},
+        {"fixed_pins": [["format", "png"]]},  # collides with param_space
+        {"param_space": {"format": "webp"}},
+        {"count_key": ""},
+    ],
+)
+def test_malformed_images_endpoint_is_ignored(change: dict[str, Any]) -> None:
+    side = {"endpoints": {"images": {**_IMAGES_EP, **change}}}
+    assert conf.images_endpoint(side) is None
+    assert conf.images_endpoint({"endpoints": {"images": _IMAGES_EP}}) is not None
+    assert conf.images_endpoint({}) is None
+
+
+def test_image_variants_per_tier_flat_and_refused_books() -> None:
+    from routstr.payment.image_pricing import ImagePricing
+
+    space = _IMAGES_EP["param_space"]
+    tiered = conf.image_variants(_image_model("np", _tiered_book(), 216.0), space, 0)
+    assert tiered == [
+        {
+            "id": "1K-webp",
+            "pins": [["resolution", "1K"], ["format", "webp"]],
+            "msat_per_image": 180_000,
+        },
+        {
+            "id": "2K-webp",
+            "pins": [["resolution", "2K"], ["format", "webp"]],
+            "msat_per_image": 216_000,
+        },
+    ]
+    flat = conf.image_variants(_image_model("z", _flat_book(), 12.0), space, 20.0)
+    assert flat == [
+        {"id": "webp", "pins": [["format", "webp"]], "msat_per_image": 14_400}
+    ]
+    # An upscale price is for Venice's separate upscale call, not generation:
+    # every Venice book carries one, and it must not hide the model.
+    upscaled = _flat_book().copy(update={"upscale": {"2x": 0.02, "4x": 0.08}})
+    assert conf.image_variants(_image_model("z", upscaled, 12.0), space, 20.0) == flat
+    # Prices that depend on the response, or a tier axis the endpoint cannot
+    # pin, are never offered.
+    for book in (
+        ImagePricing(max_usd=0.04, unit="token", output_token_usd=1e-5),
+        ImagePricing(max_usd=0.04, trust_upstream_cost=True),
+        ImagePricing(max_usd=0.04, qualities=["low", "high"]),
+    ):
+        assert conf.image_variants(_image_model("x", book, 48.0), space, 0) == []
+    assert (
+        conf.image_variants(
+            _image_model("z", _flat_book(), 12.0), {"format": ["png"]}, 0
+        )
+        == []
+    )
+
+
+def _images_world(monkeypatch: pytest.MonkeyPatch, side: dict[str, Any]) -> Any:
+    import routstr.proxy as proxy
+
+    chat = SimpleNamespace(
+        id="chat-m", architecture=SimpleNamespace(output_modalities=["text"])
+    )
+    tiered = _image_model("nano", _tiered_book(), 216.0)
+    flat = _image_model("zimg", _flat_book(), 12.0)
+    inpaint = _image_model("inpaint", _flat_book(), 12.0)
+    inpaint.architecture.input_modalities = ["text", "image"]
+    models = {m.id: m for m in (chat, tiered, flat, inpaint)}
+
+    async def fake_side() -> dict[str, Any]:
+        return side
+
+    monkeypatch.setattr(proxy, "get_unique_models", lambda: list(models.values()))
+    monkeypatch.setattr(
+        proxy,
+        "get_candidates",
+        lambda mid: (
+            [(models[mid], _Up("https://api.venice.ai/api/v1"))]
+            if mid in models
+            else []
+        ),
+    )
+    monkeypatch.setattr(conf, "cached_sidecar_offer", fake_side)
+    monkeypatch.setattr(conf, "price_entry", lambda mid, c: dict(RATES))
+    monkeypatch.setattr(settings, "http_url", "https://node.example.com")
+    return models
+
+
+async def test_offer_publishes_signed_image_variants(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    _secret, pub_hex = node_identity
+    side = {
+        "upstream_host": "api.venice.ai",
+        "head_template": "x",
+        "endpoints": {"images": _IMAGES_EP},
+    }
+    _images_world(monkeypatch, side)
+    offer = await conf.build_offer()
+    assert offer["capabilities"] == ["chat", "images"]
+    assert set(offer["price_list"]) == {"chat-m"}  # chat lists chat models only
+    images = offer["images"]
+    assert set(images["price_list"]) == {"nano", "zimg"}  # no inpaint model
+    assert images["max_count"] == 4 and images["count_key"] == "variants"
+    assert images["fixed_pins"] == _IMAGES_EP["fixed_pins"]
+    assert images["head_template"] == _IMAGES_EP["head_template"]
+    assert images["response_shape"] == "venice"
+    assert images["max_response_bytes"] == 64 << 20
+    assert _verify_schnorr(offer["sig_payload"], offer["sig"], pub_hex)
+    assert json.loads(offer["sig_payload"])["images"] == images
+    terms = conf.signed_offer_terms(offer["sig"])
+    assert terms is not None and terms.images == images
+    variant = conf.signed_image_variant(terms, "nano", "2K-webp")
+    assert variant is not None and variant["msat_per_image"] == 216_000
+
+    fields = await conf.models_fields()
+    assert fields["nano"]["kind"] == "images" and "kind" not in fields["chat-m"]
+
+
+async def test_offer_without_the_images_endpoint_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    _images_world(monkeypatch, {"upstream_host": "api.venice.ai", "head_template": "x"})
+    offer = await conf.build_offer()
+    assert "capabilities" not in offer and "images" not in offer
+    fields = await conf.models_fields()
+    assert set(fields) == {"chat-m"}
+
+
+_IMG_SETUP = {
+    "type": "setup",
+    "kind": "images",
+    "nonce_c": "aa" * 32,
+    "model": "zimg",
+    "variant": "webp",
+    "count": 2,
+    "len": 300,
+    "auth": "sk-client-key",
+    "offer_sig": "ab" * 64,
+}
+
+
+@pytest.mark.parametrize(
+    "change,reason",
+    [
+        ({"kind": "video"}, "setup.kind"),
+        ({"variant": ""}, "setup.variant"),
+        ({"count": 0}, "setup.count"),
+        ({"count": 5}, "setup.count"),
+        ({"count": True}, "setup.count"),
+        ({"max_tokens": 10}, "no max_tokens"),
+        ({"armed": True}, "cannot be armed"),
+    ],
+)
+def test_image_setup_validation(change: dict[str, Any], reason: str) -> None:
+    with pytest.raises(cws.SetupError) as err:
+        cws.validate_setup({**_IMG_SETUP, **change}, 4096)
+    assert reason in str(err.value)
+    cws.validate_setup(dict(_IMG_SETUP), 4096)  # valid without max_tokens
+    cws.validate_setup({**_IMG_SETUP, "armed": False}, 4096)
+
+
+async def test_reserve_image_is_the_flat_price_times_count(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any, fee_settings: None
+) -> None:
+    side = {
+        "upstream_host": "api.venice.ai",
+        "head_template": "x",
+        "endpoints": {"images": _IMAGES_EP},
+    }
+    _images_world(monkeypatch, side)
+    block = conf.images_offer_block(side, conf.rate_surcharge_pct())
+    assert block is not None
+    terms = conf.OfferTerms({}, 2000, 20.0, 10000, 0, block)
+    conf._remember_offer("cd" * 32, terms)
+    # 12 sats + 20 % = 14.4 sats per image; the larger fee on top.
+    billing = await conf.reserve_image("hk", "zimg", "webp", 3, "cd" * 32, 2000, 10000)
+    assert billing.kind == "images" and billing.msat_per_image == 14_400
+    assert billing.reserved_msats == 3 * 14_400 + 10_000
+    assert billing.suffix == conf.render_image_suffix(
+        "zimg", "variants", 3, _IMAGES_EP["fixed_pins"], [["format", "webp"]]
+    )
+    assert (await billing_db.key()).reserved_balance == billing.reserved_msats
+
+    # Charged price × count + session fee, the rest released.
+    settled = await conf.settle_flat(billing)
+    assert settled["cost_msats"] == 3 * 14_400 + 2000
+    key = await billing_db.key()
+    assert key.reserved_balance == 0
+    assert key.balance == 3_000_000 - (3 * 14_400 + 2000)
+
+    for model, variant, count in (
+        ("zimg", "2K-webp", 1),  # not a variant of this model
+        ("nano", "webp", 1),
+        ("unknown", "webp", 1),
+    ):
+        with pytest.raises(conf.BillingError) as err:
+            await conf.reserve_image(
+                "hk", model, variant, count, "cd" * 32, 2000, 10000
+            )
+        assert err.value.status == 409
+    with pytest.raises(conf.BillingError):
+        await conf.reserve_image("hk", "zimg", "webp", 5, "cd" * 32, 2000, 10000)
+    with pytest.raises(conf.BillingError) as err:
+        await conf.reserve_image("hk", "zimg", "webp", 1, "ef" * 32, 2000, 10000)
+    assert err.value.status == 409
+    with pytest.raises(conf.BillingError) as err:  # fees not accepted
+        await conf.reserve_image("hk", "zimg", "webp", 1, "cd" * 32, None, None)
+    assert err.value.status == 409
+
+
+class _ImageBilling(_Billing):
+    def __init__(self) -> None:
+        super().__init__()
+        self.model_id = "zimg"
+        self.kind = "images"
+        self.variant = "webp"
+        self.count = 2
+        self.msat_per_image = 14_400
+        self.suffix = ',"model":"zimg","variants":2,"format":"webp"}'
+        self.rates = {}
+
+
+def _image_ledger(monkeypatch: pytest.MonkeyPatch) -> _Ledger:
+    ledger = _Ledger(monkeypatch)
+
+    async def reserve_image(
+        auth: str,
+        model: str,
+        variant: str,
+        count: int,
+        offer_sig: str,
+        accepted_fee_msat: int | None = None,
+        accepted_abandon_fee_msat: int | None = None,
+    ) -> Any:
+        ledger.calls.append("reserve_image")
+        return _ImageBilling()
+
+    async def settle_flat(billing: Any) -> dict[str, Any]:
+        ledger.calls.append("settle_flat")
+        return {"cost_msats": 28_800, "balance_msats": 70_000}
+
+    async def side() -> dict[str, Any]:
+        return {"upstream_host": "api.venice.ai", "endpoints": {"images": _IMAGES_EP}}
+
+    monkeypatch.setattr(cws, "reserve_image", reserve_image)
+    monkeypatch.setattr(cws, "settle_flat", settle_flat)
+    monkeypatch.setattr(cws, "cached_sidecar_offer", side)
+    return ledger
+
+
+_FLAT = {
+    "type": "usage",
+    "sid": SID,
+    "model": "zimg",
+    "usage": {"flat": True, "kind": "images"},
+}
+
+
+def test_image_session_settles_flat_with_an_image_receipt(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    _secret, pub_hex = node_identity
+    ledger = _image_ledger(monkeypatch)
+    setup = {**_IMG_SETUP, "suffix": ',"model":"cheap"}'}  # never forwarded
+    holder, got = _run_session(
+        monkeypatch, [_READY, _ATTEST, {"type": "body_released"}, _FLAT], 4, setup
+    )
+    sent = holder["setup"]
+    assert sent["kind"] == "images" and sent["count"] == 2
+    assert sent["suffix"] == _ImageBilling().suffix
+    assert "max_tokens" not in sent and "variant" not in sent and "auth" not in sent
+    receipt_msg = got[-1]
+    receipt = receipt_msg["receipt"]
+    assert receipt["kind"] == "images" and receipt["variant"] == "webp"
+    assert receipt["count"] == 2 and receipt["msat_per_image"] == 14_400
+    assert receipt["cost_msats"] == 28_800 and "rates" not in receipt
+    assert _verify_schnorr(receipt_msg["receipt_json"], receipt_msg["sig"], pub_hex)
+    assert ledger.calls == ["reserve_image", "settle_flat"]
+
+
+def test_image_session_on_a_node_without_images_is_refused(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch)
+    _, got = _run_session(monkeypatch, [], 1, dict(_IMG_SETUP))
+    assert got[0]["status"] == 400 and "images" in got[0]["reason"]
+    assert ledger.calls == []
+
+
+@pytest.mark.parametrize(
+    "usage,expected",
+    [
+        ({"error_status": 400}, "release"),
+        ({"error_status": 502}, "charge"),
+        (
+            {"model": "zimg", "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+            "charge",
+        ),
+        ({"flat": True, "model": "other"}, "charge"),
+    ],
+)
+def test_image_session_other_settlements(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    usage: dict[str, Any],
+    expected: str,
+) -> None:
+    ledger = _image_ledger(monkeypatch)
+    frame = {"type": "usage", "sid": SID, "usage": usage}
+    _run_session(
+        monkeypatch,
+        [_READY, {"type": "body_released"}, frame],
+        3,
+        dict(_IMG_SETUP),
+    )
+    assert ledger.calls == ["reserve_image", expected]
+
+
+def test_flat_usage_on_a_chat_session_charges_the_reservation(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch)
+    flat = {**_FLAT, "model": "test-model"}
+    _run_session(monkeypatch, [_READY, {"type": "body_released"}, flat], 3)
+    assert ledger.calls == ["reserve", "charge"]
