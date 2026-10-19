@@ -379,6 +379,31 @@ def test_messages_generic_spelling_wins_over_output_config() -> None:
     assert body["reasoning_effort"] == "low"
 
 
+def test_messages_format_only_output_config_does_not_add_effort() -> None:
+    """``output_config.format`` is structured output, not a reasoning request.
+
+    Counting the object as "reasoning mentioned" would resolve to the
+    model's ``default_effort`` on the litellm path and forward it as
+    ``reasoning_effort``, turning reasoning on for a request that never
+    asked for it.
+    """
+    model = _model(reasoning=SOL_REASONING)
+    body: dict[str, Any] = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 16,
+        "output_config": {
+            "format": {"type": "json_schema", "schema": {"type": "object"}}
+        },
+    }
+    assert apply_reasoning_effort(body, model, drop_thinking=True) is False
+    assert "reasoning_effort" not in body
+    assert "reasoning" not in body
+
+    adapt_messages_body_for_litellm(body, model)
+    assert "reasoning_effort" not in body
+    assert "reasoning" not in body
+
+
 def test_apply_injects_default_when_mandatory_and_output_config_is_junk() -> None:
     """A malformed native effort still yields a legal mandatory effort."""
     data: dict[str, Any] = {

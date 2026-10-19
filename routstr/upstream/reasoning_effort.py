@@ -27,11 +27,11 @@ EFFORT_RANK: tuple[str, ...] = (
 )
 _RANK_INDEX: dict[str, int] = {name: i for i, name in enumerate(EFFORT_RANK)}
 
-# Every client shape that can carry an effort level. ``output_config`` is the
-# Anthropic-native spelling (``output_config.effort``); litellm-backed
-# OpenAI-compatible upstreams reject it, so the effort is lifted onto
-# ``reasoning_effort`` and the object itself is pruned afterwards.
-_REASONING_KEYS = ("reasoning", "reasoning_effort", "thinking", "output_config")
+# Client shapes whose mere presence means the caller said something about
+# reasoning. ``output_config`` is deliberately not in this tuple: clients also
+# send it purely for structured output (``output_config.format``), which must
+# not count as a request for reasoning. See ``_request_mentions_reasoning``.
+_REASONING_KEYS = ("reasoning", "reasoning_effort", "thinking")
 
 
 def _normalize_effort(value: object) -> str | None:
@@ -149,7 +149,15 @@ def extract_requested_effort(data: dict[str, Any]) -> str | None:
 
 
 def _request_mentions_reasoning(data: dict[str, Any]) -> bool:
-    return any(key in data for key in _REASONING_KEYS)
+    if any(key in data for key in _REASONING_KEYS):
+        return True
+    # ``output_config`` only counts when it actually carries an effort. A
+    # format-only object (structured output) must not be read as "turn
+    # reasoning on": that would inject the model's default effort on a
+    # request that never asked for it, while ``output_config`` itself is
+    # pruned on the litellm path.
+    config = data.get("output_config")
+    return isinstance(config, dict) and "effort" in config
 
 
 def apply_reasoning_effort(

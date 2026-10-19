@@ -506,6 +506,65 @@ async def test_dispatch_clamps_output_config_effort_to_supported_efforts() -> No
 
 
 @pytest.mark.asyncio
+async def test_dispatch_does_not_invent_effort_for_format_only_output_config() -> None:
+    """`output_config.format` (structured output) must not turn reasoning on.
+
+    The object has no `effort`, so it says nothing about thinking level. It is
+    pruned like any other Anthropic-only field and the upstream must not
+    receive a `reasoning_effort` the client never asked for.
+    """
+    provider = _make_provider()
+    key = _make_key()
+    model = _make_model()
+    model.reasoning = Reasoning(
+        mandatory=False,
+        default_effort="medium",
+        supported_efforts=["max", "high", "medium", "low", "none"],
+    )
+    session = _make_session()
+
+    body = json.dumps(
+        {
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "output_config": {
+                "format": {"type": "json_schema", "schema": {"type": "object"}}
+            },
+        }
+    ).encode()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acreate(**kwargs: Any) -> dict:
+        captured["kwargs"] = kwargs
+        return _anthropic_non_stream_response()
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(side_effect=fake_acreate),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
+        ),
+    ):
+        await provider._forward_messages_via_litellm(
+            request_body=body,
+            key=key,
+            session=session,
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    forwarded = captured["kwargs"]
+    assert "reasoning_effort" not in forwarded
+    assert "reasoning" not in forwarded
+    assert "output_config" not in forwarded
+
+
+@pytest.mark.asyncio
 async def test_dispatch_forwards_all_allowlisted_messages_fields() -> None:
     provider = _make_provider()
     key = _make_key()
