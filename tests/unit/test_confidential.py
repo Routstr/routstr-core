@@ -1108,6 +1108,12 @@ async def test_reservation_ignores_the_models_completion_limit(
     # 100000 tokens * 10 msats + 8 tokens * 100 msats, not (100000 - 50000) * 10
     assert billing.reserved_msats == 1_000_800
     assert conf.prompt_token_limit(billing_db.model) == 100_000
+    # The catalogue's top provider and the model disagree: the larger counts.
+    billing_db.model.top_provider.context_length = 64_000
+    billing_db.model.context_length = 128_000
+    assert conf.prompt_token_limit(billing_db.model) == 128_000
+    billing_db.model.top_provider.context_length = 200_000
+    assert conf.prompt_token_limit(billing_db.model) == 200_000
     # Only a completion limit, no context length: fall back to the max cost.
     billing_db.model.top_provider.context_length = None
     billing_db.model.context_length = None
