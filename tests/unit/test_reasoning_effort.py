@@ -10,6 +10,7 @@ os.environ.setdefault("UPSTREAM_BASE_URL", "http://test")
 os.environ.setdefault("UPSTREAM_API_KEY", "test")
 os.environ.setdefault("LIGHTNING_ADDRESS", "test@stm.to")
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -179,6 +180,61 @@ def test_extract_prefers_nested_reasoning_effort() -> None:
     )
 
 
+def test_extract_reads_output_config_effort() -> None:
+    assert extract_requested_effort({"output_config": {"effort": " Max "}}) == "max"
+    # Sibling keys on the same object are irrelevant to extraction.
+    assert (
+        extract_requested_effort(
+            {
+                "output_config": {
+                    "effort": "high",
+                    "format": {"type": "json_schema"},
+                }
+            }
+        )
+        == "high"
+    )
+
+
+def test_extract_precedence_includes_output_config_last() -> None:
+    """reasoning.effort > reasoning_effort > thinking.effort > output_config."""
+    output_only = {"output_config": {"effort": "max"}}
+    with_thinking = {**output_only, "thinking": {"effort": "medium"}}
+    with_top_level = {**with_thinking, "reasoning_effort": "low"}
+    with_nested = {**with_top_level, "reasoning": {"effort": "xhigh"}}
+
+    assert extract_requested_effort(output_only) == "max"
+    assert extract_requested_effort(with_thinking) == "medium"
+    assert extract_requested_effort(with_top_level) == "low"
+    assert extract_requested_effort(with_nested) == "xhigh"
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"effort": ""},
+        {"effort": "   "},
+        {"effort": None},
+        {"effort": 3},
+        {"effort": ["high"]},
+        {"format": {"type": "json_schema"}},
+        "high",
+        ["high"],
+        12,
+        None,
+    ],
+)
+def test_extract_ignores_malformed_output_config(malformed: Any) -> None:
+    assert extract_requested_effort({"output_config": malformed}) is None
+    # A malformed native object must not mask a valid generic spelling.
+    assert (
+        extract_requested_effort(
+            {"output_config": malformed, "reasoning_effort": "high"}
+        )
+        == "high"
+    )
+
+
 def test_prepare_request_body_rewrites_unsupported_effort() -> None:
     provider = GenericUpstreamProvider(base_url="https://openrouter.ai/api/v1")
     model = _model(reasoning=SOL_REASONING)
@@ -288,3 +344,106 @@ def test_messages_thinking_becomes_reasoning_effort() -> None:
     adapt_messages_body_for_litellm(body, model)
     assert "thinking" not in body
     assert body["reasoning_effort"] == "low"
+
+
+def test_messages_output_config_effort_becomes_reasoning_effort() -> None:
+    """An ``output_config``-only body keeps its effort as ``reasoning_effort``.
+
+    ``output_config`` itself is Anthropic-native and gets pruned by the
+    litellm allowlist; without the lift the requested effort would vanish.
+    """
+    model = _model(reasoning=SOL_REASONING)
+    body: dict[str, Any] = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 16,
+        "output_config": {"effort": "max"},
+    }
+    adapt_messages_body_for_litellm(body, model)
+    assert body["reasoning_effort"] == "max"
+    # Nothing else invented on the client's behalf.
+    assert "reasoning" not in body
+    # The dispatch allowlist prune is what drops output_config afterwards.
+    assert body["output_config"] == {"effort": "max"}
+
+
+def test_messages_output_config_effort_is_clamped_to_supported() -> None:
+    model = _model(
+        reasoning={
+            "mandatory": False,
+            "supported_efforts": ["high", "medium", "low"],
+            "default_effort": "medium",
+        }
+    )
+    body: dict[str, Any] = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 16,
+        "output_config": {"effort": "max"},
+    }
+    adapt_messages_body_for_litellm(body, model)
+    assert body["reasoning_effort"] == "high"
+
+
+def test_messages_model_without_metadata_keeps_output_config_effort() -> None:
+    model = _model()
+    body: dict[str, Any] = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "output_config": {"effort": "high"},
+    }
+    adapt_messages_body_for_litellm(body, model)
+    assert body["reasoning_effort"] == "high"
+
+
+def test_messages_generic_spelling_wins_over_output_config() -> None:
+    """No conflicting duplicate effort is written when both shapes are sent."""
+    model = _model(reasoning=SOL_REASONING)
+    body: dict[str, Any] = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "low",
+        "output_config": {"effort": "max"},
+    }
+    adapt_messages_body_for_litellm(body, model)
+    assert body["reasoning_effort"] == "low"
+
+
+def test_messages_format_only_output_config_does_not_add_effort() -> None:
+    """``output_config.format`` is structured output, not a reasoning request.
+
+    Counting the object as "reasoning mentioned" would resolve to the
+    model's ``default_effort`` on the litellm path and forward it as
+    ``reasoning_effort``, turning reasoning on for a request that never
+    asked for it.
+    """
+    model = _model(reasoning=SOL_REASONING)
+    body: dict[str, Any] = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 16,
+        "output_config": {
+            "format": {"type": "json_schema", "schema": {"type": "object"}}
+        },
+    }
+    assert apply_reasoning_effort(body, model, drop_thinking=True) is False
+    assert "reasoning_effort" not in body
+    assert "reasoning" not in body
+
+    adapt_messages_body_for_litellm(body, model)
+    assert "reasoning_effort" not in body
+    assert "reasoning" not in body
+
+
+def test_apply_injects_default_when_mandatory_and_output_config_is_junk() -> None:
+    """A malformed native effort still yields a legal mandatory effort."""
+    data: dict[str, Any] = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "output_config": {"effort": "banana"},
+    }
+    model = _model(
+        id="anthropic/claude-fable-5.1",
+        reasoning={
+            "mandatory": True,
+            "supported_efforts": ["max", "xhigh", "high", "medium", "low"],
+            "default_effort": "high",
+        },
+    )
+    assert apply_reasoning_effort(data, model, drop_thinking=True) is True
+    # Unknown value falls back to the model default rather than forwarding it.
+    assert data["reasoning_effort"] == "high"
