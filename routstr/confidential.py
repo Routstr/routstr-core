@@ -344,15 +344,26 @@ def candidate_for(model_id: str, host: str) -> Candidate | None:
     return None
 
 
+def produces_text(model: Any) -> bool:
+    """A chat model: confidential mode serves chat completions only.
+
+    Image and embedding models carry zero token rates, which are usable
+    prices, so without this they would be offered for chat at no charge.
+    """
+    arch = getattr(model, "architecture", None)
+    return "text" in (getattr(arch, "output_modalities", None) or [])
+
+
 def offered_models(side_offer: dict[str, Any]) -> dict[str, Candidate]:
-    """Models the node serves confidentially: on the sidecar host, within the allowlist."""
+    """Models the node serves confidentially: chat models on the sidecar host,
+    within the allowlist."""
     from .proxy import get_unique_models
 
     host = str(side_offer.get("upstream_host", ""))
     allowlist = model_allowlist(side_offer)
     out: dict[str, Candidate] = {}
     for model in get_unique_models():
-        if not model_allowed(model.id, allowlist):
+        if not model_allowed(model.id, allowlist) or not produces_text(model):
             continue
         cand = candidate_for(model.id, host)
         if cand is not None:
