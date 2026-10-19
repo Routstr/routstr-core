@@ -25,6 +25,14 @@ larger of the two. A client accepts both by echoing the signed offer's
 ``session_fee_msat`` and ``abandon_fee_msat`` in its setup; a setup that does
 not is refused, so an older client is never charged a fee it does not check.
 
+Image generation (``kind: "images"``) is offered when the sidecar's offer has
+an ``endpoints.images`` block: the signed offer lists, per image model, the
+variants it can price (pinned tier and format) at a flat msat per image. The
+client's suffix pins model, count and variant, π_C2S proves it, and the charge
+is that flat price × count plus the session fee, fixed at setup. A success
+needs no disclosure (the sidecar reports ``usage.flat``); a provider error
+uses the same error-head disclosure as chat.
+
 ``CONFIDENTIAL_RESERVE_MARGIN_TOKENS`` (default 16) completion tokens are
 reserved beyond the pinned cap, because a provider may bill a few more than
 ``max_tokens`` and the charge is capped at the reservation. The margin only
@@ -58,6 +66,12 @@ logger = get_logger(__name__)
 CONFIDENTIAL_VERSION = 2
 CONFIDENTIAL_MIN_V = 2
 CONFIDENTIAL_MAX_V = 2
+
+# Images per confidential image request (the count the suffix pins), and the
+# only output format offered: WebP is the smallest response.
+IMAGE_MAX_COUNT = 4
+IMAGE_FORMAT = "webp"
+DEFAULT_IMAGE_COUNT_KEY = "variants"
 
 # Upstream HTTP errors settled at zero cost once disclosed under π_C3S: client
 # errors, rate limiting and "overloaded" are answered before any work starts.
@@ -371,6 +385,184 @@ def offered_models(side_offer: dict[str, Any]) -> dict[str, Candidate]:
     return out
 
 
+def compact_json(value: Any) -> str:
+    """JSON as the sidecar and the clients render suffix values: no
+    whitespace, non-ASCII kept (``serde_json::to_string``/``JSON.stringify``)."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def render_image_suffix(
+    model: str,
+    count_key: str,
+    count: int,
+    fixed_pins: list[Any],
+    pins: list[Any],
+) -> str:
+    """The pinned end of an image request body, byte-exact: model, count, the
+    endpoint's fixed pins, then the variant's pins, closing the object."""
+    parts = [
+        '"model":' + compact_json(model),
+        compact_json(count_key) + ":" + compact_json(count),
+    ]
+    parts += [compact_json(k) + ":" + compact_json(v) for k, v in [*fixed_pins, *pins]]
+    return "," + ",".join(parts) + "}"
+
+
+def images_endpoint(side_offer: dict[str, Any]) -> dict[str, Any] | None:
+    """The sidecar's ``endpoints.images`` block when it is usable, else ``None``.
+
+    A malformed block disables images only; chat is unaffected.
+    """
+    endpoints = side_offer.get("endpoints")
+    ep = endpoints.get("images") if isinstance(endpoints, dict) else None
+    if ep is None:
+        return None
+    problem = _images_endpoint_problem(ep)
+    if problem:
+        logger.warning("confidential: sidecar images endpoint ignored: %s", problem)
+        return None
+    return ep
+
+
+def _images_endpoint_problem(ep: Any) -> str | None:
+    if not isinstance(ep, dict):
+        return "not an object"
+    if not isinstance(ep.get("head_template"), str) or not ep["head_template"]:
+        return "head_template"
+    if ep.get("billing", "flat") != "flat":
+        return "billing must be flat"
+    count_key = ep.get("count_key", DEFAULT_IMAGE_COUNT_KEY)
+    if not isinstance(count_key, str) or not count_key:
+        return "count_key"
+    pins = ep.get("fixed_pins", [])
+    if not isinstance(pins, list) or not all(
+        isinstance(p, list) and len(p) == 2 and isinstance(p[0], str) for p in pins
+    ):
+        return "fixed_pins"
+    space = ep.get("param_space", {})
+    if not isinstance(space, dict) or not all(
+        isinstance(k, str) and isinstance(v, list) for k, v in space.items()
+    ):
+        return "param_space"
+    keys = ["model", count_key, *(p[0] for p in pins)]
+    if len(set(keys)) != len(keys) or set(keys) & set(space):
+        return "a pinned key repeats"
+    return None
+
+
+def image_variants(model_obj: Any, space: dict[str, Any], pct: float) -> list[dict]:
+    """The variants of ``model_obj`` the node can price at a flat msat per image.
+
+    One per declared resolution (and quality), always WebP. Only per-image
+    books qualify: a token-metered or upstream-reported price depends on the
+    response, which the node never sees. A book with a tier axis the endpoint
+    cannot pin would let the client pick a dearer tier privately, so it is
+    not offered.
+    """
+    from .payment.image_pricing import per_image_sats
+
+    book = getattr(model_obj, "image_pricing", None)
+    if (
+        book is None
+        or book.unit != "image"
+        or book.trust_upstream_cost
+        or book.endpoints
+        or book.input_image_usd > 0
+        or IMAGE_FORMAT not in (space.get("format") or [])
+    ):
+        return []
+    axes: list[list[tuple[str, str] | None]] = []
+    for name, declared in (
+        ("resolution", book.resolutions),
+        ("quality", book.qualities),
+    ):
+        if not declared:
+            axes.append([None])
+            continue
+        allowed = space.get(name)
+        if not isinstance(allowed, list):
+            return []
+        values = [v for v in declared if v in allowed]
+        if not values:
+            return []
+        axes.append([(name, v) for v in values])
+    variants = []
+    for res in axes[0]:
+        for qual in axes[1]:
+            chosen = [p for p in (res, qual) if p is not None]
+            sats = per_image_sats(model_obj, dict(chosen))
+            msat = sats * 1000.0 * (1.0 + pct / 100.0)
+            if not math.isfinite(msat) or msat <= 0:
+                continue
+            variants.append(
+                {
+                    "id": "-".join([v for _k, v in chosen] + [IMAGE_FORMAT]),
+                    "pins": [[k, v] for k, v in chosen] + [["format", IMAGE_FORMAT]],
+                    # Rounded first: float noise must not add a millisat.
+                    "msat_per_image": math.ceil(round(msat, 3)),
+                }
+            )
+    return variants
+
+
+def priced_image_models(
+    side_offer: dict[str, Any], pct: float
+) -> dict[str, tuple[Candidate, list[dict]]]:
+    """Image models on the sidecar host, within the allowlist, with their
+    priced variants; empty unless the sidecar offers the images endpoint."""
+    from .payment.image_pricing import produces_images
+    from .proxy import get_unique_models
+
+    ep = images_endpoint(side_offer)
+    if ep is None:
+        return {}
+    host = str(side_offer.get("upstream_host", ""))
+    allowlist = model_allowlist(side_offer)
+    space = ep.get("param_space", {})
+    out: dict[str, tuple[Candidate, list[dict]]] = {}
+    for model in get_unique_models():
+        if not model_allowed(model.id, allowlist) or not produces_images(model):
+            continue
+        # Text to image only: inpaint and upscale need an input image.
+        arch = getattr(model, "architecture", None)
+        if getattr(arch, "input_modalities", None) != ["text"]:
+            continue
+        cand = candidate_for(model.id, host)
+        if cand is None:
+            continue
+        try:
+            variants = image_variants(cand.model, space, pct)
+        except Exception:
+            logger.debug("confidential: no image pricing", extra={"model": model.id})
+            continue
+        if variants:
+            out[model.id] = (cand, variants)
+    return out
+
+
+def images_offer_block(side_offer: dict[str, Any], pct: float) -> dict[str, Any] | None:
+    """The ``images`` block of the signed offer, or ``None`` without images."""
+    ep = images_endpoint(side_offer)
+    if ep is None:
+        return None
+    priced = priced_image_models(side_offer, pct)
+    if not priced:
+        return None
+    block: dict[str, Any] = {
+        "head_template": ep["head_template"],
+        "response_shape": str(ep.get("response_shape", "venice")),
+        "response_idle_s": int(ep.get("response_idle_s", 300)),
+        "count_key": ep.get("count_key", DEFAULT_IMAGE_COUNT_KEY),
+        "fixed_pins": ep.get("fixed_pins", []),
+        "param_space": ep.get("param_space", {}),
+        "max_count": IMAGE_MAX_COUNT,
+        "price_list": {mid: variants for mid, (_c, variants) in priced.items()},
+    }
+    if _is_int(ep.get("max_response_bytes")):
+        block["max_response_bytes"] = ep["max_response_bytes"]
+    return block
+
+
 def price_entry(model_id: str, cand: Candidate) -> dict[str, float] | None:
     """msats per 1k tokens, from the same rate function billing uses."""
     from .payment.cost_calculation import _get_pricing_rates
@@ -447,6 +639,8 @@ class OfferTerms:
     rate_surcharge_pct: float = 0.0
     abandon_fee_msat: int = 0
     reserve_margin_tokens: int = 0
+    # The signed ``images`` block (variants and prices), when images are offered.
+    images: dict[str, Any] | None = None
 
 
 # sig -> (monotonic time last served, terms), oldest first.
@@ -495,6 +689,17 @@ def signed_offer_rates(sig: str, model_id: str) -> dict[str, float] | None:
     return dict(entry) if isinstance(entry, dict) else None
 
 
+def signed_image_variant(
+    terms: OfferTerms, model_id: str, variant_id: str
+) -> dict[str, Any] | None:
+    """A variant of ``model_id`` in a signed offer's images block."""
+    block = terms.images or {}
+    for variant in (block.get("price_list") or {}).get(model_id) or []:
+        if isinstance(variant, dict) and variant.get("id") == variant_id:
+            return variant
+    return None
+
+
 async def build_offer() -> dict[str, Any]:
     """The node's offer, signed with its Nostr key.
 
@@ -513,7 +718,8 @@ async def build_offer() -> dict[str, Any]:
         mid: surcharged(entry, pct) for mid, (_c, entry) in priced_models(side).items()
     }
     margin = reserve_margin_tokens()
-    terms = OfferTerms(prices, fee, pct, abandon, margin)
+    images = images_offer_block(side, pct)
+    terms = OfferTerms(prices, fee, pct, abandon, margin, images)
     offer: dict[str, Any] = {
         # Protocol v2 (the two-party handshake) only; v1 is retired.
         "v": CONFIDENTIAL_VERSION,
@@ -534,6 +740,10 @@ async def build_offer() -> dict[str, Any]:
     }
     if margin > 0:
         offer["reserve_margin_tokens"] = margin
+    if images is not None:
+        # Absent without images, so a chat-only node signs what it signed before.
+        offer["capabilities"] = ["chat", "images"]
+        offer["images"] = images
     payload = canonical_json(offer).decode("utf-8")
     last = _LAST_OFFER["offer"]
     if last is not None and _LAST_OFFER["payload"] == payload:
@@ -575,7 +785,10 @@ async def models_fields() -> dict[str, dict[str, Any]]:
         # Lets a client size its deposit before it fetches the offer.
         **pricing_fields(session_fee_msat(), abandon_fee_msat(), rate_surcharge_pct()),
     }
-    return {model_id: field for model_id in priced_models(side)}
+    out = {model_id: field for model_id in priced_models(side)}
+    for model_id in priced_image_models(side, rate_surcharge_pct()):
+        out[model_id] = {**field, "kind": "images"}
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +813,13 @@ class Billing:
     session_fee_msat: int = 0
     rate_surcharge_pct: float = 0.0
     abandon_fee_msat: int = 0
+    # Image sessions: the frozen variant, the count and the rendered suffix;
+    # the charge is ``msat_per_image × count`` plus the session fee.
+    kind: str = "chat"
+    variant: str | None = None
+    count: int = 1
+    msat_per_image: int = 0
+    suffix: str = ""
 
 
 class BillingError(Exception):
@@ -840,6 +1060,92 @@ async def settle(billing: Billing, usage_event: dict[str, Any]) -> dict[str, Any
         cost = billing.reserved_msats
     else:
         cost = min(usage_cost + billing.session_fee_msat, billing.reserved_msats)
+    if cost == 0:
+        return {"cost_msats": 0, "balance_msats": await release(billing)}
+    return {"cost_msats": cost, "balance_msats": await _charge(billing, cost)}
+
+
+async def reserve_image(
+    auth: str,
+    model_id: str,
+    variant_id: str,
+    count: int,
+    offer_sig: str,
+    accepted_fee_msat: int | None = None,
+    accepted_abandon_fee_msat: int | None = None,
+) -> Billing:
+    """Validate the bearer and reserve a flat-priced image request.
+
+    The price per image is frozen from the signed offer ``offer_sig`` names;
+    the reservation is that price × ``count`` plus the larger of the frozen
+    session and abandon fees, which the client must have accepted. An unknown
+    or expired offer, model or variant is refused (409), like chat.
+    """
+    from .auth import pay_for_request, validate_bearer_key
+    from .core.db import create_session
+
+    side = await cached_sidecar_offer()
+    if images_endpoint(side) is None:
+        raise BillingError("this node does not serve confidential images")
+    cand = candidate_for(model_id, str(side.get("upstream_host", "")))
+    terms = signed_offer_terms(offer_sig)
+    variant = (
+        signed_image_variant(terms, model_id, variant_id) if terms is not None else None
+    )
+    if cand is None or terms is None or variant is None or terms.images is None:
+        raise _offer_expired(model_id)
+    max_count = int(terms.images.get("max_count", 1))
+    if not _is_int(count) or not 1 <= count <= max_count:
+        raise BillingError(f"count must be an integer in [1, {max_count}]")
+    fee = terms.session_fee_msat
+    abandon = max(terms.abandon_fee_msat, fee)
+    if (fee > 0 and accepted_fee_msat != fee) or (
+        abandon > 0 and accepted_abandon_fee_msat != abandon
+    ):
+        raise _fee_not_accepted(fee, abandon)
+    per_image = int(variant["msat_per_image"])
+    suffix = render_image_suffix(
+        model_id,
+        str(terms.images.get("count_key", DEFAULT_IMAGE_COUNT_KEY)),
+        count,
+        terms.images.get("fixed_pins", []),
+        variant.get("pins", []),
+    )
+    async with create_session() as session:
+        try:
+            key = await validate_bearer_key(auth, session)
+        except HTTPException as exc:
+            raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
+        max_cost = per_image * count + max(fee, abandon)
+        try:
+            snapshot = await pay_for_request(key, max_cost, session)
+        except HTTPException as exc:
+            raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
+        return Billing(
+            key.hashed_key,
+            model_id,
+            cand,
+            snapshot.reserved_msats,
+            snapshot,
+            {},
+            session_fee_msat=fee,
+            rate_surcharge_pct=terms.rate_surcharge_pct,
+            abandon_fee_msat=abandon,
+            kind="images",
+            variant=variant_id,
+            count=count,
+            msat_per_image=per_image,
+            suffix=suffix,
+        )
+
+
+async def settle_flat(billing: Billing) -> dict[str, Any]:
+    """Charge a flat image request: the frozen price × count plus the session
+    fee, capped at the reservation. Returns ``{"cost_msats", "balance_msats"}``."""
+    cost = min(
+        billing.msat_per_image * billing.count + billing.session_fee_msat,
+        billing.reserved_msats,
+    )
     if cost == 0:
         return {"cost_msats": 0, "balance_msats": await release(billing)}
     return {"cost_msats": cost, "balance_msats": await _charge(billing, cost)}
