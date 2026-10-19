@@ -7,12 +7,14 @@ target logic.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from routstr import proxy as proxy_module
 from routstr.core.db import ApiKey
+from routstr.payment.models import Model
 from routstr.upstream.ehbp import (
     _PROXY_ONLY_HEADERS,
     EHBPForwardingTarget,
@@ -1206,11 +1208,10 @@ class TestTinfoilUpstreamProvider:
     async def test_fetch_models_exposes_reasoning_effort_metadata(self) -> None:
         """Tinfoil's effort map becomes the catalog's reasoning metadata.
 
-        The native values (``xhigh``/``high``/``low``) are advertised as
-        supported efforts so anything published can be sent as-is, the map is
-        kept so a client offering the coarser ``low``/``medium``/``high``
-        levels can reach the exact spelling, and a published disable shape marks
-        reasoning as optional.
+        Only the map is advertised, never ``supported_efforts``: that field is
+        not just published, it is applied - ``reasoning_effort.resolve_effort``
+        snaps requests onto its members - and the map's values are the model's
+        spellings for the three coarse levels, not the set of values it accepts.
         """
         payload = {
             "id": "deepseek-v4-1-flash",
@@ -1240,28 +1241,36 @@ class TestTinfoilUpstreamProvider:
         (model,) = await _fetch_models_for(payload)
 
         assert model.reasoning is not None
-        assert model.reasoning.supported_efforts == ["xhigh", "high", "low"]
+        assert model.reasoning.supported_efforts is None
         assert model.reasoning.effort_map == {
             "low": "low",
             "medium": "high",
             "high": "xhigh",
         }
+        # An ``off`` level plus a published disable shape: reasoning is optional.
         assert model.reasoning.mandatory is False
         # Tinfoil publishes no default effort, so none is invented.
         assert model.reasoning.default_effort is None
 
         dumped = model.dict()["reasoning"]
-        assert dumped["supported_efforts"] == ["xhigh", "high", "low"]
+        assert "supported_efforts" not in dumped
         assert dumped["effort_map"] == {
             "low": "low",
             "medium": "high",
             "high": "xhigh",
         }
+        assert dumped["mandatory"] is False
         assert "default_effort" not in dumped
 
     @pytest.mark.asyncio
-    async def test_fetch_models_omits_reasoning_without_effort_map(self) -> None:
-        """An on/off reasoning toggle publishes no effort metadata."""
+    async def test_fetch_models_publishes_mandatory_for_always_on_model(
+        self,
+    ) -> None:
+        """Kimi K3 only ever reasons: ``intelligence`` has no ``off`` level.
+
+        There are no effort levels to advertise, but the flag is exactly what a
+        client needs to stop offering a disable switch.
+        """
         payload = {
             "id": "kimi-k3",
             "context_window": 262144,
@@ -1276,7 +1285,10 @@ class TestTinfoilUpstreamProvider:
         (model,) = await _fetch_models_for(payload)
 
         assert model.id == "kimi-k3"
-        assert "reasoning" not in model.dict()
+        assert model.reasoning is not None
+        assert model.reasoning.mandatory is True
+        assert model.reasoning.effort_map is None
+        assert model.dict()["reasoning"] == {"mandatory": True}
 
     @pytest.mark.asyncio
     async def test_fetch_models_survives_malformed_reasoning_metadata(self) -> None:
@@ -1300,9 +1312,10 @@ class TestTinfoilUpstreamProvider:
 
         assert model.id == "deepseek-v4-1-flash"
         assert model.reasoning is not None
-        # Only the well-formed pair survives; the disable shape is unknown.
-        assert model.reasoning.supported_efforts == ["low"]
+        # Only the well-formed pair survives; an unreadable ``intelligence`` is
+        # unknown, not "always reasons", and the disable shape is unreadable.
         assert model.reasoning.effort_map == {"low": "low"}
+        assert model.reasoning.supported_efforts is None
         assert model.reasoning.mandatory is None
 
     @pytest.mark.asyncio
@@ -1323,6 +1336,242 @@ class TestTinfoilUpstreamProvider:
         (model,) = await _fetch_models_for(payload)
 
         assert "reasoning" not in model.dict()
+
+    @pytest.mark.asyncio
+    async def test_fetch_models_publishes_always_on_reasoning(self) -> None:
+        """GLM 5.3 reasons at every level and publishes no ``off``."""
+        payload = {
+            "id": "glm-5-3",
+            "reasoning": True,
+            "intelligence": {"low": 39, "medium": 42, "high": 45},
+            "reasoning_params": {
+                "effort_map": {"low": "low", "medium": "high", "high": "max"},
+                "params": {
+                    "/v1/chat/completions": {
+                        "enable": {
+                            "chat_template_kwargs": {"reasoning_effort": "$EFFORT"}
+                        }
+                    }
+                },
+            },
+            "pricing": {
+                "inputTokenPricePer1M": 0.3,
+                "outputTokenPricePer1M": 1.2,
+            },
+        }
+
+        (model,) = await _fetch_models_for(payload)
+
+        assert model.reasoning is not None
+        assert model.reasoning.mandatory is True
+        assert model.reasoning.effort_map == {
+            "low": "low",
+            "medium": "high",
+            "high": "max",
+        }
+
+    @pytest.mark.asyncio
+    async def test_fetch_models_publishes_disableable_toggle(self) -> None:
+        """An ``off`` level with a disable shape and no map: off is allowed."""
+        payload = {
+            "id": "gemma4-31b",
+            "reasoning": True,
+            "intelligence": {"off": 14, "on": 15},
+            "reasoning_params": {
+                "params": {
+                    "/v1/chat/completions": {
+                        "enable": {"chat_template_kwargs": {"enable_thinking": True}},
+                        "disable": {"chat_template_kwargs": {"enable_thinking": False}},
+                    }
+                }
+            },
+            "pricing": {
+                "inputTokenPricePer1M": 0.1,
+                "outputTokenPricePer1M": 0.2,
+            },
+        }
+
+        (model,) = await _fetch_models_for(payload)
+
+        assert model.dict()["reasoning"] == {"mandatory": False}
+
+
+# ---------------------------------------------------------------------------
+# Plaintext reasoning-effort translation
+# ---------------------------------------------------------------------------
+
+_DEEPSEEK_EFFORT_MAP = {"low": "low", "medium": "high", "high": "xhigh"}
+_GLM_EFFORT_MAP = {"low": "low", "medium": "high", "high": "max"}
+
+_DEEPSEEK_REASONING_PARAMS = {
+    "effort_map": _DEEPSEEK_EFFORT_MAP,
+    "params": {
+        route: {
+            "enable": {
+                "chat_template_kwargs": {
+                    "reasoning_effort": "$EFFORT",
+                    "thinking": True,
+                }
+            },
+            "disable": {"chat_template_kwargs": {"thinking": False}},
+        }
+        for route in ("/v1/chat/completions", "/v1/responses")
+    },
+}
+
+
+async def _plaintext_case(
+    model_id: str,
+    reasoning_params: dict | None,
+    intelligence: dict | None,
+) -> tuple[TinfoilUpstreamProvider, Model]:
+    """Fetch one model from a mocked catalog and build its provider."""
+    payload = {
+        "id": model_id,
+        "reasoning": True,
+        "intelligence": intelligence,
+        "reasoning_params": reasoning_params,
+        "pricing": {
+            "inputTokenPricePer1M": 0.65,
+            "outputTokenPricePer1M": 1.45,
+        },
+    }
+    (model,) = await _fetch_models_for(payload)
+    return TinfoilUpstreamProvider(api_key="test"), model
+
+
+def _prepared(
+    provider: TinfoilUpstreamProvider,
+    model: Model,
+    extra: dict,
+    *,
+    responses: bool = False,
+) -> dict:
+    body = json.dumps(
+        {"model": model.id, "messages": [{"role": "user", "content": "hi"}], **extra}
+    ).encode()
+    prepared = (
+        provider.prepare_responses_request_body(body, model)
+        if responses
+        else provider.prepare_request_body(body, model)
+    )
+    assert prepared is not None
+    return json.loads(prepared)
+
+
+class TestPlaintextReasoningEffortTranslation:
+    """Translate only what the model rejects; never reshape a valid request.
+
+    EHBP bodies never reach this path (they are sealed, so the routing client
+    maps the effort before encrypting), which makes this the whole server-side
+    story for a plaintext caller.
+    """
+
+    @pytest.mark.asyncio
+    async def test_coarse_medium_is_translated(self) -> None:
+        provider, model = await _plaintext_case(
+            "deepseek-v4-1-flash",
+            _DEEPSEEK_REASONING_PARAMS,
+            {"off": 22, "low": 31, "medium": 36, "high": 39},
+        )
+
+        data = _prepared(provider, model, {"reasoning_effort": "medium"})
+
+        assert data["reasoning_effort"] == "high"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("effort", ["none", "max", "xhigh", "low", "high"])
+    async def test_native_and_disabling_values_pass_through(self, effort: str) -> None:
+        """``none`` disables reasoning; ``max`` outranks ``xhigh``.
+
+        Snapping either onto an allowlist used to turn ``none`` into ``low``
+        (reasoning on) and downgrade ``max``, so both must survive untouched.
+        """
+        provider, model = await _plaintext_case(
+            "deepseek-v4-1-flash",
+            _DEEPSEEK_REASONING_PARAMS,
+            {"off": 22, "low": 31, "medium": 36, "high": 39},
+        )
+
+        data = _prepared(provider, model, {"reasoning_effort": effort})
+
+        assert data["reasoning_effort"] == effort
+
+    @pytest.mark.asyncio
+    async def test_nested_reasoning_object_is_not_given_an_effort(self) -> None:
+        provider, model = await _plaintext_case(
+            "deepseek-v4-1-flash",
+            _DEEPSEEK_REASONING_PARAMS,
+            {"off": 22, "low": 31, "medium": 36, "high": 39},
+        )
+
+        data = _prepared(provider, model, {"reasoning": {"enabled": False}})
+
+        assert data["reasoning"] == {"enabled": False}
+
+    @pytest.mark.asyncio
+    async def test_chat_template_kwargs_medium_is_translated(self) -> None:
+        """The documented enable shape is rewritten in place too."""
+        provider, model = await _plaintext_case(
+            "deepseek-v4-1-flash",
+            _DEEPSEEK_REASONING_PARAMS,
+            {"off": 22, "low": 31, "medium": 36, "high": 39},
+        )
+
+        data = _prepared(
+            provider,
+            model,
+            {"chat_template_kwargs": {"reasoning_effort": "medium", "thinking": True}},
+        )
+
+        assert data["chat_template_kwargs"] == {
+            "reasoning_effort": "high",
+            "thinking": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_glm_medium_becomes_high(self) -> None:
+        provider, model = await _plaintext_case(
+            "glm-5-3",
+            {
+                "effort_map": _GLM_EFFORT_MAP,
+                "params": {
+                    "/v1/chat/completions": {
+                        "enable": {
+                            "chat_template_kwargs": {"reasoning_effort": "$EFFORT"}
+                        }
+                    }
+                },
+            },
+            {"low": 39, "medium": 42, "high": 45},
+        )
+
+        data = _prepared(provider, model, {"reasoning_effort": "medium"})
+
+        assert data["reasoning_effort"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_model_without_effort_map_is_untouched(self) -> None:
+        """Kimi K3 accepts no effort levels: nothing may be invented."""
+        provider, model = await _plaintext_case("kimi-k3", None, {"on": 45})
+
+        data = _prepared(provider, model, {"reasoning_effort": "medium"})
+
+        assert data["reasoning_effort"] == "medium"
+
+    @pytest.mark.asyncio
+    async def test_responses_route_uses_the_same_translation(self) -> None:
+        provider, model = await _plaintext_case(
+            "deepseek-v4-1-flash",
+            _DEEPSEEK_REASONING_PARAMS,
+            {"off": 22, "low": 31, "medium": 36, "high": 39},
+        )
+
+        data = _prepared(
+            provider, model, {"reasoning_effort": "medium"}, responses=True
+        )
+
+        assert data["reasoning_effort"] == "high"
 
 
 # ---------------------------------------------------------------------------

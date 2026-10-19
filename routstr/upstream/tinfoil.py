@@ -25,7 +25,6 @@ from .ehbp import (
     ConfidentialInferenceProfile,
     EHBPForwardingTarget,
 )
-from .reasoning_effort import EFFORT_RANK
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -98,14 +97,6 @@ def _clean_effort_map(
     }
 
 
-def _ordered_efforts(effort_map: dict[str, str]) -> list[str]:
-    """Native effort values, deduplicated and highest-first."""
-    values = list(dict.fromkeys(effort_map.values()))
-    ranked = [effort for effort in EFFORT_RANK if effort in values]
-    ranked.extend(effort for effort in values if effort not in EFFORT_RANK)
-    return ranked
-
-
 def _reasoning_disableable(
     reasoning_params: TinfoilReasoningParams | None,
 ) -> bool:
@@ -118,31 +109,53 @@ def _reasoning_disableable(
     )
 
 
+def _reasoning_mandatory(tf: TinfoilModel) -> bool | None:
+    """Whether the model reasons without being asked to.
+
+    ``intelligence`` is keyed by the levels the model supports, including the
+    special level ``off`` when reasoning can be turned off at all. Levels
+    without ``off`` mean the model always reasons: GLM 5.3, Kimi K3 and
+    gpt-oss-120b publish no ``off`` and no disable shape, so a caller cannot
+    ask them for a non-reasoning answer.
+
+    Without either signal the answer is unknown rather than assumed, so a
+    shape change upstream cannot silently flip the flag.
+    """
+    intelligence = tf.intelligence if isinstance(tf.intelligence, dict) else {}
+    if intelligence and "off" not in intelligence:
+        return True
+    if _reasoning_disableable(tf.reasoning_params):
+        return False
+    return None
+
+
 def _tinfoil_reasoning(tf: TinfoilModel) -> Reasoning | None:
     """Translate a Tinfoil model's reasoning metadata into ``Reasoning``.
 
-    Tinfoil publishes an effort *map* rather than a flat allowlist, and no
-    default effort, so ``default_effort``/``default_enabled`` stay unset instead
-    of inventing values. ``supported_efforts`` lists the native values a caller
-    can send as-is (highest first); clients that offer the coarser
-    ``low``/``medium``/``high`` levels use ``effort_map`` for the exact spelling.
+    Tinfoil publishes an effort *map*, not an allowlist: the keys are the
+    caller-facing levels a UI offers (``low``/``medium``/``high``), the values
+    the exact spelling the model's chat template accepts. It is therefore
+    published as ``effort_map`` only, never as ``supported_efforts``.
 
-    Models with no effort map (reasoning is a plain on/off toggle there) publish
-    no ``reasoning`` object, matching how Routstr already treats models without
-    effort metadata.
+    That distinction matters downstream: ``supported_efforts`` is not merely
+    advertised, it is applied - ``routstr.upstream.reasoning_effort`` snaps any
+    requested level onto the nearest member, which is what kept turning a
+    deliberate ``reasoning_effort: "none"`` into ``"low"`` (reasoning on) and
+    downgrading ``"max"``. Tinfoil accepts more than the map's values anyway
+    (``none``, ``max``, and integers inside ``chat_template_kwargs``), so no
+    truthful allowlist exists to publish.
+
+    Defaults stay unset because the catalog publishes none, and a model whose
+    reasoning is a plain toggle publishes no effort map - only ``mandatory``,
+    when it can be determined.
     """
     if not tf.reasoning:
         return None
     effort_map = _clean_effort_map(tf.reasoning_params)
-    if not effort_map:
+    mandatory = _reasoning_mandatory(tf)
+    if not effort_map and mandatory is None:
         return None
-    return Reasoning(
-        supported_efforts=_ordered_efforts(effort_map),
-        effort_map=effort_map,
-        # A published disable shape proves reasoning is optional; without one the
-        # answer is unknown rather than assumed mandatory.
-        mandatory=False if _reasoning_disableable(tf.reasoning_params) else None,
-    )
+    return Reasoning(effort_map=effort_map or None, mandatory=mandatory)
 
 
 class TinfoilUpstreamProvider(BaseUpstreamProvider):
@@ -206,6 +219,50 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
 
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("tinfoil/")
+
+    def _apply_reasoning_effort(self, data: dict, model_obj: Model) -> bool:
+        """Rescue effort levels the gateway accepts but the model rejects.
+
+        Tinfoil's gateway advertises the OpenAI literals
+        (``none|minimal|low|medium|high|xhigh|max``), while a model's chat
+        template can be narrower: DeepSeek V4.1 and GLM 5.3 reject a literal
+        ``medium``. Translate only those levels, using the model's published
+        ``effort_map``; every other value is already native and is left exactly
+        as sent.
+
+        Deliberately narrow: ``none`` is a valid, meaningful input (it disables
+        reasoning) and ``max`` is a stronger level than ``xhigh``, so a rewrite
+        that reshaped either - which snapping onto an allowlist did - silently
+        changed what the caller asked for.
+
+        Only readable bodies reach here. EHBP requests are sealed ciphertext, so
+        the routing client applies the same map before encrypting.
+        """
+        reasoning = getattr(model_obj, "reasoning", None)
+        effort_map = (reasoning.effort_map if reasoning else None) or {}
+        if not effort_map:
+            return False
+        native = set(effort_map.values())
+        changed = False
+        for holder, key in (
+            (data, "reasoning_effort"),
+            (data.get("reasoning"), "effort"),
+            (data.get("chat_template_kwargs"), "reasoning_effort"),
+        ):
+            if not isinstance(holder, dict):
+                continue
+            value = holder.get(key)
+            if not isinstance(value, str):
+                continue
+            effort = value.strip().lower()
+            if effort in native:
+                continue
+            mapped = effort_map.get(effort)
+            if mapped is None or mapped == value:
+                continue
+            holder[key] = mapped
+            changed = True
+        return changed
 
     def get_confidential_inference_profile(self) -> ConfidentialInferenceProfile:
         return self.confidential_inference_profile

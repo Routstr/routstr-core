@@ -77,8 +77,10 @@ class Reasoning(BaseModel):
     ``effort_map`` is a Routstr extension for upstreams (Tinfoil) that publish
     a caller-level -> native-effort mapping instead of a flat allowlist: the
     caller-facing levels a UI offers (``low``/``medium``/``high``) are the keys,
-    the exact spelling the upstream accepts is the value. ``supported_efforts``
-    carries those native values, so every advertised effort can be sent as-is.
+    the exact spelling the upstream accepts is the value. Such an upstream
+    publishes the map alone, not ``supported_efforts``: that field is applied
+    (`routstr.upstream.reasoning_effort` snaps requests onto its members), and a
+    map's values are not the set of values the model accepts.
     """
 
     mandatory: bool | None = None
