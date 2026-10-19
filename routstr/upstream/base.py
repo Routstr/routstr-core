@@ -962,7 +962,9 @@ class BaseUpstreamProvider:
                     transformed_model = self.transform_model_name(original_model)
                     data["input"]["model"] = transformed_model
 
-                apply_reasoning_effort(data, model_obj)
+                # Route through the instance hook so providers that override the
+                # translation (Tinfoil, Anthropic) also cover this endpoint.
+                self._apply_reasoning_effort(data, model_obj)
 
                 return json.dumps(data).encode()
         except Exception as e:
