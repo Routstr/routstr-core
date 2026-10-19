@@ -142,6 +142,18 @@ def to_ws_url(url: str) -> str:
     return urlunsplit(parts._replace(scheme=scheme))
 
 
+def warn_unprotected_sidecar() -> None:
+    """Log when the sidecar is reached off loopback without a token: the
+    sidecar refuses such a node, and anyone who can reach it spends the key."""
+    host = (urlsplit(settings.confidential_sidecar_url).hostname or "").lower()
+    loopback = host == "localhost" or host == "::1" or host.startswith("127.")
+    if not loopback and not settings.confidential_sidecar_token:
+        logger.error(
+            "confidential: CONFIDENTIAL_SIDECAR_URL is not on loopback but "
+            "CONFIDENTIAL_SIDECAR_TOKEN is empty; the sidecar requires the token"
+        )
+
+
 def sidecar_headers() -> dict[str, str]:
     """The node's credential for the sidecar (empty when no token is set)."""
     token = settings.confidential_sidecar_token
@@ -715,7 +727,7 @@ async def reserve(
     auth: str,
     model_id: str,
     max_tokens: int,
-    offer_sig: str | None = None,
+    offer_sig: str,
     accepted_fee_msat: int | None = None,
     accepted_abandon_fee_msat: int | None = None,
 ) -> Billing:
@@ -729,7 +741,8 @@ async def reserve(
     discount) plus the same margin; fixed-pricing deployments keep
     their per-request reservation. The larger of the frozen offer's session
     and abandon fees is added on top; the client must have accepted exactly
-    those fees.
+    those fees. Everything is frozen from the signed offer ``offer_sig`` names;
+    an unknown or expired offer is refused (409).
     """
     from .auth import pay_for_request, validate_bearer_key
     from .core.db import create_session
@@ -739,21 +752,13 @@ async def reserve(
     cand = offered_models(side).get(model_id)
     if cand is None:
         raise BillingError(f"model {model_id!r} is not served confidentially")
-    if offer_sig:
-        terms = signed_offer_terms(offer_sig)
-        rates = signed_offer_rates(offer_sig, model_id)
-        if terms is None or rates is None:
-            raise _offer_expired(model_id)
-        fee, pct = terms.session_fee_msat, terms.rate_surcharge_pct
-        abandon = max(terms.abandon_fee_msat, fee)
-        margin = terms.reserve_margin_tokens
-    else:
-        fee, abandon, pct = session_fee_msat(), abandon_fee_msat(), rate_surcharge_pct()
-        margin = reserve_margin_tokens()
-        base = usable_price_entry(model_id, cand)
-        if base is None:
-            raise BillingError(f"model {model_id!r} has no usable pricing")
-        rates = surcharged(base, pct)
+    terms = signed_offer_terms(offer_sig)
+    rates = signed_offer_rates(offer_sig, model_id)
+    if terms is None or rates is None:
+        raise _offer_expired(model_id)
+    fee, pct = terms.session_fee_msat, terms.rate_surcharge_pct
+    abandon = max(terms.abandon_fee_msat, fee)
+    margin = terms.reserve_margin_tokens
     if (fee > 0 and accepted_fee_msat != fee) or (
         abandon > 0 and accepted_abandon_fee_msat != abandon
     ):

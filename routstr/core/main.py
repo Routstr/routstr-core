@@ -125,6 +125,15 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # debug logging) before any upstream provider dispatches a request.
         configure_litellm()
 
+        # Confidential mode keeps its offers and sessions in this process:
+        # refuse to start as one of several workers.
+        if global_settings.confidential_sidecar_url:
+            from ..confidential import warn_unprotected_sidecar
+            from ..confidential_ws import claim_single_worker
+            from .db import DATABASE_URL
+
+            claim_single_worker(DATABASE_URL)
+            warn_unprotected_sidecar()
         # One-time copy of SQLITE_IMPORT_PATH into an empty PostgreSQL database.
         # Raises when it cannot complete: the node must not start without it.
         await import_sqlite_on_startup()
