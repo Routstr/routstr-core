@@ -135,7 +135,14 @@ async def test_offer_signed_and_verifiable(
             "upstream_host": "api.venice.ai",
             "head_template": "POST / HTTP/1.1\r\n\r\n",
             "key_length": 42,
-            "suffix_keys": ["model"],
+            "suffix_keys": ["model", "max_tokens", "stream", "stream_options"],
+            "chat": {
+                "cap_keys": ["max_tokens"],
+                "fixed_pins": [
+                    ["stream", True],
+                    ["stream_options", {"include_usage": True}],
+                ],
+            },
             "max_tokens_cap": 4096,
         }
 
@@ -159,6 +166,9 @@ async def test_offer_signed_and_verifiable(
     assert _verify_schnorr(offer["sig_payload"], offer["sig"], pub_hex)
     payload = json.loads(offer["sig_payload"])
     assert payload["price_list"] == offer["price_list"] and "sig" not in payload
+    # The pinned chat suffix is the sidecar's, signed.
+    assert payload["chat"] == (await fake_sidecar_offer())["chat"]
+    assert payload["suffix_keys"] == ["model", "max_tokens", "stream", "stream_options"]
 
 
 def test_offer_unsigned_without_identity(monkeypatch: pytest.MonkeyPatch) -> None:
