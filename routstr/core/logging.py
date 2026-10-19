@@ -449,7 +449,9 @@ _NON_EXTRA_RECORD_ATTRS = frozenset(
 
 
 _ZK_TOKEN_PATTERN = re.compile(r"\bzk_token=[0-9a-fA-F]+")
-_SESSION_ID_PATTERN = re.compile(r"\b(session_id|sid)=([0-9a-fA-F]{12})[0-9a-fA-F]{52}\b")
+_SESSION_ID_PATTERN = re.compile(
+    r"\b(session_id|sid)=([0-9a-fA-F]{12})[0-9a-fA-F]{52}\b"
+)
 
 
 class SecurityFilter(logging.Filter):
