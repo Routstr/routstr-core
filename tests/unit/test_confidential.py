@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import math
 import threading
 import uuid
@@ -1236,8 +1237,8 @@ def test_zk_proxy_passes_bytes(monkeypatch: pytest.MonkeyPatch, proof: str) -> N
     with MockSidecar(echo) as mock:
         _use_sidecar(monkeypatch, mock.port)
         client = TestClient(_app())
-        cws._live_sids[SID] = cws.SessionState()
-        url = f"/v1/confidential/zk?proof={proof}&session_id={SID}"
+        state = cws._live_sids[SID] = cws.SessionState()
+        url = f"/v1/confidential/zk?proof={proof}&session_id={SID}&zk_token={state.zk_token}"
         with client.websocket_connect(url) as ws:
             payload = b"\x00\x01\x02zkmux\xff" * 100
             ws.send_bytes(payload)
@@ -1259,8 +1260,8 @@ def test_zk_proxy_sends_the_sidecar_token(
     with MockSidecar(record) as mock:
         _use_sidecar(monkeypatch, mock.port)
         client = TestClient(_app())
-        cws._live_sids[SID] = cws.SessionState()
-        url = f"/v1/confidential/zk?proof=zkchan&session_id={SID}"
+        state = cws._live_sids[SID] = cws.SessionState()
+        url = f"/v1/confidential/zk?proof=zkchan&session_id={SID}&zk_token={state.zk_token}"
         with client.websocket_connect(url) as ws:
             ws.send_bytes(b"x")
             assert ws.receive_bytes() == b"x"
@@ -1917,7 +1918,14 @@ def test_zk_proxy_admits_only_live_sessions(monkeypatch: pytest.MonkeyPatch) -> 
             msg = ws.receive()
             assert msg["type"] == "websocket.close" and msg["code"] == 1008
         assert dials == []  # never reached the sidecar
-        cws._live_sids[SID] = cws.SessionState()
+        state = cws._live_sids[SID] = cws.SessionState()
+        # The sid alone (or with another session's token) admits nothing.
+        for token in ["", cws.SessionState().zk_token]:
+            with client.websocket_connect(f"{url}&zk_token={token}") as ws:
+                msg = ws.receive()
+                assert msg["type"] == "websocket.close" and msg["code"] == 1008
+        assert dials == []
+        url = f"{url}&zk_token={state.zk_token}"
         monkeypatch.setattr(cws, "_active_zk", cws.MAX_ZK_CONNS)
         with client.websocket_connect(url) as ws:
             msg = ws.receive()
@@ -1937,7 +1945,7 @@ def test_zk_proxy_closes_when_its_session_ends(
         state = cws.SessionState()
         state.sid = SID
         cws._live_sids[SID] = state
-        url = f"/v1/confidential/zk?proof=zkchan&session_id={SID}"
+        url = f"/v1/confidential/zk?proof=zkchan&session_id={SID}&zk_token={state.zk_token}"
         with TestClient(_app()) as client:
             with client.websocket_connect(url) as ws:
                 ws.send_bytes(b"x")
@@ -2017,8 +2025,12 @@ def test_session_registers_its_sid_for_the_zk_route(
         _use_sidecar(monkeypatch, mock.port)
         with _connect(TestClient(_app())) as ws:
             ws.send_text(json.dumps(_SETUP))
-            assert json.loads(ws.receive_text())["type"] == "ready"
+            ready = json.loads(ws.receive_text())
+            assert ready["type"] == "ready"
             seen["live"] = SID in cws._live_sids
+            # The client gets the /zk token of its own session.
+            assert ready["zk_token"] == cws._live_sids[SID].zk_token
+            assert re.fullmatch(r"[0-9a-f]{64}", ready["zk_token"])
     assert seen["live"] is True
     assert SID not in cws._live_sids  # forgotten when the session ended
 

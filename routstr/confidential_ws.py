@@ -24,21 +24,23 @@
   for free: the node did the 2PC work either way. Every refusal or failure is reported as
   ``{"type": "error", "status", "reason", "detail"}`` before the socket closes.
 
-* ``GET /v1/confidential/zk?proof=<pi_*>&session_id=<sid>``: a byte proxy for
+* ``GET /v1/confidential/zk?proof=<pi_*>&session_id=<sid>&zk_token=<token>``: a byte proxy for
   one ZK proof (``twopc``: the two-party handshake; ``zkchan``: the
   session's long-lived proof channel, which carries π_NK, π_C2S and π_C3S
   over correlations set up while the session is armed). Only the sid of a
-  live session on this process (announced by the sidecar's ``ready``) is
-  admitted, so the node must run as a single worker process.
+  live session on this process (announced by the sidecar's ``ready``), with
+  the token the node added to that ``ready``, is admitted, so the node must run as a single worker process.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import socket
 import sys
 import tempfile
@@ -210,6 +212,10 @@ class SessionState:
         self.attestation_hash = ""
         # Set when the session ends: its /zk proxies close with it.
         self.ended = asyncio.Event()
+        # Admits this session's /zk channels, together with the sid. Only the
+        # client gets it (in ``ready``); unlike the sid it is in no receipt or
+        # attestation, so a shared receipt or log line cannot open a channel.
+        self.zk_token = secrets.token_hex(32)
 
 
 class SetupError(Exception):
@@ -634,6 +640,7 @@ async def _on_sidecar_text(
             # connections (opened with this sid) are admitted.
             _live_sids.setdefault(state.sid, state)
         msg.pop("offer", None)
+        msg["zk_token"] = state.zk_token
         msg["pubkey"] = node_pubkey_hex()
         msg["sig_scheme"] = "schnorr-secp256k1"
         return json.dumps(msg)
@@ -858,7 +865,7 @@ async def _finalize(state: SessionState) -> None:
 
 @confidential_ws_router.websocket("/v1/confidential/zk")
 async def confidential_zk_proxy(
-    websocket: WebSocket, proof: str = "", session_id: str = ""
+    websocket: WebSocket, proof: str = "", session_id: str = "", zk_token: str = ""
 ) -> None:
     global _active_zk
     await websocket.accept()
@@ -869,7 +876,9 @@ async def confidential_zk_proxy(
     # on this node may open proof channels; anything else never reaches the
     # sidecar.
     state = _live_sids.get(session_id)
-    if state is None:
+    if state is None or not hmac.compare_digest(
+        zk_token.encode(), state.zk_token.encode()
+    ):
         await websocket.close(code=1008, reason="unknown session")
         return
     if _active_zk >= MAX_ZK_CONNS:
