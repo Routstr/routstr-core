@@ -253,3 +253,102 @@ def test_native_catalog_providers_do_not_backfill_generic_cache_rates(
     backfill.assert_not_called()
     assert adjusted.pricing.input_cache_read == 0
     assert adjusted.pricing.prompt == pytest.approx(4.4e-6)
+
+
+@pytest.mark.asyncio
+async def test_ppq_does_not_expose_enclave_routes() -> None:
+    # Pricing blocks as GET https://api.ppq.ai/models returned them on 2026-10-19.
+    # Both routes collapse onto the public id ``kimi-k3`` (aliases strip the
+    # namespace), and the enclave route publishes no cache rate, so exposing it
+    # either shadows or is shadowed by the cache-priced original.
+    models = await _fetch(
+        [
+            _entry(
+                "moonshotai/kimi-k3",
+                {
+                    "input_per_1M_tokens": 3.165,
+                    "output_per_1M_tokens": 15.825,
+                    "cache_read_per_1M_tokens": 0.3165,
+                    "cache_write_per_1M_tokens": 3.165,
+                },
+            ),
+            _entry(
+                "private/kimi-k3",
+                {
+                    "input_per_1M_tokens": 4.22,
+                    "output_per_1M_tokens": 21.1,
+                    "cache_read_per_1M_tokens": None,
+                    "cache_write_per_1M_tokens": None,
+                },
+            ),
+        ]
+    )
+    assert [m.id for m in models] == ["moonshotai/kimi-k3"]
+    assert models[0].pricing.prompt == pytest.approx(3.165e-6)
+    assert models[0].pricing.input_cache_read == pytest.approx(0.3165e-6)
+
+
+@pytest.mark.asyncio
+async def test_ppq_enclave_route_never_shadows_the_cache_priced_original() -> None:
+    discovered = await _fetch(
+        [
+            _entry(
+                "moonshotai/kimi-k3",
+                {
+                    "input_per_1M_tokens": 3.165,
+                    "output_per_1M_tokens": 15.825,
+                    "cache_read_per_1M_tokens": 0.3165,
+                    "cache_write_per_1M_tokens": 3.165,
+                },
+            ),
+            _entry(
+                "private/kimi-k3",
+                {
+                    "input_per_1M_tokens": 4.22,
+                    "output_per_1M_tokens": 21.1,
+                    "cache_read_per_1M_tokens": None,
+                    "cache_write_per_1M_tokens": None,
+                },
+            ),
+        ],
+        [_model().copy(update={"id": "kimi-k3"}).dict()],
+    )
+    provider = PPQAIUpstreamProvider("test-only")
+    with patch.object(provider, "get_cached_models", return_value=discovered):
+        _, provider_map, unique_models = create_model_mappings([provider], {}, set())
+
+    (served,) = provider_map["kimi-k3"]
+    assert served[0].id == "kimi-k3"
+    assert served[0].pricing.prompt == pytest.approx(3.165e-6)
+    assert served[0].pricing.input_cache_read == pytest.approx(0.3165e-6)
+    assert unique_models["kimi-k3"].pricing.input_cache_read == pytest.approx(0.3165e-6)
+
+
+@pytest.mark.asyncio
+async def test_ppq_drops_enclave_only_models() -> None:
+    # A model that exists *only* behind the enclave is not exposed under its
+    # stripped public id either.
+    models = await _fetch(
+        [
+            _entry(
+                "private/enclave-only",
+                {
+                    "input_per_1M_tokens": 4.0,
+                    "output_per_1M_tokens": 8.0,
+                    "cache_read_per_1M_tokens": None,
+                    "cache_write_per_1M_tokens": None,
+                },
+            ),
+            _entry(
+                "PRIVATE/shouty-enclave",
+                {
+                    "input_per_1M_tokens": 4.0,
+                    "output_per_1M_tokens": 8.0,
+                    "cache_read_per_1M_tokens": None,
+                    "cache_write_per_1M_tokens": None,
+                },
+            ),
+        ],
+        [],
+    )
+    assert models == []
