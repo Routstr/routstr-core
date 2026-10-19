@@ -11,6 +11,13 @@ from .base import BaseUpstreamProvider
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
 
+# Effort levels Anthropic's native Messages API accepts in
+# ``output_config.effort``. Everything else (``none``, ``minimal``, unknown
+# strings, non-strings) is rejected with a 400 rather than forwarded.
+ANTHROPIC_SUPPORTED_EFFORTS: frozenset[str] = frozenset(
+    {"low", "medium", "high", "xhigh", "max"}
+)
+
 # Body fields the API accepts only with their beta. Relays such as routstrd
 # drop client headers, so the beta is restored from the body that needs it.
 _FIELD_BETAS = (
@@ -154,6 +161,35 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
             model_id = fixed_transforms[model_id]
         return model_id
 
+    def prepare_request_body(
+        self,
+        body: bytes | None,
+        model_obj: Model,
+        include_stream_usage: bool = False,
+    ) -> bytes | None:
+        body = super().prepare_request_body(body, model_obj, include_stream_usage)
+        if not body:
+            return body
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return body
+        # Anthropic 400s when both caps are set. Keep the larger, matching the
+        # cap the reservation was priced against.
+        if (
+            isinstance(data, dict)
+            and "messages" in data
+            and data.get("max_tokens") is not None
+            and data.get("max_completion_tokens") is not None
+        ):
+            caps = [data.pop("max_tokens"), data.pop("max_completion_tokens")]
+            try:
+                data["max_tokens"] = max(caps, key=int)
+            except (TypeError, ValueError):
+                data["max_tokens"] = caps[0]
+            return json.dumps(data).encode()
+        return body
+
     def prepare_headers(self, request_headers: dict) -> dict:
         headers = super().prepare_headers(request_headers)
         # Match Anthropic's SDK default API version while preserving client overrides.
@@ -207,8 +243,26 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
         return _normalize_thinking(data) or changed
 
     def _apply_generic_effort(self, data: dict) -> bool:
+        # Anthropic accepts effort spelled three ways: OpenAI-compatible
+        # ``reasoning_effort``, Anthropic ``reasoning.effort``, and the newer
+        # native ``output_config.effort``. Normalize all of them onto
+        # ``output_config.effort`` and validate them identically, so a client
+        # cannot smuggle an illegal level in through the native spelling.
         # Anthropic defaults are independent of OpenRouter's mandatory metadata.
-        if "reasoning_effort" not in data and "reasoning" not in data:
+        config = data.get("output_config")
+        if config is None:
+            config = {}
+        elif not isinstance(config, dict):
+            raise UpstreamError(
+                "Anthropic output_config must be an object", status_code=400
+            )
+        native_effort = config.get("effort")
+
+        if (
+            "reasoning_effort" not in data
+            and "reasoning" not in data
+            and native_effort is None
+        ):
             return False
 
         reasoning = data.get("reasoning")
@@ -220,30 +274,21 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
                 status_code=400,
             )
         efforts: list[str] = []
-        for value in (data.get("reasoning_effort"), reasoning.get("effort")):
+        for value in (
+            data.get("reasoning_effort"),
+            reasoning.get("effort"),
+            native_effort,
+        ):
             if value is None:
                 continue
-            if not isinstance(value, str) or value not in {
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-            }:
+            if not isinstance(value, str) or value not in ANTHROPIC_SUPPORTED_EFFORTS:
                 raise UpstreamError("Unsupported Anthropic effort", status_code=400)
             efforts.append(value)
 
         if efforts:
-            config = data.get("output_config", {})
-            if not isinstance(config, dict):
-                raise UpstreamError(
-                    "Anthropic output_config must be an object", status_code=400
-                )
-            native_effort = config.get("effort")
-            if any(value != efforts[0] for value in efforts) or (
-                native_effort is not None and native_effort != efforts[0]
-            ):
+            if any(value != efforts[0] for value in efforts):
                 raise UpstreamError("Conflicting Anthropic effort", status_code=400)
+            # Preserve sibling keys (``format``, future extensions).
             data["output_config"] = {**config, "effort": efforts[0]}
 
         data.pop("reasoning_effort", None)

@@ -132,6 +132,17 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
     # (EHBP is currently disabled for this provider — see ``supports_ehbp``.)
     ehbp_path_prefix = "private/v1"
     IGNORED_MODEL_IDS: list[str] = ["auto"]
+    # PPQ.AI also lists enclave copies of some models under ``private/``
+    # (``private/kimi-k3``, ``private/gpt-oss-120b``). Those are a different
+    # product, not a second deployment of the same one: they cost more per
+    # token (the enclave premium), their context window is smaller, and their
+    # published cache rates are null because PPQ.AI bills cached tokens at the
+    # full input rate there. Model aliases strip everything before the first
+    # slash (``resolve_model_alias``), so both spellings collapse onto one
+    # public id and the reservation-ranked router can pick the enclave route —
+    # shadowing the cache-priced original and advertising cache reads as free
+    # of discount. Do not expose them.
+    IGNORED_MODEL_ID_PREFIXES: list[str] = ["private/"]
     # PPQ.AI has a private encrypted endpoint, but this proxy currently has no
     # provider-attested usage extractor/model binding for it. Keep EHBP disabled
     # until a ConfidentialInferenceProfile can bill it without max-cost fallback.
@@ -235,6 +246,14 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                 try:
                     ppqai_model = PPQAIModel.parse_obj(model_data)
                     if ppqai_model.id in self.IGNORED_MODEL_IDS:
+                        continue
+                    if ppqai_model.id.lower().startswith(
+                        tuple(self.IGNORED_MODEL_ID_PREFIXES)
+                    ):
+                        logger.debug(
+                            "Skipping PPQ.AI enclave model",
+                            extra={"model_id": ppqai_model.id},
+                        )
                         continue
 
                     api_pricing = ppqai_model.pricing.api or {}
