@@ -247,3 +247,9 @@ def test_confidential_session_id_is_shortened(
     assert "session_id=8a6e5426abab…" in out
     out = filter_message(f"GET /zk?proof=pi_nk&sid={sid}")
     assert sid not in out and "sid=8a6e5426abab…" in out
+
+
+def test_zk_token_is_removed(filter_message: Callable[[str], str]) -> None:
+    token = "cd" * 32
+    out = filter_message(f'"WebSocket /v1/confidential/zk?proof=zkchan&session_id=ab&zk_token={token}" [accepted]')
+    assert token not in out and "zk_token=[REDACTED]" in out
