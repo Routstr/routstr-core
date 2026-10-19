@@ -1652,11 +1652,11 @@ def test_abort_after_release_with_fees_charges_the_reservation(
     assert ledger.calls == ["reserve", "charge"]
 
 
-@pytest.mark.parametrize("status", [400, 429, 503])
-def test_upstream_refusal_charges_the_session_fee(
+@pytest.mark.parametrize("status", [429, 503])
+def test_provider_refusal_charges_the_session_fee(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], status: int
 ) -> None:
-    """The request reached the provider: the session fee, not the abandon fee."""
+    """Rate limit or capacity on the provider's side: the session fee only."""
     ledger = _fee_ledger(monkeypatch)
     usage = {"type": "usage", "sid": SID, "usage": {"error_status": status}}
     _, got = _run_session(
@@ -1665,6 +1665,26 @@ def test_upstream_refusal_charges_the_session_fee(
     assert ledger.calls == ["reserve", "charge_fee:2000"]
     receipt = got[-1]["receipt"]
     assert receipt["cost_msats"] == 2000 and receipt["balance_msats"] == 98000
+
+
+@pytest.mark.parametrize("status", [400, 404, 422, 499])
+def test_rejected_request_charges_the_abandon_fee(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], status: int
+) -> None:
+    """A request the provider rejected costs the abandon fee: the node did the
+    session's 2PC, and an invalid body must not be a free way to make it."""
+    ledger = _fee_ledger(monkeypatch)
+    usage = {"type": "usage", "sid": SID, "usage": {"error_status": status}}
+    _, got = _run_session(
+        monkeypatch, [_READY, {"type": "body_released"}, usage], 3, _FEE_SETUP
+    )
+    assert ledger.calls == ["reserve", "charge_fee:5000"]
+    assert got[-1]["receipt"]["cost_msats"] == 5000
+
+
+def test_error_status_classes() -> None:
+    assert conf.PROVIDER_REFUSAL_STATUSES == {429, 503}
+    assert conf.PROVIDER_REFUSAL_STATUSES <= conf.UNBILLED_ERROR_STATUSES
 
 
 def test_setup_rejects_bad_fee_fields() -> None:
@@ -2357,6 +2377,89 @@ async def test_reserve_image_is_the_flat_price_times_count(
     with pytest.raises(conf.BillingError) as err:  # fees not accepted
         await conf.reserve_image("hk", "zimg", "webp", 1, "cd" * 32, None, None)
     assert err.value.status == 409
+
+
+def test_4k_variants_are_one_image_at_a_time() -> None:
+    from routstr.payment.image_pricing import ImagePriceTier, ImagePricing
+
+    book = ImagePricing(
+        max_usd=0.35,
+        tiers=[
+            ImagePriceTier(resolution="1K", usd=0.15),
+            ImagePriceTier(resolution="4K", usd=0.35),
+        ],
+        resolutions=["1K", "4K"],
+        default_resolution="1K",
+    )
+    variants = conf.image_variants(
+        _image_model("nb", book, 420.0), _IMAGES_EP["param_space"], 0
+    )
+    by_id = {v["id"]: v for v in variants}
+    assert by_id["4K-webp"]["max_count"] == 1
+    assert "max_count" not in by_id["1K-webp"]
+
+
+async def test_reserve_image_honours_the_variant_count_and_whole_prices(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any, fee_settings: None
+) -> None:
+    side = {
+        "upstream_host": "api.venice.ai",
+        "head_template": "x",
+        "endpoints": {"images": _IMAGES_EP},
+    }
+    _images_world(monkeypatch, side)
+    block = conf.images_offer_block(side, conf.rate_surcharge_pct())
+    assert block is not None
+    block = {**block, "price_list": dict(block["price_list"])}
+    block["price_list"]["zimg"] = [
+        {
+            "id": "4K-webp",
+            "pins": [["format", "webp"]],
+            "msat_per_image": 20_000,
+            "max_count": 1,
+        },
+        {"id": "frac-webp", "pins": [["format", "webp"]], "msat_per_image": 1.5},
+    ]
+    conf._remember_offer("cd" * 32, conf.OfferTerms({}, 2000, 20.0, 10000, 0, block))
+    with pytest.raises(conf.BillingError) as err:
+        await conf.reserve_image("hk", "zimg", "4K-webp", 2, "cd" * 32, 2000, 10000)
+    assert "[1, 1]" in str(err.value)
+    billing = await conf.reserve_image(
+        "hk", "zimg", "4K-webp", 1, "cd" * 32, 2000, 10000
+    )
+    assert billing.msat_per_image == 20_000
+    await conf.release(billing)
+    with pytest.raises(conf.BillingError) as err:  # not a whole millisat price
+        await conf.reserve_image("hk", "zimg", "frac-webp", 1, "cd" * 32, 2000, 10000)
+    assert err.value.status == 409
+
+
+def test_image_offer_pins_the_providers_own_model_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The node's public ids are lower-cased; the suffix must carry the
+    provider's spelling, or the provider answers 404."""
+    import routstr.proxy as proxy
+
+    public = _image_model("wai-illustrious", _flat_book(), 12.0)
+    upstream = _image_model("wai-Illustrious", _flat_book(), 12.0)
+    monkeypatch.setattr(proxy, "get_unique_models", lambda: [public])
+    monkeypatch.setattr(
+        proxy,
+        "get_candidates",
+        lambda mid: [(upstream, _Up("https://api.venice.ai/api/v1"))]
+        if mid.lower() == "wai-illustrious"
+        else [],
+    )
+    side = {"upstream_host": "api.venice.ai", "endpoints": {"images": _IMAGES_EP}}
+    priced = conf.priced_image_models(side, 0)
+    assert list(priced) == ["wai-Illustrious"]
+    # An operator-set forwarded id wins, as on the plain path.
+    upstream.forwarded_model_id = "vendor/Wai"
+    assert list(conf.priced_image_models(side, 0)) == ["vendor/Wai"]
+    assert (
+        conf.upstream_model_id(SimpleNamespace(id="", forwarded_model_id=None)) is None
+    )
 
 
 class _ImageBilling(_Billing):
