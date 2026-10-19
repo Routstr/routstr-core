@@ -12,6 +12,7 @@ from routstr.core.db import ModelRow
 from routstr.payment.models import (
     NATIVE_ANTHROPIC_SUPPORTED_EFFORTS,
     Model,
+    Reasoning,
     apply_native_anthropic_reasoning,
 )
 from routstr.upstream.anthropic import AnthropicUpstreamProvider
@@ -264,12 +265,12 @@ async def test_refresh_keeps_catalog_reasoning_verbatim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """OpenRouter-shaped metadata is authoritative; the fill only adds."""
-    catalog_reasoning = {
-        "mandatory": True,
-        "default_enabled": True,
-        "supported_efforts": ["max", "high", "low", "none"],
-        "default_effort": "high",
-    }
+    catalog_reasoning = Reasoning(
+        mandatory=True,
+        default_enabled=True,
+        supported_efforts=["max", "high", "low", "none"],
+        default_effort="high",
+    )
     provider = AnthropicUpstreamProvider(api_key="sk-test")
     provider.db_id = 9
     _patch_refresh(
@@ -281,7 +282,12 @@ async def test_refresh_keeps_catalog_reasoning_verbatim(
     await provider.refresh_models_cache()
 
     (published,) = provider.get_cached_models()
-    assert published.dict()["reasoning"] == catalog_reasoning
+    assert published.dict()["reasoning"] == {
+        "mandatory": True,
+        "default_enabled": True,
+        "supported_efforts": ["max", "high", "low", "none"],
+        "default_effort": "high",
+    }
 
 
 def test_effort_domain_is_scoped_to_the_native_anthropic_provider() -> None:
@@ -298,7 +304,9 @@ def test_effort_domain_is_scoped_to_the_native_anthropic_provider() -> None:
 
 
 def test_partial_catalog_reasoning_keeps_its_other_fields() -> None:
-    model = Model(**model_data("claude-sonnet-5.5"), reasoning={"mandatory": True})
+    model = Model(
+        **model_data("claude-sonnet-5.5"), reasoning=Reasoning(mandatory=True)
+    )
     filled = apply_native_anthropic_reasoning(model, "anthropic")
     assert filled.reasoning is not None
     assert filled.reasoning.mandatory is True
