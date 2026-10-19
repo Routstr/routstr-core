@@ -70,6 +70,7 @@ CONFIDENTIAL_MAX_V = 2
 # Images per confidential image request (the count the suffix pins), and the
 # only output format offered: WebP is the smallest response.
 IMAGE_MAX_COUNT = 4
+IMAGE_IDLE_RANGE = (30, 600)
 IMAGE_FORMAT = "webp"
 DEFAULT_IMAGE_COUNT_KEY = "variants"
 
@@ -447,7 +448,33 @@ def _images_endpoint_problem(ep: Any) -> str | None:
     keys = ["model", count_key, *(p[0] for p in pins)]
     if len(set(keys)) != len(keys) or set(keys) & set(space):
         return "a pinned key repeats"
+    # Numbers the clients check: one out of range must disable images, not
+    # make every client refuse the whole signed offer.
+    idle = ep.get("response_idle_s", 300)
+    if not _is_int(idle) or not IMAGE_IDLE_RANGE[0] <= idle <= IMAGE_IDLE_RANGE[1]:
+        return "response_idle_s"
+    count = ep.get("max_count", IMAGE_MAX_COUNT)
+    if not _is_int(count) or count < 1:
+        return "max_count"
+    size = ep.get("max_response_bytes")
+    if size is not None and (not _is_int(size) or size <= 0):
+        return "max_response_bytes"
     return None
+
+
+def _axis_values(declared: list[str], tiers: list[Any], name: str) -> list[str]:
+    """Every value of a price axis: the declared ones, then any a tier names.
+
+    A book whose tiers vary along an axis it does not declare would otherwise
+    leave that axis unpinned, and the client could pick the dearer tier
+    privately.
+    """
+    values = list(declared)
+    for tier in tiers:
+        value = getattr(tier, name, None)
+        if value and value not in values:
+            values.append(value)
+    return values
 
 
 def image_variants(model_obj: Any, space: dict[str, Any], pct: float) -> list[dict]:
@@ -473,8 +500,8 @@ def image_variants(model_obj: Any, space: dict[str, Any], pct: float) -> list[di
         return []
     axes: list[list[tuple[str, str] | None]] = []
     for name, declared in (
-        ("resolution", book.resolutions),
-        ("quality", book.qualities),
+        ("resolution", _axis_values(book.resolutions, book.tiers, "resolution")),
+        ("quality", _axis_values(book.qualities, book.tiers, "quality")),
     ):
         if not declared:
             axes.append([None])
@@ -551,11 +578,12 @@ def images_offer_block(side_offer: dict[str, Any], pct: float) -> dict[str, Any]
     block: dict[str, Any] = {
         "head_template": ep["head_template"],
         "response_shape": str(ep.get("response_shape", "venice")),
-        "response_idle_s": int(ep.get("response_idle_s", 300)),
+        "response_idle_s": ep.get("response_idle_s", 300),
         "count_key": ep.get("count_key", DEFAULT_IMAGE_COUNT_KEY),
         "fixed_pins": ep.get("fixed_pins", []),
         "param_space": ep.get("param_space", {}),
-        "max_count": IMAGE_MAX_COUNT,
+        # The sidecar refuses a larger count, so never sign one it would.
+        "max_count": min(ep.get("max_count", IMAGE_MAX_COUNT), IMAGE_MAX_COUNT),
         "price_list": {mid: variants for mid, (_c, variants) in priced.items()},
     }
     if _is_int(ep.get("max_response_bytes")):
