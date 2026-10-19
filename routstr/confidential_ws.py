@@ -537,7 +537,9 @@ async def _open_session(
         except Exception as exc:
             logger.exception("confidential ws: reservation failed")
             raise SetupError(500, "reservation failed") from exc
-        # The sidecar binds sid to this value; it is unique and not a secret.
+        # The sidecar binds sid to this value. It is unique; the derived
+        # protocol sid also admits /zk proof channels while the session is
+        # live, so it is only logged shortened (``_short``, SecurityFilter).
         msg = sidecar_setup(msg, state.billing.snapshot.release_id, state.billing)
         try:
             upstream = await websockets.connect(

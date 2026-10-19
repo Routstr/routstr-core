@@ -448,6 +448,11 @@ _NON_EXTRA_RECORD_ATTRS = frozenset(
 )
 
 
+_SESSION_ID_PATTERN = re.compile(
+    r"\b(session_id|sid)=([0-9a-fA-F]{12})[0-9a-fA-F]{52}\b"
+)
+
+
 class SecurityFilter(logging.Filter):
     """Filter to remove sensitive information from logs."""
 
@@ -486,6 +491,10 @@ class SecurityFilter(logging.Filter):
                     message = re.sub(
                         pattern, f"{key}: [REDACTED]", message, flags=re.IGNORECASE
                     )
+        # A live confidential session id admits proof channels on
+        # /v1/confidential/zk (uvicorn logs the full path of every
+        # WebSocket): keep only a short prefix, as the node's own logs do.
+        message = _SESSION_ID_PATTERN.sub(r"\1=\2…", message)
         # The value shapes (sk- keys, 64-hex key hashes, secret query
         # parameters…, org IDs) that structured fields are already stripped of.
         return redact_secret_text(message)
