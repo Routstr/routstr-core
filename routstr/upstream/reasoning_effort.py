@@ -27,7 +27,11 @@ EFFORT_RANK: tuple[str, ...] = (
 )
 _RANK_INDEX: dict[str, int] = {name: i for i, name in enumerate(EFFORT_RANK)}
 
-_REASONING_KEYS = ("reasoning", "reasoning_effort", "thinking")
+# Every client shape that can carry an effort level. ``output_config`` is the
+# Anthropic-native spelling (``output_config.effort``); litellm-backed
+# OpenAI-compatible upstreams reject it, so the effort is lifted onto
+# ``reasoning_effort`` and the object itself is pruned afterwards.
+_REASONING_KEYS = ("reasoning", "reasoning_effort", "thinking", "output_config")
 
 
 def _normalize_effort(value: object) -> str | None:
@@ -112,8 +116,25 @@ def _effort_from_thinking(thinking: object) -> str | None:
     return None
 
 
+def _effort_from_output_config(config: object) -> str | None:
+    """Read ``output_config.effort`` (Anthropic-native thinking level)."""
+    if not isinstance(config, dict):
+        return None
+    return _normalize_effort(config.get("effort"))
+
+
 def extract_requested_effort(data: dict[str, Any]) -> str | None:
-    """Best-effort effort string from the OpenAI / Anthropic request shapes."""
+    """Best-effort effort string from the OpenAI / Anthropic request shapes.
+
+    Precedence, highest first: ``reasoning.effort`` > ``reasoning_effort`` >
+    ``thinking.effort`` > ``output_config.effort``. OpenRouter/OpenAI shapes
+    win over the Anthropic-native object because a client that sends both is
+    explicit about the generic spelling, and ``thinking`` outranks
+    ``output_config`` because it is the older, more specific Anthropic field.
+
+    Malformed sources (non-dict objects, non-string or empty efforts) are
+    ignored so a junk value cannot override a valid one.
+    """
     if isinstance(data.get("reasoning"), dict):
         nested = _normalize_effort(data["reasoning"].get("effort"))
         if nested:
@@ -121,7 +142,10 @@ def extract_requested_effort(data: dict[str, Any]) -> str | None:
     top_level = _normalize_effort(data.get("reasoning_effort"))
     if top_level:
         return top_level
-    return _effort_from_thinking(data.get("thinking"))
+    thinking_effort = _effort_from_thinking(data.get("thinking"))
+    if thinking_effort:
+        return thinking_effort
+    return _effort_from_output_config(data.get("output_config"))
 
 
 def _request_mentions_reasoning(data: dict[str, Any]) -> bool:
@@ -193,5 +217,10 @@ def adapt_messages_body_for_litellm(data: dict[str, Any], model: Model) -> None:
     Litellm's Anthropic-messages adapter talking to an OpenAI-compatible
     upstream will 400 on ``thinking``. Lift the effort onto
     ``reasoning_effort`` and drop the Anthropic-only object.
+
+    ``output_config.effort`` (the Anthropic-native thinking level sent by
+    newer SDK clients and OpenCode) is lifted the same way, so the
+    requested effort survives the caller's allowlist prune instead of being
+    silently discarded along with the rest of ``output_config``.
     """
     apply_reasoning_effort(data, model, drop_thinking=True)
