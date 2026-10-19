@@ -330,6 +330,7 @@ _SETUP = {
     "max_tokens": 12,
     "len": 150,
     "auth": "sk-client-key",
+    "offer_sig": "ab" * 64,
 }
 
 
@@ -380,6 +381,18 @@ def test_session_settles_on_the_reservation(
         == hashlib.sha256(att["a_json"].encode("utf-8")).hexdigest()
     )
     assert _verify_schnorr(receipt_msg["receipt_json"], receipt_msg["sig"], pub_hex)
+    assert ledger.calls == ["reserve", "settle"]
+
+
+def test_attestation_of_another_session_is_not_signed(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch)
+    foreign = {**_ATTEST, "a": {"sid": "ef" * 32}}
+    _, got = _run_session(monkeypatch, [_READY, foreign, _USAGE], 2)
+    ready, receipt_msg = got
+    assert receipt_msg["type"] == "receipt"
+    assert receipt_msg["receipt"]["attestation_hash"] == ""
     assert ledger.calls == ["reserve", "settle"]
 
 
@@ -578,6 +591,8 @@ def _connect(client: TestClient) -> Any:
         ("nonce_c", "aa"),
         ("offer_sig", 5),
         ("offer_sig", "not-hex"),
+        ("offer_sig", None),
+        ("offer_sig", ""),
     ],
 )
 def test_setup_validation_rejects_before_reserving(
@@ -959,6 +974,24 @@ def _ctx_model() -> Any:
     )
 
 
+def _current_sig(model_id: str = "ctx-model") -> str:
+    """Sign (remember) an offer with the node's current settings, as the
+    offer endpoint would, and return its signature for ``reserve``."""
+    cand = conf.offered_models({})[model_id]
+    pct = conf.rate_surcharge_pct()
+    entry = conf.usable_price_entry(model_id, cand)
+    terms = conf.OfferTerms(
+        {model_id: conf.surcharged(entry, pct)} if entry else {},
+        conf.session_fee_msat(),
+        pct,
+        conf.abandon_fee_msat(),
+        conf.reserve_margin_tokens(),
+    )
+    sig = hashlib.sha256(repr(terms).encode()).hexdigest() * 2
+    conf._remember_offer(sig, terms)
+    return sig
+
+
 @pytest.fixture()
 async def billing_db(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
     """Real reserve/settle against an in-memory database and a fake model."""
@@ -1025,7 +1058,7 @@ async def test_reservation_covers_the_full_context(billing_db: Any) -> None:
         get_max_cost_for_model,
     )
 
-    billing = await conf.reserve("hk", "ctx-model", 8)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     # 100000 tokens * 10 msats + 8 tokens * 100 msats
     assert billing.reserved_msats == 1_000_800
     assert billing.rates == {"in": 10_000.0, "cached_in": 10_000.0, "out": 100_000.0}
@@ -1048,7 +1081,7 @@ async def test_reservation_ignores_the_models_completion_limit(
     prompt reservation: the provider accepts a prompt up to context - cap, and
     the charge is capped at the reservation, so the difference would be free."""
     billing_db.model.top_provider.max_completion_tokens = 50_000
-    billing = await conf.reserve("hk", "ctx-model", 8)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     # 100000 tokens * 10 msats + 8 tokens * 100 msats, not (100000 - 50000) * 10
     assert billing.reserved_msats == 1_000_800
     assert conf.prompt_token_limit(billing_db.model) == 100_000
@@ -1063,7 +1096,7 @@ async def test_reservation_without_context_uses_the_max_cost(
 ) -> None:
     billing_db.model.top_provider = None
     billing_db.model.context_length = None
-    billing = await conf.reserve("hk", "ctx-model", 8)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     assert billing.reserved_msats == 1_100_000  # sats_pricing.max_cost
 
 
@@ -1072,12 +1105,12 @@ async def test_fixed_pricing_keeps_the_per_request_reservation(
 ) -> None:
     monkeypatch.setattr(settings, "fixed_pricing", True)
     monkeypatch.setattr(settings, "fixed_cost_per_request", 7)
-    billing = await conf.reserve("hk", "ctx-model", 8)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     assert billing.reserved_msats == 7000
 
 
 async def test_settlement_uses_the_frozen_rates(billing_db: Any) -> None:
-    billing = await conf.reserve("hk", "ctx-model", 8)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     billing_db.model.sats_pricing.prompt = 0.05  # live rate moves after setup
     usage = {
         "model": "ctx-model",
@@ -1122,12 +1155,12 @@ async def test_reservation_covers_a_provider_overshoot_of_the_cap(
     # 99997*10 + 6*100 msats
     full = 1_000_570
 
-    billing = await conf.reserve("hk", "ctx-model", 3)
+    billing = await conf.reserve("hk", "ctx-model", 3, _current_sig())
     assert billing.reserved_msats == 1_000_300
     assert (await conf.settle(billing, usage))["cost_msats"] < full
 
     monkeypatch.setattr(settings, "confidential_reserve_margin_tokens", 16)
-    billing = await conf.reserve("hk", "ctx-model", 3)
+    billing = await conf.reserve("hk", "ctx-model", 3, _current_sig())
     # 100000*10 + (3 + 16)*100 msats
     assert billing.reserved_msats == 1_001_900
     out = await conf.settle(billing, usage)
@@ -1150,7 +1183,7 @@ async def test_signed_offer_freezes_the_reserve_margin(
 
 
 async def test_zero_cost_releases_and_reports_balance(billing_db: Any) -> None:
-    billing = await conf.reserve("hk", "ctx-model", 8)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     out = await conf.settle(
         billing,
         {"model": "ctx-model", "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
@@ -1453,8 +1486,8 @@ async def test_reserve_requires_the_client_to_accept_the_fees(
 async def test_reservation_includes_the_larger_fee_and_surcharge(
     billing_db: Any, fee_settings: None
 ) -> None:
-    # Without an offer_sig the current settings apply (+20 %, fees 2000/10000).
-    billing = await conf.reserve("hk", "ctx-model", 8, None, 2000, 10000)
+    # An offer signed with the current settings (+20 %, fees 2000/10000).
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig(), 2000, 10000)
     assert billing.rates["in"] == pytest.approx(12_000.0)
     # (100000 * 12 + 8 * 120) msats + max(2000, 10000)
     assert billing.reserved_msats == 1_200_960 + 10000
@@ -1479,7 +1512,7 @@ async def test_signed_offer_terms_win_over_current_settings(
 async def test_settlement_is_usage_plus_session_fee_capped(
     billing_db: Any, fee_settings: None
 ) -> None:
-    billing = await conf.reserve("hk", "ctx-model", 8, None, 2000, 10000)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig(), 2000, 10000)
     usage = {
         "model": "ctx-model",
         "usage": {"prompt_tokens": 1000, "completion_tokens": 8},
@@ -1491,10 +1524,10 @@ async def test_settlement_is_usage_plus_session_fee_capped(
     key = await billing_db.key()
     assert key.reserved_balance == 0 and key.total_spent == 14_960
 
-    billing = await conf.reserve("hk", "ctx-model", 8, None, 2000, 10000)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig(), 2000, 10000)
     zero = {"model": "ctx-model", "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
     assert (await conf.settle(billing, zero))["cost_msats"] == 2000
-    billing = await conf.reserve("hk", "ctx-model", 8, None, 2000, 10000)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig(), 2000, 10000)
     huge = {
         "model": "ctx-model",
         "usage": {"prompt_tokens": 10**7, "completion_tokens": 10**6},
@@ -1505,7 +1538,7 @@ async def test_settlement_is_usage_plus_session_fee_capped(
 async def test_charge_fee_charges_exactly_the_fee(
     billing_db: Any, fee_settings: None
 ) -> None:
-    billing = await conf.reserve("hk", "ctx-model", 8, None, 2000, 10000)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig(), 2000, 10000)
     balance = await conf.charge_fee(billing, billing.abandon_fee_msat)
     assert balance == 3_000_000 - 10000
     key = await billing_db.key()
@@ -1645,7 +1678,7 @@ async def test_reservation_lease_outlives_the_session(
     monkeypatch.setattr(settings, "max_request_lifetime_seconds", 60)
     token = request_lifetime.set(cws._session_lifetime())
     try:
-        billing = await conf.reserve("hk", "ctx-model", 8)
+        billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     finally:
         request_lifetime.reset(token)
     expires_at = await _lease_expiry(billing_db, billing.snapshot.release_id)
@@ -1679,10 +1712,10 @@ async def test_reservation_heartbeat_runs_for_the_session_lifetime(
     monkeypatch.setattr(settings, "max_request_lifetime_seconds", 0.2)
     monkeypatch.setattr(settings, "stale_reservation_timeout_seconds", 3)
 
-    plain = await conf.reserve("hk", "ctx-model", 8)
+    plain = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     token = request_lifetime.set(cws._session_lifetime())
     try:
-        session = await conf.reserve("hk", "ctx-model", 8)
+        session = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     finally:
         request_lifetime.reset(token)
     await asyncio.sleep(1.3)  # one heartbeat interval, past the request lifetime
@@ -1697,7 +1730,7 @@ async def test_negative_context_length_does_not_shrink_the_reservation(
 ) -> None:
     billing_db.model.top_provider.context_length = bad
     # The model's own context length still counts.
-    billing = await conf.reserve("hk", "ctx-model", 8)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     assert billing.reserved_msats == 1_000_800
     await conf.release(billing)
     # With no usable context length anywhere, the model is refused rather
@@ -1705,7 +1738,7 @@ async def test_negative_context_length_does_not_shrink_the_reservation(
     billing_db.model.context_length = bad
     assert conf.prompt_token_limit(billing_db.model) is None
     with pytest.raises(conf.BillingError):
-        await conf.reserve("hk", "ctx-model", 8)
+        await conf.reserve("hk", "ctx-model", 8, _current_sig())
 
 
 async def test_reservation_without_context_is_undiscounted_with_margin(
@@ -1717,7 +1750,7 @@ async def test_reservation_without_context_is_undiscounted_with_margin(
     billing_db.model.context_length = 0
     monkeypatch.setattr(settings, "tolerance_percentage", 1.0)
     monkeypatch.setattr(settings, "confidential_reserve_margin_tokens", 10)
-    billing = await conf.reserve("hk", "ctx-model", 8)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     # 1100 sats max cost + 10 tokens * 100 msats
     assert billing.reserved_msats == 1_101_000
 
@@ -1841,6 +1874,81 @@ def test_zk_proxy_admits_only_live_sessions(monkeypatch: pytest.MonkeyPatch) -> 
             msg = ws.receive()
             assert msg["type"] == "websocket.close" and msg["code"] == 1013
         assert dials == []
+
+
+def test_zk_proxy_closes_when_its_session_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def echo(ws: Any) -> None:
+        async for frame in ws:
+            await ws.send(frame)
+
+    with MockSidecar(echo) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        state = cws.SessionState()
+        state.sid = SID
+        cws._live_sids[SID] = state
+        url = f"/v1/confidential/zk?proof=zkchan&session_id={SID}"
+        with TestClient(_app()) as client:
+            with client.websocket_connect(url) as ws:
+                ws.send_bytes(b"x")
+                assert ws.receive_bytes() == b"x"
+                client.portal.call(cws._forget_sid, state)  # type: ignore[union-attr]
+                assert ws.receive()["type"] == "websocket.close"
+            # The ended session admits no new channel either.
+            with client.websocket_connect(url) as ws:
+                assert ws.receive()["code"] == 1008
+
+
+@pytest.mark.parametrize(
+    "argv,env,workers",
+    [
+        (["uvicorn", "routstr.core.main:app"], {}, 1),
+        (["uvicorn", "app", "--workers", "4"], {}, 4),
+        (["uvicorn", "app", "--workers=2"], {}, 2),
+        (["uvicorn", "app", "--workers", "1"], {}, 1),
+        (["uvicorn", "app"], {"WEB_CONCURRENCY": "3"}, 3),
+        (["gunicorn", "app", "-w", "2"], {}, 2),
+        (["gunicorn", "app"], {"GUNICORN_CMD_ARGS": "--workers 5"}, 5),
+        # ``-w`` means workers to gunicorn only.
+        (["python", "app", "-w", "2"], {}, 1),
+    ],
+)
+def test_configured_workers(argv: list[str], env: dict[str, str], workers: int) -> None:
+    assert cws._configured_workers(argv, env) == workers
+
+
+def test_claim_single_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    import os
+    import subprocess
+    import sys
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(settings, "confidential_sidecar_url", "http://127.0.0.1:7444")
+    monkeypatch.setattr(cws.sys, "argv", ["uvicorn", "app", "--workers", "2"])
+    with pytest.raises(RuntimeError, match="single worker"):
+        cws.claim_single_worker("sqlite:///x.db")
+    monkeypatch.setattr(cws.sys, "argv", ["uvicorn", "app"])
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.setattr(cws, "_worker_lock_fd", None)
+    cws.claim_single_worker("sqlite:///x.db")
+    try:
+        cws.claim_single_worker("sqlite:///x.db")  # the same process again
+        # Another process of the same node on this host is refused.
+        code = (
+            "import fcntl, os, sys\n"
+            "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+            "try:\n"
+            "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "except BlockingIOError:\n"
+            "    sys.exit(3)\n"
+        )
+        (lock,) = list(tmp_path.glob("routstr-confidential-*.lock"))
+        assert subprocess.run([sys.executable, "-c", code, str(lock)]).returncode == 3
+    finally:
+        os.close(cws._worker_lock_fd)  # type: ignore[arg-type]
+        monkeypatch.setattr(cws, "_worker_lock_fd", None)
 
 
 def test_session_registers_its_sid_for_the_zk_route(
