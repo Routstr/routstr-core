@@ -30,7 +30,7 @@ from .core.error_scope import (
     UPSTREAM_ERROR_STATUS,
     UPSTREAM_UNAVAILABLE,
 )
-from .core.exceptions import UpstreamError
+from .core.exceptions import EhbpEncryptedUpstreamError, UpstreamError
 from .core.middleware import mark
 from .core.not_found import build_not_found_response
 from .core.settings import settings
@@ -47,7 +47,7 @@ from .payment.image_pricing import (
     quote_image_endpoint,
     requested_image_count,
 )
-from .payment.models import Model
+from .payment.models import Model, is_decision_model
 from .payment.price import sats_usd_price
 from .upstream import BaseUpstreamProvider
 from .upstream.cooldown import (
@@ -414,6 +414,20 @@ def _canonical_api_path(path: str) -> str:
     if core.startswith("v1/"):
         core = core[len("v1/") :]
     return core
+
+
+_DECISION_ROUTE = "systemone"
+
+
+def _route_accepts_model(path: str, model: Model) -> bool:
+    """Confine decision models to ``systemone``.
+
+    Unmarked models pass everywhere: OpenRouter and mixed upstreams list Jev as
+    ``text``.
+    """
+    if not is_decision_model(model):
+        return True
+    return _canonical_api_path(path) == _DECISION_ROUTE
 
 
 def _parse_extra_allowed_endpoints(raw: str) -> dict[str, frozenset[str]]:
@@ -867,6 +881,20 @@ async def _proxy(
                 400,
                 request=request,
             )
+
+    routable = [
+        (model, upstream)
+        for model, upstream in candidates
+        if _route_accepts_model(path, model)
+    ]
+    if not routable:
+        return create_error_response(
+            "unsupported_request",
+            f"Model '{model_id}' is a decision model; call it on /v1/{_DECISION_ROUTE}",
+            400,
+            request=request,
+        )
+    candidates = routable
 
     if _canonical_api_path(path) == "decisions":
         candidates = [
@@ -1417,6 +1445,12 @@ async def _proxy(
                 await revert_pay_for_request(
                     key, session, max_cost_for_model, reservation_snapshot
                 )
+                if isinstance(e, EhbpEncryptedUpstreamError):
+                    # The enclave encrypted its error body end-to-end. Only the
+                    # EHBP client can decrypt it, so relay the enclave reply
+                    # verbatim; a proxy envelope would hand the caller
+                    # ciphertext instead of the provider's actual error.
+                    return e.response
                 return create_upstream_error_response(e, request)
 
             # Otherwise loop continues to next provider

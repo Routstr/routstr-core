@@ -72,13 +72,23 @@ class TopProvider(BaseModel):
 
 
 class Reasoning(BaseModel):
-    """Per-model reasoning-effort metadata, matching OpenRouter's shape."""
+    """Per-model reasoning-effort metadata, matching OpenRouter's shape.
+
+    ``effort_map`` is a Routstr extension for upstreams (Tinfoil) that publish
+    a caller-level -> native-effort mapping instead of a flat allowlist: the
+    caller-facing levels a UI offers (``low``/``medium``/``high``) are the keys,
+    the exact spelling the upstream accepts is the value. Such an upstream
+    publishes the map alone, not ``supported_efforts``: that field is applied
+    (`routstr.upstream.reasoning_effort` snaps requests onto its members), and a
+    map's values are not the set of values the model accepts.
+    """
 
     mandatory: bool | None = None
     default_enabled: bool | None = None
     supported_efforts: list[str] | None = None
     default_effort: str | None = None
     supports_max_tokens: bool | None = None
+    effort_map: dict[str, str] | None = None
 
     class Config:
         extra = "ignore"
@@ -91,6 +101,7 @@ class Reasoning(BaseModel):
                 self.supported_efforts,
                 self.default_effort,
                 self.supports_max_tokens is not None,
+                self.effort_map,
             )
         )
 
@@ -148,6 +159,16 @@ class Model(BaseModel):
             else:
                 data.pop("reasoning", None)
         return data
+
+
+DECISIONS_MODALITY = "decisions"
+
+
+def is_decision_model(model: Model | None) -> bool:
+    """True only for an explicit mark; providers default models to ``text``."""
+    if model is None:
+        return False
+    return DECISIONS_MODALITY in model.architecture.output_modalities
 
 
 def litellm_cost_entry(model_id: str) -> dict | None:
