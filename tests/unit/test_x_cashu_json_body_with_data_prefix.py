@@ -1,8 +1,10 @@
+import gzip
 import json
 import os
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import h11
 import httpx
 import pytest
 
@@ -102,6 +104,52 @@ async def _settle_responses(response: httpx.Response) -> tuple[Any, AsyncMock]:
             mint=None,
         )
     return result, send_refund
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("compressed", [False, True])
+async def test_annotated_reply_reframes_upstream_body(
+    api: str, compressed: bool
+) -> None:
+    payload = (
+        _chat_json_with_data_prefix()
+        if api == "chat"
+        else _responses_json_with_data_prefix()
+    )
+    raw = json.dumps(payload).encode()
+    wire = gzip.compress(raw) if compressed else raw
+    headers = {
+        "content-type": "application/json",
+        "content-length": str(len(wire)),
+        "connection": "keep-alive",
+        "x-request-id": "upstream-request",
+    }
+    if compressed:
+        headers["content-encoding"] = "gzip"
+    upstream = httpx.Response(200, content=wire, headers=headers)
+    settle = _settle_chat if api == "chat" else _settle_responses
+    response, send_refund = await settle(upstream)
+
+    assert response.status_code == 200
+    assert int(response.headers["content-length"]) == len(response.body)
+    assert "content-encoding" not in response.headers
+    assert "transfer-encoding" not in response.headers
+    assert "connection" not in response.headers
+    assert response.headers["x-request-id"] == "upstream-request"
+    assert response.headers["x-cashu"] == REFUND_TOKEN
+    assert json.loads(response.body)["usage"]["cost"]["total_msats"] == 4000
+    send_refund.assert_awaited_once()
+
+    # ASGITransport accepts inconsistent lengths; exercise the HTTP framing
+    # layer that raised after payment settlement in a real deployment.
+    connection = h11.Connection(h11.SERVER)
+    connection.receive_data(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+    connection.next_event()
+    connection.next_event()
+    connection.send(h11.Response(status_code=200, headers=response.raw_headers))
+    connection.send(h11.Data(data=response.body))
+    connection.send(h11.EndOfMessage())
 
 
 @pytest.mark.asyncio

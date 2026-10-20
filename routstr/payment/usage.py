@@ -121,6 +121,10 @@ def _extract_cache_tokens(usage_data: dict) -> tuple[int, int]:
         # DeepSeek: prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens
         cache_read = parse_token_count(usage_data.get("prompt_cache_hit_tokens", 0))
 
+    if not cache_read:
+        # Together may report cached reads directly on the usage object.
+        cache_read = parse_token_count(usage_data.get("cached_tokens", 0))
+
     return cache_read, cache_write
 
 

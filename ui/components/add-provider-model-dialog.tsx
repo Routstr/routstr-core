@@ -356,6 +356,11 @@ export function AddProviderModelDialog({
         }
       }
 
+      // An image model's generation price lives outside the form; carry it
+      // through so saving the dialog does not unprice the model.
+      const initialPricing = initialData?.pricing as
+        | Record<string, number>
+        | undefined;
       const adminModel: AdminModel = {
         id: data.id,
         name: data.name,
@@ -380,6 +385,7 @@ export function AddProviderModelDialog({
           input_cache_write: data.cache_write_cost,
           request: data.request_cost,
           image: data.image_cost,
+          image_output: initialPricing?.image_output ?? 0,
           web_search: data.web_search_cost,
           internal_reasoning: data.internal_reasoning_cost,
           max_prompt_cost: data.max_prompt_cost,
@@ -405,6 +411,7 @@ export function AddProviderModelDialog({
         alias_ids: listFromString(data.alias_ids_raw || ''),
         enabled: data.enabled,
         forwarded_model_id: data.forwarded_model_id?.trim() || null,
+        image_pricing: initialData?.image_pricing ?? null,
       };
 
       if (isEdit) {

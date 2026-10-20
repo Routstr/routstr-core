@@ -39,7 +39,11 @@ from ..core.error_scope import (
     client_code_for_upstream_error,
     client_status_for_upstream_error,
 )
-from ..core.exceptions import EhbpTimeoutError, UpstreamError
+from ..core.exceptions import (
+    EhbpEncryptedUpstreamError,
+    EhbpTimeoutError,
+    UpstreamError,
+)
 from ..core.settings import settings
 from ..payment.cost_calculation import (
     CostData,
@@ -71,6 +75,22 @@ _TINFOIL_ALLOWED_ENCLAVE_HOSTS = frozenset({"tinfoil.sh"})
 
 
 _KEY_CONFIG_PROBLEM_TYPE = "urn:ietf:params:ehbp:error:key-config"
+
+# Present only when the enclave encrypted the response body; the EHBP client
+# derives its response keys from this nonce, so it must survive the relay.
+_EHBP_RESPONSE_NONCE_HEADER = "ehbp-response-nonce"
+
+# Response headers that describe the upstream connection's framing, not the
+# payload. The EHBP stream is re-framed for the client, so these are dropped.
+_HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "transfer-encoding",
+        "trailer",
+        "content-length",
+    }
+)
 
 
 def _is_ehbp_key_config_response(resp: TrailerResponse) -> bool:
@@ -116,6 +136,43 @@ def _passthrough_key_config_response(resp: TrailerResponse) -> Response:
         status_code=422,
         headers={"content-type": "application/problem+json"},
         media_type="application/problem+json",
+    )
+
+
+def _is_ehbp_encrypted_response(resp: TrailerResponse) -> bool:
+    """Check whether an upstream response body is EHBP-encrypted.
+
+    ``Ehbp-Response-Nonce`` is emitted only when the enclave encrypted the
+    body — for successful responses and for error responses alike. Without the
+    nonce the reply never reached an enclave (router/gateway/proxy rejection)
+    and is plaintext, so it must keep the usual proxy-side error handling.
+    """
+    for key, value in resp.headers:
+        if key.lower() == _EHBP_RESPONSE_NONCE_HEADER:
+            return bool(value.strip())
+    return False
+
+
+def _passthrough_encrypted_response(resp: TrailerResponse) -> Response:
+    """Reconstruct an encrypted enclave reply so the EHBP client can decrypt it.
+
+    The client decrypts any response that carries ``Ehbp-Response-Nonce``, so
+    the status, the ciphertext body and that header must be relayed verbatim.
+    Connection-framing headers are dropped because the body is re-framed by
+    this proxy; ``X-Routstr-Error-Scope`` is (re)set so callers and cooldown
+    accounting still attribute the failure to the provider hop.
+    """
+    headers = {
+        key: value
+        for key, value in resp.headers
+        if key.lower() not in _HOP_BY_HOP_RESPONSE_HEADERS
+        and key.lower() != ERROR_SCOPE_HEADER.lower()
+    }
+    headers[ERROR_SCOPE_HEADER] = ERROR_SCOPE_UPSTREAM
+    return Response(
+        content=resp.body,
+        status_code=resp.status_code,
+        headers=headers,
     )
 
 
@@ -269,7 +326,6 @@ def _validated_tinfoil_enclave_base_url(enclave_url: str) -> str | None:
 
 def _resolve_ehbp_target_url(
     target_url: str,
-    path: str,
     headers: Mapping[str, str],
     provider_type: str | None = None,
     profile: "ConfidentialInferenceProfile | None" = None,
@@ -281,6 +337,13 @@ def _resolve_ehbp_target_url(
     opt in to client-supplied target overrides and constrain the destination;
     otherwise the header is ignored so callers cannot redirect other providers
     or leak upstream API keys.
+
+    The provider builds the request path through
+    :meth:`~routstr.upstream.base.BaseUpstreamProvider.build_ehbp_request_path`.
+    The override supplies the host and optional base path. If that base path
+    already ends in ``/v1``, do not append the provider's version twice.
+    Appending the caller's raw path instead would lose the provider's prefix
+    for clients that post to ``/chat/completions``.
     """
     override_header = (
         profile.client_target_url_header if profile else _ENCLAVE_URL_HEADER
@@ -318,7 +381,10 @@ def _resolve_ehbp_target_url(
             status_code=400,
         )
 
-    return f"{validated_base_url}/{path.lstrip('/')}"
+    target_path = urlsplit(target_url).path
+    if validated_base_url.endswith("/v1") and target_path.startswith("/v1/"):
+        target_path = target_path[3:]
+    return f"{validated_base_url}{target_path}"
 
 
 def _validated_confidential_target_url(
@@ -845,9 +911,7 @@ async def forward_ehbp_request(
 
     provider_type = getattr(upstream, "provider_type", "unknown")
     profile = target.profile or upstream.get_confidential_inference_profile()  # type: ignore[attr-defined]
-    target_url = _resolve_ehbp_target_url(
-        target.url, path, headers, provider_type, profile
-    )
+    target_url = _resolve_ehbp_target_url(target.url, headers, provider_type, profile)
     upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers, profile)
 
     # Merge query params into the target URL since forward_with_trailer
@@ -879,7 +943,15 @@ async def forward_ehbp_request(
         )
 
         if resp.status_code != 200:
-            body_preview = resp.body.decode("utf-8", errors="ignore").strip()[:500]
+            # An EHBP enclave encrypts error bodies too, so this relay cannot
+            # decode them. Decoding the bytes as UTF-8 would log and return
+            # mojibake, hiding the real failure from the caller.
+            encrypted_response = _is_ehbp_encrypted_response(resp)
+            body_preview = (
+                f"<{len(resp.body)} bytes of EHBP ciphertext>"
+                if encrypted_response
+                else resp.body.decode("utf-8", errors="ignore").strip()[:500]
+            )
             logger.error(
                 "EHBP upstream %s returned %s for model=%s path=%s: %s",
                 provider_type,
@@ -893,6 +965,7 @@ async def forward_ehbp_request(
                     "status_code": resp.status_code,
                     "path": path,
                     "body_preview": body_preview,
+                    "encrypted": encrypted_response,
                 },
             )
             # Key-config mismatch (stale client HPKE key): return the
@@ -913,6 +986,32 @@ async def forward_ehbp_request(
                     },
                 )
                 return _passthrough_key_config_response(resp)
+
+            if encrypted_response:
+                # Only the EHBP client holds the session keys for this body.
+                # Keep it intact so proxy.py can relay it after failover, and
+                # keep the ciphertext out of the error message and logs.
+                logger.warning(
+                    "EHBP upstream %s returned encrypted %s for model=%s "
+                    "path=%s; passing the ciphertext through for the client "
+                    "to decrypt",
+                    provider_type,
+                    resp.status_code,
+                    model_obj.id,
+                    path,
+                    extra={
+                        "provider": provider_type,
+                        "model": model_obj.id,
+                        "status_code": resp.status_code,
+                        "path": path,
+                    },
+                )
+                raise EhbpEncryptedUpstreamError(
+                    f"EHBP upstream {provider_type} returned "
+                    f"{resp.status_code} for model {model_obj.id}",
+                    status_code=resp.status_code,
+                    response=_passthrough_encrypted_response(resp),
+                )
 
             raise UpstreamError(
                 f"EHBP upstream {provider_type} returned {resp.status_code} "
@@ -1042,15 +1141,8 @@ async def forward_ehbp_request(
 
         # Build response headers, filtering out hop-by-hop headers
         response_headers: dict[str, str] = {}
-        hop_by_hop = {
-            "connection",
-            "keep-alive",
-            "transfer-encoding",
-            "trailer",
-            "content-length",
-        }
         for k, v in resp.headers:
-            if k.lower() not in hop_by_hop:
+            if k.lower() not in _HOP_BY_HOP_RESPONSE_HEADERS:
                 response_headers[k] = v
 
         # Surface per-request cost to the client. Since EHBP bodies are
@@ -1128,7 +1220,7 @@ async def forward_ehbp_x_cashu_request(
         provider_type = getattr(upstream, "provider_type", "unknown")
         profile = target.profile or upstream.get_confidential_inference_profile()  # type: ignore[attr-defined]
         target_url = _resolve_ehbp_target_url(
-            target.url, path, headers, provider_type, profile
+            target.url, headers, provider_type, profile
         )
         upstream_headers = _prepare_ehbp_upstream_headers(
             headers, target.headers, profile
@@ -1175,6 +1267,28 @@ async def forward_ehbp_x_cashu_request(
                     return passthrough
 
                 refund_token = await send_cashu_refund(amount, unit, mint, request_id)
+                if _is_ehbp_encrypted_response(resp):
+                    # The enclave encrypted its error body; only the EHBP
+                    # client can decrypt it, so relay the ciphertext together
+                    # with the refund instead of a mojibake proxy envelope.
+                    logger.warning(
+                        "EHBP upstream %s returned encrypted %s for model=%s; "
+                        "refunding and passing the ciphertext through for the "
+                        "client to decrypt",
+                        provider_type,
+                        resp.status_code,
+                        model_obj.id,
+                        extra={
+                            "provider": provider_type,
+                            "model": model_obj.id,
+                            "path": path,
+                            "refunded_amount": amount,
+                        },
+                    )
+                    passthrough = _passthrough_encrypted_response(resp)
+                    passthrough.headers["X-Cashu"] = refund_token
+                    return passthrough
+
                 error_response = Response(
                     content=json.dumps(
                         {
@@ -1253,15 +1367,8 @@ async def forward_ehbp_x_cashu_request(
 
             # Build response headers, filtering out hop-by-hop headers
             response_headers: dict[str, str] = {}
-            hop_by_hop = {
-                "connection",
-                "keep-alive",
-                "transfer-encoding",
-                "trailer",
-                "content-length",
-            }
             for k, v in resp.headers:
-                if k.lower() not in hop_by_hop:
+                if k.lower() not in _HOP_BY_HOP_RESPONSE_HEADERS:
                     response_headers[k] = v
 
             # Surface per-request cost to the client. Since EHBP bodies are

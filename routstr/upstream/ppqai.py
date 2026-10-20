@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import time
 from dataclasses import dataclass, field
@@ -106,6 +107,8 @@ class PPQAIModelPricing(BaseModel):
     api: Optional[dict[str, float]] = None
     input_per_1M_tokens: Optional[float] = Field(None, alias="input_per_1M_tokens")
     output_per_1M_tokens: Optional[float] = Field(None, alias="output_per_1M_tokens")
+    cache_read_per_1M_tokens: Optional[float] = None
+    cache_write_per_1M_tokens: Optional[float] = None
 
 
 class PPQAIModel(BaseModel):
@@ -124,7 +127,22 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
     provider_type = "ppqai"
     default_base_url = "https://api.ppq.ai"
     platform_url = "https://ppq.ai/api-docs"
+    # PPQ.AI's private enclave lives under ``/private/v1/...`` and the base URL
+    # carries no version prefix, so the EHBP target re-adds the whole prefix.
+    # (EHBP is currently disabled for this provider — see ``supports_ehbp``.)
+    ehbp_path_prefix = "private/v1"
     IGNORED_MODEL_IDS: list[str] = ["auto"]
+    # PPQ.AI also lists enclave copies of some models under ``private/``
+    # (``private/kimi-k3``, ``private/gpt-oss-120b``). Those are a different
+    # product, not a second deployment of the same one: they cost more per
+    # token (the enclave premium), their context window is smaller, and their
+    # published cache rates are null because PPQ.AI bills cached tokens at the
+    # full input rate there. Model aliases strip everything before the first
+    # slash (``resolve_model_alias``), so both spellings collapse onto one
+    # public id and the reservation-ranked router can pick the enclave route —
+    # shadowing the cache-priced original and advertising cache reads as free
+    # of discount. Do not expose them.
+    IGNORED_MODEL_ID_PREFIXES: list[str] = ["private/"]
     # PPQ.AI has a private encrypted endpoint, but this proxy currently has no
     # provider-attested usage extractor/model binding for it. Keep EHBP disabled
     # until a ConfidentialInferenceProfile can bill it without max-cost fallback.
@@ -170,7 +188,10 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         Routstr, so PPQ.AI also needs X-Private-Model for routing/billing.
         """
         return EHBPForwardingTarget(
-            url=f"{self.base_url.rstrip('/')}/private/{path.lstrip('/')}",
+            url=(
+                f"{self.base_url.rstrip('/')}/"
+                f"{self.build_ehbp_request_path(path, model_obj)}"
+            ),
             headers={"X-Private-Model": model_obj.forwarded_model_id or model_obj.id},
         )
 
@@ -220,12 +241,55 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
             ]
 
             models = []
+            seen_ids: set[str] = set()
             for model_data in models_data:
                 try:
                     ppqai_model = PPQAIModel.parse_obj(model_data)
                     if ppqai_model.id in self.IGNORED_MODEL_IDS:
                         continue
+                    if ppqai_model.id.lower().startswith(
+                        tuple(self.IGNORED_MODEL_ID_PREFIXES)
+                    ):
+                        logger.debug(
+                            "Skipping PPQ.AI enclave model",
+                            extra={"model_id": ppqai_model.id},
+                        )
+                        continue
 
+                    api_pricing = ppqai_model.pricing.api or {}
+                    input_price = api_pricing.get("input_per_1M")
+                    if input_price is None:
+                        input_price = ppqai_model.pricing.input_per_1M_tokens
+                    output_price = api_pricing.get("output_per_1M")
+                    if output_price is None:
+                        output_price = ppqai_model.pricing.output_per_1M_tokens
+                    if any(
+                        rate is None or not math.isfinite(rate) or rate < 0
+                        for rate in (input_price, output_price)
+                    ):
+                        logger.warning(
+                            "Skipping PPQ model without valid native token prices",
+                            extra={"model_id": ppqai_model.id},
+                        )
+                        continue
+                    assert input_price is not None and output_price is not None
+                    # A missing or invalid cache rate stays 0, which bills
+                    # cached tokens at the prompt rate.
+                    cache_read, cache_write = (
+                        rate / 1_000_000
+                        if rate is not None and math.isfinite(rate) and rate >= 0
+                        else 0.0
+                        for rate in (
+                            ppqai_model.pricing.cache_read_per_1M_tokens,
+                            ppqai_model.pricing.cache_write_per_1M_tokens,
+                        )
+                    )
+                    pricing = Pricing(
+                        prompt=input_price / 1_000_000,
+                        completion=output_price / 1_000_000,
+                        input_cache_read=cache_read,
+                        input_cache_write=cache_write,
+                    )
                     or_model = next(
                         (
                             model
@@ -237,45 +301,24 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                         None,
                     )
 
+                    model_id = or_model.id if or_model else ppqai_model.id
+                    if model_id.lower() in seen_ids:
+                        continue
+
                     if or_model:
-                        input_price = None
-                        if ppqai_model.pricing.api:
-                            input_price = ppqai_model.pricing.api.get("input_per_1M")
-                        elif ppqai_model.pricing.input_per_1M_tokens:
-                            input_price = ppqai_model.pricing.input_per_1M_tokens
-
-                        if input_price is not None:
-                            or_model.pricing.prompt = input_price / 1_000_000
-
-                        output_price = None
-                        if ppqai_model.pricing.api:
-                            output_price = ppqai_model.pricing.api.get("output_per_1M")
-                        elif ppqai_model.pricing.output_per_1M_tokens:
-                            output_price = ppqai_model.pricing.output_per_1M_tokens
-
-                        if output_price is not None:
-                            or_model.pricing.completion = output_price / 1_000_000
-
-                        if cl := ppqai_model.context_length:
-                            or_model.context_length = cl
-                        models.append(or_model)
+                        # Keep the stored model identity, but not foreign billing rates.
+                        models.append(
+                            or_model.copy(
+                                deep=True,
+                                update={
+                                    "pricing": pricing,
+                                    "sats_pricing": None,
+                                    "context_length": ppqai_model.context_length
+                                    or or_model.context_length,
+                                },
+                            )
+                        )
                     else:
-                        input_price = 0.0
-                        if ppqai_model.pricing.api:
-                            input_price = ppqai_model.pricing.api.get(
-                                "input_per_1M", 0.0
-                            )
-                        elif ppqai_model.pricing.input_per_1M_tokens:
-                            input_price = ppqai_model.pricing.input_per_1M_tokens
-
-                        output_price = 0.0
-                        if ppqai_model.pricing.api:
-                            output_price = ppqai_model.pricing.api.get(
-                                "output_per_1M", 0.0
-                            )
-                        elif ppqai_model.pricing.output_per_1M_tokens:
-                            output_price = ppqai_model.pricing.output_per_1M_tokens
-
                         models.append(
                             Model(
                                 id=ppqai_model.id,
@@ -290,16 +333,10 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                                     tokenizer="Unknown",
                                     instruct_type=None,
                                 ),
-                                pricing=Pricing(
-                                    prompt=input_price / 1_000_000,
-                                    completion=output_price / 1_000_000,
-                                    request=0.0,
-                                    image=0.0,
-                                    web_search=0.0,
-                                    internal_reasoning=0.0,
-                                ),
+                                pricing=pricing,
                             )
                         )
+                    seen_ids.add(model_id.lower())
                 except Exception as e:
                     logger.warning(
                         "Failed to parse PPQ.AI model",

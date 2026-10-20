@@ -267,7 +267,12 @@ async def test_primary_msat_token_sets_provenance_without_cashu_mint_duplicate(
 ) -> None:
     token = "cashuAprimary_msat_token"
     token_obj = SimpleNamespace(mint="http://primary:3338", unit="msat")
-    credit = AsyncMock(return_value=1_000)
+
+    async def write_key(token: str, key: ApiKey, session: AsyncSession) -> int:
+        await session.flush()
+        return 1_000
+
+    credit = AsyncMock(side_effect=write_key)
 
     from routstr.core.settings import settings
 
@@ -330,3 +335,44 @@ async def test_malformed_cashu_token_returns_400_invalid_token(
     assert detail["error"]["code"] == "invalid_cashu_token"
     # Raw decoder text must not leak to the client.
     assert "base64" not in detail["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_sk_key_reports_key_not_found(session: AsyncSession) -> None:
+    """A well-formed 'sk-...' key that is absent from the DB must report
+    key_not_found, not the generic "Invalid API key format" error.
+
+    Falling through to the generic handler mislabelled an unknown key as a
+    malformed one, sending operators after a formatting bug that cannot exist.
+    """
+    key = "sk-" + "0" * 64
+
+    with pytest.raises(HTTPException) as exc_info:
+        await validate_bearer_key(key, session)
+
+    assert exc_info.value.status_code == 401
+    detail = cast(dict[str, dict[str, str]], exc_info.value.detail)
+    assert detail["error"]["type"] == "invalid_request_error"
+    assert detail["error"]["code"] == "key_not_found"
+    assert "format" not in detail["error"]["message"].lower()
+    # @routstr/sdk (<=0.4.6) purges a dead key on a case-sensitive
+    # `body.includes("Key not found")` probe, so the prefix is part of the
+    # wire contract, not cosmetic.
+    assert detail["error"]["message"].startswith("Key not found.")
+
+
+@pytest.mark.asyncio
+async def test_malformed_bearer_still_reports_invalid_api_key_format(
+    session: AsyncSession,
+) -> None:
+    """A bearer that is neither 'sk-...' nor 'cashu...' is a genuine format
+    error and keeps the generic invalid_api_key code — the unknown-key fix
+    must not swallow this case."""
+    with pytest.raises(HTTPException) as exc_info:
+        await validate_bearer_key("Bearer-ish-garbage-token", session)
+
+    assert exc_info.value.status_code == 401
+    detail = cast(dict[str, dict[str, str]], exc_info.value.detail)
+    assert detail["error"]["type"] == "invalid_request_error"
+    assert detail["error"]["code"] == "invalid_api_key"
+    assert "format" in detail["error"]["message"].lower()

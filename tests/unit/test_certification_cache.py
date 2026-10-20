@@ -11,7 +11,12 @@ import pytest
 import respx
 
 from routstr.payment.cost_calculation import CostData, CostDataError
-from routstr.upstream.certification import STATUS_FAIL, STATUS_OK, STATUS_WARN
+from routstr.upstream.certification import (
+    PROBE_MAX_TOKENS,
+    STATUS_FAIL,
+    STATUS_OK,
+    STATUS_WARN,
+)
 from routstr.upstream.certification_cache import (
     CacheProbeResult,
     _raw_cache_keys,
@@ -210,6 +215,8 @@ class TestCacheBillingRow:
             model=_model(),
             probe=_probe([_payload(UNCACHED), cached]),
             cost_data=_cost(100),
+            provider_fee=1.0,
+            sats_to_usd=SATS_USD,
         )
         assert row["status"] == STATUS_OK
         assert row["evidence"]["reported_usd"] == 5e-5
@@ -242,12 +249,21 @@ class TestCostMarginRow:
         payload = _payload({"prompt_tokens": 5, "completion_tokens": 1, "cost": 1e-3})
         row = self._row([payload])
         assert row["status"] == STATUS_FAIL
-        assert "lose money" in row["detail"]
+        assert "below raw upstream cost" in row["detail"]
+        assert "does not measure client debits" in row["detail"]
 
     def test_fee_scales_upstream_cost(self) -> None:
         payload = _payload({"prompt_tokens": 5, "completion_tokens": 1, "cost": 9e-7})
         assert self._row([payload], fee=1.0)["status"] == STATUS_OK
-        assert self._row([payload], fee=2.0)["status"] == STATUS_FAIL
+        marked_up = self._row([payload], fee=2.0)
+        assert marked_up["status"] == STATUS_FAIL
+        assert "Raw upstream cost is covered" in marked_up["detail"]
+        assert "lose money" not in marked_up["detail"]
+        sample = marked_up["evidence"]["samples"][0]
+        assert sample["upstream_msats"] == 2
+        assert sample["upstream_msats_with_fee"] == 4
+        assert sample["token_estimate_minus_upstream_msats"] == 0
+        assert sample["token_estimate_minus_fee_target_msats"] == -2
 
     def test_deepseek_endpoint_price_exceeds_configured_model_price(self) -> None:
         sats_usd = 0.0008616302499999999
@@ -332,6 +348,8 @@ class TestCostMarginRow:
         )
 
         assert row["status"] == STATUS_OK
+        assert row["title"] == "Token estimate covers fee-adjusted target"
+        assert "raw upstream cost exceeds" in row["detail"]
 
     def test_warn_when_pricing_unknown(self) -> None:
         payload = _payload({"prompt_tokens": 5, "completion_tokens": 1, "cost": 9e-7})
@@ -373,7 +391,7 @@ class TestProbeCache:
         assert first == second
         system = first["messages"][0]["content"]
         assert system[0]["cache_control"] == {"type": "ephemeral"}
-        assert first["max_tokens"] == 1
+        assert first["max_tokens"] == PROBE_MAX_TOKENS
         assert route.calls[0].request.headers["Authorization"] == "Bearer k"
 
     @pytest.mark.asyncio
