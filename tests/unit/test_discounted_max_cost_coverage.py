@@ -125,6 +125,50 @@ async def test_reservation_covers_prompt_plus_requested_completion(
     assert needed <= reserved <= needed + 2
 
 
+@pytest.mark.parametrize(
+    "cap_field", ["max_tokens", "max_completion_tokens", "max_output_tokens"]
+)
+@pytest.mark.parametrize("requested_tokens", [100_000, 128_000, 1_000_000])
+@pytest.mark.parametrize("prompt_repetitions", [50, 50_000])
+@pytest.mark.asyncio
+async def test_reservation_floor_respects_advertised_completion_limit(
+    cap_field: str, requested_tokens: int, prompt_repetitions: int
+) -> None:
+    model = _model(
+        top_provider=TopProvider(
+            context_length=1_050_000, max_completion_tokens=128_000
+        )
+    )
+    body = _body(requested_tokens)
+    body[cap_field] = body.pop("max_tokens")
+    body["messages"][0]["content"] = "Write a long story. " * prompt_repetitions
+
+    reserved, max_cost = await _reserve(model, body)
+
+    needed = min(max_cost, _worst_case_msats(body, min(requested_tokens, 128_000)))
+    # Keep the entire prompt cost, not just the capped completion cost.
+    assert needed <= reserved <= needed + 2
+
+
+@pytest.mark.parametrize(
+    "top_provider",
+    [
+        None,
+        TopProvider(context_length=1_050_000),
+        TopProvider(context_length=1_050_000, max_completion_tokens=0),
+        TopProvider(context_length=1_050_000, max_completion_tokens=-1),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reservation_floor_without_positive_completion_limit(
+    top_provider: TopProvider | None,
+) -> None:
+    body = _body(100_000)
+    reserved, max_cost = await _reserve(_model(top_provider=top_provider), body)
+    needed = min(max_cost, _worst_case_msats(body, 100_000))
+    assert needed <= reserved <= needed + 2
+
+
 @pytest.mark.parametrize("tolerance_percentage", [1, 10])
 @pytest.mark.asyncio
 async def test_tolerance_does_not_lower_the_floor(

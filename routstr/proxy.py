@@ -30,7 +30,7 @@ from .core.error_scope import (
     UPSTREAM_ERROR_STATUS,
     UPSTREAM_UNAVAILABLE,
 )
-from .core.exceptions import UpstreamError
+from .core.exceptions import EhbpEncryptedUpstreamError, UpstreamError
 from .core.middleware import mark
 from .core.not_found import build_not_found_response
 from .core.settings import settings
@@ -41,7 +41,14 @@ from .payment.helpers import (
     create_upstream_error_response,
     get_max_cost_for_model,
 )
-from .payment.models import Model
+from .payment.image_pricing import (
+    ImageRequestRefused,
+    image_reservation_msats,
+    quote_image_endpoint,
+    requested_image_count,
+)
+from .payment.models import Model, is_decision_model
+from .payment.price import sats_usd_price
 from .upstream import BaseUpstreamProvider
 from .upstream.cooldown import (
     candidate_model_identity,
@@ -51,6 +58,7 @@ from .upstream.cooldown import (
 )
 from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
+from .upstream.image_generation import is_image_generation_path
 from .upstream.model_paths import (
     ModelPathSelector,
     apply_model_path_pricing,
@@ -59,7 +67,12 @@ from .upstream.model_paths import (
     public_model_id,
     public_provider_url,
 )
-from .upstream.request_correction import correct_request, extract_error_message
+from .upstream.request_correction import (
+    Correction,
+    correct_request,
+    error_message_from_body,
+    extract_error_message,
+)
 
 logger = get_logger(__name__)
 
@@ -157,6 +170,49 @@ def _candidate_for_selector(
             continue
         return model_obj, upstream
     return None
+
+
+_TEXT_GENERATION_PATHS = frozenset(
+    {"chat/completions", "completions", "responses", "messages"}
+)
+
+
+def _image_only(model: Model) -> bool:
+    outputs = model.architecture.output_modalities
+    return "image" in outputs and "text" not in outputs
+
+
+def _price_image_candidate(
+    body: dict,
+    model: Model,
+    upstream: BaseUpstreamProvider,
+    path: str,
+) -> tuple[Model, BaseUpstreamProvider] | str:
+    """The candidate priced for an image request, or why it cannot be.
+
+    OpenRouter serves a model from several endpoints at different prices, so
+    the request is quoted on one endpoint and pinned there. A quote above the
+    node's per-request budget is refused like one that cannot be bounded.
+    """
+    try:
+        requested_image_count(body)
+        upstream.check_image_request(body)
+        if is_openrouter_base_url(upstream.base_url):
+            model = quote_image_endpoint(body, model, path)
+    except ImageRequestRefused as refused:
+        return str(refused)
+    reserved = image_reservation_msats(body, model, path)
+    if reserved is None:
+        return f"Model '{model.id}' cannot be priced for this request on this node"
+    budget = settings.image_max_request_usd
+    if budget > 0:
+        try:
+            reserved_usd = reserved / 1000 * sats_usd_price()
+        except ValueError:
+            return "Image requests cannot be priced until the exchange rate is known"
+        if reserved_usd > budget:
+            return "Image quote exceeds the node's per-request budget"
+    return model, upstream
 
 
 async def _price_pinned_endpoint(
@@ -327,6 +383,16 @@ _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     # response's usage exactly like embeddings.
     "systemone": frozenset({"POST"}),
     "decisions": frozenset({"POST"}),
+    # Image generation: the OpenAI images API plus Venice's native routes,
+    # billed per image by ``handle_image_generation``. Bodies must be JSON;
+    # multipart uploads to edits/variations are refused before routing.
+    "images/generations": frozenset({"POST"}),
+    "images/edits": frozenset({"POST"}),
+    "images/variations": frozenset({"POST"}),
+    "image/generate": frozenset({"POST"}),
+    "image/edit": frozenset({"POST"}),
+    "image/inpaint": frozenset({"POST"}),
+    "image/upscale": frozenset({"POST"}),
     "models": frozenset({"GET"}),
     "attestation": frozenset({"GET"}),
     "tee/attestation": frozenset({"GET"}),
@@ -348,6 +414,20 @@ def _canonical_api_path(path: str) -> str:
     if core.startswith("v1/"):
         core = core[len("v1/") :]
     return core
+
+
+_DECISION_ROUTE = "systemone"
+
+
+def _route_accepts_model(path: str, model: Model) -> bool:
+    """Confine decision models to ``systemone``.
+
+    Unmarked models pass everywhere: OpenRouter and mixed upstreams list Jev as
+    ``text``.
+    """
+    if not is_decision_model(model):
+        return True
+    return _canonical_api_path(path) == _DECISION_ROUTE
 
 
 def _parse_extra_allowed_endpoints(raw: str) -> dict[str, frozenset[str]]:
@@ -454,6 +534,44 @@ def _forwarding_allowed(path: str, method: str) -> bool:
 # deterministic rejection that fails identically on the next attempt.
 _RETRYABLE_UPSTREAM_5XX = frozenset({502, 503, 504})
 _UPSTREAM_5XX_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def _correct_rejected_request(
+    request_body: bytes,
+    error_message: str,
+    already_stripped: set[str],
+    request_body_dict: dict[str, Any],
+    pinned_route: bool,
+    upstream: BaseUpstreamProvider,
+    model_id: str,
+    path: str,
+) -> Correction | None:
+    """Fix a param the upstream rejected so the same upstream can be retried."""
+    correction = correct_request(request_body, error_message, already_stripped)
+    if correction is None:
+        return None
+    # Same-provider recovery must not relax an explicit route.
+    if pinned_route:
+        corrected_body = json.loads(correction.body)
+        if any(
+            corrected_body.get(field) != request_body_dict.get(field)
+            for field in ("model", "provider")
+        ):
+            return None
+    logger.warning(
+        "Upstream %s rejected param '%s' for model=%s; "
+        "correcting and retrying same upstream",
+        upstream.provider_type,
+        correction.label,
+        model_id,
+        extra={
+            "provider": upstream.provider_type,
+            "model": model_id,
+            "stripped_param": correction.label,
+            "path": path,
+        },
+    )
+    return correction
 
 
 def _counts_toward_cooldown(status_code: int) -> bool:
@@ -764,6 +882,20 @@ async def _proxy(
                 request=request,
             )
 
+    routable = [
+        (model, upstream)
+        for model, upstream in candidates
+        if _route_accepts_model(path, model)
+    ]
+    if not routable:
+        return create_error_response(
+            "unsupported_request",
+            f"Model '{model_id}' is a decision model; call it on /v1/{_DECISION_ROUTE}",
+            400,
+            request=request,
+        )
+    candidates = routable
+
     if _canonical_api_path(path) == "decisions":
         candidates = [
             (model, upstream)
@@ -774,6 +906,51 @@ async def _proxy(
             return create_error_response(
                 "unsupported_request",
                 f"No Decisions-capable provider found for model '{model_id}'",
+                400,
+                request=request,
+            )
+
+    single_dispatch = is_image_generation_path(path)
+    if _canonical_api_path(path) in _TEXT_GENERATION_PATHS:
+        # An image-only model has no token price, so a text route would serve
+        # its generations free. It is refused whatever its capabilities say.
+        candidates = [
+            (model, upstream)
+            for model, upstream in candidates
+            if not _image_only(model)
+        ]
+        if not candidates:
+            return create_error_response(
+                "unsupported_request",
+                f"Model '{model_id}' requires the images API",
+                400,
+                request=request,
+            )
+    if single_dispatch:
+        # Settlement buffers the whole response and bills the images it counts,
+        # so a stream would be billed as one image whatever it carried.
+        if request_body_dict.get("stream"):
+            return create_error_response(
+                "unsupported_request",
+                "Streaming is not supported for image generation",
+                400,
+                request=request,
+            )
+        priced_candidates: list[tuple[Model, BaseUpstreamProvider]] = []
+        refusals: list[str] = []
+        for model, upstream in candidates:
+            priced = _price_image_candidate(request_body_dict, model, upstream, path)
+            if isinstance(priced, str):
+                refusals.append(priced)
+            else:
+                priced_candidates.append(priced)
+        candidates = priced_candidates
+        if not candidates:
+            return create_error_response(
+                "unsupported_request",
+                refusals[0]
+                if refusals
+                else f"Model '{model_id}' cannot be priced for this request on this node",
                 400,
                 request=request,
             )
@@ -792,6 +969,13 @@ async def _proxy(
         if healthy:
             candidates = healthy
 
+    if single_dispatch:
+        # A generation is a purchase. Once dispatched, an ambiguous failure
+        # (lost response, timeout, gateway error) is no proof the upstream did
+        # not charge for it, so no second provider is tried and no 5xx is
+        # re-sent: one candidate, one POST, settle or refund.
+        candidates = candidates[:1]
+
     # Reserve/max-cost checks use the best-ranked candidate; the failover loop
     # below rebinds (model_obj, upstream) per candidate so forwarding and
     # settlement always use the model of the provider actually being tried.
@@ -801,7 +985,7 @@ async def _proxy(
         model=model_id, session=session, model_obj=model_obj
     )
     max_cost_for_model = await calculate_discounted_max_cost(
-        _max_cost_for_model, request_body_dict, model_obj=model_obj
+        _max_cost_for_model, request_body_dict, model_obj=model_obj, path=path
     )
 
     check_token_balance(headers, request_body_dict, max_cost_for_model)
@@ -977,7 +1161,7 @@ async def _proxy(
                 model=model_id, session=session, model_obj=model_obj
             )
             candidate_max = await calculate_discounted_max_cost(
-                candidate_max, request_body_dict, model_obj=model_obj
+                candidate_max, request_body_dict, model_obj=model_obj, path=path
             )
             if candidate_max > max_cost_for_model:
                 await revert_pay_for_request(
@@ -1001,7 +1185,7 @@ async def _proxy(
         # Only once the candidate is actually tried: a fallback skipped for its
         # reservation must not take over the last attempted upstream's line.
         _attribute_request(request, model_obj, upstream)
-        retries_left = settings.upstream_5xx_retry_attempts
+        retries_left = 0 if single_dispatch else settings.upstream_5xx_retry_attempts
         retry_index = 0
         headers = upstream.prepare_headers(dict(request.headers))
 
@@ -1056,6 +1240,23 @@ async def _proxy(
                             reservation_snapshot,
                         )
                 except UpstreamError as e:
+                    # Some upstreams report a rejected param as a 5xx. Fix the
+                    # body before retrying, or the retry fails the same way.
+                    if e.from_upstream_response and e.upstream_body and not is_ehbp:
+                        correction = _correct_rejected_request(
+                            request_body,
+                            error_message_from_body(e.upstream_body),
+                            already_stripped,
+                            request_body_dict,
+                            selector is not None,
+                            upstream,
+                            model_id,
+                            path,
+                        )
+                        if correction is not None:
+                            request_body = correction.body
+                            already_stripped.add(correction.label)
+                            continue
                     # Only a gateway status the upstream itself answered with:
                     # re-sending the buffered body cannot double-bill. A 502 this
                     # proxy invented for a transport error or timeout is not
@@ -1106,36 +1307,23 @@ async def _proxy(
                     )
                     raise
 
-                # Same-provider recovery must not relax an explicit route.
-                if response.status_code == 400 and not is_ehbp:
-                    correction = correct_request(
+                # Same-provider recovery must not relax an explicit route, and
+                # must not re-send an image request the reservation priced as
+                # sent.
+                if response.status_code == 400 and not is_ehbp and not single_dispatch:
+                    correction = _correct_rejected_request(
                         request_body,
                         extract_error_message(response),
                         already_stripped,
+                        request_body_dict,
+                        selector is not None,
+                        upstream,
+                        model_id,
+                        path,
                     )
-                    if correction is not None and selector is not None:
-                        corrected_body = json.loads(correction.body)
-                        if any(
-                            corrected_body.get(field) != request_body_dict.get(field)
-                            for field in ("model", "provider")
-                        ):
-                            correction = None
                     if correction is not None:
-                        request_body, bad_param = correction.body, correction.label
-                        already_stripped.add(bad_param)
-                        logger.warning(
-                            "Upstream %s rejected param '%s' for model=%s; "
-                            "correcting and retrying same upstream",
-                            upstream.provider_type,
-                            bad_param,
-                            model_id,
-                            extra={
-                                "provider": upstream.provider_type,
-                                "model": model_id,
-                                "stripped_param": bad_param,
-                                "path": path,
-                            },
-                        )
+                        request_body = correction.body
+                        already_stripped.add(correction.label)
                         continue
                 break
 
@@ -1257,6 +1445,12 @@ async def _proxy(
                 await revert_pay_for_request(
                     key, session, max_cost_for_model, reservation_snapshot
                 )
+                if isinstance(e, EhbpEncryptedUpstreamError):
+                    # The enclave encrypted its error body end-to-end. Only the
+                    # EHBP client can decrypt it, so relay the enclave reply
+                    # verbatim; a proxy envelope would hand the caller
+                    # ciphertext instead of the provider's actual error.
+                    return e.response
                 return create_upstream_error_response(e, request)
 
             # Otherwise loop continues to next provider

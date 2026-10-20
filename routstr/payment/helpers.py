@@ -32,6 +32,7 @@ from ..wallet import (
     deserialize_token_from_string,
     is_trusted_source_mint,
 )
+from .image_pricing import image_reservation_msats
 from .responses_input import (
     FILE_ID_URL_PREFIX,
     count_input_images,
@@ -192,6 +193,7 @@ async def calculate_discounted_max_cost(
     max_cost_for_model: int,
     body: dict,
     model_obj: Any | None = None,
+    path: str = "",
 ) -> int:
     """Calculate the discounted max cost for a request using model pricing when available.
 
@@ -207,6 +209,10 @@ async def calculate_discounted_max_cost(
     model_pricing = model_obj.sats_pricing if model_obj else None
     if not model_pricing:
         return max_cost_for_model
+
+    image_reservation = image_reservation_msats(body, model_obj, path)
+    if image_reservation is not None:
+        return max(settings.min_request_msat, image_reservation)
 
     tol = settings.tolerance_percentage
     tol_factor = max(0.0, 1 - float(tol) / 100.0)
@@ -310,11 +316,17 @@ async def calculate_discounted_max_cost(
 
         # Without a separate completion limit both discounts assume the whole
         # context window, so together they can remove more than the request
-        # may cost. Never reserve less than the prompt plus the requested cap.
+        # may cost. Never reserve less than the prompt plus the requested cap,
+        # bounded by a positive advertised completion limit when available.
         # Tolerance only trims discounts; applied here it would lower the floor.
+        completion_tokens = max_tokens_int
+        if model_obj and model_obj.top_provider:
+            completion_limit = model_obj.top_provider.max_completion_tokens
+            if completion_limit is not None and completion_limit > 0:
+                completion_tokens = min(completion_tokens, completion_limit)
         requested_sats = (
             prompt_tokens * model_pricing.prompt
-            + max_tokens_int * model_pricing.completion
+            + completion_tokens * model_pricing.completion
         )
         adjusted = max(
             adjusted, min(max_cost_for_model, math.floor(requested_sats * 1000))
@@ -381,10 +393,15 @@ def _count_prompt_token_ids(node: Any) -> int:
 def estimate_prompt_tokens(body: dict) -> int:
     """Conservatively estimate prompt tokens for the whole provider-bound body.
 
-    Every string counts, as do token IDs in legacy ``prompt`` arrays, so no
-    forwarded field can hide prompt weight and shrink its reservation.
+    Every string counts, as do token IDs in legacy ``prompt`` and embeddings
+    ``input`` arrays, so no forwarded field can hide prompt weight and shrink
+    its reservation.
     """
-    return _sum_string_chars(body) // 3 + _count_prompt_token_ids(body.get("prompt"))
+    return (
+        _sum_string_chars(body) // 3
+        + _count_prompt_token_ids(body.get("prompt"))
+        + _count_prompt_token_ids(body.get("input"))
+    )
 
 
 IMAGE_FETCH_TIMEOUT_SECONDS = 10.0

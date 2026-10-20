@@ -53,6 +53,31 @@ class NodeSetupTests(unittest.TestCase):
             self.assertIn("HTTP_URL=https://node.example", text)
             self.assertIn("RECEIVE_LN_ADDRESS=me@host", text)
 
+    def test_emitted_env_keeps_upstream_seed_commented(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / ".env.example").write_text(
+                "# Core Configuration\n"
+                "UPSTREAM_BASE_URL=https://api.openai.com/v1\n"
+                "UPSTREAM_API_KEY=your-upstream-api-key\n"
+                "HTTP_URL=\n"
+            )
+            self.assertTrue(
+                node_setup.prepare_env(root, {"HTTP_URL": "https://node.example"})
+            )
+            text = (root / ".env").read_text()
+            self.assertIsNone(node_setup._env_value(text, "UPSTREAM_BASE_URL"))
+            self.assertIsNone(node_setup._env_value(text, "UPSTREAM_API_KEY"))
+            self.assertIn("# UPSTREAM_BASE_URL=https://api.openai.com/v1", text)
+            self.assertIn("# UPSTREAM_API_KEY=your-upstream-api-key", text)
+            self.assertIn("HTTP_URL=https://node.example", text)
+
+    def test_repo_env_template_seeds_no_upstream(self) -> None:
+        text = (Path(node_setup.ROOT) / ".env.example").read_text()
+        for key in node_setup.DASHBOARD_ONLY_KEYS:
+            with self.subTest(key=key):
+                self.assertIsNone(node_setup._env_value(text, key))
+
     def test_prepare_env_upserts_without_clobbering(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

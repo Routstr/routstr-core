@@ -21,7 +21,12 @@ os.environ.setdefault("UPSTREAM_API_KEY", "test")
 from routstr.auth import ReservationSnapshot  # noqa: E402
 from routstr.core.db import ApiKey  # noqa: E402
 from routstr.payment.cost_calculation import CostData  # noqa: E402
-from routstr.payment.models import Architecture, Model, Pricing  # noqa: E402
+from routstr.payment.models import (  # noqa: E402
+    Architecture,
+    Model,
+    Pricing,
+    Reasoning,
+)
 from routstr.upstream.base import BaseUpstreamProvider  # noqa: E402
 from routstr.upstream.messages_dispatch import (  # noqa: E402
     prune_blank_system_blocks,
@@ -396,6 +401,167 @@ async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
     assert forwarded["api_base"] == "http://test"
     assert forwarded["api_key"] == "upstream-key"
     assert forwarded["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_lifts_output_config_effort_onto_reasoning_effort() -> None:
+    """A body whose only thinking signal is `output_config.effort` keeps it.
+
+    `output_config` must still be pruned (non-Anthropic upstreams 400 on
+    it), but the requested level has to survive as `reasoning_effort`
+    instead of being silently discarded.
+    """
+    provider = _make_provider()
+    key = _make_key()
+    model = _make_model()
+    session = _make_session()
+
+    body = json.dumps(
+        {
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "output_config": {"effort": "max"},
+        }
+    ).encode()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acreate(**kwargs: Any) -> dict:
+        captured["kwargs"] = kwargs
+        return _anthropic_non_stream_response()
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(side_effect=fake_acreate),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
+        ),
+    ):
+        await provider._forward_messages_via_litellm(
+            request_body=body,
+            key=key,
+            session=session,
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    forwarded = captured["kwargs"]
+    assert forwarded["reasoning_effort"] == "max"
+    assert "output_config" not in forwarded
+
+
+@pytest.mark.asyncio
+async def test_dispatch_clamps_output_config_effort_to_supported_efforts() -> None:
+    provider = _make_provider()
+    key = _make_key()
+    model = _make_model()
+    model.reasoning = Reasoning(
+        mandatory=False,
+        default_effort="medium",
+        supported_efforts=["high", "medium", "low"],
+    )
+    session = _make_session()
+
+    body = json.dumps(
+        {
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "output_config": {"effort": "max"},
+        }
+    ).encode()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acreate(**kwargs: Any) -> dict:
+        captured["kwargs"] = kwargs
+        return _anthropic_non_stream_response()
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(side_effect=fake_acreate),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
+        ),
+    ):
+        await provider._forward_messages_via_litellm(
+            request_body=body,
+            key=key,
+            session=session,
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    forwarded = captured["kwargs"]
+    # 'max' is not offered by this model; the nearest legal level is used.
+    assert forwarded["reasoning_effort"] == "high"
+    assert "output_config" not in forwarded
+
+
+@pytest.mark.asyncio
+async def test_dispatch_does_not_invent_effort_for_format_only_output_config() -> None:
+    """`output_config.format` (structured output) must not turn reasoning on.
+
+    The object has no `effort`, so it says nothing about thinking level. It is
+    pruned like any other Anthropic-only field and the upstream must not
+    receive a `reasoning_effort` the client never asked for.
+    """
+    provider = _make_provider()
+    key = _make_key()
+    model = _make_model()
+    model.reasoning = Reasoning(
+        mandatory=False,
+        default_effort="medium",
+        supported_efforts=["max", "high", "medium", "low", "none"],
+    )
+    session = _make_session()
+
+    body = json.dumps(
+        {
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "output_config": {
+                "format": {"type": "json_schema", "schema": {"type": "object"}}
+            },
+        }
+    ).encode()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acreate(**kwargs: Any) -> dict:
+        captured["kwargs"] = kwargs
+        return _anthropic_non_stream_response()
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(side_effect=fake_acreate),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
+        ),
+    ):
+        await provider._forward_messages_via_litellm(
+            request_body=body,
+            key=key,
+            session=session,
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    forwarded = captured["kwargs"]
+    assert "reasoning_effort" not in forwarded
+    assert "reasoning" not in forwarded
+    assert "output_config" not in forwarded
 
 
 @pytest.mark.asyncio
@@ -886,6 +1052,71 @@ async def test_x_cashu_non_streaming_no_refund_when_fully_consumed() -> None:
     assert isinstance(result, Response)
     assert "X-Cashu" not in result.headers
     mock_refund.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("failure", ["cost", "refund"])
+async def test_x_cashu_settlement_failure_still_serves_paid_body(
+    stream: bool, failure: str
+) -> None:
+    provider = _make_provider()
+
+    async def chunks() -> AsyncIterator[dict]:
+        yield {
+            "type": "message_start",
+            "message": {"id": "m", "usage": {"input_tokens": 5, "output_tokens": 0}},
+        }
+        yield {"type": "message_delta", "usage": {"output_tokens": 7}}
+        yield {"type": "message_stop"}
+
+    cost = CostData(base_msats=0, input_msats=0, output_msats=0, total_msats=1_000_000)
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(
+                return_value=chunks() if stream else _anthropic_non_stream_response()
+            ),
+        ),
+        patch.object(
+            provider,
+            "get_x_cashu_cost",
+            new=AsyncMock(
+                side_effect=RuntimeError("cost failed") if failure == "cost" else None,
+                return_value=cost,
+            ),
+        ),
+        patch.object(
+            provider,
+            "send_refund",
+            new=AsyncMock(
+                side_effect=RuntimeError("mint down") if failure == "refund" else None,
+                return_value="cashuREFUND",
+            ),
+        ) as refund,
+    ):
+        result = await provider._forward_x_cashu_messages_via_litellm(
+            request_body=_anthropic_request_body(stream=stream),
+            amount=5_000,
+            unit="sat",
+            max_cost_for_model=2_000_000,
+            model_obj=_make_model(),
+            mint="https://mint.example",
+            request_id="req-1",
+        )
+
+    assert result.status_code == 200
+    assert bytes(result.body).strip()
+    if failure == "cost":
+        # The charge is capped at the max cost: 5_000 - 2_000 sats.
+        refund.assert_awaited_once_with(
+            3_000, "sat", "https://mint.example", request_id="req-1"
+        )
+        assert result.headers["X-Cashu"] == "cashuREFUND"
+    else:
+        refund.assert_awaited_once()
+        assert result.headers["X-Routstr-Refund-Error"] == "refund_failed"
+        assert "X-Cashu" not in result.headers
 
 
 # ---------------------------------------------------------------------------
@@ -1645,6 +1876,9 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
         ),
         patch("routstr.upstream.base.store_cashu_transaction", new=AsyncMock()),
         patch.object(
+            provider, "send_refund", new=AsyncMock(return_value="cashuArefund")
+        ) as refund,
+        patch.object(
             provider,
             forward_attr,
             new=AsyncMock(side_effect=httpx.ConnectError("upstream down")),
@@ -1665,6 +1899,11 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
     assert body["error"]["type"] == "upstream_error"
     assert body["error"]["code"] == "UPSTREAM_UNAVAILABLE"
     assert body["error"]["code"] != "cashu_mint_unreachable"
+    assert response.headers["X-Cashu"] == "cashuArefund"
+    assert body["error"]["refund_token"] == "cashuArefund"
+    refund.assert_awaited_once_with(
+        5_000, "sat", "https://mint", request_id=getattr(request.state, "request_id", None)
+    )
 
 
 @pytest.mark.asyncio

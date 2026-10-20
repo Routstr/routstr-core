@@ -13,7 +13,8 @@ This repo contains Routstr Core: a FastAPI-based reverse proxy that sits in fron
 
 - **Overview**: <https://docs.routstr.com/overview/>
 - **Provider Guide**: <https://docs.routstr.com/provider/quickstart/>
-- **User Guide**: <https://docs.routstr.com/user-guide/introduction/>
+- **Client Guide**: <https://docs.routstr.com/client/introduction/>
+- **Browse providers and models**: <https://routstr.com/providers>
 
 ## Basic Usage
 
@@ -62,7 +63,7 @@ git clone https://github.com/Routstr/routstr-core.git
 cd routstr-core
 # production: check out a reviewed release tag
 
-# Phase 0: DNS + TLS + reverse proxy -> 127.0.0.1:8000, and restrict /admin
+# Phase 0: DNS + TLS + reverse proxy -> 127.0.0.1:8000
 
 # Phase 1: start (public is the default)
 python3 scripts/node_setup.py start \
