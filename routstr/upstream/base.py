@@ -553,6 +553,7 @@ class BaseUpstreamProvider:
     # Last non-empty catalog this worker obtained, before DB overrides and fees.
     # Only ever rebound, never mutated, so the class-level default is safe.
     _upstream_catalog: list[Model] = []
+    _upstream_catalog_config_hash: str | None = None
 
     def __init__(self, base_url: str, api_key: str, provider_fee: float = 1.01):
         """Initialize the upstream provider.
@@ -971,7 +972,9 @@ class BaseUpstreamProvider:
                     transformed_model = self.transform_model_name(original_model)
                     data["input"]["model"] = transformed_model
 
-                apply_reasoning_effort(data, model_obj)
+                # Route through the instance hook so providers that override the
+                # translation (Tinfoil, Anthropic) also cover this endpoint.
+                self._apply_reasoning_effort(data, model_obj)
 
                 return json.dumps(data).encode()
         except Exception as e:
@@ -4850,11 +4853,6 @@ class BaseUpstreamProvider:
                 )
 
             response_headers = _decoded_response_headers(response.headers)
-            if "transfer-encoding" in response_headers:
-                del response_headers["transfer-encoding"]
-            if "content-encoding" in response_headers:
-                del response_headers["content-encoding"]
-
             _inject_cost_response_headers(response_headers, cost_data)
 
             if unit == "msat":
@@ -5055,6 +5053,11 @@ class BaseUpstreamProvider:
         """
         _refund = _refund or _XCashuRefund(self)
         completion_path = _openai_completion_path(path)
+        # Same URL as the API-key path, so provider overrides (Ollama /v1,
+        # Azure deployments) apply.
+        url = self.build_request_url(
+            self.normalize_request_path(path, model_obj), model_obj
+        )
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
 
@@ -5090,8 +5093,6 @@ class BaseUpstreamProvider:
                 request_id=getattr(request.state, "request_id", None),
                 _refund=_refund,
             )
-
-        url = f"{self.base_url}/{path}"
 
         transformed_body = self.prepare_request_body(
             request_body,
@@ -5400,10 +5401,11 @@ class BaseUpstreamProvider:
             Response or StreamingResponse with refund if applicable
         """
         _refund = _refund or _XCashuRefund(self)
+        url = self.build_request_url(
+            self.normalize_request_path(path, model_obj), model_obj
+        )
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
 
         if request_body is None:
             request_body = await request.body()
@@ -5907,11 +5909,6 @@ class BaseUpstreamProvider:
                 )
 
             response_headers = _decoded_response_headers(response.headers)
-            if "transfer-encoding" in response_headers:
-                del response_headers["transfer-encoding"]
-            if "content-encoding" in response_headers:
-                del response_headers["content-encoding"]
-
             _inject_cost_response_headers(response_headers, cost_data)
 
             if unit == "msat":
@@ -6340,10 +6337,17 @@ class BaseUpstreamProvider:
                 extra={"error": repr(e), "error_type": type(e).__name__},
             )
 
+    def _catalog_settings(self) -> dict[str, object]:
+        """Provider configuration used to discover or price the raw catalog."""
+        return {}
+
+    def _restore_catalog_state(self, models: list[Model]) -> None:
+        """Restore adapter state normally derived during ``fetch_models``."""
+
     async def _shared_upstream_models(self, provider_id: int) -> list[Model]:
         """This provider's upstream catalog, shared with the other workers.
 
-        ``fetch_models`` reports every failure as an empty list. Taken at face
+        ``fetch_models`` generally reports failure as an empty list. Taken at face
         value, one rate-limited refresh wiped a worker's catalog until the next
         one, and behind a load balancer the node answered most requests with
         "model not found". A recent catalog stored by any worker is used without
@@ -6356,9 +6360,14 @@ class BaseUpstreamProvider:
         )
 
         config_hash = provider_config_hash(
-            self.provider_type, self.base_url, self.api_key
+            self.provider_type, self.base_url, self.api_key, self._catalog_settings()
         )
         from ..core.settings import settings
+
+        if self._upstream_catalog_config_hash != config_hash:
+            self._upstream_catalog = []
+            self._restore_catalog_state([])
+            self._upstream_catalog_config_hash = config_hash
 
         snapshot = await load_snapshot(provider_id, config_hash)
         interval = settings.models_refresh_interval_seconds
@@ -6367,10 +6376,19 @@ class BaseUpstreamProvider:
             and interval > 0
             and time.time() - snapshot[1] < interval * SNAPSHOT_REUSE_FRACTION
         ):
+            self._restore_catalog_state(snapshot[0])
             self._upstream_catalog = snapshot[0]
             return snapshot[0]
 
-        fetched = await self.fetch_models()
+        try:
+            fetched = await self.fetch_models()
+        except Exception as e:
+            # Native discovery can raise instead of returning an empty catalog.
+            logger.warning(
+                "Model fetch failed, trying last good catalog",
+                extra={"provider_id": provider_id, "error_type": type(e).__name__},
+            )
+            fetched = []
         if fetched:
             await save_snapshot(provider_id, config_hash, fetched)
             self._upstream_catalog = fetched
@@ -6386,6 +6404,7 @@ class BaseUpstreamProvider:
                     "source": "shared" if snapshot is not None else "local",
                 },
             )
+            self._restore_catalog_state(fallback)
             self._upstream_catalog = fallback
         return fallback
 

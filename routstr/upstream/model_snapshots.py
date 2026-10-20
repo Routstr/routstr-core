@@ -19,13 +19,23 @@ from ..payment.models import Model
 logger = get_logger(__name__)
 
 
-def provider_config_hash(provider_type: str | None, base_url: str, api_key: str) -> str:
+def provider_config_hash(
+    provider_type: str | None,
+    base_url: str,
+    api_key: str,
+    catalog_settings: dict[str, object] | None = None,
+) -> str:
     """Fingerprint of what decides a provider's catalog.
 
     A snapshot taken before an admin changed the URL or key, or left behind by a
     deleted provider whose id was reused, must not be served for the new one.
     """
-    material = f"{provider_type or ''}\0{base_url}\0{api_key}"
+    # Store only the digest, never credentials or provider settings themselves.
+    material = json.dumps(
+        [provider_type or "", base_url, api_key, catalog_settings or {}],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(material.encode()).hexdigest()
 
 

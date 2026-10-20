@@ -152,3 +152,110 @@ async def test_concurrent_first_snapshots_do_not_fail_any_worker(
     for worker in workers:
         assert _ids(worker) == {"alpha", "beta"}
     assert await integration_session.get(UpstreamModelSnapshot, provider_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refresh_result", ["fresh", "empty", "error", "local"])
+async def test_anthropic_snapshot_restores_native_model_names(
+    integration_session: AsyncSession,
+    patched_db_engine: None,
+    refresh_interval: int,
+    monkeypatch: pytest.MonkeyPatch,
+    refresh_result: str,
+) -> None:
+    from routstr.upstream.anthropic import AnthropicUpstreamProvider
+
+    provider_id = await _provider_row(integration_session)
+    first = AnthropicUpstreamProvider(api_key="k")
+    monkeypatch.setattr(
+        first, "_fetch_native_model_ids", AsyncMock(return_value={"claude-haiku-5-5"})
+    )
+    monkeypatch.setattr(
+        "routstr.upstream.anthropic.async_fetch_openrouter_models",
+        AsyncMock(return_value=[_model("claude-haiku-5.5").dict()]),
+    )
+    await first._shared_upstream_models(provider_id)
+    snapshot = await integration_session.get(UpstreamModelSnapshot, provider_id)
+    assert snapshot is not None
+    if refresh_result != "fresh":
+        snapshot.fetched_at -= refresh_interval
+        await integration_session.commit()
+    worker = AnthropicUpstreamProvider(api_key="k")
+    if refresh_result == "local":
+        worker = first
+        worker._native_model_names = {}
+        await integration_session.delete(snapshot)
+        await integration_session.commit()
+    fetch = AsyncMock(return_value=[])
+    if refresh_result == "error":
+        fetch.side_effect = RuntimeError("native discovery unavailable")
+    monkeypatch.setattr(worker, "fetch_models", fetch)
+
+    models = await worker._shared_upstream_models(provider_id)
+
+    assert [m.id for m in models] == ["claude-haiku-5.5"]
+    assert worker.transform_model_name(models[0].id) == "claude-haiku-5-5"
+    if refresh_result == "fresh":
+        fetch.assert_not_awaited()
+    else:
+        fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fetch_fails", [False, True])
+@pytest.mark.parametrize("same_worker", [False, True])
+async def test_together_snapshot_invalidated_by_image_price_settings(
+    integration_session: AsyncSession,
+    patched_db_engine: None,
+    refresh_interval: int,
+    monkeypatch: pytest.MonkeyPatch,
+    fetch_fails: bool,
+    same_worker: bool,
+) -> None:
+    import json
+
+    from routstr.upstream.together import TogetherUpstreamProvider
+
+    model_id = "operator/custom-image"
+    row = UpstreamProviderRow(
+        provider_type="together",
+        base_url=TogetherUpstreamProvider.default_base_url,
+        api_key="test-snapshot-credential",
+        provider_settings=json.dumps({"image_prices": {model_id: 0.01}}),
+    )
+    integration_session.add(row)
+    await integration_session.commit()
+    await integration_session.refresh(row)
+    assert row.id is not None
+    first = TogetherUpstreamProvider.from_db_row(row)
+    assert first is not None
+    monkeypatch.setattr(
+        first,
+        "_fetch_catalog",
+        AsyncMock(return_value=[{"id": model_id, "type": "image"}]),
+    )
+    old = await first._shared_upstream_models(row.id)
+    assert old[0].pricing.image_output == 0.01
+    row.provider_settings = json.dumps({"image_prices": {model_id: 0.02}})
+    await integration_session.commit()
+    updated = first if same_worker else TogetherUpstreamProvider.from_db_row(row)
+    assert updated is not None
+    if same_worker:
+        updated.image_prices = {model_id: 0.02}
+    fetch = AsyncMock(
+        return_value=[] if fetch_fails else [{"id": model_id, "type": "image"}]
+    )
+    monkeypatch.setattr(updated, "_fetch_catalog", fetch)
+
+    models = await updated._shared_upstream_models(row.id)
+
+    fetch.assert_awaited_once()
+    if fetch_fails:
+        assert models == []  # A failed refresh must not revive the old price.
+    else:
+        assert models[0].pricing.image_output == 0.02
+    await integration_session.refresh(row)
+    snapshot = await integration_session.get(UpstreamModelSnapshot, row.id)
+    assert snapshot is not None
+    assert row.api_key not in snapshot.models_json
+    assert row.api_key not in snapshot.config_hash
