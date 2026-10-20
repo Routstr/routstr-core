@@ -28,6 +28,9 @@ services:
       - .env
     environment:
       - TOR_PROXY_URL=socks5://tor:9050
+      # Self-provision a Nostr identity on first boot so the node announces
+      # itself without an operator pasting an nsec. A provided NSEC still wins.
+      - AUTO_GENERATE_NSEC=true
     ports:
       - 8000:8000
     extra_hosts: # Needed to access locally running models

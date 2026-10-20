@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
 from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
+from ..payment.image_pricing import ImagePriceTier, ImagePricing, ImageRequestRefused
 from ..payment.models import Architecture, Model, Pricing, TopProvider
+from . import messages_dispatch
 from .base import BaseUpstreamProvider
+from .stream_ownership import aclose_if_needed
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -18,18 +22,26 @@ logger = get_logger(__name__)
 # configured as a generic upstream never sees the rest of its catalog.
 _MODELS_TYPE_PARAM = "all"
 
-# Families this proxy can both route and price. Image, audio, music and video
-# are billed per clip or per second and return no usage object to settle
-# against, so exposing them would hand out unpriced inference.
-_SUPPORTED_TYPES = frozenset({"text", "embedding"})
+# Families this proxy can both route and price. Audio, music and video are
+# billed per clip or per second and return no usage object to settle against,
+# so exposing them would hand out unpriced inference.
+_SUPPORTED_TYPES = frozenset({"text", "image", "inpaint", "upscale", "embedding"})
+
+_IMAGE_TYPES = frozenset({"image", "inpaint", "upscale"})
 
 # Venice prices text in USD per million tokens; Routstr prices per token.
 _USD_PER_MILLION = 1_000_000.0
 
 _ARCHITECTURES: dict[str, tuple[str, list[str], list[str]]] = {
     "text": ("text->text", ["text"], ["text"]),
+    "image": ("text->image", ["text"], ["image"]),
+    "inpaint": ("text+image->image", ["text", "image"], ["image"]),
+    "upscale": ("image->image", ["image"], ["image"]),
     "embedding": ("text->embedding", ["text"], ["embedding"]),
 }
+
+# Image options Venice bills as extra, unpublished credits.
+_UNPRICED_IMAGE_OPTIONS = ("enhance_prompt", "enable_web_search")
 
 # Venice runs search itself and reports it back through ``venice_parameters``;
 # it has no Anthropic-shaped server tool and rejects the ``web_search_options``
@@ -50,6 +62,73 @@ _UNENFORCEABLE_WEB_SEARCH_KEYS = frozenset(
     {"allowed_domains", "blocked_domains", "user_location"}
 )
 
+# Venice streams OpenAI reasoning models' encrypted reasoning as a trailing
+# ``reasoning_content`` delta carrying this marker. litellm turns it into a
+# plaintext ``thinking`` block after the answer, which clients render as
+# gibberish and which makes Claude Code report an empty final result.
+_ENCRYPTED_REASONING_MARKER = "__ENCRYPTED_REASONING__"
+
+
+async def _drop_encrypted_reasoning(
+    upstream: AsyncIterator[Any],
+) -> AsyncGenerator[bytes, None]:
+    """A thinking block's start carries no text, so it is held until its first
+    delta shows whether it is the encrypted payload; later indices shift down
+    to close the gap."""
+    encode = messages_dispatch.encode_sse
+    sse_buffer = b""
+    dropped: set[int] = set()
+    held: list[dict] | None = None
+    held_index: int | None = None
+
+    def shift(event: dict) -> dict:
+        index = event.get("index")
+        if not isinstance(index, int):
+            return event
+        gap = sum(1 for d in dropped if d < index)
+        return {**event, "index": index - gap} if gap else event
+
+    try:
+        async for chunk in upstream:
+            events, sse_buffer = messages_dispatch.events_from_chunk(chunk, sse_buffer)
+            for event in events:
+                etype = event.get("type")
+                index = event.get("index")
+                if held is not None:
+                    delta = event.get("delta") or {}
+                    is_own_delta = (
+                        index == held_index and etype == "content_block_delta"
+                    )
+                    thinking = str(delta.get("thinking") or "")
+                    if is_own_delta and thinking.startswith(
+                        _ENCRYPTED_REASONING_MARKER
+                    ):
+                        dropped.add(cast(int, index))
+                        held = None
+                        continue
+                    if is_own_delta and not thinking:
+                        held.append(event)
+                        continue
+                    for pending in held:
+                        yield encode(shift(pending))
+                    held = None
+                if index in dropped:
+                    continue
+                block = event.get("content_block") or {}
+                if (
+                    etype == "content_block_start"
+                    and block.get("type") == "thinking"
+                    and not block.get("thinking")
+                ):
+                    held, held_index = [event], index
+                    continue
+                yield encode(shift(event))
+        if held is not None:
+            for pending in held:
+                yield encode(shift(pending))
+    finally:
+        await aclose_if_needed(upstream)
+
 
 def _is_web_search_tool(tool: Any) -> bool:
     """An Anthropic server-side web-search tool, by either of its markers.
@@ -66,6 +145,35 @@ def _is_web_search_tool(tool: Any) -> bool:
     ) or tool.get("name") == "web_search"
 
 
+def _merge_cache_marked_system(body: dict) -> None:
+    """Venice rejects an OpenAI ``system`` message with two or more text parts
+    when any part carries ``cache_control`` (``400 system: text content blocks
+    must contain non-whitespace text``), even though every part is non-blank.
+    Claude Code always sends that shape. A single marked block is accepted and
+    still caches, so the prefix stays cacheable under the last marker.
+    """
+    system = body.get("system")
+    if not isinstance(system, list) or len(system) < 2:
+        return
+    if not all(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+        for block in system
+    ):
+        return
+    markers = [block["cache_control"] for block in system if block.get("cache_control")]
+    if not markers:
+        return
+    body["system"] = [
+        {
+            "type": "text",
+            "text": "\n\n".join(block["text"] for block in system),
+            "cache_control": markers[-1],
+        }
+    ]
+
+
 def _usd(entry: Any) -> float | None:
     """Read the USD leg of a Venice ``{usd, diem}`` price pair."""
     if isinstance(entry, dict):
@@ -73,6 +181,44 @@ def _usd(entry: Any) -> float | None:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
     return None
+
+
+def _max_usd(entry: Any) -> float | None:
+    """Worst-case USD price across a nested Venice price table."""
+    direct = _usd(entry)
+    if direct is not None:
+        return direct
+    if not isinstance(entry, dict):
+        return None
+    prices = [p for p in (_max_usd(value) for value in entry.values()) if p is not None]
+    return max(prices) if prices else None
+
+
+def _prices(table: Any, case: Callable[[str], str]) -> dict[str, float]:
+    """A Venice ``{label: {usd, diem}}`` table as ``{label: usd}``."""
+    if not isinstance(table, dict):
+        return {}
+    priced = ((case(str(label)), _usd(entry)) for label, entry in table.items())
+    return {label: usd for label, usd in priced if usd is not None}
+
+
+def _tables(table: Any) -> dict[str, dict]:
+    """The nested sub-tables of a Venice price table, keyed by their label."""
+    if not isinstance(table, dict):
+        return {}
+    return {
+        str(label): entry for label, entry in table.items() if isinstance(entry, dict)
+    }
+
+
+def _label(value: Any, case: Callable[[str], str]) -> str | None:
+    return case(value) if isinstance(value, str) else None
+
+
+def _labels(values: Any, case: Callable[[str], str]) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [case(str(value)) for value in values]
 
 
 class VeniceUpstreamProvider(BaseUpstreamProvider):
@@ -114,7 +260,27 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("venice/")
 
+    def check_image_request(self, body: dict) -> None:
+        enabled = sorted(
+            field
+            for field in _UNPRICED_IMAGE_OPTIONS
+            if body.get(field) not in (None, False)
+        )
+        if enabled:
+            raise ImageRequestRefused(
+                f"Unsupported image request fields: {', '.join(enabled)}"
+            )
+
+    def transform_messages_stream(
+        self, stream: AsyncIterator[Any]
+    ) -> AsyncIterator[Any]:
+        return _drop_encrypted_reasoning(stream)
+
     def adapt_messages_request(self, body: dict, model_obj: Model) -> str:
+        _merge_cache_marked_system(body)
+        return self._adapt_web_search(body)
+
+    def _adapt_web_search(self, body: dict) -> str:
         """Trade an Anthropic web-search tool for Venice's own search switch.
 
         Left in the body, litellm's Anthropic adapter rewrites the tool into a
@@ -249,6 +415,11 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
         pricing = self._parse_pricing(spec.get("pricing"), str(model_type))
         if pricing is None:
             return None
+        image_pricing = (
+            self._build_image_pricing(spec.get("pricing"), spec)
+            if model_type in _IMAGE_TYPES
+            else None
+        )
 
         modality, input_modalities, output_modalities = _ARCHITECTURES[str(model_type)]
         capabilities = spec.get("capabilities")
@@ -278,6 +449,7 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
                 instruct_type=None,
             ),
             pricing=pricing,
+            image_pricing=image_pricing,
             top_provider=TopProvider(
                 context_length=int(context_length) if context_length else None,
                 max_completion_tokens=int(max_completion_tokens)
@@ -289,6 +461,17 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
     def _parse_pricing(self, raw: Any, model_type: str) -> Pricing | None:
         if not isinstance(raw, dict):
             return None
+
+        if model_type in _IMAGE_TYPES:
+            per_image = self._per_image_usd(raw)
+            if per_image is None:
+                return None
+            return Pricing(
+                prompt=0.0,
+                completion=0.0,
+                image=self._input_image_usd(raw),
+                image_output=per_image,
+            )
 
         # The ``extended`` tier some models charge past a context threshold is
         # ignored: billing it would overcharge every request staying under it.
@@ -310,3 +493,72 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
             input_cache_read=(_usd(raw.get("cache_input")) or 0.0) / _USD_PER_MILLION,
             input_cache_write=(_usd(raw.get("cache_write")) or 0.0) / _USD_PER_MILLION,
         )
+
+    def _build_image_pricing(
+        self, raw: Any, spec: dict[str, Any]
+    ) -> ImagePricing | None:
+        """Venice's per-tier image prices as the model's own price book.
+
+        ``constraints`` carries the resolution and quality applied when the
+        request names neither, so a default request is priced at the default
+        tier rather than the ceiling.
+        """
+        if not isinstance(raw, dict):
+            return None
+        max_usd = self._per_image_usd(raw)
+        if max_usd is None:
+            return None
+
+        tiers = [
+            ImagePriceTier(resolution=label, usd=price)
+            for label, price in _prices(raw.get("resolutions"), str.upper).items()
+        ]
+        for label, steps in _tables(raw.get("quality")).items():
+            tiers += [
+                ImagePriceTier(resolution=label.upper(), quality=step, usd=price)
+                for step, price in _prices(steps, str.lower).items()
+            ]
+
+        constraints = spec.get("constraints")
+        constraints = constraints if isinstance(constraints, dict) else {}
+        input_images = raw.get("inputImages")
+        input_images = input_images if isinstance(input_images, dict) else {}
+        included = input_images.get("included")
+
+        return ImagePricing(
+            max_usd=max_usd,
+            tiers=tiers,
+            default_resolution=_label(constraints.get("defaultResolution"), str.upper),
+            default_quality=_label(constraints.get("defaultQuality"), str.lower),
+            resolutions=_labels(constraints.get("resolutions"), str.upper),
+            qualities=_labels(constraints.get("qualities"), str.lower),
+            upscale=_prices(raw.get("upscale"), str.lower),
+            input_image_usd=self._input_image_usd(raw),
+            input_images_included=included
+            if isinstance(included, int) and not isinstance(included, bool)
+            else 0,
+        )
+
+    @staticmethod
+    def _input_image_usd(raw: dict[str, Any]) -> float:
+        """Venice's per-extra-reference-image surcharge, ``inputImages.additional``."""
+        input_images = raw.get("inputImages")
+        if not isinstance(input_images, dict):
+            return 0.0
+        return _usd(input_images.get("additional")) or 0.0
+
+    @staticmethod
+    def _per_image_usd(raw: dict[str, Any]) -> float | None:
+        """Worst-case USD for one generation.
+
+        ``upscale`` and ``inputImages`` price a separate call and a per-extra-
+        image surcharge, so folding them in would inflate every reservation.
+        """
+        candidates = [
+            _usd(raw.get("generation")),
+            _usd(raw.get("inpaint")),
+            _max_usd(raw.get("resolutions")),
+            _max_usd(raw.get("quality")),
+        ]
+        priced = [c for c in candidates if c is not None]
+        return max(priced) if priced else None

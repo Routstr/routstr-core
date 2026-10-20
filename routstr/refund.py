@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 import httpx
+from cashu.wallet.helpers import deserialize_token_from_string
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, func, select, update
@@ -29,8 +30,12 @@ from .payment.lnurl import (
     get_lnurl_data,
 )
 from .wallet import (
+    SWAP_BUSY_RETRY_AFTER_SECONDS,
     check_bolt11_payment_status,
     is_mint_connection_error,
+    is_swap_busy,
+    preferred_trusted_mint,
+    resolve_trusted_source_mint,
     send_to_lnurl,
     send_token,
     token_mint_url,
@@ -50,9 +55,27 @@ def amount_in_unit(amount_msats: int, unit: str) -> int:
 
 
 def refund_mint(key: ApiKey) -> str:
-    if key.refund_mint_url and key.refund_mint_url in settings.cashu_mints:
-        return key.refund_mint_url
-    return settings.primary_mint
+    """Trusted mint the payout is drawn from.
+
+    A foreign refund mint (a key funded by a swapped-in token) is paid from the
+    first configured trusted mint and swapped back; see :func:`swap_destination`.
+    """
+    if key.refund_mint_url:
+        trusted_source = resolve_trusted_source_mint(key.refund_mint_url)
+        if trusted_source is not None:
+            return trusted_source
+    return preferred_trusted_mint()
+
+
+async def swap_destination(
+    key: ApiKey, method: str, session: AsyncSession
+) -> str | None:
+    """The user's own mint to swap a Cashu refund to, if that applies."""
+    from .foreign_mint_swap import refund_destination_mint
+
+    if method != "cashu":
+        return None
+    return await refund_destination_mint(key, session)
 
 
 async def validate_lightning_destination(destination: str) -> None:
@@ -85,6 +108,10 @@ async def open_claim(
         )
     )
     created_at = max(int(time.time()), (latest.one() or 0) + 1)
+    if destination is None:
+        # A cashu refund to the user's own foreign mint records that mint as
+        # the destination; the payout is still drawn from a trusted mint.
+        destination = await swap_destination(key, method, session)
     refund = Refund(
         api_key_hashed_key=key.hashed_key,
         method=method,
@@ -252,6 +279,38 @@ async def hold(
     await session.commit()
 
 
+# Machine-readable reasons a refund cannot proceed. Clients act on these
+# codes, so they must not be reworded: `no_balance_to_refund` proves the key
+# holds nothing and its local copy can be dropped, while
+# `refund_ongoing_requests` is a transient race whose balance is still there.
+REFUND_NO_BALANCE = "no_balance_to_refund"
+REFUND_BALANCE_TOO_SMALL = "balance_too_small_to_refund"
+REFUND_ONGOING_REQUESTS = "refund_ongoing_requests"
+
+
+def refund_failure_error(
+    message: str, code: str, status_code: int = 400
+) -> HTTPException:
+    """A refund refusal carrying a structured `code`, not a bare `detail` string.
+
+    These used to be plain-string 400s, which are indistinguishable to a
+    client: the SDK could not tell "No balance to refund" (the key is dead,
+    drop it) from "Cannot refund key. There are ongoing requests for this api
+    key." (a transient race, keep the key). It kept every key and re-swept it
+    forever, re-reading the same 400 every five minutes.
+    """
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "code": code,
+            }
+        },
+    )
+
+
 def refund_in_progress_error(refund: Refund | None = None) -> HTTPException:
     """The 409 raised when a key already has an unresolved refund claim."""
     stuck = refund is not None and refund.status == "stuck"
@@ -306,16 +365,32 @@ async def latest_terminal(session: AsyncSession, key: ApiKey) -> Refund | None:
     return await _latest_with_status(session, key, ("paid",))
 
 
+def _delivered_amount_msats(refund: Refund) -> int:
+    """Actual bearer-token value, which can be net of cross-mint fees."""
+    if not refund.token:
+        return refund.amount_msats
+    try:
+        token = deserialize_token_from_string(refund.token)
+    except Exception:
+        logger.error(
+            "paid refund token could not be decoded for amount reporting",
+            extra={"refund_id": refund.id},
+        )
+        return refund.amount_msats
+    return int(token.amount) * 1000 if str(token.unit) == "sat" else int(token.amount)
+
+
 def describe(refund: Refund) -> dict[str, str]:
     body: dict[str, str] = {"refund_id": refund.id, "status": refund.status}
     if refund.token:
         body["token"] = refund.token
     if refund.destination:
         body["recipient"] = refund.destination
+    delivered_msats = _delivered_amount_msats(refund)
     if refund.unit == "sat":
-        body["sats"] = str(refund.amount_msats // 1000)
+        body["sats"] = str(delivered_msats // 1000)
     else:
-        body["msats"] = str(refund.amount_msats)
+        body["msats"] = str(delivered_msats)
     return body
 
 
@@ -349,6 +424,10 @@ async def _pay_lightning(session: AsyncSession, refund: Refund) -> bool:
 async def _pay_cashu(session: AsyncSession, refund: Refund) -> bool:
     amount = amount_in_unit(refund.amount_msats, refund.unit)
     await renew_lease(session, refund)
+    if refund.destination:
+        from .foreign_mint_swap import swap_out_for_refund
+
+        return await swap_out_for_refund(session, refund, refund.destination)
     token = await send_token(amount, refund.unit, refund.mint_url)
     # From here the token is bearer money: keep it on the claim so a failed
     # settle withholds the balance instead of restoring it.
@@ -363,7 +442,7 @@ async def _record_cashu_payout(refund: Refund) -> None:
     try:
         await store_cashu_transaction(
             token=str(refund.token),
-            amount=amount_in_unit(refund.amount_msats, refund.unit),
+            amount=amount_in_unit(_delivered_amount_msats(refund), refund.unit),
             unit=refund.unit,
             mint_url=refund.mint_url,
             typ="out",
@@ -465,6 +544,13 @@ async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
                 "mint_url": refund.mint_url,
             },
         )
+        if is_swap_busy(e):
+            raise HTTPException(
+                status_code=503,
+                detail="Another swap against the refund mint is in progress; "
+                "balance unchanged, retry in a few seconds.",
+                headers={"Retry-After": str(SWAP_BUSY_RETRY_AFTER_SECONDS)},
+            )
         if is_mint_connection_error(e):
             raise HTTPException(status_code=503, detail="Mint service unavailable")
         raise HTTPException(status_code=500, detail="Refund failed")
@@ -513,6 +599,10 @@ async def _reconcile(refund: Refund, now: int) -> None:
             # The token was issued and kept on the claim; the payout is done.
             async with create_session() as session:
                 await settle(session, refund)
+            return
+        if refund.destination and refund.quote_id:
+            # A swap to the user's mint: its journal row owns the outcome and
+            # the swap reconciler settles or releases this claim from there.
             return
         # No quote to query for cashu; withhold the balance and alert once.
         async with create_session() as session:

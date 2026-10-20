@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useMemo } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { type Model, type GroupSettings } from '@/lib/api/schemas/models';
 import {
   AdminService,
@@ -13,6 +13,7 @@ import { AddProviderModelDialog } from '@/components/add-provider-model-dialog';
 import { EditGroupForm } from '@/components/edit-group-form';
 import { ModelProviderSection } from '@/components/model-provider-section';
 import { useDisplayCurrency } from '@/lib/hooks/use-display-currency';
+import { useModelsWithProviders } from '@/lib/hooks/use-models-with-providers';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -131,19 +132,14 @@ export function ModelSelector({
 
   const queryClient = useQueryClient();
 
-  // Fetch models and groups
+  // Shared with the page shell, so mounting this panel costs no extra fetch.
   const {
-    data: modelsData,
+    models,
+    groups,
     isLoading: isLoadingModels,
     error: modelsError,
     refetch: refetchModels,
-  } = useQuery({
-    queryKey: ['models-with-providers'],
-    queryFn: () => AdminService.getModelsWithProviders(),
-    refetchOnWindowFocus: false,
-  });
-
-  const { models = [], groups = [] } = modelsData || {};
+  } = useModelsWithProviders();
   const allOverrideModels = useMemo(
     () => models.filter(isOverrideModel),
     [models]

@@ -349,11 +349,14 @@ def _expected_serialised_model(provider_id: int) -> dict:
         "enabled": True,
         "forwarded_model_id": _SEEDED_MODEL_ID,
         "id": _SEEDED_MODEL_ID,
+        # Only models that return images carry a per-image price book.
+        "image_pricing": None,
         "name": f"SerTest {_SEEDED_MODEL_ID}",
         "per_request_limits": None,
         "pricing": {
             "completion": 2.0e-7,
             "image": 0.0,
+            "image_output": 0.0,
             "input_cache_read": 0.0,
             "input_cache_write": 0.0,
             "internal_reasoning": 0.0,
@@ -367,6 +370,7 @@ def _expected_serialised_model(provider_id: int) -> dict:
         "sats_pricing": {
             "completion": 2.0e-7 / _SATS,
             "image": 0.0,
+            "image_output": 0.0,
             "input_cache_read": 0.0,
             "input_cache_write": 0.0,
             "internal_reasoning": 0.0,

@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+import pytest
+
 from routstr.upstream.anthropic import AnthropicUpstreamProvider
 from routstr.upstream.base import BaseUpstreamProvider
 from routstr.upstream.generic import GenericUpstreamProvider
@@ -103,6 +105,32 @@ def test_apply_provider_field_openrouter_falls_back_to_pinned_endpoint() -> None
     unpinned: dict = {"id": "gen-def"}
     p._apply_provider_field(unpinned)
     assert unpinned["provider"] == "openrouter:unknown"
+
+
+@pytest.mark.parametrize("envelope", ["message", "response"])
+@pytest.mark.parametrize("pinned", [None, "deepinfra/fp8"])
+@pytest.mark.parametrize("reported", [None, "Fireworks"])
+def test_apply_provider_field_openrouter_pinned_nested_usage(
+    envelope: str, pinned: str | None, reported: str | None
+) -> None:
+    p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
+    nested: dict = {"usage": {"input_tokens": 1}}
+    if reported is not None:
+        nested["provider"] = reported
+    payload: dict = {envelope: nested}
+    token = pinned_endpoint_context.set(pinned)
+    try:
+        with patch("routstr.upstream.openrouter.logger.warning") as warning:
+            p._apply_provider_field(payload)
+            p._apply_provider_field(payload)
+        assert payload["provider"] == f"openrouter:{reported or pinned or 'unknown'}"
+        if reported is None:
+            warning.assert_called_once()
+            assert warning.call_args.kwargs["extra"]["pinned_endpoint"] == pinned
+        else:
+            warning.assert_not_called()
+    finally:
+        pinned_endpoint_context.reset(token)
 
 
 def test_apply_provider_field_openrouter_idempotent_no_double_prefix() -> None:

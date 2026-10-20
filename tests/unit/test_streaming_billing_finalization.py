@@ -316,7 +316,7 @@ async def test_streaming_response_closes_iterator_when_downstream_send_is_cancel
     reservation = MagicMock(spec=ReservationSnapshot)
     upstream_response.status_code = 201
     upstream_response.headers = {"x-upstream": "preserved"}
-    response = provider._generic_streaming_response(
+    response = await provider._generic_streaming_response(
         upstream_response,
         "key-hash",
         500,
@@ -377,7 +377,7 @@ async def test_generic_stream_settles_when_response_start_fails() -> None:
     upstream_response.status_code = 201
     upstream_response.headers = {"x-upstream": "preserved"}
     reservation = MagicMock(spec=ReservationSnapshot)
-    response = provider._generic_streaming_response(
+    response = await provider._generic_streaming_response(
         upstream_response,
         "key-hash",
         500,

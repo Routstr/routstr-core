@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import ipaddress
 import json
 import math
 import socket
@@ -26,12 +25,14 @@ from ..core.error_scope import (
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..core.settings import settings
+from ..net_guard import is_blocked_address as _is_blocked_address
 from ..wallet import (
     UntrustedSourceMintError,
     classify_redemption_error,
     deserialize_token_from_string,
     is_trusted_source_mint,
 )
+from .image_pricing import image_reservation_msats
 from .responses_input import (
     FILE_ID_URL_PREFIX,
     count_input_images,
@@ -192,6 +193,7 @@ async def calculate_discounted_max_cost(
     max_cost_for_model: int,
     body: dict,
     model_obj: Any | None = None,
+    path: str = "",
 ) -> int:
     """Calculate the discounted max cost for a request using model pricing when available.
 
@@ -207,6 +209,10 @@ async def calculate_discounted_max_cost(
     model_pricing = model_obj.sats_pricing if model_obj else None
     if not model_pricing:
         return max_cost_for_model
+
+    image_reservation = image_reservation_msats(body, model_obj, path)
+    if image_reservation is not None:
+        return max(settings.min_request_msat, image_reservation)
 
     tol = settings.tolerance_percentage
     tol_factor = max(0.0, 1 - float(tol) / 100.0)
@@ -369,10 +375,15 @@ def _count_prompt_token_ids(node: Any) -> int:
 def estimate_prompt_tokens(body: dict) -> int:
     """Conservatively estimate prompt tokens for the whole provider-bound body.
 
-    Every string counts, as do token IDs in legacy ``prompt`` arrays, so no
-    forwarded field can hide prompt weight and shrink its reservation.
+    Every string counts, as do token IDs in legacy ``prompt`` and embeddings
+    ``input`` arrays, so no forwarded field can hide prompt weight and shrink
+    its reservation.
     """
-    return _sum_string_chars(body) // 3 + _count_prompt_token_ids(body.get("prompt"))
+    return (
+        _sum_string_chars(body) // 3
+        + _count_prompt_token_ids(body.get("prompt"))
+        + _count_prompt_token_ids(body.get("input"))
+    )
 
 
 IMAGE_FETCH_TIMEOUT_SECONDS = 10.0
@@ -394,21 +405,6 @@ def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
             extra={"error": str(e)},
         )
         return (512, 512)
-
-
-def _is_blocked_address(address: str) -> bool:
-    """Allow only globally reachable addresses (RFC 6890)."""
-    try:
-        ip = ipaddress.ip_address(address)
-    except ValueError:
-        return True
-    if isinstance(ip, ipaddress.IPv6Address):
-        # An embedded v4 address would otherwise smuggle a rejected target past
-        # the v6 checks.
-        for embedded in (ip.ipv4_mapped, ip.sixtofour):
-            if embedded is not None:
-                return _is_blocked_address(str(embedded))
-    return not ip.is_global or ip.is_multicast
 
 
 async def _validated_fetch_target(url: str) -> tuple[str, str]:

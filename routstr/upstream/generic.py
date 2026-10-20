@@ -23,12 +23,36 @@ from ..core.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _join_system_text_blocks(body: dict) -> None:
+    """Send an Anthropic block-list ``system`` as one string.
+
+    Litellm forwards it as an OpenAI system message with array content, which
+    some OpenAI-compatible gateways refuse (``messages[0].content: expected
+    string, received array``). Claude Code always sends the block form. A
+    plain string is accepted everywhere; the per-block ``cache_control``
+    markers it drops have no OpenAI chat equivalent.
+    """
+    system = body.get("system")
+    if not isinstance(system, list) or not all(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+        for block in system
+    ):
+        return
+    body["system"] = "\n\n".join(block["text"] for block in system)
+
+
 class GenericUpstreamProvider(BaseUpstreamProvider):
     """Generic upstream provider that can fetch models from any OpenAI-compatible API."""
 
     provider_type = "generic"
     default_base_url = "http://localhost:8888"
-    platform_url = None
+    platform_url: str | None = None
+    # Subclasses that own an authoritative price table set this False so a model
+    # the table misses imports disabled instead of taking a litellm/OpenRouter
+    # price that may undercut the upstream's own rate.
+    use_fallback_pricing = True
 
     def __init__(
         self,
@@ -66,6 +90,10 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                 or self.upstream_name
             )
         super()._apply_provider_field(response_json)
+
+    def adapt_messages_request(self, body: dict, model_obj: Model) -> str:
+        _join_system_text_blocks(body)
+        return super().adapt_messages_request(body, model_obj)
 
     @classmethod
     def _build_from_row(
@@ -162,7 +190,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                     model_spec = model_data.get("model_spec", {})
 
                     resolved = self._native_pricing(model_id, model_spec)
-                    if resolved is None:
+                    if resolved is None and self.use_fallback_pricing:
                         resolved = await resolver.resolve(model_id)
 
                     if resolved is None:

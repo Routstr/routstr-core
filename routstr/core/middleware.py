@@ -31,6 +31,13 @@ _CLIENT_APP_HEADERS: tuple[str, ...] = (
 # Limit untrusted header data repeated in every log record.
 _CLIENT_APP_MAX_LENGTH = 120
 
+# Upstream responses are relayed with their headers, and these identify the
+# operator's provider account. Stripped here so every relay path is covered.
+_UPSTREAM_ACCOUNT_HEADERS: tuple[str, ...] = (
+    "anthropic-workspace-id",
+    "anthropic-organization-id",
+)
+
 
 def client_app_from_headers(headers: Headers) -> str:
     for header in _CLIENT_APP_HEADERS:
@@ -261,6 +268,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             headers_duration = time.monotonic() - stage_start
 
             if hasattr(response, "headers"):
+                for header in _UPSTREAM_ACCOUNT_HEADERS:
+                    del response.headers[header]
                 response.headers["x-routstr-request-id"] = request_id
                 # Headers are already on the wire before a streamed body ends,
                 # so this can only ever be time-to-headers.

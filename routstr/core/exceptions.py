@@ -3,7 +3,7 @@ import math
 from fastapi import Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from .error_scope import (
     ERROR_SCOPE_UPSTREAM,
@@ -36,6 +36,9 @@ class UpstreamError(Exception):
     mapping happens at response construction. Proxy-chosen statuses (transport
     failure, timeout) may already be the caller-visible one — only read
     ``status_code`` as a provider status behind ``from_upstream_response``.
+
+    ``upstream_body`` holds the redacted upstream error body. It is internal
+    and never sent to the client.
     """
 
     def __init__(
@@ -46,6 +49,7 @@ class UpstreamError(Exception):
         details: dict[str, object] | None = None,
         from_upstream_response: bool = False,
         scope: str = ERROR_SCOPE_UPSTREAM,
+        upstream_body: str | None = None,
     ):
         self.message = message
         self.status_code = status_code
@@ -53,7 +57,34 @@ class UpstreamError(Exception):
         self.details = details
         self.from_upstream_response = from_upstream_response
         self.scope = scope
+        self.upstream_body = upstream_body
         super().__init__(message)
+
+
+class EhbpEncryptedUpstreamError(UpstreamError):
+    """Non-200 EHBP enclave response whose body is end-to-end encrypted.
+
+    EHBP encrypts response bodies, errors included. The proxy is a blind relay
+    and cannot decrypt them, so wrapping the bytes in a proxy JSON envelope
+    (as :func:`create_upstream_error_response` does) hands the caller mojibake
+    instead of the enclave's actual error. ``response`` holds the enclave reply
+    reconstructed verbatim — status, ``Ehbp-Response-Nonce`` and the ciphertext
+    body — and ``proxy.py`` returns it once the provider chain is exhausted, so
+    the EHBP client can decrypt the real failure.
+
+    Until then the error behaves like any other provider failure: it can fail
+    over to the next candidate, is counted for cooldown purposes, and its
+    reservation is released when no provider is left.
+    """
+
+    def __init__(self, message: str, *, status_code: int, response: Response):
+        super().__init__(
+            message,
+            status_code=status_code,
+            from_upstream_response=True,
+            scope=ERROR_SCOPE_UPSTREAM,
+        )
+        self.response = response
 
 
 class EhbpTimeoutError(UpstreamError):

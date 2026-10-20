@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Optional
 
 from fastapi import HTTPException
 from sqlalchemy import case, inspect
-from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select, update
 
 from .core import get_logger
@@ -34,6 +33,7 @@ from .redemption_cache import (
     redemption_negative_cache,
 )
 from .wallet import (
+    SWAP_BUSY_RETRY_AFTER_SECONDS,
     classify_redemption_error,
     credit_balance,
     deserialize_token_from_string,
@@ -49,11 +49,11 @@ payments_logger = get_logger("routstr.payments")
 
 # Routstr platform fee constants
 ROUTSTR_FEE_PERCENT: float = 2.1
-ROUTSTR_LN_ADDRESS: str = (
-    "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qqdufs7ql29s@npub.cash"
-)
+ROUTSTR_LN_ADDRESS: str = "routstr-fees@rizful.com"
 ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS: int = 900
-ROUTSTR_FEE_DEFAULT_PAYOUT: int = 200
+# Minimum accrued fee (in sats) before the payout loop sends anything. This is a
+# floor, not a fixed amount: once reached, the whole accumulated balance is paid.
+ROUTSTR_FEE_DEFAULT_PAYOUT: int = 500
 
 
 def _format_msat_amount(amount: int) -> str:
@@ -126,6 +126,11 @@ def redemption_error_to_http_exception(error: Exception) -> HTTPException:
                 "code": error_code,
             }
         },
+        headers=(
+            {"Retry-After": str(SWAP_BUSY_RETRY_AFTER_SECONDS)}
+            if error_code == "cashu_swap_busy"
+            else None
+        ),
     )
 
 
@@ -173,6 +178,53 @@ def _maybe_cache_terminal_redemption_failure(hashed_key: str, error: Exception) 
     )
 
 
+def _validate_existing_cashu_key(
+    existing_key: ApiKey,
+    refund_address: Optional[str],
+    key_expiry_time: Optional[int],
+    min_cost: int,
+) -> ApiKey:
+    logger.info(
+        "Existing Cashu token found",
+        extra={
+            "key_hash": existing_key.hashed_key[:8] + "...",
+            "balance": existing_key.balance,
+            "total_requests": existing_key.total_requests,
+        },
+    )
+
+    if key_expiry_time is not None:
+        existing_key.key_expiry_time = key_expiry_time
+        logger.debug(
+            "Updated key expiry time for existing Cashu key",
+            extra={
+                "key_hash": existing_key.hashed_key[:8] + "...",
+                "expiry_time": key_expiry_time,
+            },
+        )
+
+    if refund_address is not None:
+        existing_key.refund_address = refund_address
+        logger.debug(
+            "Updated refund address for existing Cashu key",
+            extra={
+                "key_hash": existing_key.hashed_key[:8] + "...",
+                "refund_address_preview": refund_address[:20] + "..."
+                if len(refund_address) > 20
+                else refund_address,
+            },
+        )
+
+    # Early check: Billing balance check
+    if min_cost > 0 and existing_key.total_balance < min_cost:
+        raise HTTPException(
+            status_code=402,
+            detail=_model_balance_error(min_cost, existing_key.total_balance),
+        )
+
+    return existing_key
+
+
 async def validate_bearer_key(
     bearer_key: str,
     session: AsyncSession,
@@ -181,8 +233,20 @@ async def validate_bearer_key(
     min_cost: int = 0,
 ) -> ApiKey:
     if bearer_key.startswith("cashu"):
-        # Acquire before the first lookup/flush so concurrent token creation
-        # cannot hold SQLite write transactions while waiting to mutate proofs.
+        hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
+        with session.no_autoflush:
+            existing_key = await session.get(ApiKey, hashed_key)
+        if existing_key is not None:
+            return _validate_existing_cashu_key(
+                existing_key, refund_address, key_expiry_time, min_cost
+            )
+        if cached_failure := redemption_negative_cache.get(hashed_key):
+            raise _cached_failure_to_http_exception(cached_failure)
+
+        # Finish the lookup transaction before waiting for the wallet lock;
+        # concurrent creation must not hold SQLite writes while waiting to
+        # mutate proofs. The locked path re-checks existence before redeeming.
+        await session.commit()
         async with wallet_operation_guard():
             return await _validate_bearer_key_locked(
                 bearer_key,
@@ -293,6 +357,20 @@ async def _validate_bearer_key_locked(
                 "sk- API key not found in database",
                 extra={"key_preview": bearer_key[:10] + "..."},
             )
+            # Keep the "Key not found." prefix verbatim: @routstr/sdk (<=0.4.6)
+            # detects a dead key with a case-sensitive `body.includes("Key not
+            # found")` probe, and uses it to purge the key from its store. The
+            # refund path in balance.py already relies on the same prefix.
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "message": "Key not found. Deposit first via /v1/wallet/create to get a key on this node.",
+                        "type": "invalid_request_error",
+                        "code": "key_not_found",
+                    }
+                },
+            )
 
     if bearer_key.startswith("cashu"):
         logger.debug(
@@ -321,47 +399,9 @@ async def _validate_bearer_key_locked(
             )
 
             if existing_key := await session.get(ApiKey, hashed_key):
-                logger.info(
-                    "Existing Cashu token found",
-                    extra={
-                        "key_hash": existing_key.hashed_key[:8] + "...",
-                        "balance": existing_key.balance,
-                        "total_requests": existing_key.total_requests,
-                    },
+                return _validate_existing_cashu_key(
+                    existing_key, refund_address, key_expiry_time, min_cost
                 )
-
-                if key_expiry_time is not None:
-                    existing_key.key_expiry_time = key_expiry_time
-                    logger.debug(
-                        "Updated key expiry time for existing Cashu key",
-                        extra={
-                            "key_hash": existing_key.hashed_key[:8] + "...",
-                            "expiry_time": key_expiry_time,
-                        },
-                    )
-
-                if refund_address is not None:
-                    existing_key.refund_address = refund_address
-                    logger.debug(
-                        "Updated refund address for existing Cashu key",
-                        extra={
-                            "key_hash": existing_key.hashed_key[:8] + "...",
-                            "refund_address_preview": refund_address[:20] + "..."
-                            if len(refund_address) > 20
-                            else refund_address,
-                        },
-                    )
-
-                # Early check: Billing balance check
-                if min_cost > 0 and existing_key.total_balance < min_cost:
-                    raise HTTPException(
-                        status_code=402,
-                        detail=_model_balance_error(
-                            min_cost, existing_key.total_balance
-                        ),
-                    )
-
-                return existing_key
 
             if cached_failure := redemption_negative_cache.get(hashed_key):
                 logger.info(
@@ -404,26 +444,11 @@ async def _validate_bearer_key_locked(
                 refund_currency=refund_currency,
                 refund_mint_url=refund_mint_url,
             )
+            # No flush: the INSERT is written together with the credit, after the
+            # mint replies. Flushing here would hold the SQLite write lock across
+            # mint I/O and stall every other request's reservation. The wallet
+            # lock and the re-check above already make this the only creator.
             session.add(new_key)
-
-            try:
-                await session.flush()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(
-                    "Concurrent key creation detected, fetching existing key",
-                    extra={"key_hash": hashed_key[:8] + "..."},
-                )
-                existing_key = await session.get(ApiKey, hashed_key)
-                if not existing_key:
-                    raise Exception("Failed to fetch existing key after IntegrityError")
-
-                if key_expiry_time is not None:
-                    existing_key.key_expiry_time = key_expiry_time
-                if refund_address is not None:
-                    existing_key.refund_address = refund_address
-
-                return existing_key
 
             logger.debug(
                 "New key created, starting token redemption",
@@ -637,6 +662,14 @@ async def pay_for_request(
     )
 
     # Charge the base cost for the request atomically to avoid race conditions
+    from .core.lifecycle import request_lifetime
+
+    lifetime = request_lifetime.get()
+    remaining_lifetime = (
+        max(0, lifetime.deadline - asyncio.get_running_loop().time())
+        if lifetime is not None
+        else settings.max_request_lifetime_seconds
+    )
     reserved_at_now = int(time.time())
     stmt = (
         update(ApiKey)
@@ -686,6 +719,13 @@ async def pay_for_request(
             billing_key_hash=reservation.billing_key_hash,
             reserved_msats=reservation.reserved_msats,
             status="active",
+            started_at=reserved_at_now,
+            # reserved_at_now floors to the second; add 1s margin so a
+            # finalizer finishing right at the nominal deadline isn't fenced
+            # out by truncation.
+            expires_at=reserved_at_now
+            + math.ceil(remaining_lifetime + settings.request_cleanup_timeout_seconds)
+            + 1,
         )
     )
     # Publish the identity before commit. If the commit succeeds but its
@@ -875,6 +915,10 @@ async def renew_reservation(
         update(ReservationRelease)
         .where(col(ReservationRelease.id) == snapshot.release_id)
         .where(col(ReservationRelease.status) == "active")
+        .where(
+            (col(ReservationRelease.expires_at).is_(None))
+            | (col(ReservationRelease.expires_at) > int(time.time()))
+        )
         .values(created_at=int(time.time()))
     )
     await session.commit()
@@ -902,12 +946,21 @@ def _start_reservation_heartbeat(snapshot: ReservationSnapshot) -> None:
     """
     interval = max(1, settings.stale_reservation_timeout_seconds // 3)
     owner = asyncio.current_task()
+    from .core.lifecycle import request_lifetime
+
+    lifetime = request_lifetime.get()
+    deadline = asyncio.get_running_loop().time() + settings.max_request_lifetime_seconds
 
     async def beat() -> None:
         try:
             while True:
                 await asyncio.sleep(interval)
-                if owner is None or owner.done():
+                if (
+                    owner is None
+                    or owner.done()
+                    or (lifetime is not None and lifetime.stopped)
+                    or asyncio.get_running_loop().time() >= deadline
+                ):
                     # Request control is gone; let the lease expire so the
                     # sweeper can release the reservation if no terminal
                     # transition ever ran.
@@ -1091,6 +1144,10 @@ async def _claim_reservation_for_charge(
         update(ReservationRelease)
         .where(col(ReservationRelease.id) == snapshot.release_id)
         .where(col(ReservationRelease.status) == "active")
+        .where(
+            col(ReservationRelease.expires_at).is_(None)
+            | (col(ReservationRelease.expires_at) > int(time.time()))
+        )
         .where(col(ReservationRelease.key_hash) == snapshot.key_hash)
         .where(col(ReservationRelease.billing_key_hash) == snapshot.billing_key_hash)
         .where(col(ReservationRelease.reserved_msats) == snapshot.reserved_msats)
@@ -1159,6 +1216,7 @@ async def _adjust_payment_for_tokens(
     model_obj: "Model | None" = None,
     provider_fee: float | None = None,
     reservation_snapshot: ReservationSnapshot | None = None,
+    precomputed_cost: CostData | None = None,
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
@@ -1235,8 +1293,14 @@ async def _adjust_payment_for_tokens(
                     extra={"error": str(e), "fee_msats": fee_msats},
                 )
 
-    calculated_cost = await calculate_cost(
-        response_data, deducted_max_cost, model_obj, provider_fee
+    # A flat per-unit charge is priced by the caller; its response carries no
+    # usage object for ``calculate_cost`` to read.
+    calculated_cost: CostData | CostDataError = (
+        precomputed_cost
+        if precomputed_cost is not None
+        else await calculate_cost(
+            response_data, deducted_max_cost, model_obj, provider_fee
+        )
     )
     if isinstance(calculated_cost, CostDataError):
         # Content was already served, so release instead of raising a 400.
@@ -1595,6 +1659,7 @@ async def adjust_payment_for_tokens(
     model_obj: "Model | None" = None,
     provider_fee: float | None = None,
     reservation_snapshot: ReservationSnapshot | None = None,
+    precomputed_cost: CostData | None = None,
 ) -> dict:
     """Settle payment while exposing latency for every import path."""
     started = time.perf_counter()
@@ -1609,6 +1674,7 @@ async def adjust_payment_for_tokens(
             model_obj,
             provider_fee,
             reservation_snapshot,
+            precomputed_cost,
         )
         succeeded = True
         return result

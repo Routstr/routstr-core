@@ -1,10 +1,23 @@
+import json
 from typing import TYPE_CHECKING
+
+from litellm.llms.openai.chat.gpt_5_transformation import OpenAIGPT5Config
+from litellm.llms.openai.chat.o_series_transformation import OpenAIOSeriesConfig
 
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
+from .image_catalog import attach_image_books, openai_image_book
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
+
+_O_SERIES = OpenAIOSeriesConfig()
+
+
+def _rejects_max_tokens(model: str) -> bool:
+    return OpenAIGPT5Config.is_model_gpt_5_model(
+        model
+    ) or _O_SERIES.is_model_o_series_model(model)
 
 
 class OpenAIUpstreamProvider(BaseUpstreamProvider):
@@ -13,6 +26,7 @@ class OpenAIUpstreamProvider(BaseUpstreamProvider):
     provider_type = "openai"
     default_base_url = "https://api.openai.com/v1"
     platform_url = "https://platform.openai.com/api-keys"
+    supports_decisions = True
 
     def __init__(self, api_key: str, provider_fee: float = 1.01):
         super().__init__(
@@ -42,7 +56,50 @@ class OpenAIUpstreamProvider(BaseUpstreamProvider):
         """Strip 'openai/' prefix for OpenAI API compatibility."""
         return model_id.removeprefix("openai/")
 
+    def prepare_request_body(
+        self,
+        body: bytes | None,
+        model_obj: Model,
+        include_stream_usage: bool = False,
+    ) -> bytes | None:
+        body = super().prepare_request_body(body, model_obj, include_stream_usage)
+        if not body:
+            return body
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return body
+        # Reasoning models 400 on max_tokens; renaming up front saves the
+        # reject-and-retry round trip. Names litellm doesn't know yet still
+        # fall through to request_correction's reactive rename.
+        if (
+            isinstance(data, dict)
+            and "messages" in data
+            and "max_tokens" in data
+            and "max_completion_tokens" not in data
+            and _rejects_max_tokens(self.transform_model_name(model_obj.id))
+        ):
+            data["max_completion_tokens"] = data.pop("max_tokens")
+            return json.dumps(data).encode()
+        return body
+
     async def fetch_models(self) -> list[Model]:
-        """Fetch OpenAI models from OpenRouter API filtered by openai source."""
+        """Fetch OpenAI models from OpenRouter API filtered by openai source.
+
+        GPT Image models are metered in image output tokens, which the
+        images API reports in ``usage``; their book carries that rate and
+        the documented per-image estimates for the reservation.
+        """
         models_data = await async_fetch_openrouter_models(source_filter="openai")
-        return [Model(**model) for model in models_data]  # type: ignore
+        books = {}
+        for entry in models_data:
+            pricing = entry.get("pricing")
+            book = (
+                openai_image_book(str(entry.get("id", "")), pricing)
+                if isinstance(pricing, dict)
+                else None
+            )
+            if book is not None:
+                books[str(entry["id"])] = book
+        models = [Model(**model) for model in models_data]  # type: ignore
+        return attach_image_books(models, books, source="OpenAI")
