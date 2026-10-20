@@ -15,7 +15,13 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ..core.logging import get_logger
-from ..payment.models import Architecture, Model, Pricing, TopProvider
+from ..payment.models import (
+    DECISIONS_MODALITY,
+    Architecture,
+    Model,
+    Pricing,
+    TopProvider,
+)
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
@@ -56,9 +62,9 @@ def _build_model(name: str, entry: dict[str, Any] | None = None) -> Model:
         description=description,
         context_length=_CONTEXT_LENGTH,
         architecture=Architecture(
-            modality="text->decisions",
+            modality=f"text->{DECISIONS_MODALITY}",
             input_modalities=["text"],
-            output_modalities=["decisions"],
+            output_modalities=[DECISIONS_MODALITY],
             tokenizer="Other",
             instruct_type=None,
         ),
