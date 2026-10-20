@@ -71,7 +71,7 @@ async def test_bootstrap_fetches_models_without_stored_rows(
             new=AsyncMock(return_value=fetched),
         ),
         patch("routstr.payment.price._update_prices", new=AsyncMock()),
-        patch("routstr.payment.models._update_sats_pricing_once", new=AsyncMock()),
+        patch("routstr.payment.price.SATS_USD_PRICE", 0.001),
     ):
         await _bootstrap_providers_and_pricing()
 

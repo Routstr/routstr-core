@@ -25,9 +25,11 @@ import {
   AlertTriangle,
   Unlock,
   Loader2,
+  ShieldCheck,
 } from 'lucide-react';
 import { ProviderBalance } from '@/components/provider-balance';
 import { ProviderModelsPanel } from '@/components/provider-models-panel';
+import { ProviderCertificationDialog } from '@/components/provider-certification-dialog';
 import { RoutstrCreateKeySection } from '@/components/providers/RoutstrCreateKeySection';
 import { RoutstrProviderService } from '@/lib/api/services/routstr-provider';
 import { getErrorStatus } from '@/lib/api/client';
@@ -93,6 +95,7 @@ export function ProviderCard({
 }: ProviderCardProps) {
   const queryClient = useQueryClient();
   const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
+  const [isCertifyOpen, setIsCertifyOpen] = useState(false);
   const [isReleaseDialogOpen, setIsReleaseDialogOpen] = useState(false);
   // The claim as the query cache held it when the admin opened the dialog.
   // The mutation sends this token rather than re-reading the query at submit
@@ -313,6 +316,17 @@ export function ProviderCard({
             <Button
               variant='outline'
               size='sm'
+              onClick={() => setIsCertifyOpen(true)}
+              className='justify-center gap-1.5'
+              title='Probe the upstream and verify usage, pricing, caching and margin'
+            >
+              <ShieldCheck className='h-4 w-4' />
+              <span>Certify</span>
+            </Button>
+
+            <Button
+              variant='outline'
+              size='sm'
               onClick={onEditProvider}
               className='justify-center gap-1.5'
             >
@@ -368,6 +382,12 @@ export function ProviderCard({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <ProviderCertificationDialog
+        provider={provider}
+        open={isCertifyOpen}
+        onOpenChange={setIsCertifyOpen}
+      />
 
       <Dialog open={isKeyModalOpen} onOpenChange={setIsKeyModalOpen}>
         <DialogContent className='max-h-[90dvh] overflow-y-auto sm:max-w-[500px]'>

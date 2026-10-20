@@ -46,11 +46,48 @@ export const UpdateUpstreamProviderSchema = z.object({
   slug: z.string().optional(),
 });
 
+export const CertificationStatusSchema = z.enum(['ok', 'warn', 'fail']);
+
+export const CertificationRowSchema = z.object({
+  id: z.string(),
+  status: CertificationStatusSchema,
+  title: z.string(),
+  detail: z.string(),
+  evidence: z.record(z.string(), z.unknown()),
+});
+
+export const CertificationGoalSchema = z.object({
+  goal: z.string(),
+  label: z.string(),
+  status: CertificationStatusSchema,
+  tick: z.string(),
+  rows: z.array(z.string()),
+});
+
+export const ProviderCertificationSchema = z.object({
+  provider_id: z.number(),
+  generated_at: z.string(),
+  rows: z.array(CertificationRowSchema),
+  checklist: z.array(CertificationGoalSchema),
+});
+
+export type CertificationStatus = z.infer<typeof CertificationStatusSchema>;
+export type CertificationRow = z.infer<typeof CertificationRowSchema>;
+export type CertificationGoal = z.infer<typeof CertificationGoalSchema>;
+export type ProviderCertification = z.infer<typeof ProviderCertificationSchema>;
+
+export type CertifyProviderRequest = {
+  model_id?: string;
+  model_path?: string;
+  check_cache?: boolean;
+};
+
 export const AdminModelPricingSchema = z.object({
   prompt: z.number().optional(),
   completion: z.number().optional(),
   request: z.number().optional(),
   image: z.number().optional(),
+  image_output: z.number().optional(),
   web_search: z.number().optional(),
   internal_reasoning: z.number().optional(),
   input_cache_read: z.number().optional(),
@@ -82,6 +119,13 @@ export const AdminModelSchema = z.object({
   alias_ids: z.array(z.string()).nullable().optional(),
   enabled: z.boolean().default(true),
   forwarded_model_id: z.string().nullable().optional(),
+  image_pricing: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+
+export const CertificationPathSchema = z.object({
+  path: z.string(),
+  endpoint_tag: z.string().nullable(),
+  endpoint_name: z.string().nullable(),
 });
 
 export const ProviderModelsSchema = z.object({
@@ -92,6 +136,7 @@ export const ProviderModelsSchema = z.object({
   }),
   db_models: z.array(AdminModelSchema),
   remote_models: z.array(AdminModelSchema),
+  certification_paths: z.record(z.string(), z.array(CertificationPathSchema)),
 });
 
 export type ProviderType = z.infer<typeof ProviderTypeSchema>;
@@ -107,6 +152,7 @@ export type AdminModelPricing = z.infer<typeof AdminModelPricingSchema>;
 export type AdminModelArchitecture = z.infer<
   typeof AdminModelArchitectureSchema
 >;
+export type CertificationPath = z.infer<typeof CertificationPathSchema>;
 export type ProviderModels = z.infer<typeof ProviderModelsSchema>;
 
 export interface AdminModelAsModel {
@@ -315,6 +361,17 @@ export class AdminService {
     return await apiClient.delete<{ ok: boolean; deleted_id: number }>(
       `/admin/api/upstream-providers/${id}`
     );
+  }
+
+  static async certifyProvider(
+    providerId: number,
+    body: CertifyProviderRequest = {}
+  ): Promise<ProviderCertification> {
+    const data = await apiClient.post<unknown>(
+      `/admin/api/upstream-providers/${providerId}/certify`,
+      body
+    );
+    return ProviderCertificationSchema.parse(data);
   }
 
   static async getProviderModels(providerId: number): Promise<ProviderModels> {

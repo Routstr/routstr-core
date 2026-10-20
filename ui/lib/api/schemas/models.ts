@@ -111,37 +111,11 @@ export const ModelListResponseSchema = z.object({
   }),
 });
 
-// Schema for model testing request
-export const ModelTestRequestSchema = z.object({
-  modelId: z.string(),
-  input: z.string(),
-  parameters: z.record(z.string(), z.unknown()).optional(),
-});
-
-// Schema for model testing response
-export const ModelTestResponseSchema = z.object({
-  output: z.string(),
-  usage: z
-    .object({
-      promptTokens: z.number().optional(),
-      completionTokens: z.number().optional(),
-      totalTokens: z.number().optional(),
-    })
-    .optional(),
-  timings: z
-    .object({
-      totalMs: z.number(),
-    })
-    .optional(),
-});
-
 // Export types derived from the schemas
 export type Model = z.infer<typeof ModelSchema>;
 export type ModelWithSettings = z.infer<typeof ModelWithSettingsSchema>;
 export type CreateModel = z.infer<typeof CreateModelSchema>;
 export type UpdateModel = z.infer<typeof UpdateModelSchema>;
 export type ModelListResponse = z.infer<typeof ModelListResponseSchema>;
-export type ModelTestRequest = z.infer<typeof ModelTestRequestSchema>;
-export type ModelTestResponse = z.infer<typeof ModelTestResponseSchema>;
 export type ManualModel = z.infer<typeof ManualModelSchema>;
 export type GroupSettings = z.infer<typeof GroupSettingsSchema>;

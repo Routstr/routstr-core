@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -18,7 +19,7 @@ import { BatchOverrideDialog } from '@/components/batch-override-dialog';
 import { ProviderCard } from '@/components/provider-card';
 import { ProviderFormDialogContent } from '@/components/provider-form-dialog-content';
 import { Skeleton } from '@/components/ui/skeleton';
-import { AlertCircle, Plus, Server } from 'lucide-react';
+import { AlertCircle, BadgeCheck, Plus, Server } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogTrigger } from '@/components/ui/dialog';
 import {
@@ -348,12 +349,20 @@ export default function ProvidersPage() {
             title='Upstream Providers'
             description='Manage your AI provider connections and credentials.'
             actions={
-              <DialogTrigger asChild>
-                <Button>
-                  <Plus className='h-4 w-4' />
-                  Add Provider
+              <>
+                <Button asChild variant='outline'>
+                  <Link href='/providers/certification'>
+                    <BadgeCheck className='h-4 w-4' />
+                    Certify Providers
+                  </Link>
                 </Button>
-              </DialogTrigger>
+                <DialogTrigger asChild>
+                  <Button>
+                    <Plus className='h-4 w-4' />
+                    Add Provider
+                  </Button>
+                </DialogTrigger>
+              </>
             }
           />
           <ProviderFormDialogContent

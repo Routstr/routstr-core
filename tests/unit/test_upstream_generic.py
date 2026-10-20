@@ -362,6 +362,26 @@ async def test_litellm_zero_price_entry_fails_closed(
 
 
 @pytest.mark.asyncio
+async def test_openrouter_image_model_without_token_price_fails_closed() -> None:
+    """The feed carries OpenRouter's image-only models, priced per image with
+    0/0 token rates. Resolving one at 0/0 would serve it free, so it imports
+    disabled like any other unpriced model."""
+    payload = {"data": [{"id": "flux.2-pro", "object": "model", "owned_by": "bfl"}]}
+    or_entry = {
+        "id": "black-forest-labs/flux.2-pro",
+        "architecture": {"output_modalities": ["image"]},
+        "pricing": {"prompt": "0", "completion": "0", "image_output": "0.0000073"},
+    }
+
+    with _patch_models_endpoint(payload):
+        or_feed = AsyncMock(return_value=[or_entry])
+        with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    assert _model_by_id(models, "flux.2-pro").enabled is False
+
+
+@pytest.mark.asyncio
 async def test_litellm_output_cap_not_used_as_context() -> None:
     """litellm's ``max_tokens`` is the completion cap, not the context window
     (it tracks ``max_output_tokens`` for ~94% of models). When a model reports

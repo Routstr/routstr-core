@@ -32,6 +32,9 @@ RUN apt-get update \
         libtool \
     && rm -rf /var/lib/apt/lists/*
 
+# Match the backend image: compile dependencies once at build time.
+ENV UV_COMPILE_BYTECODE=1
+
 COPY uv.lock pyproject.toml ./
 
 RUN uv sync --no-dev --no-install-project
@@ -39,6 +42,8 @@ RUN uv sync --no-dev --no-install-project
 WORKDIR /app
 
 COPY . .
+
+RUN /.venv/bin/python -m compileall -q routstr
 
 # Copy the built UI from the ui-builder stage
 COPY --from=ui-builder /app/ui/out ./ui_out
@@ -49,6 +54,9 @@ ENV GIT_COMMIT=${GIT_COMMIT}
 ENV GIT_TAG=${GIT_TAG}
 ENV PORT=8000
 ENV PYTHONUNBUFFERED=1
+# routstr is not installed into the venv (--no-install-project); make it importable
+# for `python scripts/<name>.py` run via `docker compose exec`.
+ENV PYTHONPATH=/app
 
 EXPOSE 8000
 

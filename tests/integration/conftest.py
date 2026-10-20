@@ -72,6 +72,12 @@ from routstr.mint import MintRateGuard  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def initialized_sats_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Model/admin tests skip lifespan, so supply its initial exchange rate."""
+    monkeypatch.setattr("routstr.payment.price.SATS_USD_PRICE", 0.0005)
+
+
+@pytest.fixture(autouse=True)
 def isolate_mint_rate_guards() -> Iterator[None]:
     MintRateGuard._guards.clear()
     yield
