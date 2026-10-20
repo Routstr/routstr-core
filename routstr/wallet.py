@@ -102,6 +102,9 @@ async def wallet_operation_guard() -> AsyncGenerator[None, None]:
     finally:
         if depth_token is not None:
             _wallet_operation_depth.reset(depth_token)
+            # Proofs may have changed (payouts, melts, sends, credits); a cached
+            # scan would keep showing funds that already left the wallet.
+            invalidate_balance_cache()
         if acquired:
             fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)

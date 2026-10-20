@@ -645,6 +645,25 @@ async def test_invalidation_discards_scan_started_before_wallet_change() -> None
 
 
 @pytest.mark.asyncio
+async def test_wallet_operation_drops_cached_balances(tmp_path: Path) -> None:
+    from routstr import wallet
+
+    fetch = AsyncMock(return_value=([], 0, 0, 0))
+    with (
+        patch("routstr.wallet.fetch_all_balances", fetch),
+        patch("routstr.wallet._WALLET_OPERATION_LOCK", tmp_path / "op.lock"),
+    ):
+        await wallet.get_cached_balances()
+        # A payout, melt or send moves proofs; the next read must rescan
+        # rather than return a stale cached balance.
+        async with wallet.wallet_operation_guard():
+            pass
+        await wallet.get_cached_balances()
+
+    assert fetch.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_balances_api_forwards_refresh_flag() -> None:
     from routstr.core.admin import get_balances_api
 

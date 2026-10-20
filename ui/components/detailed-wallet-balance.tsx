@@ -148,7 +148,11 @@ export function DetailedWalletBalance({
               <Button
                 variant='default'
                 size='sm'
-                onClick={() => setWithdrawModalOpen(true)}
+                onClick={() => {
+                  setWithdrawModalOpen(true);
+                  // A stale balance here decides how much money moves.
+                  void forceRefresh().catch(() => undefined);
+                }}
                 disabled={isLoading || !data || data.length === 0}
                 className='flex-1 sm:flex-none'
               >
