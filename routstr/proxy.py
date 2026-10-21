@@ -64,6 +64,7 @@ from .upstream.model_paths import (
     apply_model_path_pricing,
     decode_model_path,
     is_openrouter_base_url,
+    pinned_endpoint_context,
     public_model_id,
     public_provider_url,
 )
@@ -805,6 +806,9 @@ async def _proxy(
                 request=request,
             )
         model_id = selector.model_id
+
+    # Set for every request so an unpinned one never inherits a stale pin.
+    pinned_endpoint_context.set(selector.endpoint_tag if selector else None)
 
     candidates = get_candidates(model_id)
 
