@@ -82,10 +82,11 @@ class Settings(BaseSettings):
     confidential_sidecar_token: str = Field(
         default="", env="CONFIDENTIAL_SIDECAR_TOKEN"
     )
-    # Denial-of-service limit: confidential sessions per client address that
-    # have not been used yet (from the WebSocket accept, before the setup
-    # frame, until the credential record is written). Pre-warmed sessions
-    # count. 0 disables the limit.
+    # Denial-of-service limit: confidential sessions per client address (an
+    # IPv6 address by its /64) that have not been used yet (from the setup's
+    # reservation until the credential record is written). Pre-warmed
+    # sessions count; connections still waiting for their setup are limited
+    # separately. 0 disables the limit.
     confidential_max_unused_per_ip: int = Field(
         default=12, env="CONFIDENTIAL_MAX_UNUSED_PER_IP"
     )
@@ -130,8 +131,9 @@ class Settings(BaseSettings):
         env="CONFIDENTIAL_TRUSTED_PROXIES",
     )
     # Header a trusted proxy puts the client address in. For X-Forwarded-For the
-    # rightmost entry is used (the one the proxy appended; earlier entries come
-    # from the client). Other headers (X-Real-IP, CF-Connecting-IP) are used as is.
+    # rightmost entry over all its lines is used (the one the proxy added;
+    # earlier entries come from the client). Other headers (X-Real-IP,
+    # CF-Connecting-IP) are used as is, from their last line.
     confidential_client_ip_header: str = Field(
         default="x-forwarded-for", env="CONFIDENTIAL_CLIENT_IP_HEADER"
     )
