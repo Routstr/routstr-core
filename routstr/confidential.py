@@ -77,12 +77,15 @@ DEFAULT_IMAGE_COUNT_KEY = "variants"
 # Upstream HTTP errors answered before any inference starts, so the request
 # itself is not billed once the error head is disclosed under π_C3S.
 UNBILLED_ERROR_STATUSES = frozenset(range(400, 500)) | {503}
-# Of those, the ones the provider's own state caused (rate limiting, at
-# capacity): only the session fee. Every other 4xx is a request the provider
-# rejected after the node did the session's 2PC, so the client pays the
-# abandon fee, as for a session it never used; otherwise a deliberately
-# invalid body would be a free way to make the node work.
-PROVIDER_REFUSAL_STATUSES = frozenset({429, 503})
+# Of those, the ones the provider's or the node's own state caused: only the
+# session fee. That is rate limiting and capacity (429, 503), and the node's
+# provider account (401, 403: the key the node wrote is missing, revoked or
+# not entitled; 402: its credit ran out), which only the operator can fix.
+# Every other 4xx is a request the provider rejected after the node did the
+# session's 2PC, so the client pays the abandon fee, as for a session it
+# never used; otherwise a deliberately invalid body would be a free way to
+# make the node work.
+PROVIDER_REFUSAL_STATUSES = frozenset({401, 402, 403, 429, 503})
 
 # A 4K image takes the provider long enough (a busy one took 44 s and 5.9 MB as
 # base64) that several in one response could outlast the provider's idle
@@ -177,6 +180,14 @@ def warn_unprotected_sidecar() -> None:
         logger.error(
             "confidential: CONFIDENTIAL_SIDECAR_URL is not on loopback but "
             "CONFIDENTIAL_SIDECAR_TOKEN is empty; the sidecar requires the token"
+        )
+    elif not loopback:
+        # The sidecar serves plain HTTP: the token (which lets its holder
+        # spend the provider key) crosses this hop unencrypted.
+        logger.warning(
+            "confidential: the sidecar is not on loopback; its token is sent "
+            "unencrypted, so the network to it must be private (a container "
+            "network, a WireGuard or SSH tunnel)"
         )
 
 
@@ -436,6 +447,29 @@ def images_endpoint(side_offer: dict[str, Any]) -> dict[str, Any] | None:
     return ep
 
 
+# Pin keys the clients refuse: under a negating name ``false`` switches a
+# feature on, and pinning a protection can only switch it off.
+_NEGATING_PIN_PREFIXES = (
+    "disable",
+    "no_",
+    "skip",
+    "without",
+    "exclude",
+    "omit",
+    "hide",
+)
+_PROTECTION_PIN_WORDS = ("safe", "moderat", "filter", "nsfw", "censor", "guard")
+
+
+def pin_key_problem(key: str) -> str | None:
+    low = key.lower()
+    if low.startswith(_NEGATING_PIN_PREFIXES):
+        return f"{key!r} has a negating name"
+    if any(word in low for word in _PROTECTION_PIN_WORDS):
+        return f"{key!r} names a protection"
+    return None
+
+
 def _images_endpoint_problem(ep: Any) -> str | None:
     if not isinstance(ep, dict):
         return "not an object"
@@ -451,6 +485,14 @@ def _images_endpoint_problem(ep: Any) -> str | None:
         isinstance(p, list) and len(p) == 2 and isinstance(p[0], str) for p in pins
     ):
         return "fixed_pins"
+    for key, value in pins:
+        # The clients' pin policy: a fixed pin only switches an extra off,
+        # so a block they would refuse is never signed.
+        problem = pin_key_problem(key)
+        if problem:
+            return f"fixed_pins: {problem}"
+        if value is not False and value != []:
+            return f"fixed_pins: {key!r} must be false or []"
     space = ep.get("param_space", {})
     if not isinstance(space, dict) or not all(
         isinstance(k, str) and isinstance(v, list) for k, v in space.items()
@@ -629,11 +671,17 @@ def price_entry(model_id: str, cand: Candidate) -> dict[str, float] | None:
     if rates is None:  # fixed-pricing deployment
         in_rate = float(settings.fixed_per_1k_input_tokens) * 1000.0
         out_rate = float(settings.fixed_per_1k_output_tokens) * 1000.0
-        return {"in": in_rate, "cached_in": in_rate, "out": out_rate}
-    in_rate, out_rate, cache_read_rate, _cache_write = rates
+        return {
+            "in": in_rate,
+            "cached_in": in_rate,
+            "cache_write": in_rate,
+            "out": out_rate,
+        }
+    in_rate, out_rate, cache_read_rate, cache_write_rate = rates
     return {
         "in": float(in_rate),
         "cached_in": float(cache_read_rate),
+        "cache_write": float(cache_write_rate),
         "out": float(out_rate),
     }
 
@@ -650,6 +698,8 @@ def usable_price_entry(model_id: str, cand: Candidate) -> dict[str, float] | Non
     if not entry or not all(
         is_usable_rate(entry.get(k, math.nan)) for k in ("in", "cached_in", "out")
     ):
+        return None
+    if "cache_write" in entry and not is_usable_rate(entry["cache_write"]):
         return None
     return entry
 
@@ -830,8 +880,10 @@ async def confidential_offer() -> dict[str, Any]:
     try:
         return await build_offer()
     except (OfferError, httpx.HTTPError) as exc:
+        # The cause stays in the log: it can name the sidecar's address.
+        logger.warning("confidential: offer unavailable: %s", exc)
         raise HTTPException(
-            status_code=502, detail=f"confidential sidecar unavailable: {exc}"
+            status_code=502, detail="confidential sidecar unavailable"
         ) from exc
 
 
@@ -869,7 +921,8 @@ class Billing:
     candidate: Candidate
     reserved_msats: int
     snapshot: Any  # auth.ReservationSnapshot
-    # Frozen at setup: msats per 1k tokens ({"in", "cached_in", "out"}),
+    # Frozen at setup: msats per 1k tokens ({"in", "cached_in", "cache_write",
+    # "out"}; offers signed before cache writes were priced lack "cache_write"),
     # surcharge included.
     rates: dict[str, float]
     # Frozen at setup from the same offer; the larger fee is part of
@@ -884,6 +937,9 @@ class Billing:
     count: int = 1
     msat_per_image: int = 0
     suffix: str = ""
+    # Chat sessions: the pinned cap and the offer's completion margin.
+    max_tokens: int = 0
+    reserve_margin_tokens: int = 0
 
 
 class BillingError(Exception):
@@ -950,9 +1006,12 @@ def frozen_cost_msats(
 ) -> int | None:
     """The cost of the provider-reported usage at the frozen rates.
 
-    ``None`` when the usage carries no prompt/completion counts. Never more
-    than ``ceil((in*prompt + out*completion)/1000)``, the bound the client
-    checks against its signed offer, nor more than the reservation.
+    ``None`` when the usage carries no prompt/completion counts. Prompt tokens
+    are billed at ``in``, less the cached reads (at ``cached_in``, never above
+    ``in``) and the cache writes (at ``cache_write``, ``in`` when the offer has
+    none), both counted inside ``prompt_tokens`` as OpenAI-style usage reports
+    them. That is the bound the client checks against its signed offer; the
+    cost is never more than the reservation either.
     """
     from .payment.usage import parse_token_count
 
@@ -978,13 +1037,45 @@ def frozen_cost_msats(
         details.get("cached_tokens") if isinstance(details, dict) else 0
     )
     cached = min(max(cached, 0), prompt)
+    written = min(cache_write_tokens(usage), prompt - cached)
     in_rate, out_rate = rates["in"], rates["out"]
     cached_rate = min(rates["cached_in"], in_rate)
+    write_rate = rates.get("cache_write", in_rate)
     cost = math.ceil(
-        (in_rate * (prompt - cached) + cached_rate * cached + out_rate * completion)
+        (
+            in_rate * (prompt - cached - written)
+            + cached_rate * cached
+            + write_rate * written
+            + out_rate * completion
+        )
         / 1000
     )
     return min(max(cost, 0), reserved_msats)
+
+
+# Where OpenAI-style usage reports prompt-cache writes, first match wins:
+# nested under ``prompt_tokens_details`` (Venice, OpenRouter, litellm), then
+# Anthropic's top-level name (Venice repeats it there).
+_CACHE_WRITE_DETAIL_KEYS = (
+    "cache_creation_input_tokens",
+    "cache_write_tokens",
+    "cache_creation_tokens",
+)
+
+
+def cache_write_tokens(usage: dict[str, Any]) -> int:
+    """Prompt tokens the provider reports as written to its prompt cache."""
+    details = usage.get("prompt_tokens_details")
+    found = (
+        [details.get(k) for k in _CACHE_WRITE_DETAIL_KEYS]
+        if isinstance(details, dict)
+        else []
+    )
+    found.append(usage.get("cache_creation_input_tokens"))
+    for v in found:
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            return v
+    return 0
 
 
 def _offer_expired(model_id: str) -> BillingError:
@@ -1089,7 +1180,11 @@ async def reserve(
             max_cost = max(
                 settings.min_request_msat,
                 math.ceil(
-                    (limit * rates["in"] + (max_tokens + margin) * rates["out"]) / 1000
+                    (
+                        limit * max(rates["in"], rates.get("cache_write", 0.0))
+                        + (max_tokens + margin) * rates["out"]
+                    )
+                    / 1000
                 ),
             )
         max_cost += max(fee, abandon)
@@ -1107,6 +1202,30 @@ async def reserve(
             session_fee_msat=fee,
             rate_surcharge_pct=pct,
             abandon_fee_msat=abandon,
+            max_tokens=max_tokens,
+            reserve_margin_tokens=margin,
+        )
+
+
+def _warn_completion_overshoot(billing: Billing, usage: Any) -> None:
+    """Log a provider that reports more completion tokens than the pinned
+    cap plus the margin (the charge is still capped at the reservation)."""
+    completion = usage.get("completion_tokens") if isinstance(usage, dict) else None
+    limit = billing.max_tokens + billing.reserve_margin_tokens
+    if (
+        billing.max_tokens > 0
+        and isinstance(completion, int)
+        and not isinstance(completion, bool)
+        and completion > limit
+    ):
+        logger.warning(
+            "confidential: usage exceeds the pinned max_tokens",
+            extra={
+                "model": billing.model_id,
+                "completion_tokens": completion,
+                "max_tokens": billing.max_tokens,
+                "reserve_margin_tokens": billing.reserve_margin_tokens,
+            },
         )
 
 
@@ -1117,6 +1236,7 @@ async def settle(billing: Billing, usage_event: dict[str, Any]) -> dict[str, Any
     reservation (which includes the fee). A usage event without token counts
     is charged the reservation. Raises if nothing was finalized.
     """
+    _warn_completion_overshoot(billing, usage_event.get("usage"))
     usage_cost = frozen_cost_msats(
         billing.rates, usage_event.get("usage"), billing.reserved_msats
     )
