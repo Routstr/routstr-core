@@ -51,6 +51,9 @@ def _fresh_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cws, "_active_sessions", 0)
     monkeypatch.setattr(cws, "_active_zk", 0)
     monkeypatch.setattr(cws, "_live_sids", {})
+    monkeypatch.setattr(cws, "_pending", {})
+    monkeypatch.setattr(cws, "_pending_by_addr", {})
+    monkeypatch.setattr(cws, "_unused_by_ip", {})
 
 
 @pytest.fixture()
@@ -276,7 +279,9 @@ class _Ledger:
         monkeypatch: pytest.MonkeyPatch,
         reserve_error: Any = None,
         settle_error: Any = None,
+        settle_failures: int | None = None,
     ) -> None:
+        """``settle_failures``: raise ``settle_error`` only on that many first calls."""
         self.calls: list[str] = []
         self.auth: str | None = None
         self.offer_sig: str | None = None
@@ -299,7 +304,10 @@ class _Ledger:
 
         async def settle(billing: Any, usage: dict[str, Any]) -> dict[str, Any]:
             self.calls.append("settle")
-            if settle_error is not None:
+            failed = self.calls.count("settle") - 1
+            if settle_error is not None and (
+                settle_failures is None or failed < settle_failures
+            ):
                 raise settle_error
             return {"cost_msats": 12, "balance_msats": 88000}
 
@@ -424,10 +432,20 @@ def test_attestation_of_another_session_is_not_signed(
     ledger = _Ledger(monkeypatch)
     foreign = {**_ATTEST, "a": {"sid": "ef" * 32}}
     _, got = _run_session(monkeypatch, [_READY, foreign, _USAGE], 2)
-    ready, receipt_msg = got
-    assert receipt_msg["type"] == "receipt"
-    assert receipt_msg["receipt"]["attestation_hash"] == ""
-    assert ledger.calls == ["reserve", "settle"]
+    ready, error = got
+    # Without an attestation nothing is charged and no receipt is signed.
+    assert error["type"] == "error" and error["status"] == 502
+    assert error["detail"]["error"]["outcome"] == "released"
+    assert ledger.calls == ["reserve", "release"]
+
+
+def test_usage_without_an_attestation_is_not_charged(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch)
+    _, got = _run_session(monkeypatch, [_READY, {"type": "body_released"}, _USAGE], 3)
+    assert [m["type"] for m in got] == ["ready", "body_released", "error"]
+    assert ledger.calls == ["reserve", "release"]
 
 
 def test_abort_before_release_releases_the_reservation(
@@ -462,7 +480,9 @@ def test_upstream_error_settlement(
         "sid": SID,
         "usage": {"error_status": status, "choices": []},
     }
-    _, got = _run_session(monkeypatch, [_READY, {"type": "body_released"}, usage], 3)
+    _, got = _run_session(
+        monkeypatch, [_READY, {"type": "body_released"}, _ATTEST, usage], 4
+    )
     assert ledger.calls == ["reserve", expected]
     receipt = got[-1]["receipt"]
     assert got[-1]["type"] == "receipt"
@@ -475,7 +495,7 @@ def test_usage_for_another_model_charges_the_reservation(
 ) -> None:
     ledger = _Ledger(monkeypatch)
     other = {"type": "usage", "sid": SID, "usage": {"model": "pricier", "usage": {}}}
-    _run_session(monkeypatch, [_READY, {"type": "body_released"}, other], 3)
+    _run_session(monkeypatch, [_READY, {"type": "body_released"}, _ATTEST, other], 4)
     assert ledger.calls == ["reserve", "charge"]
 
 
@@ -623,10 +643,12 @@ def _connect(client: TestClient) -> Any:
         ("model", 7),
         ("nonce_c", "zz" * 32),
         ("nonce_c", "aa"),
+        ("nonce_c", "aa" * 32 + "\n"),
         ("offer_sig", 5),
         ("offer_sig", "not-hex"),
         ("offer_sig", None),
         ("offer_sig", ""),
+        ("offer_sig", "ab" * 64 + "\n"),
     ],
 )
 def test_setup_validation_rejects_before_reserving(
@@ -686,20 +708,157 @@ def test_sidecar_is_dialed_only_after_the_reservation(
     assert ledger.calls == ["reserve", "release"]
 
 
-def test_session_cap(
+def _holding_sidecar(holder: dict[str, Any]) -> Any:
+    """Sidecar that accepts the setup (``ready``) and keeps the session open."""
+
+    async def handler(ws: Any) -> None:
+        async for frame in ws:
+            if isinstance(frame, str) and json.loads(frame).get("type") == "setup":
+                holder.setdefault("setups", []).append(json.loads(frame))
+                await ws.send(json.dumps(_READY))
+
+    return handler
+
+
+def test_session_cap_refuses_after_the_reservation_and_releases_it(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
-    _Ledger(monkeypatch)
-    _ConnectRecorder(monkeypatch)
+    """A full node refuses a reserved setup with 503 before dialing the
+    sidecar and releases the reservation in full (no abandon fee)."""
+    ledger = _Ledger(monkeypatch)
+    monkeypatch.setattr(_Billing, "abandon_fee_msat", 500, raising=False)
+
+    async def charge_fee(billing: Any, fee: int) -> int:
+        ledger.calls.append(f"fee:{fee}")
+        return 96500
+
+    monkeypatch.setattr(cws, "charge_fee", charge_fee)
     monkeypatch.setattr(cws, "MAX_SESSIONS", 1)
+    holder: dict[str, Any] = {}
+    with MockSidecar(_holding_sidecar(holder)) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        client = TestClient(_app())
+        with _connect(client) as first:
+            # An idle connection takes no slot: the first setup gets it.
+            with _connect(client) as idle:
+                first.send_text(json.dumps(_SETUP))
+                assert json.loads(first.receive_text())["type"] == "ready"
+                assert cws._active_sessions == 1
+                with _connect(client) as second:
+                    second.send_text(json.dumps(_SETUP))
+                    err = json.loads(second.receive_text())
+                    assert err["status"] == 503
+                    assert err["reason"] == "too many confidential sessions"
+                assert idle is not None
+            assert ledger.calls == ["reserve", "reserve", "release"]
+            assert len(holder["setups"]) == 1  # the refused one never reached it
+        # The accepted session ends unused: it keeps its abandon fee.
+    assert ledger.calls == ["reserve", "reserve", "release", "fee:500"]
+    assert cws._active_sessions == 0 and cws._pending == {}
+
+
+def test_idle_pre_setup_sockets_cannot_block_a_credentialed_setup(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Idle sockets beyond the address's pending share are evicted oldest
+    first, and none of them takes a session slot."""
+    from contextlib import ExitStack
+
+    ledger = _Ledger(monkeypatch)
+    dials = _ConnectRecorder(monkeypatch)
+    _use_sidecar(monkeypatch, 7444)
+    monkeypatch.setattr(cws, "MAX_SESSIONS", 2)
     client = TestClient(_app())
-    with _connect(client) as first:
-        with _connect(client) as second:
-            err = json.loads(second.receive_text())
-            assert err["status"] == 503
-        first.send_text(json.dumps(_SETUP))
-        assert json.loads(first.receive_text())["status"] == 502  # admitted
-    assert cws._active_sessions == 0
+    with ExitStack() as stack:
+        idle = [
+            stack.enter_context(_connect(client))
+            for _ in range(cws.MAX_PENDING_PER_ADDR + 2)
+        ]
+        assert cws._active_sessions == 0
+        with _connect(client) as ws:
+            ws.send_text(json.dumps(_SETUP))
+            assert json.loads(ws.receive_text())["status"] == 502  # admitted
+        # The oldest idle ones were closed to make room.
+        err = json.loads(idle[0].receive_text())
+        assert err["status"] == 503 and "pending" in err["reason"]
+        assert len(cws._pending_by_addr["testclient"]) <= cws.MAX_PENDING_PER_ADDR
+    assert ledger.calls == ["reserve", "release"] and len(dials.urls) == 1
+    assert cws._active_sessions == 0 and cws._pending == {}
+
+
+def test_idle_sockets_from_many_addresses_cannot_block_a_setup(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """A full pending pool evicts its oldest waiting connection."""
+    from contextlib import ExitStack
+
+    ledger = _Ledger(monkeypatch)
+    _ConnectRecorder(monkeypatch)
+    _use_sidecar(monkeypatch, 7444)
+    monkeypatch.setattr(cws, "MAX_SESSIONS", 1)
+    monkeypatch.setattr(cws, "MAX_PENDING", 3)
+    addresses = iter(f"198.51.100.{i}" for i in range(1, 100))
+    monkeypatch.setattr(cws, "client_address", lambda ws: next(addresses))
+    client = TestClient(_app())
+    with ExitStack() as stack:
+        for _ in range(5):
+            stack.enter_context(_connect(client))
+        with _connect(client) as ws:
+            ws.send_text(json.dumps(_SETUP))
+            assert json.loads(ws.receive_text())["status"] == 502  # admitted
+        assert len(cws._pending) <= 3
+    assert ledger.calls == ["reserve", "release"]
+
+
+def test_pending_pool_evicts_the_oldest_waiting_connection() -> None:
+    states = [cws.SessionState() for _ in range(4)]
+    cws._pending.clear()
+    cws._pending_by_addr.clear()
+    try:
+        old = (cws.MAX_PENDING, cws.MAX_PENDING_PER_ADDR)
+        cws.MAX_PENDING, cws.MAX_PENDING_PER_ADDR = 3, 2
+        assert cws._admit_pending(states[0], "a") is None
+        assert cws._admit_pending(states[1], "a") is None
+        # The address's share is full: its oldest is evicted.
+        assert cws._admit_pending(states[2], "a") is None
+        assert states[0].evicted.is_set() and states[0] not in cws._pending
+        # A connection whose setup is being reserved is never evicted.
+        states[1].awaiting_setup = False
+        assert cws._admit_pending(states[3], "b") is None
+        assert cws._pending.keys() == {states[1], states[2], states[3]}
+        late = cws.SessionState()
+        assert cws._admit_pending(late, "c") is None  # the pool evicts states[2]
+        assert states[2].evicted.is_set() and not states[1].evicted.is_set()
+        states[3].awaiting_setup = late.awaiting_setup = False
+        refused = cws._admit_pending(cws.SessionState(), "d")
+        assert refused is not None and refused[0] == 503
+        busy = cws.SessionState()
+        cws._pending_by_addr["a"][busy] = None
+        cws._pending[busy] = "a"
+        busy.awaiting_setup = False
+        refused = cws._admit_pending(cws.SessionState(), "a")
+        assert refused is not None and refused[0] == 429
+        for st in list(cws._pending):
+            cws._release_pending(st)
+        assert cws._pending == {} and cws._pending_by_addr == {}
+    finally:
+        cws.MAX_PENDING, cws.MAX_PENDING_PER_ADDR = old
+        cws._pending.clear()
+        cws._pending_by_addr.clear()
+
+
+@pytest.mark.parametrize(
+    "addr,bucket",
+    [
+        ("198.51.100.7", "198.51.100.7"),
+        ("2001:db8:1:2:aaaa::1", "2001:db8:1:2::/64"),
+        ("2001:db8:1:2:ffff::9", "2001:db8:1:2::/64"),
+        ("::ffff:198.51.100.7", "198.51.100.7"),
+        ("testclient", "testclient"),
+    ],
+)
+def test_address_bucket(addr: str, bucket: str) -> None:
+    assert cws._address_bucket(addr) == bucket
 
 
 def test_offer_fetch_failure_is_an_error_frame(
@@ -742,11 +901,32 @@ def test_settle_failure_finalizes_once_and_reports(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
     ledger = _Ledger(monkeypatch, settle_error=RuntimeError("db down"))
-    _, got = _run_session(monkeypatch, [_READY, {"type": "body_released"}, _USAGE], 3)
+    monkeypatch.setattr(cws, "SETTLE_RETRY_DELAYS", (0, 0, 0))
+    _, got = _run_session(
+        monkeypatch, [_READY, {"type": "body_released"}, _ATTEST, _USAGE], 4
+    )
     assert got[-1]["type"] == "error" and got[-1]["status"] == 500
     assert got[-1]["detail"]["error"]["outcome"] == "charged_reservation"
-    # Fallback charged the reservation; the abort path did not finalize again.
-    assert ledger.calls == ["reserve", "settle", "charge"]
+    # Retried, then the fallback charged the reservation; the abort path did
+    # not finalize again.
+    assert ledger.calls == ["reserve"] + ["settle"] * 4 + ["charge"]
+
+
+def test_a_transient_settle_failure_is_retried(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """A database hiccup during settlement charges the verified usage on a
+    retry, not the whole reservation."""
+    ledger = _Ledger(
+        monkeypatch, settle_error=RuntimeError("database is locked"), settle_failures=1
+    )
+    monkeypatch.setattr(cws, "SETTLE_RETRY_DELAYS", (0, 0, 0))
+    _, got = _run_session(
+        monkeypatch, [_READY, {"type": "body_released"}, _ATTEST, _USAGE], 4
+    )
+    assert got[-1]["type"] == "receipt"
+    assert got[-1]["receipt"]["cost_msats"] == 12
+    assert ledger.calls == ["reserve", "settle", "settle"]
 
 
 def test_usage_for_a_foreign_sid_is_ignored(
@@ -754,16 +934,20 @@ def test_usage_for_a_foreign_sid_is_ignored(
 ) -> None:
     ledger = _Ledger(monkeypatch)
     foreign = {**_USAGE, "sid": "b" * 64}
-    _, got = _run_session(monkeypatch, [_READY, {"type": "body_released"}, foreign], 2)
-    assert [m["type"] for m in got] == ["ready", "body_released"]
+    _, got = _run_session(
+        monkeypatch, [_READY, {"type": "body_released"}, _ATTEST, foreign], 3
+    )
+    assert [m["type"] for m in got] == ["ready", "body_released", "attestation"]
     assert ledger.calls == ["reserve", "charge"]  # no disclosure for this session
 
 
 def test_session_time_limit(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
+    """No disclosure within the post-release window: the reservation is charged."""
     ledger = _Ledger(monkeypatch)
     monkeypatch.setattr(cws, "SESSION_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(cws, "POST_RELEASE_TIMEOUT_S", 0.5)
 
     async def stalling(ws: Any) -> None:
         async for frame in ws:
@@ -780,6 +964,78 @@ def test_session_time_limit(
             got = [json.loads(ws.receive_text()) for _ in range(3)]
     assert got[-1]["type"] == "error" and got[-1]["status"] == 408
     assert ledger.calls == ["reserve", "charge"]
+
+
+def test_released_session_outlives_the_setup_phase_limit(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """A usage disclosed after the setup-phase limit, within the post-release
+    window, is settled rather than the reservation charged."""
+    ledger = _Ledger(monkeypatch)
+    monkeypatch.setattr(cws, "SESSION_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(cws, "POST_RELEASE_TIMEOUT_S", 10.0)
+
+    async def slow(ws: Any) -> None:
+        async for frame in ws:
+            if isinstance(frame, str) and json.loads(frame).get("type") == "setup":
+                await ws.send(json.dumps(_READY))
+                await ws.send(json.dumps({"type": "body_released"}))
+                await asyncio.sleep(1.5)  # past the setup-phase limit
+                await ws.send(json.dumps(_ATTEST))
+                await ws.send(json.dumps(_USAGE))
+                return
+
+    with MockSidecar(slow) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        with _connect(TestClient(_app())) as ws:
+            ws.send_text(json.dumps(_SETUP))
+            got = [json.loads(ws.receive_text()) for _ in range(4)]
+    assert [m["type"] for m in got] == [
+        "ready",
+        "body_released",
+        "attestation",
+        "receipt",
+    ]
+    assert ledger.calls == ["reserve", "settle"]
+
+
+def test_unreleased_session_keeps_the_setup_phase_limit(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch)
+    monkeypatch.setattr(cws, "SESSION_TIMEOUT_S", 0.5)
+
+    async def armed(ws: Any) -> None:
+        async for frame in ws:
+            if isinstance(frame, str) and json.loads(frame).get("type") == "setup":
+                await ws.send(json.dumps(_READY))
+                await asyncio.sleep(2)
+                return
+
+    with MockSidecar(armed) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        with _connect(TestClient(_app())) as ws:
+            ws.send_text(json.dumps(_SETUP))
+            got = [json.loads(ws.receive_text()) for _ in range(2)]
+    assert got[-1]["type"] == "error" and got[-1]["status"] == 408
+    assert ledger.calls == ["reserve", "release"]
+
+
+async def test_post_release_window_stays_inside_the_lease() -> None:
+    from routstr.core.lifecycle import RequestLifetime, request_lifetime
+
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    st = cws.SessionState()
+    assert cws._session_deadline(st, now) == now + cws.SESSION_TIMEOUT_S
+    st.released_at = now + 500
+    token = request_lifetime.set(RequestLifetime(deadline=now + 2000))
+    try:
+        assert cws._session_deadline(st, now) == now + 500 + cws.POST_RELEASE_TIMEOUT_S
+        request_lifetime.set(RequestLifetime(deadline=now + 900))
+        assert cws._session_deadline(st, now) == now + 900 - cws.SETTLE_GRACE_S
+    finally:
+        request_lifetime.reset(token)
 
 
 # ---------------------------------------------------------------------------
@@ -987,6 +1243,57 @@ def test_frozen_cost() -> None:
     assert cost is not None and cost <= bound
 
 
+def test_frozen_cost_bills_cache_writes() -> None:
+    rates = {"in": 10_000.0, "cached_in": 2_500.0, "cache_write": 12_500.0}
+    rates["out"] = 100_000.0
+    # Venice: the writes inside prompt_tokens, nested and repeated top-level.
+    venice = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 8,
+        "prompt_tokens_details": {
+            "cached_tokens": 200,
+            "cache_creation_input_tokens": 600,
+        },
+        "cache_creation_input_tokens": 600,
+    }
+    # 200*10 + 200*2.5 + 600*12.5 + 8*100 msats
+    assert conf.frozen_cost_msats(rates, venice, 10**9) == 10_800
+    # Other spellings, nested or top-level only.
+    for usage in (
+        {
+            **venice,
+            "prompt_tokens_details": {"cached_tokens": 200, "cache_write_tokens": 600},
+        },
+        {
+            **venice,
+            "prompt_tokens_details": {
+                "cached_tokens": 200,
+                "cache_creation_tokens": 600,
+            },
+        },
+        {**venice, "prompt_tokens_details": {"cached_tokens": 200}},
+    ):
+        assert conf.frozen_cost_msats(rates, usage, 10**9) == 10_800
+    # An offer signed without a cache-write rate bills writes at ``in``.
+    old = {k: v for k, v in rates.items() if k != "cache_write"}
+    assert conf.frozen_cost_msats(old, venice, 10**9) == 9300
+    # Writes never exceed the uncached prompt; odd counts are ignored.
+    huge = {**venice, "cache_creation_input_tokens": 10**6, "prompt_tokens_details": {}}
+    assert conf.frozen_cost_msats(rates, huge, 10**9) == math.ceil(
+        (1000 * 12_500 + 8 * 100_000) / 1000
+    )
+    for bad in ("600", -5, True, 1.5):
+        odd = {
+            **venice,
+            "cache_creation_input_tokens": bad,
+            "prompt_tokens_details": {
+                "cached_tokens": 200,
+                "cache_creation_input_tokens": bad,
+            },
+        }
+        assert conf.frozen_cost_msats(rates, odd, 10**9) == 9300
+
+
 def _ctx_model() -> Any:
     """A model with a known context: context 100k, 0.01 / 0.1 sat per token."""
     return SimpleNamespace(
@@ -1095,7 +1402,12 @@ async def test_reservation_covers_the_full_context(billing_db: Any) -> None:
     billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     # 100000 tokens * 10 msats + 8 tokens * 100 msats
     assert billing.reserved_msats == 1_000_800
-    assert billing.rates == {"in": 10_000.0, "cached_in": 10_000.0, "out": 100_000.0}
+    assert billing.rates == {
+        "in": 10_000.0,
+        "cached_in": 10_000.0,
+        "cache_write": 10_000.0,
+        "out": 100_000.0,
+    }
     key = await billing_db.key()
     assert key.reserved_balance == 1_000_800
 
@@ -1320,9 +1632,16 @@ def test_zk_proxy_rejects_bad_proof(
 
 
 class _FakeWS:
-    def __init__(self, peer: str, headers: dict[str, str]) -> None:
+    def __init__(
+        self, peer: str, headers: dict[str, str] | list[tuple[str, str]]
+    ) -> None:
+        from starlette.datastructures import Headers
+
+        lines = headers.items() if isinstance(headers, dict) else headers
         self.client = type("C", (), {"host": peer})()
-        self.headers = headers
+        self.headers = Headers(
+            raw=[(k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in lines]
+        )
 
 
 def test_client_address_trusts_only_proxies(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1343,6 +1662,32 @@ def test_client_address_trusts_only_proxies(monkeypatch: pytest.MonkeyPatch) -> 
     assert cws.client_address(direct) == "198.51.100.9"  # type: ignore[arg-type]
 
 
+def test_client_address_joins_repeated_forwarded_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy that adds its own X-Forwarded-For line (rather than appending to
+    the client's) still decides the address."""
+    monkeypatch.setattr(settings, "confidential_trusted_proxies", ["127.0.0.1"])
+    monkeypatch.setattr(settings, "confidential_client_ip_header", "x-forwarded-for")
+    ws = _FakeWS(
+        "127.0.0.1",
+        [("X-Forwarded-For", "10.9.8.7"), ("X-Forwarded-For", "203.0.113.9")],
+    )
+    assert cws.client_address(ws) == "203.0.113.9"  # type: ignore[arg-type]
+    ws = _FakeWS(
+        "127.0.0.1",
+        [
+            ("X-Forwarded-For", "10.9.8.7, 10.9.8.8"),
+            ("X-Forwarded-For", " 203.0.113.9"),
+        ],
+    )
+    assert cws.client_address(ws) == "203.0.113.9"  # type: ignore[arg-type]
+    # A single-value header: the last line is the proxy's.
+    monkeypatch.setattr(settings, "confidential_client_ip_header", "X-Real-IP")
+    ws = _FakeWS("127.0.0.1", [("X-Real-IP", "10.9.8.7"), ("X-Real-IP", "203.0.113.7")])
+    assert cws.client_address(ws) == "203.0.113.7"  # type: ignore[arg-type]
+
+
 def test_client_address_configured_header(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "confidential_trusted_proxies", ["127.0.0.1"])
     monkeypatch.setattr(settings, "confidential_client_ip_header", "X-Real-IP")
@@ -1358,6 +1703,24 @@ def test_client_address_self_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cws.client_address(ws) == "10.89.0.3"  # type: ignore[arg-type]
     monkeypatch.setattr(settings, "confidential_trusted_proxies", ["self"])
     assert cws.client_address(ws) == "203.0.113.9"  # type: ignore[arg-type]
+
+
+def test_ws_proxy_rejects_session_id_with_trailing_newline(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    with _connect_raw(f"/v1/confidential/ws?session_id={uuid.uuid4()}%0A&v=2") as ws:
+        msg = ws.receive()
+        assert msg["type"] == "websocket.close" and msg["code"] == 1008
+    with _connect_raw(f"/v1/confidential/zk?proof=pi_nk%0A&session_id={SID}") as ws:
+        msg = ws.receive()
+        assert msg["type"] == "websocket.close" and msg["code"] == 1008
+    with _connect_raw(f"/v1/confidential/zk?proof=pi_nk&session_id={SID}%0A") as ws:
+        msg = ws.receive()
+        assert msg["type"] == "websocket.close" and msg["code"] == 1008
+
+
+def _connect_raw(path: str) -> Any:
+    return TestClient(_app()).websocket_connect(path)
 
 
 def test_mark_used_releases_the_slot_once() -> None:
@@ -1677,7 +2040,7 @@ def test_provider_refusal_charges_the_session_fee(
     ledger = _fee_ledger(monkeypatch)
     usage = {"type": "usage", "sid": SID, "usage": {"error_status": status}}
     _, got = _run_session(
-        monkeypatch, [_READY, {"type": "body_released"}, usage], 3, _FEE_SETUP
+        monkeypatch, [_READY, {"type": "body_released"}, _ATTEST, usage], 4, _FEE_SETUP
     )
     assert ledger.calls == ["reserve", "charge_fee:2000"]
     receipt = got[-1]["receipt"]
@@ -1693,14 +2056,14 @@ def test_rejected_request_charges_the_abandon_fee(
     ledger = _fee_ledger(monkeypatch)
     usage = {"type": "usage", "sid": SID, "usage": {"error_status": status}}
     _, got = _run_session(
-        monkeypatch, [_READY, {"type": "body_released"}, usage], 3, _FEE_SETUP
+        monkeypatch, [_READY, {"type": "body_released"}, _ATTEST, usage], 4, _FEE_SETUP
     )
     assert ledger.calls == ["reserve", "charge_fee:5000"]
     assert got[-1]["receipt"]["cost_msats"] == 5000
 
 
 def test_error_status_classes() -> None:
-    assert conf.PROVIDER_REFUSAL_STATUSES == {429, 503}
+    assert conf.PROVIDER_REFUSAL_STATUSES == {401, 402, 403, 429, 503}
     assert conf.PROVIDER_REFUSAL_STATUSES <= conf.UNBILLED_ERROR_STATUSES
 
 
@@ -1742,13 +2105,62 @@ async def test_reservation_lease_outlives_the_session(
     finally:
         request_lifetime.reset(token)
     expires_at = await _lease_expiry(billing_db, billing.snapshot.release_id)
-    assert expires_at > _time.time() + cws.SESSION_TIMEOUT_S + cws.SETTLE_GRACE_S
+    assert expires_at > _time.time() + (
+        cws.SESSION_TIMEOUT_S + cws.POST_RELEASE_TIMEOUT_S + cws.SETTLE_GRACE_S
+    )
     # The settlement at the end of the session still finds it active.
     out = await conf.settle(
         billing,
         {"model": "ctx-model", "usage": {"prompt_tokens": 10, "completion_tokens": 1}},
     )
     assert out["cost_msats"] == 200
+
+
+async def test_usage_past_the_cap_is_logged(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any
+) -> None:
+    """Completion tokens beyond max_tokens + the margin are logged; the charge
+    is unchanged (capped at the reservation)."""
+    seen: list[dict[str, Any]] = []
+
+    def warning(msg: str, *args: Any, extra: Any = None, **kw: Any) -> None:
+        if "max_tokens" in msg:
+            seen.append(extra)
+
+    monkeypatch.setattr(conf.logger, "warning", warning)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
+    limit = 8 + billing.reserve_margin_tokens
+    await conf.settle(
+        billing,
+        {
+            "model": "ctx-model",
+            "usage": {"prompt_tokens": 1, "completion_tokens": limit},
+        },
+    )
+    assert seen == []
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
+    await conf.settle(
+        billing,
+        {
+            "model": "ctx-model",
+            "usage": {"prompt_tokens": 1, "completion_tokens": limit + 1},
+        },
+    )
+    assert seen and seen[0]["completion_tokens"] == limit + 1
+    assert seen[0]["max_tokens"] == 8
+
+
+async def test_offer_error_is_not_echoed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    async def broken() -> dict[str, Any]:
+        raise conf.OfferError("sidecar at 10.0.0.5:7444: connection refused")
+
+    monkeypatch.setattr(conf, "build_offer", broken)
+    with pytest.raises(HTTPException) as info:
+        await conf.confidential_offer()
+    assert info.value.status_code == 502
+    assert info.value.detail == "confidential sidecar unavailable"
 
 
 async def test_session_lifetime_never_shortens_the_request_lifetime(
@@ -1758,7 +2170,7 @@ async def test_session_lifetime_never_shortens_the_request_lifetime(
     monkeypatch.setattr(settings, "max_request_lifetime_seconds", 5000)
     assert cws._session_lifetime().deadline >= loop.time() + 4999
     monkeypatch.setattr(settings, "max_request_lifetime_seconds", 1)
-    floor = cws.SESSION_TIMEOUT_S + cws.SETTLE_GRACE_S
+    floor = cws.SESSION_TIMEOUT_S + cws.POST_RELEASE_TIMEOUT_S + cws.SETTLE_GRACE_S
     assert cws._session_lifetime().deadline >= loop.time() + floor - 1
 
 
@@ -1943,6 +2355,37 @@ def test_zk_proxy_admits_only_live_sessions(monkeypatch: pytest.MonkeyPatch) -> 
         assert dials == []
 
 
+def test_zk_proxy_limits_each_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    dials: list[int] = []
+
+    async def echo(ws: Any) -> None:
+        dials.append(1)
+        async for frame in ws:
+            await ws.send(frame)
+
+    with MockSidecar(echo) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        client = TestClient(_app())
+        greedy = cws._live_sids[SID] = cws.SessionState()
+        other_sid = "b" * 64
+        other = cws._live_sids[other_sid] = cws.SessionState()
+        # A session at its own limit is refused before the sidecar is dialed…
+        greedy.zk_open = cws.MAX_ZK_CONNS_PER_SESSION
+        url = f"/v1/confidential/zk?proof=zkchan&session_id={SID}&zk_token={greedy.zk_token}"
+        with client.websocket_connect(url) as ws:
+            msg = ws.receive()
+            assert msg["type"] == "websocket.close" and msg["code"] == 1013
+        assert dials == []
+        # …and another session's channel still opens, and gives its slot back.
+        url = f"/v1/confidential/zk?proof=zkchan&session_id={other_sid}&zk_token={other.zk_token}"
+        with client.websocket_connect(url) as ws:
+            ws.send_bytes(b"x")
+            assert ws.receive_bytes() == b"x"
+            assert other.zk_open == 1
+        assert dials == [1]
+    assert other.zk_open == 0 and cws._active_zk == 0
+
+
 def test_zk_proxy_closes_when_its_session_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1977,12 +2420,21 @@ def test_zk_proxy_closes_when_its_session_ends(
         (["uvicorn", "app"], {"WEB_CONCURRENCY": "3"}, 3),
         (["gunicorn", "app", "-w", "2"], {}, 2),
         (["gunicorn", "app"], {"GUNICORN_CMD_ARGS": "--workers 5"}, 5),
+        (["gunicorn", "app", "-w4"], {}, 4),
+        (["gunicorn", "app", "-w=3"], {}, 3),
+        (["/venv/lib/gunicorn/app/wsgiapp.py", "app", "-w", "2"], {}, 2),
         # ``-w`` means workers to gunicorn only.
         (["python", "app", "-w", "2"], {}, 1),
+        (["python", "app", "-w2"], {}, 1),
     ],
 )
 def test_configured_workers(argv: list[str], env: dict[str, str], workers: int) -> None:
     assert cws._configured_workers(argv, env) == workers
+
+
+def test_configured_workers_under_an_imported_gunicorn() -> None:
+    # ``python -m gunicorn``: argv[0] names no launcher, but gunicorn is loaded.
+    assert cws._configured_workers(["__main__.py", "app", "-w", "2"], {}, True) == 2
 
 
 def test_claim_single_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
@@ -1992,6 +2444,7 @@ def test_claim_single_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> 
     import tempfile
 
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     monkeypatch.setattr(settings, "confidential_sidecar_url", "http://127.0.0.1:7444")
     monkeypatch.setattr(cws.sys, "argv", ["uvicorn", "app", "--workers", "2"])
     with pytest.raises(RuntimeError, match="single worker"):
@@ -2011,11 +2464,38 @@ def test_claim_single_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> 
             "except BlockingIOError:\n"
             "    sys.exit(3)\n"
         )
-        (lock,) = list(tmp_path.glob("routstr-confidential-*.lock"))
+        (lock,) = list(tmp_path.glob("routstr-confidential-*/*.lock"))
+        assert (lock.parent.stat().st_mode & 0o777) == 0o700
         assert subprocess.run([sys.executable, "-c", code, str(lock)]).returncode == 3
     finally:
         os.close(cws._worker_lock_fd)  # type: ignore[arg-type]
         monkeypatch.setattr(cws, "_worker_lock_fd", None)
+
+
+def test_worker_lock_needs_a_private_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    import os
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(cws.sys, "argv", ["uvicorn", "app"])
+    monkeypatch.setattr(cws, "_worker_lock_fd", None)
+    lock_dir = tmp_path / f"routstr-confidential-{os.getuid()}"
+    # Another account's (here: a world-writable) directory is refused…
+    lock_dir.mkdir(mode=0o777)
+    os.chmod(lock_dir, 0o777)
+    with pytest.raises(RuntimeError, match="private directory"):
+        cws.claim_single_worker("sqlite:///x.db")
+    # …and so is a symlink in its place, even to a private directory.
+    lock_dir.rmdir()
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o700)
+    lock_dir.symlink_to(target)
+    with pytest.raises(RuntimeError, match="private directory"):
+        cws.claim_single_worker("sqlite:///x.db")
+    assert cws._worker_lock_fd is None
 
 
 def test_session_registers_its_sid_for_the_zk_route(
@@ -2189,6 +2669,18 @@ def test_image_suffix_matches_the_shared_vector() -> None:
         {"max_count": True},
         {"max_response_bytes": -1},
         {"max_response_bytes": 1.5},
+        # Fixed pins only switch extras off, under plain names.
+        {"fixed_pins": [["safe_mode", False]]},
+        {"fixed_pins": [["hide_watermark", False]]},
+        {"fixed_pins": [["disable_filter", False]]},
+        {"fixed_pins": [["no_logo", False]]},
+        {"fixed_pins": [["nsfw_check", False]]},
+        {"fixed_pins": [["Content_Moderation", False]]},
+        {"fixed_pins": [["return_binary", True]]},
+        {"fixed_pins": [["return_binary", "off"]]},
+        {"fixed_pins": [["style_references", {}]]},
+        {"fixed_pins": [["style_references", ["x"]]]},
+        {"fixed_pins": [["steps", 0]]},
     ],
 )
 def test_malformed_images_endpoint_is_ignored(change: dict[str, Any]) -> None:
@@ -2591,8 +3083,8 @@ def test_image_session_other_settlements(
     frame = {"type": "usage", "sid": SID, "usage": usage}
     _run_session(
         monkeypatch,
-        [_READY, {"type": "body_released"}, frame],
-        3,
+        [_READY, {"type": "body_released"}, _ATTEST, frame],
+        4,
         dict(_IMG_SETUP),
     )
     assert ledger.calls == ["reserve_image", expected]
@@ -2603,5 +3095,5 @@ def test_flat_usage_on_a_chat_session_charges_the_reservation(
 ) -> None:
     ledger = _Ledger(monkeypatch)
     flat = {**_FLAT, "model": "test-model"}
-    _run_session(monkeypatch, [_READY, {"type": "body_released"}, flat], 3)
+    _run_session(monkeypatch, [_READY, {"type": "body_released"}, _ATTEST, flat], 4)
     assert ledger.calls == ["reserve", "charge"]

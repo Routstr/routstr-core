@@ -37,11 +37,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
 import secrets
 import socket
+import stat
 import sys
 import tempfile
 import time
@@ -96,20 +98,36 @@ _PROOF_RE = re.compile(r"^(twopc|zkchan|pi_nk|pi_c2s|pi_c3s)$")
 _WS_MAX_SIZE = 64 << 20
 _SESSION_WS_MAX_SIZE = 12 << 20
 
-# Limits: concurrent sessions per process, time to the setup frame, a whole
-# session's lifetime (counted from the WebSocket accept), and the largest
-# request body a setup may declare.
+# Limits: concurrent sessions per process (counted once the setup's
+# reservation is held), time to the setup frame (clients send it as soon as
+# the socket opens), a session's lifetime until the final body record is
+# released (counted from the WebSocket accept), the window after that release
+# for the response and the usage disclosure, and the largest request body a
+# setup may declare.
 MAX_SESSIONS = 32
-SETUP_TIMEOUT_S = 15.0
+SETUP_TIMEOUT_S = 10.0
 SESSION_TIMEOUT_S = 600.0
+POST_RELEASE_TIMEOUT_S = 600.0
 MAX_BODY_LEN = 8 << 20
 # Time after the session limit for the final settlement or abort to finish.
-# The reservation's lease covers the session plus this, whatever
+# The reservation's lease covers both phases plus this, whatever
 # MAX_REQUEST_LIFETIME_SECONDS is: a lease that lapsed mid-session would let
 # the stale-reservation sweeper release it, and the final charge would fail.
 SETTLE_GRACE_S = 60.0
-# Concurrent /zk proxies per process: the sidecar allows 6 per session.
-MAX_ZK_CONNS = MAX_SESSIONS * 6
+# Connections whose setup is not reserved yet (waiting for the frame, or the
+# reservation in progress) are pending: they never take a session slot. The
+# pool is large, each address (IPv6: its /64) holds at most a few, and a full
+# pool or address share evicts the oldest connection still waiting for its
+# setup, so idle sockets cannot keep a credentialed setup out.
+MAX_PENDING = 1024
+MAX_PENDING_PER_ADDR = 4
+# Concurrent /zk proxies per session (the sidecar's own limit) and per
+# process. The per-session limit is enforced here too, so one session cannot
+# hold the process-wide slots other sessions' proof channels need.
+MAX_ZK_CONNS_PER_SESSION = 6
+MAX_ZK_CONNS = MAX_SESSIONS * MAX_ZK_CONNS_PER_SESSION
+# Longest a /zk proxy may stay open; it normally closes with its session.
+_ZK_PROXY_CAP_S = SESSION_TIMEOUT_S + POST_RELEASE_TIMEOUT_S + SETTLE_GRACE_S
 # The setup fields the sidecar is sent (``escrow`` is set by the node; for an
 # image session also ``kind``, ``count`` and the node-rendered ``suffix``).
 _SIDECAR_SETUP_FIELDS = ("type", "nonce_c", "model", "max_tokens", "len", "armed")
@@ -117,11 +135,14 @@ _SETUP_KINDS = ("chat", "images")
 
 _active_sessions = 0
 _active_zk = 0
+# Pending connections, oldest first (pool-wide and per address bucket).
+_pending: dict["SessionState", str] = {}
+_pending_by_addr: dict[str, dict["SessionState", None]] = {}
 # Protocol sids of this process's live sessions (from the sidecar's ``ready``
 # until the session ends): only these may open a /zk proxy.
 _live_sids: dict[str, "SessionState"] = {}
-# Unused sessions per client address: counted from the WebSocket accept (before
-# the setup frame) until the sidecar reports ``head_written`` or the session ends.
+# Unused sessions per client address bucket: counted from the reservation
+# until the sidecar reports ``head_written`` or the session ends.
 _unused_by_ip: dict[str, int] = {}
 
 
@@ -129,12 +150,17 @@ _unused_by_ip: dict[str, int] = {}
 _worker_lock_fd: int | None = None
 
 
-def _configured_workers(argv: list[str], env: dict[str, str]) -> int:
+def _configured_workers(
+    argv: list[str], env: dict[str, str], gunicorn: bool = False
+) -> int:
     """The worker count named by the launcher's arguments or environment
-    (uvicorn ``--workers``/``WEB_CONCURRENCY``, gunicorn ``-w``/``--workers``)."""
+    (uvicorn ``--workers``/``WEB_CONCURRENCY``, gunicorn ``-w``/``--workers``,
+    also as ``-w4``/``-w=4`` and in ``GUNICORN_CMD_ARGS``)."""
     found = [env.get("WEB_CONCURRENCY", "")]
-    gunicorn = "gunicorn" in os.path.basename(argv[0] if argv else "") or (
-        "gunicorn" in env.get("SERVER_SOFTWARE", "")
+    gunicorn = (
+        gunicorn
+        or "gunicorn" in (argv[0] if argv else "")
+        or "gunicorn" in env.get("SERVER_SOFTWARE", "")
     )
     args = argv[1:] + env.get("GUNICORN_CMD_ARGS", "").split()
     for i, arg in enumerate(args):
@@ -142,8 +168,31 @@ def _configured_workers(argv: list[str], env: dict[str, str]) -> int:
             found.append(arg.split("=", 1)[1])
         elif arg == "--workers" or (arg == "-w" and gunicorn):
             found.append(args[i + 1] if i + 1 < len(args) else "")
+        elif gunicorn and arg.startswith("-w"):
+            found.append(arg[2:].removeprefix("="))
     counts = [int(v) for v in found if v.strip().isdigit()]
     return max(counts, default=1)
+
+
+def _private_lock_dir() -> str:
+    """A directory only this user can write, for the worker lock.
+
+    A lock file in a shared temporary directory could be created first (or
+    swapped for a symlink) by another local account: it could then keep the
+    node from starting, or let a second process pass the guard."""
+    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    path = os.path.join(base, f"routstr-confidential-{os.getuid()}")
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise RuntimeError(
+            f"{path} is not a private directory of this user (a directory, "
+            "owned by it, mode 0700); remove it or point TMPDIR elsewhere"
+        )
+    return path
 
 
 def claim_single_worker(database_url: str) -> None:
@@ -156,7 +205,9 @@ def claim_single_worker(database_url: str) -> None:
     process of the same node on this host. Raises ``RuntimeError``.
     """
     global _worker_lock_fd
-    workers = _configured_workers(sys.argv, dict(os.environ))
+    workers = _configured_workers(
+        sys.argv, dict(os.environ), gunicorn="gunicorn" in sys.modules
+    )
     if workers > 1:
         raise RuntimeError(
             f"confidential mode needs a single worker process, but {workers} "
@@ -171,10 +222,12 @@ def claim_single_worker(database_url: str) -> None:
         return
     key = f"{settings.confidential_sidecar_url}\n{database_url}".encode()
     path = os.path.join(
-        tempfile.gettempdir(),
-        f"routstr-confidential-{hashlib.sha256(key).hexdigest()[:16]}.lock",
+        _private_lock_dir(), f"{hashlib.sha256(key).hexdigest()[:16]}.lock"
     )
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        raise RuntimeError(f"cannot open the worker lock {path}: {e}") from None
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -198,10 +251,21 @@ def _short(sid: str | None) -> str:
 class SessionState:
     def __init__(self) -> None:
         self.billing: Billing | None = None
-        # Client address counted in ``_unused_by_ip`` until the session is used.
+        # The client's address bucket (``_address_bucket``).
+        self.addr_key = "unknown"
+        # Client address bucket counted in ``_unused_by_ip`` until the session
+        # is used.
         self.unused_ip: str | None = None
+        # Pending (in ``_pending``) until the setup is reserved or fails; only
+        # a connection still waiting for its setup frame may be evicted.
+        self.awaiting_setup = True
+        self.evicted = asyncio.Event()
+        # Holds one of the MAX_SESSIONS slots.
+        self.counted = False
         self.sid: str | None = None
         self.body_released = False
+        # Loop time of ``body_released``: starts the post-release window.
+        self.released_at: float | None = None
         # The sidecar accepted the setup (``ready``): from here on the node is
         # doing the session's 2PC work and an abandoned session keeps its fee.
         self.engaged = False
@@ -216,6 +280,8 @@ class SessionState:
         # client gets it (in ``ready``); unlike the sid it is in no receipt or
         # attestation, so a shared receipt or log line cannot open a channel.
         self.zk_token = secrets.token_hex(32)
+        # Open /zk proxies of this session (``MAX_ZK_CONNS_PER_SESSION``).
+        self.zk_open = 0
 
 
 class SetupError(Exception):
@@ -288,12 +354,12 @@ def validate_setup(msg: Any, max_tokens_cap: int) -> None:
     if not _is_int(length) or not 1 <= length <= MAX_BODY_LEN:
         raise SetupError(400, f"setup.len must be an integer in [1, {MAX_BODY_LEN}]")
     nonce_c = msg.get("nonce_c")
-    if not isinstance(nonce_c, str) or not _SID_RE.match(nonce_c):
+    if not isinstance(nonce_c, str) or not _SID_RE.fullmatch(nonce_c):
         raise SetupError(400, "setup.nonce_c must be 64 hex characters")
     # The session is billed at the rates of the signed offer the client
     # verified, never at whatever the node's settings are at setup time.
     offer_sig = msg.get("offer_sig")
-    if not isinstance(offer_sig, str) or not _HEX_RE.match(offer_sig):
+    if not isinstance(offer_sig, str) or not _HEX_RE.fullmatch(offer_sig):
         raise SetupError(
             400, "setup.offer_sig must be the hex signature of the verified offer"
         )
@@ -326,14 +392,28 @@ def sidecar_setup(
 
 
 def _session_lifetime() -> RequestLifetime:
-    """The lifetime the session's reservation lease is derived from: the
-    session limit plus the settlement grace, never shorter than the HTTP
+    """The lifetime the session's reservation lease is derived from: both
+    session phases plus the settlement grace, never shorter than the HTTP
     request lifetime."""
     seconds = max(
         float(settings.max_request_lifetime_seconds),
-        SESSION_TIMEOUT_S + SETTLE_GRACE_S,
+        SESSION_TIMEOUT_S + POST_RELEASE_TIMEOUT_S + SETTLE_GRACE_S,
     )
     return RequestLifetime(deadline=asyncio.get_running_loop().time() + seconds)
+
+
+def _session_deadline(state: "SessionState", started: float) -> float:
+    """Loop time at which the session is cut off: SESSION_TIMEOUT_S after the
+    accept until the final body record is released; then POST_RELEASE_TIMEOUT_S
+    after the release (the provider has the request; the response and the
+    disclosure need time), within the reservation lease less SETTLE_GRACE_S."""
+    if state.released_at is None:
+        return started + SESSION_TIMEOUT_S
+    deadline = state.released_at + POST_RELEASE_TIMEOUT_S
+    lifetime = request_lifetime.get()
+    if lifetime is not None:
+        deadline = min(deadline, lifetime.deadline - SETTLE_GRACE_S)
+    return deadline
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +431,7 @@ async def confidential_session_proxy(
         version = int(v or CONFIDENTIAL_MIN_V)
     except ValueError:
         version = -1
-    if not _UUID_RE.match(session_id or ""):
+    if not _UUID_RE.fullmatch(session_id or ""):
         await websocket.close(code=1008, reason="invalid session_id")
         return
     if not CONFIDENTIAL_MIN_V <= version <= CONFIDENTIAL_MAX_V:
@@ -366,30 +446,109 @@ async def confidential_session_proxy(
     if not node_pubkey_hex():
         await websocket.close(code=1011, reason="node has no signing identity")
         return
-    if _active_sessions >= MAX_SESSIONS:
-        await _send_error(websocket, 503, "too many confidential sessions")
-        await _close(websocket, 1013, "too many confidential sessions")
-        return
-    ip = client_address(websocket)
+    # The session slots and the unused limit are taken only once the setup is
+    # reserved (``_claim_slot``); this early check just spares a reservation
+    # that would be refused anyway.
+    key = _address_bucket(client_address(websocket))
     limit = settings.confidential_max_unused_per_ip
-    if limit > 0 and _unused_by_ip.get(ip, 0) >= limit:
+    if limit > 0 and _unused_by_ip.get(key, 0) >= limit:
         await _send_error(
             websocket, 429, f"too many unused confidential sessions (limit {limit})"
         )
         await _close(websocket, 1013, "too many unused confidential sessions")
         return
     state = SessionState()
-    state.unused_ip = ip
-    _unused_by_ip[ip] = _unused_by_ip.get(ip, 0) + 1
-    _active_sessions += 1
+    refusal = _admit_pending(state, key)
+    if refusal is not None:
+        await _send_error(websocket, refusal[0], refusal[1])
+        await _close(websocket, 1013, refusal[1])
+        return
     lifetime = request_lifetime.set(_session_lifetime())
     try:
         await _run_session(websocket, session_id, state)
     finally:
         request_lifetime.reset(lifetime)
-        _active_sessions -= 1
+        _release_pending(state)
+        if state.counted:
+            state.counted = False
+            _active_sessions -= 1
         _mark_used(state)
         _forget_sid(state)
+
+
+def _address_bucket(addr: str) -> str:
+    """The key of the per-address limits: an IPv4 address as is, an IPv6
+    address by its /64 (one host or subscriber usually holds a whole /64)."""
+    try:
+        ip = ipaddress.ip_address(addr)
+        if isinstance(ip, ipaddress.IPv6Address):
+            if ip.ipv4_mapped is not None:
+                return str(ip.ipv4_mapped)
+            return str(ipaddress.IPv6Network((ip.packed, 64), strict=False))
+        return str(ip)
+    except ValueError:
+        return addr
+
+
+def _oldest_waiting(pool: dict["SessionState", Any]) -> "SessionState | None":
+    return next((s for s in pool if s.awaiting_setup), None)
+
+
+def _admit_pending(state: "SessionState", key: str) -> tuple[int, str] | None:
+    """Add a new connection to the pending pool, evicting the oldest one
+    still waiting for its setup when the address's share or the pool is full.
+    Returns ``(status, reason)`` when nothing can be evicted (every pending
+    connection's setup is being reserved)."""
+    bucket = _pending_by_addr.get(key, {})
+    if len(bucket) >= MAX_PENDING_PER_ADDR:
+        victim = _oldest_waiting(bucket)
+        if victim is None:
+            return 429, "too many pending confidential sessions from this address"
+        _evict(victim)
+    if len(_pending) >= MAX_PENDING:
+        victim = _oldest_waiting(_pending)
+        if victim is None:
+            return 503, "too many pending confidential sessions"
+        _evict(victim)
+    state.addr_key = key
+    _pending[state] = key
+    _pending_by_addr.setdefault(key, {})[state] = None
+    return None
+
+
+def _evict(state: "SessionState") -> None:
+    _release_pending(state)
+    state.evicted.set()
+
+
+def _release_pending(state: "SessionState") -> None:
+    """The connection no longer counts as pending (idempotent)."""
+    key = _pending.pop(state, None)
+    if key is None:
+        return
+    bucket = _pending_by_addr.get(key)
+    if bucket is not None:
+        bucket.pop(state, None)
+        if not bucket:
+            del _pending_by_addr[key]
+
+
+def _claim_slot(state: "SessionState") -> None:
+    """Count a reserved session against MAX_SESSIONS and the unused limit.
+    Raises ``SetupError``; the caller then releases the reservation (in full:
+    the sidecar has not been dialed)."""
+    global _active_sessions
+    _release_pending(state)
+    if _active_sessions >= MAX_SESSIONS:
+        raise SetupError(503, "too many confidential sessions")
+    key = state.addr_key
+    limit = settings.confidential_max_unused_per_ip
+    if limit > 0 and _unused_by_ip.get(key, 0) >= limit:
+        raise SetupError(429, f"too many unused confidential sessions (limit {limit})")
+    _active_sessions += 1
+    state.counted = True
+    state.unused_ip = key
+    _unused_by_ip[key] = _unused_by_ip.get(key, 0) + 1
 
 
 def _forget_sid(state: "SessionState") -> None:
@@ -436,9 +595,15 @@ def client_address(websocket: WebSocket) -> str:
         trusted |= _own_addresses()
     if peer in trusted:
         name = settings.confidential_client_ip_header.strip().lower()
-        value = websocket.headers.get(name, "")
+        lines = websocket.headers.getlist(name)
         if name == "x-forwarded-for":
-            value = value.split(",")[-1]
+            # Repeated lines form one list, in order (a proxy may add its own
+            # line rather than append to the client's): the proxy's entry is
+            # the last of all of them.
+            value = ",".join(lines).split(",")[-1]
+        else:
+            # A single-value header: the line the proxy added is the last.
+            value = lines[-1] if lines else ""
         value = value.strip()
         if value:
             return value
@@ -448,7 +613,8 @@ def client_address(websocket: WebSocket) -> str:
 async def _run_session(
     websocket: WebSocket, session_id: str, state: SessionState | None = None
 ) -> None:
-    started = time.monotonic()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     state = state or SessionState()
     upstream = await _open_session(websocket, session_id, state)
     if upstream is None:
@@ -457,12 +623,18 @@ async def _run_session(
     client_pump = asyncio.create_task(_client_to_sidecar(websocket, upstream, state))
     sidecar_pump = asyncio.create_task(_sidecar_to_client(websocket, upstream, state))
     try:
-        remaining = SESSION_TIMEOUT_S - (time.monotonic() - started)
-        done, _ = await asyncio.wait(
-            {client_pump, sidecar_pump},
-            timeout=max(remaining, 0.0),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        # The deadline moves once the body is released (``_session_deadline``):
+        # a released request is not cut off at the setup-phase limit, and its
+        # reservation is charged only if no disclosure arrives in its window.
+        while True:
+            remaining = _session_deadline(state, started) - loop.time()
+            done, _ = await asyncio.wait(
+                {client_pump, sidecar_pump},
+                timeout=max(remaining, 0.0),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if done or loop.time() >= _session_deadline(state, started):
+                break
         if not done:
             logger.warning(
                 "confidential ws: session time limit reached",
@@ -473,7 +645,7 @@ async def _run_session(
             # If the client left, the sidecar session is closing: let its pump
             # drain frames already in flight (body_released, usage) so the
             # money decision below sees the sidecar's real final state.
-            remaining = SESSION_TIMEOUT_S - (time.monotonic() - started)
+            remaining = _session_deadline(state, started) - loop.time()
             await asyncio.wait({sidecar_pump}, timeout=min(10.0, max(remaining, 0)))
     finally:
         for task in (client_pump, sidecar_pump):
@@ -492,10 +664,27 @@ async def _open_session(
     Returns the sidecar connection, or ``None`` after reporting an error.
     """
     try:
+        receive = asyncio.ensure_future(websocket.receive())
+        evicted = asyncio.ensure_future(state.evicted.wait())
         try:
-            message = await asyncio.wait_for(websocket.receive(), SETUP_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            raise SetupError(408, "no setup frame received in time") from None
+            done, _ = await asyncio.wait(
+                {receive, evicted},
+                timeout=SETUP_TIMEOUT_S,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (receive, evicted):
+                if not task.done():
+                    task.cancel()
+        if receive not in done:
+            if evicted in done:
+                # A newer connection needed the pending slot.
+                raise SetupError(503, "too many pending confidential sessions")
+            raise SetupError(408, "no setup frame received in time")
+        message = receive.result()
+        # From here on the connection's setup is being reserved: it stays
+        # pending (bounding concurrent reservations) but is never evicted.
+        state.awaiting_setup = False
         if message["type"] == "websocket.disconnect":
             return None
         try:
@@ -543,6 +732,10 @@ async def _open_session(
         except Exception as exc:
             logger.exception("confidential ws: reservation failed")
             raise SetupError(500, "reservation failed") from exc
+        # Only now does the session take a slot; a refusal here releases the
+        # reservation in full (``_finalize``: the sidecar was never dialed, so
+        # no abandon fee applies).
+        _claim_slot(state)
         # The sidecar binds sid to this value. It is unique; the derived
         # protocol sid also admits /zk proof channels while the session is
         # live, so it is only logged shortened (``_short``, SecurityFilter).
@@ -635,7 +828,7 @@ async def _on_sidecar_text(
         sid = msg.get("sid")
         state.sid = sid if isinstance(sid, str) else None
         state.engaged = True
-        if state.sid is not None and _SID_RE.match(state.sid):
+        if state.sid is not None and _SID_RE.fullmatch(state.sid):
             # Registered before the client sees ``ready``, so its /zk
             # connections (opened with this sid) are admitted.
             _live_sids.setdefault(state.sid, state)
@@ -651,6 +844,8 @@ async def _on_sidecar_text(
         return frame
     if kind == "body_released":
         state.body_released = True
+        if state.released_at is None:
+            state.released_at = asyncio.get_running_loop().time()
         return frame
     if kind == "attestation" and msg.get("a") is not None:
         a = msg["a"]
@@ -734,6 +929,31 @@ async def _apply_settlement(
     return int(settled["cost_msats"]), settled["balance_msats"]
 
 
+# Pauses before retrying a settlement whose database write failed.
+SETTLE_RETRY_DELAYS = (0.2, 1.0, 3.0)
+
+
+async def _apply_settlement_retrying(
+    billing: Billing, usage: dict[str, Any], model: Any = None
+) -> tuple[int, int | None]:
+    """``_apply_settlement``, retried on a failure of the node's own (a busy or
+    dropped database). The usage is already verified, so a retry repeats only
+    the billing write; the reservation's claim is atomic with the charge, so a
+    write that did commit is never charged twice (the retry then fails, and
+    the caller's fallback finds nothing left to finalize)."""
+    for delay in SETTLE_RETRY_DELAYS:
+        try:
+            return await _apply_settlement(billing, usage, model)
+        except Exception:
+            logger.warning(
+                "confidential ws: settlement failed, retrying",
+                exc_info=True,
+                extra={"model": billing.model_id, "retry_in_s": delay},
+            )
+            await asyncio.sleep(delay)
+    return await _apply_settlement(billing, usage, model)
+
+
 async def _settle(
     msg: dict[str, Any], websocket: WebSocket, state: SessionState
 ) -> None:
@@ -743,17 +963,22 @@ async def _settle(
     raw = msg.get("usage")
     usage: dict[str, Any] = raw if isinstance(raw, dict) else {}
     if not state.attestation_hash:
-        # The sidecar attests before it accepts a disclosure; the receipt
-        # cannot be bound to the session, so the client will refuse it.
+        # The sidecar attests before it accepts a disclosure, so this is a
+        # fault on the node's side, and no receipt could be bound to the
+        # session. Fail closed: charge nothing, sign nothing.
         logger.error(
             "confidential ws: usage without an attestation",
             extra={"sid": _short(state.sid)},
         )
+        await _refuse_unattested(websocket, state)
+        return
     async with state.lock:
         if state.finalized:
             return
         try:
-            cost, balance = await _apply_settlement(billing, usage, msg.get("model"))
+            cost, balance = await _apply_settlement_retrying(
+                billing, usage, msg.get("model")
+            )
         except Exception:
             logger.exception(
                 "confidential ws: settlement failed",
@@ -814,6 +1039,32 @@ async def _settle(
     )
 
 
+async def _refuse_unattested(websocket: WebSocket, state: SessionState) -> None:
+    """A usage disclosed without an attestation: release the reservation in
+    full and tell the client the request was not settled."""
+    billing = state.billing
+    outcome: str | None = None
+    async with state.lock:
+        if state.finalized or billing is None:
+            return
+        try:
+            await release(billing)
+        except Exception:
+            logger.exception(
+                "confidential ws: could not release an unattested session",
+                extra={"sid": _short(state.sid)},
+            )
+        else:
+            state.finalized = True
+            outcome = "released"
+    await _send_error(
+        websocket,
+        502,
+        "usage without an attestation",
+        {"error": {"type": "settlement_failed", "outcome": outcome}},
+    )
+
+
 async def _finalize_unsettled(state: SessionState) -> str | None:
     """Charge (body released) or release the reservation; caller holds the lock."""
     billing = state.billing
@@ -869,7 +1120,7 @@ async def confidential_zk_proxy(
 ) -> None:
     global _active_zk
     await websocket.accept()
-    if not _SID_RE.match(session_id or "") or not _PROOF_RE.match(proof or ""):
+    if not _SID_RE.fullmatch(session_id or "") or not _PROOF_RE.fullmatch(proof or ""):
         await websocket.close(code=1008, reason="invalid session_id or proof")
         return
     # Only a session that passed setup (credential checked, reservation held)
@@ -881,14 +1132,16 @@ async def confidential_zk_proxy(
     ):
         await websocket.close(code=1008, reason="unknown session")
         return
-    if _active_zk >= MAX_ZK_CONNS:
+    if state.zk_open >= MAX_ZK_CONNS_PER_SESSION or _active_zk >= MAX_ZK_CONNS:
         await _close(websocket, 1013, "too many proof connections")
         return
     _active_zk += 1
+    state.zk_open += 1
     try:
         await _zk_proxy(websocket, proof, session_id, state.ended)
     finally:
         _active_zk -= 1
+        state.zk_open -= 1
 
 
 async def _zk_proxy(
@@ -947,13 +1200,15 @@ async def _zk_proxy(
         asyncio.create_task(sidecar_to_client()),
     }
     # A pre-warmed session keeps its 2PC and proof channels open until it is
-    # claimed; the node ends sessions at 600 s anyway. A channel never
-    # outlives its session: when the session ends (settled, released or timed
-    # out) its proxies are closed too.
+    # claimed, and π_C3S runs after the response: a channel lives as long as
+    # its session. When the session ends (settled, released or timed out) its
+    # proxies are closed too; the cap is only a backstop past both phases.
     both = asyncio.create_task(asyncio.wait(tasks))
     session_end = asyncio.create_task(ended.wait())
     await asyncio.wait(
-        {both, session_end}, timeout=630, return_when=asyncio.FIRST_COMPLETED
+        {both, session_end},
+        timeout=_ZK_PROXY_CAP_S,
+        return_when=asyncio.FIRST_COMPLETED,
     )
     for task in (*tasks, both, session_end):
         if not task.done():
