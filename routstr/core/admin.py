@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import secrets
@@ -47,6 +48,7 @@ from .db import (
 from .exceptions import json_compliant
 from .log_manager import log_manager
 from .logging import get_logger
+from .login_limiter import client_key, login_limiter
 from .provider_slugs import allocate_unique_provider_slug
 from .settings import SettingsService, derive_npub_from_nsec, settings
 
@@ -273,8 +275,10 @@ async def update_password(request: Request, password_update: PasswordUpdate) -> 
         if not secret.admin_password_hash:
             raise HTTPException(status_code=500, detail="Admin password not configured")
 
-        if not vault.verify_password(
-            password_update.current_password, secret.admin_password_hash
+        if not await asyncio.to_thread(
+            vault.verify_password,
+            password_update.current_password,
+            secret.admin_password_hash,
         ):
             raise HTTPException(status_code=401, detail="Current password is incorrect")
 
@@ -330,6 +334,15 @@ class AdminLoginRequest(BaseModel):
 async def admin_login(
     request: Request, payload: AdminLoginRequest
 ) -> dict[str, object]:
+    address = client_key(request.client.host if request.client else None)
+    retry_after = login_limiter.retry_after(address)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     async with create_session() as session:
         secret = await get_secret(session)
         # Read the hash while the session is open; the ORM object is detached
@@ -339,8 +352,24 @@ async def admin_login(
     if not password_hash:
         raise HTTPException(status_code=500, detail="Admin password not configured")
 
-    if not vault.verify_password(payload.password, password_hash):
+    if not login_limiter.try_start_check():
+        raise HTTPException(
+            status_code=429,
+            detail="Too many concurrent login attempts",
+            headers={"Retry-After": "1"},
+        )
+    # scrypt runs in a worker thread so it never blocks the event loop. The
+    # slot is freed when the thread finishes, not when this request ends: a
+    # client that disconnects mid-check must not free a slot whose thread is
+    # still burning CPU.
+    check = asyncio.ensure_future(
+        asyncio.to_thread(vault.verify_password, payload.password, password_hash)
+    )
+    check.add_done_callback(lambda _: login_limiter.finish_check())
+    if not await asyncio.shield(check):
+        login_limiter.record_failure(address)
         raise HTTPException(status_code=401, detail="Invalid password")
+    login_limiter.record_success(address)
 
     token = secrets.token_urlsafe(32)
     expiry_timestamp = (
