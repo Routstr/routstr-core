@@ -621,6 +621,35 @@ async def test_numeric_string_usage_is_billed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_venice_nested_cache_writes_are_billed_as_cache_writes() -> None:
+    message, _ = await _run(
+        "openai/",
+        "https://api.venice.ai/api/v1",
+        "claude-sonnet-4-5",
+        _body(),
+        _respond(
+            _sse(
+                _chat_chunk({"role": "assistant", "content": "ok"}),
+                _chat_chunk({}, "stop"),
+                _usage_chunk(
+                    {
+                        "prompt_tokens": 1000,
+                        "completion_tokens": 40,
+                        "prompt_tokens_details": {
+                            "cached_tokens": 200,
+                            "cache_creation_input_tokens": 300,
+                        },
+                    }
+                ),
+            )
+        ),
+    )
+    assert message["usage"]["input_tokens"] == 500
+    assert message["usage"]["cache_read_input_tokens"] == 200
+    assert message["usage"]["cache_creation_input_tokens"] == 300
+
+
+@pytest.mark.asyncio
 async def test_non_json_stream_event_is_an_error_not_a_gap() -> None:
     error, _ = await _run(
         "openai/",

@@ -168,6 +168,8 @@ def anthropic_usage(usage: dict[str, Any]) -> dict[str, Any]:
             for n in (
                 _positive_int(details.get("cache_creation_tokens")),
                 _positive_int(details.get("cache_write_tokens")),
+                # Venice
+                _positive_int(details.get("cache_creation_input_tokens")),
             )
             if n
         ),
