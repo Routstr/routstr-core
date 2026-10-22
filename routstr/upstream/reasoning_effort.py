@@ -155,7 +155,7 @@ def _request_mentions_reasoning(data: dict[str, Any]) -> bool:
     # format-only object (structured output) must not be read as "turn
     # reasoning on": that would inject the model's default effort on a
     # request that never asked for it, while ``output_config`` itself is
-    # pruned on the litellm path.
+    # pruned on the translated path.
     config = data.get("output_config")
     return isinstance(config, dict) and "effort" in config
 
@@ -219,11 +219,10 @@ def apply_reasoning_effort(
     return changed
 
 
-def adapt_messages_body_for_litellm(data: dict[str, Any], model: Model) -> None:
-    """Convert Anthropic ``thinking`` into OpenAI-shaped effort for litellm.
+def adapt_messages_body_for_translation(data: dict[str, Any], model: Model) -> None:
+    """Convert Anthropic ``thinking`` into OpenAI-shaped effort.
 
-    Litellm's Anthropic-messages adapter talking to an OpenAI-compatible
-    upstream will 400 on ``thinking``. Lift the effort onto
+    An OpenAI-compatible upstream 400s on ``thinking``. Lift the effort onto
     ``reasoning_effort`` and drop the Anthropic-only object.
 
     ``output_config.effort`` (the Anthropic-native thinking level sent by

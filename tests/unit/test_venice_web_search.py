@@ -1,6 +1,6 @@
 """Venice web search over ``/v1/messages``.
 
-litellm's Anthropic adapter rewrites an Anthropic server-side web-search tool
+The Anthropic translation rewrites an Anthropic server-side web-search tool
 into a top-level ``web_search_options``, which Venice rejects with
 ``400 Unrecognized key(s) in object: 'web_search_options'``. These tests pin
 the trade: the tool is lifted out of the body and the same intent re-expressed
@@ -17,6 +17,8 @@ import pytest
 
 from routstr.core.exceptions import UpstreamError
 from routstr.payment.models import Architecture, Model, Pricing
+from routstr.upstream import messages_dispatch
+from routstr.upstream.anthropic_openai import anthropic_to_openai
 from routstr.upstream.base import BaseUpstreamProvider
 from routstr.upstream.venice import VeniceUpstreamProvider
 
@@ -55,20 +57,38 @@ def _body(**extra: Any) -> dict[str, Any]:
 
 
 async def _dispatch(provider: BaseUpstreamProvider, body: dict[str, Any]) -> dict:
-    """Run the real dispatcher, capturing the kwargs litellm would receive."""
+    """Run the real dispatcher up to the wire.
+
+    Returns the Anthropic body handed to the translator, plus the routing
+    ``model`` (prefix + upstream name), ``api_base`` and any
+    ``web_search_options`` the translation put on the wire.
+    """
     captured: dict[str, Any] = {}
+    build = messages_dispatch.build_upstream_call
 
-    async def empty_iter() -> AsyncIterator[dict]:
-        if False:
-            yield {}
+    def capturing_build(**kwargs: Any) -> Any:
+        call = build(**kwargs)
+        captured.update(kwargs["body"])
+        captured["model"] = kwargs["prefix"] + kwargs["upstream_model"]
+        captured["api_base"] = kwargs["base_url"]
+        if "web_search_options" in call.body:
+            captured["web_search_options"] = call.body["web_search_options"]
+        return call
 
-    async def fake_acreate(**kwargs: Any) -> AsyncIterator[dict]:
-        captured.update(kwargs)
+    async def no_events(call: Any, **_: Any) -> AsyncIterator[dict]:
+        async def empty_iter() -> AsyncIterator[dict]:
+            if False:
+                yield {}
+
         return empty_iter()
 
-    with patch(
-        "litellm.anthropic.messages.acreate",
-        new=AsyncMock(side_effect=fake_acreate),
+    with (
+        patch.object(
+            messages_dispatch, "build_upstream_call", side_effect=capturing_build
+        ),
+        patch.object(
+            messages_dispatch, "open_events", new=AsyncMock(side_effect=no_events)
+        ),
     ):
         await provider._dispatch_anthropic_messages(
             request_body=json.dumps(
@@ -269,7 +289,8 @@ def test_max_uses_other_than_a_positive_integer_is_refused(max_uses: Any) -> Non
 
 
 def test_tool_named_web_search_without_the_type_marker_is_caught() -> None:
-    """litellm matches on either marker, so this one would also be rewritten."""
+    """The translation matches on either marker, so this one would also be
+    rewritten."""
     provider = VeniceUpstreamProvider(api_key="sk-test")
     body = _body(tools=[{"name": "web_search"}])
 
@@ -277,24 +298,17 @@ def test_tool_named_web_search_without_the_type_marker_is_caught() -> None:
     assert "tools" not in body
 
 
-def test_litellm_adapter_derives_no_web_search_options_from_the_adapted_body() -> None:
-    """The fix at its cause: run the real litellm translation over the body
-    this provider produces and assert the rejected key is never derived."""
-    from litellm.llms.anthropic.experimental_pass_through.adapters.transformation import (  # noqa: E501
-        LiteLLMAnthropicMessagesAdapter,
-    )
-
+def test_translation_derives_no_web_search_options_from_the_adapted_body() -> None:
+    """The fix at its cause: run the real translation over the body this
+    provider produces and assert the rejected key is never derived."""
     provider = VeniceUpstreamProvider(api_key="sk-test")
-    adapter = LiteLLMAnthropicMessagesAdapter()  # type: ignore[no-untyped-call]
     body = _body(tools=[WEB_SEARCH_TOOL, FUNCTION_TOOL])
 
     def translate(request: dict[str, Any]) -> dict:
-        # litellm types the request as a TypedDict; these bodies are built
-        # from client JSON, so they are plain dicts at this seam.
-        translated, _ = adapter.translate_anthropic_to_openai(request)  # type: ignore[arg-type]
-        return dict(translated)
+        translated, _ = anthropic_to_openai(request)
+        return translated
 
-    # Unadapted, litellm derives the parameter Venice rejects.
+    # Unadapted, the translation derives the parameter Venice rejects.
     before = translate({"model": "m", **_body(tools=[WEB_SEARCH_TOOL])})
     assert "web_search_options" in before
 

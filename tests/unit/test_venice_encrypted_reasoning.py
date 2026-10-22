@@ -152,7 +152,7 @@ async def _dispatched_blocks(
 ) -> list[str]:
     events = _message([*_text(0, "hello"), *_thinking(1, ENCRYPTED)])
     with patch(
-        "litellm.anthropic.messages.acreate",
+        "routstr.upstream.messages_dispatch.open_events",
         new=AsyncMock(return_value=_upstream(events)),
     ):
         _, result, _ = await provider._dispatch_anthropic_messages(

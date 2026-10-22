@@ -1,7 +1,7 @@
-"""Unit tests for the litellm-based /v1/messages dispatch path.
+"""Unit tests for the translated /v1/messages dispatch path.
 
-Covers `BaseUpstreamProvider._forward_messages_via_litellm` (bearer-key),
-`BaseUpstreamProvider._forward_x_cashu_messages_via_litellm` (x-cashu),
+Covers `BaseUpstreamProvider._forward_messages_via_translation` (bearer-key),
+`BaseUpstreamProvider._forward_x_cashu_messages_via_translation` (x-cashu),
 and the shortcuts wired into `forward_request` and
 `forward_x_cashu_request`.
 """
@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+import respx
 from fastapi.responses import Response, StreamingResponse
 
 os.environ.setdefault("UPSTREAM_BASE_URL", "http://test")
@@ -56,7 +57,9 @@ def _make_model(
     return Model(
         id=model_id,
         name=model_id,
-        forwarded_model_id=forwarded_model_id if forwarded_model_id is not None else model_id,
+        forwarded_model_id=forwarded_model_id
+        if forwarded_model_id is not None
+        else model_id,
         created=0,
         description="",
         context_length=8192,
@@ -116,6 +119,68 @@ def _make_request(request_id: str | None = "req-test") -> Any:
     return request
 
 
+def _message_events(message: dict) -> list[dict]:
+    """A non-streaming Message as the event stream an upstream would send."""
+    events: list[dict] = [
+        {
+            "type": "message_start",
+            "message": {**message, "content": [], "stop_reason": None},
+        }
+    ]
+    for index, block in enumerate(message.get("content", [])):
+        is_text = block.get("type") == "text"
+        events.append(
+            {
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {**block, "text": ""} if is_text else block,
+            }
+        )
+        if is_text:
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {"type": "text_delta", "text": block["text"]},
+                }
+            )
+        events.append({"type": "content_block_stop", "index": index})
+    events.append(
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": message.get("stop_reason")},
+            "usage": message.get("usage", {}),
+        }
+    )
+    events.append({"type": "message_stop"})
+    return events
+
+
+def _upstream(result: Any, captured: dict | None = None) -> Any:
+    """Patch the upstream round trip: record the call, replay ``result``.
+
+    A dict is replayed as the event stream of that Message; anything else
+    is handed back as the upstream's Anthropic event iterator.
+    """
+
+    async def fake_open_events(call: Any, **_: Any) -> Any:
+        if captured is not None:
+            captured["call"] = call
+        if not isinstance(result, dict):
+            return result
+
+        async def replay() -> AsyncIterator[dict]:
+            for event in _message_events(result):
+                yield event
+
+        return replay()
+
+    return patch(
+        "routstr.upstream.messages_dispatch.open_events",
+        new=AsyncMock(side_effect=fake_open_events),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helper / coercion
 # ---------------------------------------------------------------------------
@@ -154,21 +219,21 @@ def test_prune_blank_system_blocks_keeps_non_text_blocks() -> None:
     assert body["system"] == [{"type": "image", "source": {}}]
 
 
-def test_coerce_litellm_payload_handles_dict() -> None:
-    out = BaseUpstreamProvider._coerce_litellm_payload({"a": 1})
+def test_coerce_event_payload_handles_dict() -> None:
+    out = BaseUpstreamProvider._coerce_event_payload({"a": 1})
     assert out == {"a": 1}
 
 
-def test_coerce_litellm_payload_handles_pydantic_v2() -> None:
+def test_coerce_event_payload_handles_pydantic_v2() -> None:
     obj = MagicMock()
     obj.model_dump.return_value = {"x": 42}
-    out = BaseUpstreamProvider._coerce_litellm_payload(obj)
+    out = BaseUpstreamProvider._coerce_event_payload(obj)
     assert out == {"x": 42}
 
 
-def test_coerce_litellm_payload_rejects_unknown_types() -> None:
+def test_coerce_event_payload_rejects_unknown_types() -> None:
     with pytest.raises(TypeError):
-        BaseUpstreamProvider._coerce_litellm_payload(object())
+        BaseUpstreamProvider._coerce_event_payload(object())
 
 
 def test_parse_sse_blocks_extracts_full_events() -> None:
@@ -214,9 +279,7 @@ def test_events_from_chunk_handles_bytes_chunks() -> None:
 
 def test_events_from_chunk_handles_str_chunks() -> None:
     provider = _make_provider()
-    events, buf = provider._events_from_chunk(
-        'event: a\ndata: {"type":"a"}\n\n', b""
-    )
+    events, buf = provider._events_from_chunk('event: a\ndata: {"type":"a"}\n\n', b"")
     assert events == [{"type": "a"}]
     assert buf == b""
 
@@ -243,7 +306,7 @@ def test_compute_refund_invalid_unit() -> None:
 def test_default_provider_does_not_support_anthropic_messages() -> None:
     assert BaseUpstreamProvider.supports_anthropic_messages is False
     # Class default is None so URL detection runs at dispatch time.
-    assert BaseUpstreamProvider.litellm_provider_prefix is None
+    assert BaseUpstreamProvider.provider_prefix is None
 
 
 def test_base_provider_resolves_prefix_from_base_url() -> None:
@@ -252,27 +315,23 @@ def test_base_provider_resolves_prefix_from_base_url() -> None:
     fireworks = BaseUpstreamProvider(
         base_url="https://api.fireworks.ai/inference/v1", api_key="sk-test"
     )
-    assert fireworks.get_litellm_provider_prefix() == "fireworks_ai/"
+    assert fireworks.get_provider_prefix() == "fireworks_ai/"
 
     groq = BaseUpstreamProvider(
         base_url="https://api.groq.com/openai/v1", api_key="sk-test"
     )
-    assert groq.get_litellm_provider_prefix() == "groq/"
+    assert groq.get_provider_prefix() == "groq/"
 
-    xai = BaseUpstreamProvider(
-        base_url="https://api.x.ai/v1", api_key="sk-test"
-    )
-    assert xai.get_litellm_provider_prefix() == "xai/"
+    xai = BaseUpstreamProvider(base_url="https://api.x.ai/v1", api_key="sk-test")
+    assert xai.get_provider_prefix() == "xai/"
 
     deepseek = BaseUpstreamProvider(
         base_url="https://api.deepseek.com/v1", api_key="sk-test"
     )
-    assert deepseek.get_litellm_provider_prefix() == "deepseek/"
+    assert deepseek.get_provider_prefix() == "deepseek/"
 
-    unknown = BaseUpstreamProvider(
-        base_url="https://example.com/v1", api_key="sk-test"
-    )
-    assert unknown.get_litellm_provider_prefix() == "openai/"
+    unknown = BaseUpstreamProvider(base_url="https://example.com/v1", api_key="sk-test")
+    assert unknown.get_provider_prefix() == "openai/"
 
 
 def test_subclass_prefix_wins_over_url_detection() -> None:
@@ -283,7 +342,7 @@ def test_subclass_prefix_wins_over_url_detection() -> None:
 
     p = AnthropicUpstreamProvider(api_key="sk-test")
     p.base_url = "https://api.fireworks.ai/inference/v1"
-    assert p.get_litellm_provider_prefix() == "anthropic/"
+    assert p.get_provider_prefix() == "anthropic/"
 
 
 def test_anthropic_provider_supports_native_messages() -> None:
@@ -307,13 +366,13 @@ def test_provider_prefix_overrides() -> None:
     from routstr.upstream.perplexity import PerplexityUpstreamProvider
     from routstr.upstream.xai import XAIUpstreamProvider
 
-    assert GroqUpstreamProvider.litellm_provider_prefix == "groq/"
-    assert XAIUpstreamProvider.litellm_provider_prefix == "xai/"
-    assert FireworksUpstreamProvider.litellm_provider_prefix == "fireworks_ai/"
-    assert PerplexityUpstreamProvider.litellm_provider_prefix == "perplexity/"
-    assert GeminiUpstreamProvider.litellm_provider_prefix == "gemini/"
-    assert OllamaUpstreamProvider.litellm_provider_prefix == "ollama_chat/"
-    assert AzureUpstreamProvider.litellm_provider_prefix == "azure/"
+    assert GroqUpstreamProvider.provider_prefix == "groq/"
+    assert XAIUpstreamProvider.provider_prefix == "xai/"
+    assert FireworksUpstreamProvider.provider_prefix == "fireworks_ai/"
+    assert PerplexityUpstreamProvider.provider_prefix == "perplexity/"
+    assert GeminiUpstreamProvider.provider_prefix == "gemini/"
+    assert OllamaUpstreamProvider.provider_prefix == "ollama_chat/"
+    assert AzureUpstreamProvider.provider_prefix == "azure/"
 
 
 # ---------------------------------------------------------------------------
@@ -322,11 +381,11 @@ def test_provider_prefix_overrides() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
+async def test_dispatch_strips_anthropic_only_fields_before_translation() -> None:
     """Regression: Anthropic-Messages-only fields like `output_config`,
     `thinking`, `context_management`, and `cache_control` must be removed
-    from the request body before litellm dispatches to non-Anthropic
-    upstreams. Otherwise upstream returns 400 (unknown field).
+    from the request body before it reaches non-Anthropic upstreams.
+    Otherwise upstream returns 400 (unknown field).
     """
     provider = _make_provider()
     key = _make_key()
@@ -355,21 +414,14 @@ async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
 
     captured: dict[str, Any] = {}
 
-    async def fake_acreate(**kwargs: Any) -> dict:
-        captured["kwargs"] = kwargs
-        return _anthropic_non_stream_response()
-
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(side_effect=fake_acreate),
-        ),
+        _upstream(_anthropic_non_stream_response(), captured),
         patch(
             "routstr.upstream.base.adjust_payment_for_tokens",
             new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
         ),
     ):
-        await provider._forward_messages_via_litellm(
+        await provider._forward_messages_via_translation(
             request_body=body,
             key=key,
             session=session,
@@ -377,7 +429,8 @@ async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
             model_obj=model,
         )
 
-    forwarded = captured["kwargs"]
+    call = captured["call"]
+    forwarded = call.body
     for stripped in (
         "thinking",
         "context_management",
@@ -387,19 +440,21 @@ async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
         "service_tier",
         "anthropic_beta",
         "anthropic_version",
+        "api_base",
+        "api_key",
         "custom_llm_provider",
         "unexpected_field",
     ):
         assert stripped not in forwarded, (
-            f"Anthropic-only field {stripped!r} leaked through to litellm"
+            f"Anthropic-only field {stripped!r} leaked through to the upstream"
         )
     # Core fields preserved
     assert forwarded["max_tokens"] == 64
     assert forwarded["messages"] == [{"role": "user", "content": "hi"}]
     # Dispatch-controlled values cannot be overridden by the client body.
-    assert forwarded["model"] == "openai/openai/gpt-4o-mini"
-    assert forwarded["api_base"] == "http://test"
-    assert forwarded["api_key"] == "upstream-key"
+    assert forwarded["model"] == "openai/gpt-4o-mini"
+    assert call.url == "http://test/chat/completions"
+    assert call.headers["Authorization"] == "Bearer upstream-key"
     assert forwarded["stream"] is True
 
 
@@ -427,21 +482,14 @@ async def test_dispatch_lifts_output_config_effort_onto_reasoning_effort() -> No
 
     captured: dict[str, Any] = {}
 
-    async def fake_acreate(**kwargs: Any) -> dict:
-        captured["kwargs"] = kwargs
-        return _anthropic_non_stream_response()
-
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(side_effect=fake_acreate),
-        ),
+        _upstream(_anthropic_non_stream_response(), captured),
         patch(
             "routstr.upstream.base.adjust_payment_for_tokens",
             new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
         ),
     ):
-        await provider._forward_messages_via_litellm(
+        await provider._forward_messages_via_translation(
             request_body=body,
             key=key,
             session=session,
@@ -449,8 +497,10 @@ async def test_dispatch_lifts_output_config_effort_onto_reasoning_effort() -> No
             model_obj=model,
         )
 
-    forwarded = captured["kwargs"]
-    assert forwarded["reasoning_effort"] == "max"
+    forwarded = captured["call"].body
+    # The model map does not flag this model for `max`, so the bridge
+    # lowers it to the nearest tier every reasoning model accepts.
+    assert forwarded["reasoning_effort"] == "high"
     assert "output_config" not in forwarded
 
 
@@ -477,21 +527,14 @@ async def test_dispatch_clamps_output_config_effort_to_supported_efforts() -> No
 
     captured: dict[str, Any] = {}
 
-    async def fake_acreate(**kwargs: Any) -> dict:
-        captured["kwargs"] = kwargs
-        return _anthropic_non_stream_response()
-
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(side_effect=fake_acreate),
-        ),
+        _upstream(_anthropic_non_stream_response(), captured),
         patch(
             "routstr.upstream.base.adjust_payment_for_tokens",
             new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
         ),
     ):
-        await provider._forward_messages_via_litellm(
+        await provider._forward_messages_via_translation(
             request_body=body,
             key=key,
             session=session,
@@ -499,7 +542,7 @@ async def test_dispatch_clamps_output_config_effort_to_supported_efforts() -> No
             model_obj=model,
         )
 
-    forwarded = captured["kwargs"]
+    forwarded = captured["call"].body
     # 'max' is not offered by this model; the nearest legal level is used.
     assert forwarded["reasoning_effort"] == "high"
     assert "output_config" not in forwarded
@@ -536,21 +579,14 @@ async def test_dispatch_does_not_invent_effort_for_format_only_output_config() -
 
     captured: dict[str, Any] = {}
 
-    async def fake_acreate(**kwargs: Any) -> dict:
-        captured["kwargs"] = kwargs
-        return _anthropic_non_stream_response()
-
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(side_effect=fake_acreate),
-        ),
+        _upstream(_anthropic_non_stream_response(), captured),
         patch(
             "routstr.upstream.base.adjust_payment_for_tokens",
             new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
         ),
     ):
-        await provider._forward_messages_via_litellm(
+        await provider._forward_messages_via_translation(
             request_body=body,
             key=key,
             session=session,
@@ -558,10 +594,11 @@ async def test_dispatch_does_not_invent_effort_for_format_only_output_config() -
             model_obj=model,
         )
 
-    forwarded = captured["kwargs"]
+    forwarded = captured["call"].body
     assert "reasoning_effort" not in forwarded
     assert "reasoning" not in forwarded
     assert "output_config" not in forwarded
+    assert "response_format" not in forwarded
 
 
 @pytest.mark.asyncio
@@ -591,21 +628,14 @@ async def test_dispatch_forwards_all_allowlisted_messages_fields() -> None:
     body = json.dumps({"model": model.id, **allowed}).encode()
     captured: dict[str, Any] = {}
 
-    async def fake_acreate(**kwargs: Any) -> dict:
-        captured["kwargs"] = kwargs
-        return _anthropic_non_stream_response()
-
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(side_effect=fake_acreate),
-        ),
+        _upstream(_anthropic_non_stream_response(), captured),
         patch(
             "routstr.upstream.base.adjust_payment_for_tokens",
             new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
         ),
     ):
-        await provider._forward_messages_via_litellm(
+        await provider._forward_messages_via_translation(
             request_body=body,
             key=key,
             session=session,
@@ -613,8 +643,31 @@ async def test_dispatch_forwards_all_allowlisted_messages_fields() -> None:
             model_obj=model,
         )
 
-    forwarded = captured["kwargs"]
-    assert {field: forwarded[field] for field in allowed} == allowed
+    forwarded = captured["call"].body
+    assert forwarded["messages"] == [
+        {"role": "system", "content": "Be concise"},
+        {"role": "user", "content": "hi"},
+    ]
+    assert forwarded["max_tokens"] == 64
+    assert forwarded["temperature"] == 0.2
+    assert forwarded["top_p"] == 0.9
+    assert forwarded["top_k"] == 20
+    assert forwarded["stop"] == ["STOP"]
+    assert forwarded["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {"type": "object", "properties": {}},
+                "description": "Look something up",
+            },
+        }
+    ]
+    assert forwarded["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "lookup"},
+    }
+    assert forwarded["prompt_cache_key"] == "test-user"
 
 
 @pytest.mark.asyncio
@@ -632,24 +685,17 @@ async def test_dispatch_uses_model_id_for_upstream_and_forwarded_for_client() ->
     session = _make_session()
 
     captured: dict[str, Any] = {}
-
-    async def fake_acreate(**kwargs: Any) -> dict:
-        captured["model"] = kwargs["model"]
-        resp = _anthropic_non_stream_response()
-        resp["model"] = "gpt-4o-mini"  # upstream echoes its own id
-        return resp
+    resp = _anthropic_non_stream_response()
+    resp["model"] = "gpt-4o-mini"  # upstream echoes its own id
 
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(side_effect=fake_acreate),
-        ),
+        _upstream(resp, captured),
         patch(
             "routstr.upstream.base.adjust_payment_for_tokens",
             new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
         ),
     ):
-        result = await provider._forward_messages_via_litellm(
+        result = await provider._forward_messages_via_translation(
             request_body=_anthropic_request_body(stream=False),
             key=key,
             session=session,
@@ -657,8 +703,8 @@ async def test_dispatch_uses_model_id_for_upstream_and_forwarded_for_client() ->
             model_obj=model,
         )
 
-    # Upstream call uses `model.id` with provider prefix
-    assert captured["model"] == "openai/gpt-4o-mini"
+    # Upstream call uses `model.id`
+    assert captured["call"].body["model"] == "gpt-4o-mini"
     # Response to client echoes the public `forwarded_model_id`
     assert isinstance(result, Response)
     body = json.loads(result.body)
@@ -666,9 +712,7 @@ async def test_dispatch_uses_model_id_for_upstream_and_forwarded_for_client() ->
 
 
 @pytest.mark.asyncio
-async def test_non_streaming_dispatches_via_litellm_and_returns_anthropic_response() -> (
-    None
-):
+async def test_non_streaming_dispatches_and_returns_anthropic_response() -> None:
     provider = _make_provider()
     key = _make_key()
     model = _make_model()
@@ -676,41 +720,33 @@ async def test_non_streaming_dispatches_via_litellm_and_returns_anthropic_respon
     body = _anthropic_request_body(stream=False)
 
     upstream_response = _anthropic_non_stream_response()
-
-    async def fake_acreate(**kwargs: Any) -> dict:
-        assert kwargs["model"] == "openai/openai/gpt-4o-mini"
-        assert kwargs["api_base"] == "http://test"
-        assert kwargs["api_key"] == "upstream-key"
-        # The dispatcher always streams from upstream and aggregates back
-        # when the client wants a non-streaming response (sidesteps
-        # provider-specific non-streaming caps like Fireworks's max_tokens
-        # > 4096). When the mock returns a plain dict, the dispatcher
-        # detects the lack of __aiter__ and skips aggregation, so the
-        # client still gets the same Response shape.
-        assert kwargs["stream"] is True
-        assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
-        assert kwargs["max_tokens"] == 64
-        return upstream_response
-
+    captured: dict[str, Any] = {}
     fake_cost = {"total_msats": 1234, "total_usd": 0.0001}
 
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(side_effect=fake_acreate),
-        ),
+        _upstream(upstream_response, captured),
         patch(
             "routstr.upstream.base.adjust_payment_for_tokens",
             new=AsyncMock(return_value=fake_cost),
         ),
     ):
-        result = await provider._forward_messages_via_litellm(
+        result = await provider._forward_messages_via_translation(
             request_body=body,
             key=key,
             session=session,
             max_cost_for_model=10_000,
             model_obj=model,
         )
+
+    call = captured["call"]
+    assert call.url == "http://test/chat/completions"
+    assert call.headers["Authorization"] == "Bearer upstream-key"
+    # The dispatcher always streams from upstream and aggregates back when
+    # the client wants a non-streaming response (sidesteps provider caps
+    # like Fireworks's non-streaming max_tokens <= 4096).
+    assert call.body["stream"] is True
+    assert call.body["messages"] == [{"role": "user", "content": "hi"}]
+    assert call.body["max_tokens"] == 64
 
     assert isinstance(result, Response)
     payload = json.loads(result.body)
@@ -801,10 +837,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
     fake_session.get = AsyncMock(return_value=key)
 
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(return_value=fake_chunks()),
-        ),
+        _upstream(fake_chunks()),
         patch(
             "routstr.upstream.base.adjust_payment_for_tokens",
             new=AsyncMock(side_effect=fake_adjust),
@@ -814,7 +847,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
             new=lambda: FakeSessionCtx(),
         ),
     ):
-        result = await provider._forward_messages_via_litellm(
+        result = await provider._forward_messages_via_translation(
             request_body=body,
             key=key,
             session=session,
@@ -848,8 +881,8 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
-    """Regression: litellm.anthropic.messages.acreate(stream=True) yields
-    already-SSE-encoded bytes in production. The stream loop must parse
+    """Regression: the upstream stream yields already-SSE-encoded bytes in
+    production. The stream loop must parse
     SSE blocks (even split across chunks) and still reconcile cost.
     """
     provider = _make_provider()
@@ -903,10 +936,7 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
             return None
 
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(return_value=fake_byte_chunks()),
-        ),
+        _upstream(fake_byte_chunks()),
         patch(
             "routstr.upstream.base.adjust_payment_for_tokens",
             new=AsyncMock(side_effect=fake_adjust),
@@ -916,7 +946,7 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
             new=lambda: FakeSessionCtx(),
         ),
     ):
-        result = await provider._forward_messages_via_litellm(
+        result = await provider._forward_messages_via_translation(
             request_body=body,
             key=key,
             session=session,
@@ -971,10 +1001,7 @@ async def test_x_cashu_non_streaming_dispatches_and_refunds_overpaid_amount() ->
     )
 
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(return_value=upstream_response),
-        ),
+        _upstream(upstream_response),
         patch.object(
             provider,
             "get_x_cashu_cost",
@@ -986,7 +1013,7 @@ async def test_x_cashu_non_streaming_dispatches_and_refunds_overpaid_amount() ->
             new=AsyncMock(return_value="cashuREFUND"),
         ) as mock_refund,
     ):
-        result = await provider._forward_x_cashu_messages_via_litellm(
+        result = await provider._forward_x_cashu_messages_via_translation(
             request_body=body,
             amount=10_000,  # sats
             unit="sat",
@@ -1026,10 +1053,7 @@ async def test_x_cashu_non_streaming_no_refund_when_fully_consumed() -> None:
     )
 
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(return_value=upstream_response),
-        ),
+        _upstream(upstream_response),
         patch.object(
             provider,
             "get_x_cashu_cost",
@@ -1041,7 +1065,7 @@ async def test_x_cashu_non_streaming_no_refund_when_fully_consumed() -> None:
             new=AsyncMock(return_value="cashuNOPE"),
         ) as mock_refund,
     ):
-        result = await provider._forward_x_cashu_messages_via_litellm(
+        result = await provider._forward_x_cashu_messages_via_translation(
             request_body=body,
             amount=10_000,
             unit="sat",
@@ -1072,12 +1096,7 @@ async def test_x_cashu_settlement_failure_still_serves_paid_body(
 
     cost = CostData(base_msats=0, input_msats=0, output_msats=0, total_msats=1_000_000)
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(
-                return_value=chunks() if stream else _anthropic_non_stream_response()
-            ),
-        ),
+        _upstream(chunks() if stream else _anthropic_non_stream_response()),
         patch.object(
             provider,
             "get_x_cashu_cost",
@@ -1095,7 +1114,7 @@ async def test_x_cashu_settlement_failure_still_serves_paid_body(
             ),
         ) as refund,
     ):
-        result = await provider._forward_x_cashu_messages_via_litellm(
+        result = await provider._forward_x_cashu_messages_via_translation(
             request_body=_anthropic_request_body(stream=stream),
             amount=5_000,
             unit="sat",
@@ -1161,10 +1180,7 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
     )
 
     with (
-        patch(
-            "litellm.anthropic.messages.acreate",
-            new=AsyncMock(return_value=fake_chunks()),
-        ),
+        _upstream(fake_chunks()),
         patch.object(
             provider,
             "get_x_cashu_cost",
@@ -1176,7 +1192,7 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
             new=AsyncMock(return_value="cashuSTREAM"),
         ) as mock_refund,
     ):
-        result = await provider._forward_x_cashu_messages_via_litellm(
+        result = await provider._forward_x_cashu_messages_via_translation(
             request_body=body,
             amount=5_000,
             unit="sat",
@@ -1218,7 +1234,7 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
 
 
 @pytest.mark.asyncio
-async def test_forward_request_routes_messages_via_litellm() -> None:
+async def test_forward_request_routes_messages_via_translation() -> None:
     provider = _make_provider()
     key = _make_key()
     model = _make_model()
@@ -1228,7 +1244,7 @@ async def test_forward_request_routes_messages_via_litellm() -> None:
     sentinel = Response(content=b'{"ok": true}', media_type="application/json")
     with patch.object(
         provider,
-        "_forward_messages_via_litellm",
+        "_forward_messages_via_translation",
         new=AsyncMock(return_value=sentinel),
     ) as mock_helper:
         result = await provider.forward_request(
@@ -1247,7 +1263,9 @@ async def test_forward_request_routes_messages_via_litellm() -> None:
 
 
 @pytest.mark.asyncio
-async def test_forward_request_skips_litellm_when_provider_supports_messages() -> None:
+async def test_forward_request_skips_translation_when_provider_supports_messages() -> (
+    None
+):
     provider = _make_provider(supports_messages=True)
     key = _make_key()
     model = _make_model()
@@ -1256,7 +1274,7 @@ async def test_forward_request_skips_litellm_when_provider_supports_messages() -
 
     with patch.object(
         provider,
-        "_forward_messages_via_litellm",
+        "_forward_messages_via_translation",
         new=AsyncMock(side_effect=AssertionError("should not be called")),
     ):
         with patch.object(
@@ -1287,7 +1305,7 @@ async def test_forward_request_handles_count_tokens_locally() -> None:
 
     with patch.object(
         provider,
-        "_forward_messages_via_litellm",
+        "_forward_messages_via_translation",
         new=AsyncMock(side_effect=AssertionError("should not be called")),
     ):
         with patch.object(
@@ -1320,7 +1338,7 @@ async def test_forward_request_handles_count_tokens_locally() -> None:
 
 
 @pytest.mark.asyncio
-async def test_forward_x_cashu_request_routes_messages_via_litellm() -> None:
+async def test_forward_x_cashu_request_routes_messages_via_translation() -> None:
     provider = _make_provider()
     model = _make_model()
     request = _make_request()
@@ -1330,7 +1348,7 @@ async def test_forward_x_cashu_request_routes_messages_via_litellm() -> None:
 
     with patch.object(
         provider,
-        "_forward_x_cashu_messages_via_litellm",
+        "_forward_x_cashu_messages_via_translation",
         new=AsyncMock(return_value=sentinel),
     ) as mock_helper:
         result = await provider.forward_x_cashu_request(
@@ -1356,7 +1374,7 @@ async def test_forward_x_cashu_request_routes_messages_via_litellm() -> None:
 
 
 @pytest.mark.asyncio
-async def test_forward_x_cashu_request_skips_litellm_when_native_messages() -> None:
+async def test_forward_x_cashu_request_skips_translation_when_native_messages() -> None:
     provider = _make_provider(supports_messages=True)
     model = _make_model()
     request = _make_request()
@@ -1364,7 +1382,7 @@ async def test_forward_x_cashu_request_skips_litellm_when_native_messages() -> N
 
     with patch.object(
         provider,
-        "_forward_x_cashu_messages_via_litellm",
+        "_forward_x_cashu_messages_via_translation",
         new=AsyncMock(side_effect=AssertionError("should not be called")),
     ):
         with patch.object(
@@ -1393,7 +1411,7 @@ async def test_forward_x_cashu_request_handles_count_tokens_locally() -> None:
 
     with patch.object(
         provider,
-        "_forward_x_cashu_messages_via_litellm",
+        "_forward_x_cashu_messages_via_translation",
         new=AsyncMock(side_effect=AssertionError("should not be called")),
     ):
         with patch.object(
@@ -1533,7 +1551,7 @@ async def test_aggregator_parses_tool_use_input_json_delta() -> None:
         {
             "type": "content_block_delta",
             "index": 0,
-            "delta": {"type": "input_json_delta", "partial_json": ' 7}'},
+            "delta": {"type": "input_json_delta", "partial_json": " 7}"},
         },
         {"type": "content_block_stop", "index": 0},
         {
@@ -1556,23 +1574,23 @@ async def test_aggregator_parses_tool_use_input_json_delta() -> None:
 
 @pytest.mark.asyncio
 async def test_aggregator_parses_sse_byte_chunks() -> None:
-    """litellm's anthropic adapter often yields raw SSE byte chunks. The
-    aggregator must parse the SSE wire format, not just typed dicts."""
+    """Upstream streams yield raw SSE byte chunks. The aggregator must parse
+    the SSE wire format, not just typed dicts."""
     provider = _make_provider()
 
     sse = (
-        b'event: message_start\n'
+        b"event: message_start\n"
         b'data: {"type":"message_start","message":{"id":"m1","type":"message",'
         b'"role":"assistant","model":"x","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
-        b'event: content_block_start\n'
+        b"event: content_block_start\n"
         b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
-        b'event: content_block_delta\n'
+        b"event: content_block_delta\n"
         b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n'
-        b'event: content_block_stop\n'
+        b"event: content_block_stop\n"
         b'data: {"type":"content_block_stop","index":0}\n\n'
-        b'event: message_delta\n'
+        b"event: message_delta\n"
         b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\n'
-        b'event: message_stop\n'
+        b"event: message_stop\n"
         b'data: {"type":"message_stop"}\n\n'
     )
 
@@ -1590,71 +1608,41 @@ async def test_aggregator_parses_sse_byte_chunks() -> None:
 @pytest.mark.asyncio
 async def test_dispatch_always_streams_upstream_and_aggregates_for_non_streaming_client(  # noqa: E501
 ) -> None:
-    """End-to-end: client says stream=false; dispatcher upstream-streams
-    and returns an aggregated Anthropic Message dict."""
     provider = _make_provider()
     model = _make_model()
     body = _anthropic_request_body(stream=False)
+    sse = (
+        'data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant",'
+        '"content":"ok"},"finish_reason":null}]}\n\n'
+        'data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n'
+        "data: [DONE]\n\n"
+    )
 
-    events: list[dict] = [
-        {
-            "type": "message_start",
-            "message": {
-                "id": "msg_e2e",
-                "type": "message",
-                "role": "assistant",
-                "model": "openai/gpt-4o-mini",
-                "content": [],
-                "usage": {"input_tokens": 4, "output_tokens": 0},
-            },
-        },
-        {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        },
-        {
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "text_delta", "text": "ok"},
-        },
-        {"type": "content_block_stop", "index": 0},
-        {
-            "type": "message_delta",
-            "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 1},
-        },
-        {"type": "message_stop"},
-    ]
-
-    async def event_iter() -> AsyncIterator[dict]:
-        for event in events:
-            yield event
-
-    captured_kwargs: dict[str, Any] = {}
-
-    async def fake_acreate(**kwargs: Any) -> AsyncIterator[dict]:
-        captured_kwargs.update(kwargs)
-        return event_iter()
-
-    with patch(
-        "litellm.anthropic.messages.acreate",
-        new=AsyncMock(side_effect=fake_acreate),
-    ):
-        client_stream, result, requested_model = (
-            await provider._dispatch_anthropic_messages(
-                request_body=body,
-                model_obj=model,
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post("http://test/chat/completions").mock(
+            return_value=httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, text=sse
             )
+        )
+        (
+            client_stream,
+            result,
+            requested_model,
+        ) = await provider._dispatch_anthropic_messages(
+            request_body=body,
+            model_obj=model,
         )
 
     # Upstream was streamed regardless of client preference.
-    assert captured_kwargs["stream"] is True
+    assert json.loads(route.calls.last.request.content)["stream"] is True
     # Client wanted non-streaming → aggregator ran.
     assert client_stream is False
     assert isinstance(result, dict)
     assert result["content"] == [{"type": "text", "text": "ok"}]
     assert result["stop_reason"] == "end_turn"
+    assert result["usage"]["input_tokens"] == 3
+    assert result["usage"]["output_tokens"] == 1
     assert requested_model == "openai/gpt-4o-mini"
 
 
@@ -1669,28 +1657,20 @@ async def test_dispatch_uses_url_detected_prefix_for_fireworks_custom_row() -> N
     model = _make_model(model_id="accounts/fireworks/models/glm-5")
     body = _anthropic_request_body(stream=True)
 
-    captured_kwargs: dict[str, Any] = {}
-
-    async def empty_iter() -> AsyncIterator[dict]:
-        if False:
-            yield {}
-
-    async def fake_acreate(**kwargs: Any) -> AsyncIterator[dict]:
-        captured_kwargs.update(kwargs)
-        return empty_iter()
-
-    with patch(
-        "litellm.anthropic.messages.acreate",
-        new=AsyncMock(side_effect=fake_acreate),
-    ):
-        await provider._dispatch_anthropic_messages(
+    assert provider.get_provider_prefix() == "fireworks_ai/"
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post(
+            "https://api.fireworks.ai/inference/v1/chat/completions"
+        ).mock(return_value=httpx.Response(200, text="data: [DONE]\n\n"))
+        _, result, _ = await provider._dispatch_anthropic_messages(
             request_body=body, model_obj=model
         )
+        async for _ in result:
+            pass
 
-    assert captured_kwargs["model"] == (
-        "fireworks_ai/accounts/fireworks/models/glm-5"
-    )
-    assert captured_kwargs["api_base"] == "https://api.fireworks.ai/inference/v1"
+    request = route.calls.last.request
+    assert json.loads(request.content)["model"] == "accounts/fireworks/models/glm-5"
+    assert request.headers["authorization"] == "Bearer fw-key"
 
 
 # ---------------------------------------------------------------------------
@@ -1739,9 +1719,7 @@ async def test_x_cashu_mint_unreachable_returns_503(
     model = _make_model()
     request = _make_request()
 
-    with patch(
-        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
-    ):
+    with patch("routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)):
         handler = getattr(provider, handler_name)
         response = await handler(
             request=request,
@@ -1830,9 +1808,7 @@ async def test_x_cashu_error_code_is_stable_string(
     model = _make_model()
     request = _make_request()
 
-    with patch(
-        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
-    ):
+    with patch("routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)):
         handler = getattr(provider, handler_name)
         response = await handler(
             request=request,
@@ -1902,7 +1878,10 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
     assert response.headers["X-Cashu"] == "cashuArefund"
     assert body["error"]["refund_token"] == "cashuArefund"
     refund.assert_awaited_once_with(
-        5_000, "sat", "https://mint", request_id=getattr(request.state, "request_id", None)
+        5_000,
+        "sat",
+        "https://mint",
+        request_id=getattr(request.state, "request_id", None),
     )
 
 
@@ -1962,9 +1941,7 @@ async def test_x_cashu_echoes_token_only_when_recoverable(
     model = _make_model()
     request = _make_request()
 
-    with patch(
-        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
-    ):
+    with patch("routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)):
         handler = getattr(provider, handler_name)
         response = await handler(
             request=request,
@@ -2008,7 +1985,9 @@ async def test_x_cashu_zero_value_rejected_not_forwarded(
         patch.object(
             provider,
             forward_attr,
-            new=AsyncMock(side_effect=AssertionError("must not forward a zero-value token")),
+            new=AsyncMock(
+                side_effect=AssertionError("must not forward a zero-value token")
+            ),
         ),
     ):
         handler = getattr(provider, handler_name)
@@ -2034,27 +2013,19 @@ async def test_x_cashu_zero_value_rejected_not_forwarded(
 
 @pytest.mark.asyncio
 async def test_dispatch_passes_placeholder_key_for_keyless_upstream() -> None:
-    """A blank upstream key must not reach litellm, which would fall back to
-    OPENAI_API_KEY and fail with an AuthenticationError."""
+    """A blank upstream key is sent as the ``no-key`` placeholder litellm
+    used, which keyless OpenAI-compatible servers ignore."""
     provider = BaseUpstreamProvider(base_url="http://localhost:8000/v1", api_key="")
-    captured_kwargs: dict[str, Any] = {}
 
-    async def fake_acreate(**kwargs: Any) -> AsyncIterator[dict]:
-        captured_kwargs.update(kwargs)
-
-        async def no_events() -> AsyncIterator[dict]:
-            return
-            yield
-
-        return no_events()
-
-    with patch(
-        "litellm.anthropic.messages.acreate",
-        new=AsyncMock(side_effect=fake_acreate),
-    ):
-        await provider._dispatch_anthropic_messages(
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post("http://localhost:8000/v1/chat/completions").mock(
+            return_value=httpx.Response(200, text="data: [DONE]\n\n")
+        )
+        _, result, _ = await provider._dispatch_anthropic_messages(
             request_body=_anthropic_request_body(stream=True),
             model_obj=_make_model(),
         )
+        async for _ in result:
+            pass
 
-    assert captured_kwargs["api_key"] == "no-key"
+    assert route.calls.last.request.headers["authorization"] == "Bearer no-key"

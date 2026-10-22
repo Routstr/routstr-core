@@ -79,9 +79,9 @@ def _as_int(value: object) -> int | None:
 def _from_litellm(model_id: str) -> ResolvedPricing | None:
     # Lazy import so the resolver shares the exact lookup semantics used by
     # cache-rate backfill without importing the models module at load time.
-    from ..payment.models import litellm_cost_entry
+    from ..payment.models import model_cost_entry
 
-    info = litellm_cost_entry(model_id)
+    info = model_cost_entry(model_id)
     if info is None:
         return None
 

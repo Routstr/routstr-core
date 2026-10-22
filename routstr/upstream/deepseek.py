@@ -51,7 +51,7 @@ class DeepSeekUpstreamProvider(GenericUpstreamProvider):
     provider_type = "deepseek"
     default_base_url = "https://api.deepseek.com"
     platform_url = "https://platform.deepseek.com/api_keys"
-    litellm_provider_prefix = "deepseek/"
+    provider_prefix = "deepseek/"
     use_fallback_pricing = False
 
     def __init__(self, api_key: str, provider_fee: float = 1.01):

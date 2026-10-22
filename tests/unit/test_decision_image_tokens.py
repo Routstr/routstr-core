@@ -1,6 +1,6 @@
 """System One image token estimates.
 
-Expected values are OpenAI's published examples, so a litellm regression fails here.
+Expected values are OpenAI's published examples, so a tile-math regression fails here.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from routstr.upstream.count_tokens import (
     decision_image_tokens,
 )
 
-DEFAULT_IMAGE_TOKENS = 250  # litellm.constants.DEFAULT_IMAGE_TOKEN_COUNT
+DEFAULT_IMAGE_TOKENS = 250  # litellm's DEFAULT_IMAGE_TOKEN_COUNT
 
 
 def _b64_image(width: int, height: int, fmt: str = "JPEG") -> str:
@@ -80,9 +80,9 @@ def test_raw_base64_and_data_url_agree() -> None:
     ],
 )
 def test_urls_are_never_fetched(url: str) -> None:
-    """litellm fetches http(s) image URLs; the node must not (SSRF)."""
+    """litellm fetched http(s) image URLs; the node must not (SSRF)."""
     with patch(
-        "litellm.litellm_core_utils.token_counter.safe_get",
+        "httpx.Client.send",
         side_effect=AssertionError("image URL was fetched"),
     ):
         assert decision_image_tokens(url) == DEFAULT_IMAGE_TOKENS

@@ -90,13 +90,13 @@ def test_build_request_url_combines_base_and_path() -> None:
 
 
 # ===========================================================================
-# get_litellm_provider_prefix / get_provider_metadata
+# get_provider_prefix / get_provider_metadata
 # ===========================================================================
 
-def test_get_litellm_provider_prefix_default() -> None:
+def test_get_provider_prefix_default() -> None:
     """Default returns a string prefix."""
     p = BaseUpstreamProvider("https://api.test.com", "sk-test-key")
-    prefix = p.get_litellm_provider_prefix()
+    prefix = p.get_provider_prefix()
     assert isinstance(prefix, str)
 
 

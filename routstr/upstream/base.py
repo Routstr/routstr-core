@@ -80,8 +80,8 @@ from .image_generation import (
     parse_json_body,
     read_image_response,
 )
-from .litellm_routing import detect_litellm_prefix
 from .model_paths import public_provider_url
+from .provider_prefixes import detect_provider_prefix
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
 from .reasoning_effort import apply_reasoning_effort
 from .sse_splitter import SSEEventSplitter
@@ -530,9 +530,9 @@ class BaseUpstreamProvider:
     supports_anthropic_messages: bool = False
     supports_decisions: bool = False
     # When None, the prefix is detected from `base_url` at dispatch time
-    # (see `get_litellm_provider_prefix`). Subclasses set this to lock the
+    # (see `get_provider_prefix`). Subclasses set this to lock the
     # provider regardless of URL.
-    litellm_provider_prefix: str | None = None
+    provider_prefix: str | None = None
 
     base_url: str
     api_key: str
@@ -560,18 +560,18 @@ class BaseUpstreamProvider:
         self._models_cache = []
         self._models_by_id = {}
 
-    def get_litellm_provider_prefix(self) -> str:
-        """Resolve the litellm provider prefix for this provider instance.
+    def get_provider_prefix(self) -> str:
+        """Resolve the ``/v1/messages`` provider prefix for this instance.
 
-        1. If the subclass pinned `litellm_provider_prefix`, use it.
+        1. If the subclass pinned `provider_prefix`, use it.
         2. Otherwise infer from `base_url` (e.g. ``api.fireworks.ai`` →
-           ``fireworks_ai/``) so custom/generic rows reach the correct
-           litellm backend instead of falling back to ``openai/``.
+           ``fireworks_ai/``) so custom/generic rows get the correct
+           dialect instead of falling back to ``openai/``.
         3. Default ``openai/`` for unknown OpenAI-compatible servers.
         """
-        if self.__class__.litellm_provider_prefix:
-            return self.__class__.litellm_provider_prefix
-        return detect_litellm_prefix(self.base_url)
+        if self.__class__.provider_prefix:
+            return self.__class__.provider_prefix
+        return detect_provider_prefix(self.base_url)
 
     @classmethod
     def from_db_row(cls, provider_row: "UpstreamProviderRow") -> "Self | None":
@@ -3009,14 +3009,14 @@ class BaseUpstreamProvider:
             raise
 
     # ------------------------------------------------------------------
-    # Litellm /v1/messages dispatch (thin wrappers)
+    # Translated /v1/messages dispatch (thin wrappers)
     #
     # The actual translation logic lives in ``messages_dispatch``. These
     # method shims exist so subclasses and tests can keep the original
     # provider-bound API.
     # ------------------------------------------------------------------
 
-    _coerce_litellm_payload = staticmethod(messages_dispatch.coerce_litellm_payload)
+    _coerce_event_payload = staticmethod(messages_dispatch.coerce_event_payload)
     _parse_sse_blocks = staticmethod(messages_dispatch.parse_sse_blocks)
     _events_from_chunk = staticmethod(messages_dispatch.events_from_chunk)
 
@@ -3052,14 +3052,19 @@ class BaseUpstreamProvider:
             model_obj=model_obj,
             base_url=self.base_url,
             api_key=self.api_key,
-            provider_prefix=self.get_litellm_provider_prefix(),
+            provider_prefix=self.get_provider_prefix(),
             transform_model_name=self.transform_model_name,
             adapt_request=lambda body: self.adapt_messages_request(body, model_obj),
             transform_stream=self.transform_messages_stream,
             log_extra=log_extra,
+            api_version=self.configured_api_version(),
         )
 
-    async def _forward_messages_via_litellm(
+    def configured_api_version(self) -> str | None:
+        """The row's upstream API version, if it has one (Azure)."""
+        return None
+
+    async def _forward_messages_via_translation(
         self,
         request_body: bytes | None,
         key: ApiKey,
@@ -3068,7 +3073,7 @@ class BaseUpstreamProvider:
         model_obj: Model,
         reservation_snapshot: ReservationSnapshot | None = None,
     ) -> Response | StreamingResponse:
-        """Translate /v1/messages to upstream chat/completions via litellm.
+        """Translate /v1/messages to the upstream's chat dialect.
 
         Used when the upstream provider does not natively serve Anthropic
         Messages (i.e. supports_anthropic_messages is False). Cost
@@ -3081,7 +3086,7 @@ class BaseUpstreamProvider:
         )
 
         if stream:
-            return self._stream_litellm_messages(
+            return self._stream_translated_messages(
                 cast(AsyncIterator[Any], result),
                 key,
                 max_cost_for_model,
@@ -3091,7 +3096,7 @@ class BaseUpstreamProvider:
                 request_body,
             )
 
-        response_json = messages_dispatch.coerce_litellm_payload(result)
+        response_json = messages_dispatch.coerce_event_payload(result)
         if requested_model and "model" in response_json:
             response_json["model"] = requested_model
         if not isinstance(response_json.get("usage"), dict):
@@ -3123,7 +3128,7 @@ class BaseUpstreamProvider:
             media_type="application/json",
         )
 
-    async def _forward_x_cashu_messages_via_litellm(
+    async def _forward_x_cashu_messages_via_translation(
         self,
         request_body: bytes,
         amount: int,
@@ -3134,7 +3139,7 @@ class BaseUpstreamProvider:
         request_id: str | None = None,
         _refund: _XCashuRefund | None = None,
     ) -> Response | StreamingResponse:
-        """Dispatch /v1/messages via litellm for x-cashu payments.
+        """Dispatch translated /v1/messages for x-cashu payments.
 
         Computes cost from upstream usage, refunds the unspent balance via
         an X-Cashu response header, and returns the Anthropic-shaped body.
@@ -3147,7 +3152,7 @@ class BaseUpstreamProvider:
         )
 
         if stream:
-            return await self._stream_x_cashu_litellm_messages(
+            return await self._stream_x_cashu_translated_messages(
                 cast(AsyncIterator[Any], result),
                 amount,
                 unit,
@@ -3159,7 +3164,7 @@ class BaseUpstreamProvider:
                 _refund=_refund,
             )
 
-        response_json = messages_dispatch.coerce_litellm_payload(result)
+        response_json = messages_dispatch.coerce_event_payload(result)
         self._apply_provider_field(response_json)
         if requested_model and "model" in response_json:
             response_json["model"] = requested_model
@@ -3192,7 +3197,7 @@ class BaseUpstreamProvider:
                     )
                     response_headers["X-Cashu"] = refund_token
                     logger.info(
-                        "Refund processed for non-streaming /v1/messages via litellm",
+                        "Refund processed for non-streaming translated /v1/messages",
                         extra={
                             "refund_amount": refund_amount,
                             "unit": unit,
@@ -3230,7 +3235,7 @@ class BaseUpstreamProvider:
 
     _compute_refund = staticmethod(messages_dispatch.compute_refund)
 
-    def _stream_litellm_messages(
+    def _stream_translated_messages(
         self,
         iterator: AsyncIterator[Any],
         key: ApiKey,
@@ -3240,7 +3245,7 @@ class BaseUpstreamProvider:
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
     ) -> StreamingResponse:
-        """Re-emit a litellm Anthropic-event iterator as live SSE bytes
+        """Re-emit a translated Anthropic-event iterator as live SSE bytes
         with cost reconciliation appended at end of stream."""
 
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
@@ -3428,7 +3433,7 @@ class BaseUpstreamProvider:
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
-    async def _stream_x_cashu_litellm_messages(
+    async def _stream_x_cashu_translated_messages(
         self,
         iterator: AsyncIterator[Any],
         amount: int,
@@ -3440,14 +3445,14 @@ class BaseUpstreamProvider:
         model_obj: Model | None = None,
         _refund: _XCashuRefund | None = None,
     ) -> StreamingResponse | Response:
-        """Buffer a litellm stream end-to-end, compute cost, then replay.
+        """Buffer a translated stream end-to-end, compute cost, then replay.
 
         Note this is **not** true streaming — the full event sequence is
         accumulated into memory before a single byte is sent to the
         client. The constraint is the ``X-Cashu`` refund token, which must
         be set as a response *header* and therefore has to be known before
         the response begins. The bearer-key path
-        (:meth:`_stream_litellm_messages`) avoids this by emitting cost as
+        (:meth:`_stream_translated_messages`) avoids this by emitting cost as
         a trailing ``event: cost`` SSE message; switching x-cashu to the
         same trailing-event contract would let this path stream live, at
         the cost of a wire-format change for clients that read ``X-Cashu``
@@ -3471,7 +3476,7 @@ class BaseUpstreamProvider:
             async for annotated in annotated_events:
                 if annotated.model:
                     last_model_seen = annotated.model
-                # See _stream_litellm_messages for why this is max() not +=.
+                # See _stream_translated_messages for why this is max() not +=.
                 input_tokens = max(input_tokens, annotated.input_tokens)
                 output_tokens = max(output_tokens, annotated.output_tokens)
                 cache_read_input_tokens = max(
@@ -3498,6 +3503,9 @@ class BaseUpstreamProvider:
                     },
                 ) from exc
             raise
+        finally:
+            # A failure mid-buffer must not hold the pooled connection until GC.
+            await aclose_if_needed(iterator)
 
         response_headers: dict[str, str] = {
             "Cache-Control": "no-cache",
@@ -3562,7 +3570,7 @@ class BaseUpstreamProvider:
                         )
                         response_headers["X-Cashu"] = refund_token
                         logger.info(
-                            "Refund processed for streaming /v1/messages via litellm",
+                            "Refund processed for streaming translated /v1/messages",
                             extra={
                                 "refund_amount": refund_amount,
                                 "unit": unit,
@@ -3662,7 +3670,7 @@ class BaseUpstreamProvider:
             and not path.endswith("count_tokens")
             and not self.supports_anthropic_messages
         ):
-            return await self._forward_messages_via_litellm(
+            return await self._forward_messages_via_translation(
                 request_body=request_body,
                 key=key,
                 session=session,
@@ -5073,7 +5081,7 @@ class BaseUpstreamProvider:
             and not path.endswith("count_tokens")
             and not self.supports_anthropic_messages
         ):
-            return await self._forward_x_cashu_messages_via_litellm(
+            return await self._forward_x_cashu_messages_via_translation(
                 request_body=request_body,
                 amount=amount,
                 unit=unit,

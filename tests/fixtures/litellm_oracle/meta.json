@@ -1,0 +1,17 @@
+{
+ "oracle_base_ref": "d65f8cd0e7a41029ee1326c879b80a80a80f0bba",
+ "litellm_version": "1.101.2",
+ "openai_version": "2.32.0",
+ "httpx_version": "0.28.1",
+ "model_cost_file": "routstr/payment/data/model_cost.json",
+ "model_cost_sha256": "37132f62d023bfb8552caf21373205f0848d68c4230a71085bc4168e27f4fa4b",
+ "model_cost_entries": 4243,
+ "id_placeholder": "<id>",
+ "id_patterns": [
+  "msg_[A-Za-z0-9_\\-]+",
+  "toolu_[A-Za-z0-9_\\-]+",
+  "call_[A-Za-z0-9_\\-]+",
+  "chatcmpl-[A-Za-z0-9_\\-]+",
+  "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+ ]
+}

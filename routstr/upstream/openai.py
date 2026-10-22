@@ -1,9 +1,7 @@
 import json
 from typing import TYPE_CHECKING
 
-from litellm.llms.openai.chat.gpt_5_transformation import OpenAIGPT5Config
-from litellm.llms.openai.chat.o_series_transformation import OpenAIOSeriesConfig
-
+from ..payment.model_cost import openai_chat_models
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
 from .image_catalog import attach_image_books, openai_image_book
@@ -11,13 +9,18 @@ from .image_catalog import attach_image_books, openai_image_book
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
 
-_O_SERIES = OpenAIOSeriesConfig()
-
 
 def _rejects_max_tokens(model: str) -> bool:
-    return OpenAIGPT5Config.is_model_gpt_5_model(
-        model
-    ) or _O_SERIES.is_model_o_series_model(model)
+    """Reasoning models reject max_tokens (litellm's gpt-5 and o-series checks)."""
+    name = model.split("/")[-1]
+    if ("gpt-5" in model or "gpt-6" in model) and not name.startswith("gpt-5-chat"):
+        return True
+    return (
+        len(name) > 1
+        and name[0] == "o"
+        and name[1].isdigit()
+        and name in openai_chat_models()
+    )
 
 
 class OpenAIUpstreamProvider(BaseUpstreamProvider):
@@ -70,7 +73,7 @@ class OpenAIUpstreamProvider(BaseUpstreamProvider):
         except ValueError:
             return body
         # Reasoning models 400 on max_tokens; renaming up front saves the
-        # reject-and-retry round trip. Names litellm doesn't know yet still
+        # reject-and-retry round trip. Names the cost map doesn't know yet still
         # fall through to request_correction's reactive rename.
         if (
             isinstance(data, dict)

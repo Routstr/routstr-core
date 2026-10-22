@@ -1,19 +1,15 @@
 """Generic upstreams get the Anthropic ``system`` as a plain string.
 
-Litellm turns a block-list ``system`` into an OpenAI system message with array
-content, which some OpenAI-compatible gateways reject with ``messages[0].content:
+The translation turns a block-list ``system`` into an OpenAI system message with
+array content, which some OpenAI-compatible gateways reject with ``messages[0].content:
 expected string, received array``. Claude Code always sends the block form.
 """
 
 from __future__ import annotations
 
-from typing import Any, cast
-
 import pytest
-from litellm.llms.anthropic.experimental_pass_through.adapters.transformation import (
-    LiteLLMAnthropicMessagesAdapter,
-)
 
+from routstr.upstream.anthropic_openai import anthropic_to_openai
 from routstr.upstream.deepseek import DeepSeekUpstreamProvider
 from routstr.upstream.generic import GenericUpstreamProvider
 
@@ -77,17 +73,14 @@ async def test_generic_subclasses_inherit_the_join() -> None:
 
 
 @pytest.mark.asyncio
-async def test_litellm_sends_string_system_content_upstream() -> None:
-    """Pins the litellm translation the fix relies on."""
+async def test_translation_sends_string_system_content_upstream() -> None:
+    """Pins the translation the fix relies on."""
     kwargs = await _dispatch(_generic(), _body(system=CLAUDE_CODE_SYSTEM))
     request = {
         "model": "x",
         **{k: kwargs[k] for k in ("system", "messages", "max_tokens")},
     }
 
-    adapter = LiteLLMAnthropicMessagesAdapter()  # type: ignore[no-untyped-call]
-    openai_request, _ = adapter.translate_anthropic_to_openai(
-        anthropic_message_request=cast(Any, request)
-    )
+    openai_request, _ = anthropic_to_openai(request)
 
     assert openai_request["messages"][0] == {"role": "system", "content": JOINED}

@@ -64,7 +64,7 @@ def test_returns_input_tokens_for_simple_messages() -> None:
     assert payload["input_tokens"] >= 0
 
 
-def test_falls_back_to_estimator_when_litellm_raises() -> None:
+def test_falls_back_to_estimator_when_counter_raises() -> None:
     model = _make_model()
     request_body = _body(
         {
@@ -75,7 +75,7 @@ def test_falls_back_to_estimator_when_litellm_raises() -> None:
 
     with patch.object(
         count_tokens_module,
-        "_count_with_litellm",
+        "_count_tokens",
         side_effect=RuntimeError("boom"),
     ):
         response = count_tokens_locally(request_body, model)
@@ -164,8 +164,8 @@ def test_missing_usage_estimator_prices_request_and_streamed_output() -> None:
     )
 
     with (
-        patch.object(count_tokens_module, "_count_with_litellm", return_value=17),
-        patch.object(count_tokens_module, "_count_text_with_litellm", return_value=5),
+        patch.object(count_tokens_module, "_count_tokens", return_value=17),
+        patch.object(count_tokens_module, "count_text_tokens", return_value=5),
     ):
         estimator = MissingUsageEstimator(request_body, model)
         estimator.observe(
@@ -211,8 +211,8 @@ def test_missing_usage_estimator_openai_dialect() -> None:
     )
 
     with (
-        patch.object(count_tokens_module, "_count_with_litellm", return_value=17),
-        patch.object(count_tokens_module, "_count_text_with_litellm", return_value=5),
+        patch.object(count_tokens_module, "_count_tokens", return_value=17),
+        patch.object(count_tokens_module, "count_text_tokens", return_value=5),
     ):
         estimator = MissingUsageEstimator(request_body, model)
         estimator.observe({"choices": [{"delta": {"content": "estimated output"}}]})
@@ -267,7 +267,7 @@ def test_uses_forwarded_model_id_when_present() -> None:
         captured["model"] = model_name
         return 7
 
-    with patch.object(count_tokens_module, "_count_with_litellm", side_effect=_capture):
+    with patch.object(count_tokens_module, "_count_tokens", side_effect=_capture):
         response = count_tokens_locally(request_body, model)
 
     assert captured["model"] == "claude-3-5-sonnet-20241022"
@@ -277,18 +277,18 @@ def test_uses_forwarded_model_id_when_present() -> None:
 def test_responses_instructions_are_counted_as_system_text() -> None:
     body = {"model": "gpt-4o", "input": "Hi", "instructions": "Be concise."}
     with patch.object(
-        count_tokens_module.litellm, "token_counter", return_value=12
+        count_tokens_module, "count_message_tokens", return_value=12
     ) as counter:
         usage = MissingUsageEstimator(_body(body), None).response_data()["usage"]
 
     assert usage["input_tokens"] == 12
     counter.assert_called_once_with(
-        model="gpt-4o",
-        messages=[
+        "gpt-4o",
+        [
             {"role": "system", "content": "Be concise."},
             {"role": "user", "content": "Hi"},
         ],
-        tools=None,
+        None,
     )
 
 
@@ -303,7 +303,7 @@ def test_responses_tool_results_use_fallback_instead_of_empty_messages() -> None
             }
         ],
     }
-    with patch.object(count_tokens_module.litellm, "token_counter") as counter:
+    with patch.object(count_tokens_module, "count_message_tokens") as counter:
         usage = MissingUsageEstimator(_body(body), None).response_data()["usage"]
 
     counter.assert_not_called()

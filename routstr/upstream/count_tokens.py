@@ -7,11 +7,11 @@ to ``POST /messages/count_tokens``. Claude Code and other Anthropic SDK
 clients call this endpoint before each turn to size context windows and
 trigger compaction, so a failure breaks the whole chat.
 
-We answer locally. ``litellm.token_counter`` understands the Anthropic
-message shape and the per-model tokenizers, so we prefer it. If it raises
-(unknown model, encoding lookup failure, ...), we fall back to the
-project's own ``estimate_tokens`` heuristic, which is always defined and
-never raises.
+We answer locally with a port of litellm's ``token_counter``, which
+understands the Anthropic message shape and the per-model tiktoken
+encodings. If it raises (unsupported block, malformed message, ...), we fall
+back to the project's own ``estimate_tokens`` heuristic, which is always
+defined and never raises.
 """
 
 from __future__ import annotations
@@ -19,10 +19,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import litellm
 from fastapi.responses import Response
-from litellm.constants import DEFAULT_IMAGE_TOKEN_COUNT
-from litellm.litellm_core_utils.token_counter import calculate_img_tokens
 
 from ..core import get_logger
 from ..payment.helpers import (
@@ -31,6 +28,12 @@ from ..payment.helpers import (
     estimate_tokens,
 )
 from ..payment.models import Model
+from .token_counting import (
+    DEFAULT_IMAGE_TOKEN_COUNT,
+    count_message_tokens,
+    count_text_tokens,
+    image_tokens_high_detail,
+)
 
 logger = get_logger(__name__)
 
@@ -52,7 +55,7 @@ def _model_name(model_obj: Model | None, body: dict[str, Any]) -> str:
     return body_model if isinstance(body_model, str) else ""
 
 
-def _count_with_litellm(
+def _count_tokens(
     model: str, body: dict[str, Any], include_legacy_prompt: bool = False
 ) -> int:
     messages = body.get("messages")
@@ -119,23 +122,7 @@ def _count_with_litellm(
 
     tools = body.get("tools") if isinstance(body.get("tools"), list) else None
 
-    return prompt_token_ids + int(
-        litellm.token_counter(
-            model=model,
-            messages=messages,
-            tools=tools,
-        )
-    )
-
-
-def _count_text_with_litellm(model: str, text: str) -> int:
-    return int(
-        litellm.token_counter(
-            model=model,
-            text=text,
-            count_response_tokens=True,
-        )
-    )
+    return prompt_token_ids + count_message_tokens(model, messages, tools)
 
 
 def _generated_text(value: object) -> list[str]:
@@ -179,20 +166,17 @@ def _is_decision_request(body: dict[str, Any]) -> bool:
 
 
 def decision_image_tokens(image: object) -> int:
-    """litellm's high-detail tile count for one base64 image.
-
-    URLs are never passed on: litellm would fetch them from the node.
-    """
+    """High-detail tile count for one base64 image; URLs are never fetched."""
     if not isinstance(image, str):
         return DEFAULT_IMAGE_TOKEN_COUNT
     data = image.strip()
     if not data or data.lower().startswith(("http://", "https://")):
         return DEFAULT_IMAGE_TOKEN_COUNT
     if not data.startswith("data:"):
-        # litellm sniffs the real format from the bytes.
+        # The real format is sniffed from the bytes.
         data = f"data:image/png;base64,{data}"
     try:
-        return int(calculate_img_tokens(data, mode="high"))
+        return image_tokens_high_detail(data)
     except Exception:
         return DEFAULT_IMAGE_TOKEN_COUNT
 
@@ -245,17 +229,17 @@ class MissingUsageEstimator:
         if self._input_tokens is not None:
             return self._input_tokens
         if _is_decision_request(self.body):
-            # litellm counts only messages, so {state, questions} would be ~0.
+            # The token counter reads only messages: {state, questions} would be ~0.
             self._input_tokens = _estimate_decision_input_tokens(self.body)
             return self._input_tokens
         try:
-            self._input_tokens = _count_with_litellm(
+            self._input_tokens = _count_tokens(
                 self.model_name, self.body, include_legacy_prompt=True
             )
         except Exception as exc:
             self._input_tokens = estimate_prompt_tokens(self.body)
             logger.debug(
-                "litellm request token count failed; using local estimator",
+                "request token count failed; using local estimator",
                 extra={
                     "model": self.model_name,
                     "error": str(exc),
@@ -317,13 +301,11 @@ class MissingUsageEstimator:
     def response_data(self, model: str | None = None) -> dict[str, Any]:
         text = self.output_text
         try:
-            output_tokens = (
-                _count_text_with_litellm(self.model_name, text) if text else 0
-            )
+            output_tokens = count_text_tokens(self.model_name, text) if text else 0
         except Exception as exc:
             output_tokens = len(text) // 3
             logger.debug(
-                "litellm response token count failed; using local estimator",
+                "response token count failed; using local estimator",
                 extra={
                     "model": self.model_name,
                     "error": str(exc),
@@ -371,13 +353,13 @@ def count_tokens_locally(
 
     input_tokens: int
     try:
-        input_tokens = _count_with_litellm(model_name, body)
+        input_tokens = _count_tokens(model_name, body)
     except Exception as exc:
         messages = body.get("messages")
         fallback_messages = messages if isinstance(messages, list) else []
         input_tokens = estimate_tokens(fallback_messages)
         logger.debug(
-            "litellm token_counter failed; using local estimator",
+            "token count failed; using local estimator",
             extra={
                 "model": model_name,
                 "error": str(exc),

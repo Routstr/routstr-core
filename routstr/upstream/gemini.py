@@ -28,7 +28,7 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
     provider_type = "gemini"
     default_base_url = "https://generativelanguage.googleapis.com/v1beta"
     platform_url = "https://aistudio.google.com/app/apikey"
-    litellm_provider_prefix = "gemini/"
+    provider_prefix = "gemini/"
 
     def __init__(
         self,
@@ -94,9 +94,7 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
         """
         return self.base_url.rstrip("/").removesuffix("/openai") + "/openai"
 
-    def get_request_base_url(
-        self, path: str, model_obj: "Model | None" = None
-    ) -> str:
+    def get_request_base_url(self, path: str, model_obj: "Model | None" = None) -> str:
         """Route every proxied request to the OpenAI-compat surface.
 
         Required because the stored ``base_url`` typically points at the
@@ -114,11 +112,10 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
         *,
         log_extra: dict[str, Any] | None = None,
     ) -> tuple[bool, Any, str | None]:
-        """Dispatch /v1/messages via the gemini-specific httpx path.
+        """Dispatch /v1/messages via the gemini-specific path.
 
-        See :mod:`routstr.upstream.gemini_messages` for the full rationale
-        (thought-signature injection, why litellm + the openai SDK can't
-        carry the required ``extra_content`` field).
+        See :mod:`routstr.upstream.gemini_messages` for the rationale
+        (thought-signature injection on replayed tool calls).
         """
         return await gemini_messages.dispatch_gemini_messages(
             request_body=request_body,

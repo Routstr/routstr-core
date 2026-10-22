@@ -24,7 +24,7 @@ from routstr.payment.models import (
 )
 from routstr.upstream import GenericUpstreamProvider
 from routstr.upstream.reasoning_effort import (
-    adapt_messages_body_for_litellm,
+    adapt_messages_body_for_translation,
     apply_reasoning_effort,
     closest_supported_effort,
     extract_requested_effort,
@@ -341,7 +341,7 @@ def test_messages_thinking_becomes_reasoning_effort() -> None:
         "max_tokens": 16,
         "thinking": {"type": "enabled", "effort": "minimal"},
     }
-    adapt_messages_body_for_litellm(body, model)
+    adapt_messages_body_for_translation(body, model)
     assert "thinking" not in body
     assert body["reasoning_effort"] == "low"
 
@@ -358,7 +358,7 @@ def test_messages_output_config_effort_becomes_reasoning_effort() -> None:
         "max_tokens": 16,
         "output_config": {"effort": "max"},
     }
-    adapt_messages_body_for_litellm(body, model)
+    adapt_messages_body_for_translation(body, model)
     assert body["reasoning_effort"] == "max"
     # Nothing else invented on the client's behalf.
     assert "reasoning" not in body
@@ -379,7 +379,7 @@ def test_messages_output_config_effort_is_clamped_to_supported() -> None:
         "max_tokens": 16,
         "output_config": {"effort": "max"},
     }
-    adapt_messages_body_for_litellm(body, model)
+    adapt_messages_body_for_translation(body, model)
     assert body["reasoning_effort"] == "high"
 
 
@@ -389,7 +389,7 @@ def test_messages_model_without_metadata_keeps_output_config_effort() -> None:
         "messages": [{"role": "user", "content": "hi"}],
         "output_config": {"effort": "high"},
     }
-    adapt_messages_body_for_litellm(body, model)
+    adapt_messages_body_for_translation(body, model)
     assert body["reasoning_effort"] == "high"
 
 
@@ -401,7 +401,7 @@ def test_messages_generic_spelling_wins_over_output_config() -> None:
         "reasoning_effort": "low",
         "output_config": {"effort": "max"},
     }
-    adapt_messages_body_for_litellm(body, model)
+    adapt_messages_body_for_translation(body, model)
     assert body["reasoning_effort"] == "low"
 
 
@@ -425,7 +425,7 @@ def test_messages_format_only_output_config_does_not_add_effort() -> None:
     assert "reasoning_effort" not in body
     assert "reasoning" not in body
 
-    adapt_messages_body_for_litellm(body, model)
+    adapt_messages_body_for_translation(body, model)
     assert "reasoning_effort" not in body
     assert "reasoning" not in body
 

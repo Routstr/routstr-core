@@ -1,10 +1,10 @@
 """What Routstr actually puts on the wire for a Venice web-search request.
 
-The unit tests stop at the kwargs handed to litellm. Everything that produced
-the reported ``400 Unrecognized key(s) in object: 'web_search_options'``
-happened *after* that point, inside litellm's Anthropic adapter, so this test
-runs the whole dispatch against a loopback OpenAI-compatible server and reads
-the bytes Venice would have received.
+The unit tests stop at the Anthropic body handed to the translator. The
+reported ``400 Unrecognized key(s) in object: 'web_search_options'`` came from
+the translation itself, so this test runs the whole dispatch against a
+loopback OpenAI-compatible server and reads the bytes Venice would have
+received.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from typing import Any, Iterator
 import pytest
 
 from routstr.payment.models import Architecture, Model, Pricing
-from routstr.upstream.litellm_routing import configure_litellm
 from routstr.upstream.venice import VeniceUpstreamProvider
 
 _CHUNKS = [
@@ -93,9 +92,6 @@ async def test_web_search_request_reaches_venice_in_its_own_shape(
     upstream: tuple[str, dict[str, Any]],
 ) -> None:
     base_url, captured = upstream
-    # The app applies this at startup; without it litellm posts the Anthropic
-    # body to /responses, which Venice serves only in alpha.
-    configure_litellm()
 
     provider = VeniceUpstreamProvider(api_key="sk-test")
     provider.base_url = base_url

@@ -738,7 +738,7 @@ async def test_missing_upstream_cost_uses_litellm_model_pricing(
     monkeypatch.setattr(settings, "fixed_per_1k_input_tokens", 0)
     monkeypatch.setattr(settings, "fixed_per_1k_output_tokens", 0)
     monkeypatch.setattr(
-        "routstr.payment.models.litellm_cost_entry",
+        "routstr.payment.models.model_cost_entry",
         lambda model: {
             "input_cost_per_token": 0.000001,
             "output_cost_per_token": 0.000002,

@@ -111,6 +111,24 @@ from routstr.payment.usage import NormalizedUsage, normalize_usage
                 cache_write_tokens=2000,
             ),
         ),
+        # Venice: cache writes nested as
+        # prompt_tokens_details.cache_creation_input_tokens, inside prompt_tokens
+        (
+            {
+                "prompt_tokens": 1000,
+                "completion_tokens": 40,
+                "prompt_tokens_details": {
+                    "cached_tokens": 200,
+                    "cache_creation_input_tokens": 300,
+                },
+            },
+            NormalizedUsage(
+                input_tokens=500,
+                output_tokens=40,
+                cache_read_tokens=200,
+                cache_write_tokens=300,
+            ),
+        ),
         # OpenAI Responses API: cached tokens nested under input_tokens_details
         # and INCLUDED in input_tokens (same semantics as prompt_tokens) →
         # subtracted. Real payload shape from /v1/responses response.completed.

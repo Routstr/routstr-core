@@ -4,7 +4,7 @@ Specifies two things:
 
 1. ``backfill_cache_pricing`` — when the OpenRouter model feed omits cache
    rates (it does for most DeepSeek models and e.g. openai/gpt-4o), they are
-   filled from litellm's bundled cost map instead of silently billing cache
+   filled from the vendored litellm cost map instead of silently billing cache
    reads at the full input rate. Existing OpenRouter values are never
    overwritten, and provider fees apply to backfilled rates like any other.
 2. ``calculate_cost`` — cached tokens are billed at the cache rates from the
@@ -15,7 +15,6 @@ Specifies two things:
 import os
 from unittest.mock import Mock, patch
 
-import litellm
 import pytest
 
 os.environ.setdefault("UPSTREAM_BASE_URL", "http://test")
@@ -24,6 +23,7 @@ os.environ.setdefault("LIGHTNING_ADDRESS", "test@stm.to")
 
 from routstr.core.settings import settings
 from routstr.payment.cost_calculation import CostData, calculate_cost
+from routstr.payment.model_cost import model_cost
 from routstr.payment.models import (
     Architecture,
     Model,
@@ -63,9 +63,7 @@ def test_backfill_deepseek_cache_read_from_litellm() -> None:
 
     result = backfill_cache_pricing("deepseek/deepseek-chat", pricing)
 
-    expected = litellm.model_cost["deepseek/deepseek-chat"][
-        "cache_read_input_token_cost"
-    ]
+    expected = model_cost()["deepseek/deepseek-chat"]["cache_read_input_token_cost"]
     assert result.input_cache_read == expected
     assert result.input_cache_read < pricing.prompt  # sanity: it's a discount
 
@@ -77,7 +75,7 @@ def test_backfill_strips_vendor_prefix_for_litellm_lookup() -> None:
 
     result = backfill_cache_pricing("openai/gpt-4o", pricing)
 
-    expected = litellm.model_cost["gpt-4o"]["cache_read_input_token_cost"]
+    expected = model_cost()["gpt-4o"]["cache_read_input_token_cost"]
     assert result.input_cache_read == expected
 
 
@@ -89,9 +87,7 @@ def test_backfill_case_insensitive_lookup() -> None:
 
     result = backfill_cache_pricing("deepseek-ai/DeepSeek-V4-Flash", pricing)
 
-    expected = litellm.model_cost["deepseek-v4-flash"][
-        "cache_read_input_token_cost"
-    ]
+    expected = model_cost()["deepseek-v4-flash"]["cache_read_input_token_cost"]
     assert result.input_cache_read == expected
     assert result.input_cache_read < pricing.prompt  # sanity: it's a discount
 
@@ -103,18 +99,14 @@ def test_backfill_fills_cache_write_rate() -> None:
 
     result = backfill_cache_pricing("anthropic/claude-sonnet-4-5", pricing)
 
-    expected = litellm.model_cost["claude-sonnet-4-5"][
-        "cache_creation_input_token_cost"
-    ]
+    expected = model_cost()["claude-sonnet-4-5"]["cache_creation_input_token_cost"]
     assert result.input_cache_write == expected
     assert result.input_cache_write > pricing.prompt  # sanity: write premium
 
 
 def test_backfill_never_overwrites_openrouter_rates() -> None:
     """When OpenRouter provides a cache rate, it is authoritative."""
-    pricing = Pricing(
-        prompt=2.1e-07, completion=7.9e-07, input_cache_read=1.3e-07
-    )
+    pricing = Pricing(prompt=2.1e-07, completion=7.9e-07, input_cache_read=1.3e-07)
 
     result = backfill_cache_pricing("deepseek/deepseek-chat", pricing)
 
@@ -144,9 +136,7 @@ def test_provider_fee_applies_to_backfilled_cache_rates() -> None:
 
     adjusted = provider._apply_provider_fee_to_model(model)
 
-    litellm_read = litellm.model_cost["deepseek/deepseek-chat"][
-        "cache_read_input_token_cost"
-    ]
+    litellm_read = model_cost()["deepseek/deepseek-chat"]["cache_read_input_token_cost"]
     assert adjusted.pricing.input_cache_read == pytest.approx(litellm_read * 2.0)
     assert adjusted.pricing.prompt == pytest.approx(2.8e-07 * 2.0)
 
@@ -182,14 +172,10 @@ def test_row_to_model_backfills_cache_rate() -> None:
         upstream_provider_id=1,
     )
 
-    with patch(
-        "routstr.payment.models.sats_usd_price", return_value=5.0e-5
-    ):
+    with patch("routstr.payment.models.sats_usd_price", return_value=5.0e-5):
         model = _row_to_model(row, apply_provider_fee=True, provider_fee=1.0)
 
-    litellm_read = litellm.model_cost["deepseek-v4-flash"][
-        "cache_read_input_token_cost"
-    ]
+    litellm_read = model_cost()["deepseek-v4-flash"]["cache_read_input_token_cost"]
     assert model.pricing.input_cache_read == pytest.approx(litellm_read)
     assert model.pricing.input_cache_read < model.pricing.prompt  # a discount
     assert model.sats_pricing is not None
@@ -226,14 +212,10 @@ def test_row_to_model_backfills_via_forwarded_model_id() -> None:
         forwarded_model_id="deepseek-v4-flash",
     )
 
-    with patch(
-        "routstr.payment.models.sats_usd_price", return_value=5.0e-5
-    ):
+    with patch("routstr.payment.models.sats_usd_price", return_value=5.0e-5):
         model = _row_to_model(row, apply_provider_fee=True, provider_fee=1.0)
 
-    litellm_read = litellm.model_cost["deepseek-v4-flash"][
-        "cache_read_input_token_cost"
-    ]
+    litellm_read = model_cost()["deepseek-v4-flash"]["cache_read_input_token_cost"]
     assert model.pricing.input_cache_read == pytest.approx(litellm_read)
     assert model.pricing.input_cache_read < model.pricing.prompt
 

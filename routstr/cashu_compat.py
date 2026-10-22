@@ -9,7 +9,7 @@ operation routstr performs -- ``load_mint_keysets``, ``mint_quote``,
     TypeError: AsyncClient.__init__() got an unexpected keyword argument 'proxies'
 
 Upstream cashu (0.20.3, the latest release) still caps ``httpx<0.26`` and has no
-release that fixes this, while litellm>=1.84 requires ``httpx>=0.28``. We bridge
+release that fixes this, while routstr itself requires ``httpx>=0.28``. We bridge
 the gap by translating the keyword *inside cashu's module namespace only* --
 global httpx behaviour is untouched, and the shim is a no-op on httpx<0.28.
 

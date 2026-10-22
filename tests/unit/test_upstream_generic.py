@@ -651,7 +651,7 @@ async def test_non_finite_litellm_rate_is_not_a_resolved_price() -> None:
 
     with _patch_models_endpoint(payload):
         or_feed = AsyncMock(return_value=[])
-        with patch("routstr.payment.models.litellm_cost_entry", lambda _id: cost_entry):
+        with patch("routstr.payment.models.model_cost_entry", lambda _id: cost_entry):
             with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
                 models = await GenericUpstreamProvider(
                     base_url="http://x"
@@ -785,7 +785,7 @@ async def test_boolean_litellm_rate_is_not_a_resolved_price() -> None:
 
     with _patch_models_endpoint(payload):
         or_feed = AsyncMock(return_value=[])
-        with patch("routstr.payment.models.litellm_cost_entry", lambda _id: cost_entry):
+        with patch("routstr.payment.models.model_cost_entry", lambda _id: cost_entry):
             with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
                 models = await GenericUpstreamProvider(
                     base_url="http://x"

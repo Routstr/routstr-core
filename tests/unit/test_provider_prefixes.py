@@ -1,10 +1,10 @@
-"""Tests for `routstr.upstream.litellm_routing.detect_litellm_prefix`."""
+"""Tests for `routstr.upstream.provider_prefixes.detect_provider_prefix`."""
 
 from __future__ import annotations
 
 import pytest
 
-from routstr.upstream.litellm_routing import detect_litellm_prefix
+from routstr.upstream.provider_prefixes import detect_provider_prefix
 
 
 @pytest.mark.parametrize(
@@ -79,36 +79,15 @@ from routstr.upstream.litellm_routing import detect_litellm_prefix
         ("", "openai/"),
     ],
 )
-def test_detect_litellm_prefix(base_url: str, expected: str) -> None:
-    assert detect_litellm_prefix(base_url) == expected
+def test_detect_provider_prefix(base_url: str, expected: str) -> None:
+    assert detect_provider_prefix(base_url) == expected
 
 
-def test_detect_litellm_prefix_none_uses_default() -> None:
-    assert detect_litellm_prefix(None) == "openai/"
+def test_detect_provider_prefix_none_uses_default() -> None:
+    assert detect_provider_prefix(None) == "openai/"
 
 
-def test_detect_litellm_prefix_custom_default() -> None:
-    assert detect_litellm_prefix("https://example.com", default="anthropic/") == (
+def test_detect_provider_prefix_custom_default() -> None:
+    assert detect_provider_prefix("https://example.com", default="anthropic/") == (
         "anthropic/"
     )
-
-
-@pytest.mark.parametrize("model", ["gpt-6", "gpt-6-luna", "gpt-5.5"])
-def test_litellm_sends_max_completion_tokens_for_gpt_5_and_later(model: str) -> None:
-    """OpenAI rejects ``max_tokens`` on these models; litellm <1.101 only
-    rewrote it for names containing ``gpt-5``, so gpt-6 got a 400."""
-    import litellm
-    from litellm.utils import ProviderConfigManager
-
-    config = ProviderConfigManager.get_provider_chat_config(
-        model=model, provider=litellm.LlmProviders.OPENAI
-    )
-    assert config is not None
-    mapped = config.map_openai_params(
-        non_default_params={"max_tokens": 10},
-        optional_params={},
-        model=model,
-        drop_params=True,
-    )
-
-    assert mapped == {"max_completion_tokens": 10}

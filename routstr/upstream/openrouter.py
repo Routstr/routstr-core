@@ -37,7 +37,7 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
     default_base_url = "https://openrouter.ai/api/v1"
     platform_url = "https://openrouter.ai/settings/keys"
     supports_anthropic_messages = True
-    litellm_provider_prefix = "openrouter/"
+    provider_prefix = "openrouter/"
 
     def _apply_provider_field(self, response_json: object) -> None:
         """Stamp the ``provider`` field for OpenRouter responses.

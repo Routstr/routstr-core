@@ -19,8 +19,8 @@ class RoutstrUpstreamProvider(BaseUpstreamProvider):
     default_base_url = None
     platform_url = None
     # Upstream Routstr nodes serve `/v1/messages` natively, so forward the
-    # request as-is instead of round-tripping through litellm's
-    # Anthropic→OpenAI translator.
+    # request as-is instead of round-tripping through the
+    # Anthropic→OpenAI translation.
     supports_anthropic_messages = True
 
     def __init__(
