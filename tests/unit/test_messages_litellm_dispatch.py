@@ -1284,28 +1284,33 @@ async def test_forward_request_handles_count_tokens_locally() -> None:
     model = _make_model()
     session = _make_session()
     request = _make_request()
+    revert = AsyncMock(return_value=True)
 
-    with patch.object(
-        provider,
-        "_forward_messages_via_litellm",
-        new=AsyncMock(side_effect=AssertionError("should not be called")),
-    ):
-        with patch.object(
+    with (
+        patch.object(
+            provider,
+            "_forward_messages_via_litellm",
+            new=AsyncMock(side_effect=AssertionError("should not be called")),
+        ),
+        patch.object(
             provider,
             "prepare_request_body",
             side_effect=AssertionError("upstream should not be called"),
-        ):
-            response = await provider.forward_request(
-                request=request,
-                path="messages/count_tokens",
-                headers={},
-                request_body=_anthropic_request_body(),
-                key=key,
-                max_cost_for_model=10_000,
-                session=session,
-                model_obj=model,
-            )
+        ),
+        patch("routstr.upstream.base.revert_pay_for_request", new=revert),
+    ):
+        response = await provider.forward_request(
+            request=request,
+            path="messages/count_tokens",
+            headers={},
+            request_body=_anthropic_request_body(),
+            key=key,
+            max_cost_for_model=10_000,
+            session=session,
+            model_obj=model,
+        )
 
+    revert.assert_awaited_once_with(key, session, 10_000, None)
     assert response.status_code == 200
     body = response.body if isinstance(response.body, bytes) else bytes(response.body)
     payload = json.loads(body.decode())
