@@ -1,17 +1,18 @@
-"""Pure helpers for translating ``/v1/messages`` to upstream chat completions
-via litellm.
+"""``/v1/messages`` for upstreams without a native Anthropic endpoint.
 
-This module owns the litellm/Anthropic-Messages translation layer:
+This module owns the Anthropic-Messages bridge:
 
 * SSE parsing (``parse_sse_blocks``, ``events_from_chunk``)
-* Payload coercion (``coerce_litellm_payload``)
 * Stream aggregation (``aggregate_anthropic_events_to_message``) — drains
   a streamed Anthropic event sequence into a single Message dict
 * Per-event annotation for streaming (``annotate_event``,
   ``stream_annotated_events``) — handles the model-rewrite + token-tally
   bookkeeping shared by the bearer-key and x-cashu streaming paths
-* The dispatch entry point (``dispatch_anthropic_messages``)
-* Refund math (``compute_refund``)
+* The dispatch entry point (``dispatch_anthropic_messages``), which
+  translates the request per provider dialect (``messages_dialects``),
+  streams it upstream (``messages_transport``) and translates the reply
+  back (``anthropic_openai_stream``)
+* Upstream error mapping and refund math
 
 Nothing in here touches ``BaseUpstreamProvider``; the thin instance methods
 on the provider class forward to these functions and only retain logic that
@@ -22,35 +23,51 @@ sending).
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator, AsyncIterator
-from typing import Any, Callable, NamedTuple, cast
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from typing import Any, NamedTuple, cast
 
-import litellm
+import httpx
 
 from ..core import get_logger
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..payment.models import Model
+from .anthropic_openai_stream import (
+    StreamPayloadError,
+    anthropic_events_from_chat_stream,
+    encode_event,
+)
+from .messages_dialects import UpstreamCall, build_upstream_call, ollama_chat_chunks
+from .messages_transport import (
+    MAX_RETRIES,
+    STREAM_READ_TIMEOUT_SECONDS,
+    ResponseOwnedIterator,
+    UpstreamHTTPError,
+    iter_ndjson,
+    iter_sse_json,
+    open_stream,
+)
 from .rate_limit import classify_rate_limit
-from .reasoning_effort import adapt_messages_body_for_litellm
+from .reasoning_effort import adapt_messages_body_for_translation
+from .responses_bridge import responses_chat_chunks
+from .token_counting import count_message_tokens, count_text_tokens
 
 logger = get_logger(__name__)
 
-# Sent in place of a blank upstream key. LiteLLM treats ``""`` as missing and
-# falls back to the provider's env var (e.g. ``OPENAI_API_KEY``), failing with
-# an AuthenticationError for keyless upstreams such as self-hosted
-# OpenAI-compatible servers, which the chat path reaches without auth.
+# Sent in place of a blank upstream key, as litellm did: keyless
+# OpenAI-compatible servers ignore it.
 KEYLESS_UPSTREAM_API_KEY = "no-key"
 
-# Anthropic-Messages-only fields that don't translate to OpenAI
-# Chat Completions. ``litellm.drop_params`` only filters *known*
-# unsupported params; these newer/extension fields get passed through
-# verbatim and the upstream rejects them with a 400. Pop them here so the
-# request reaches the upstream cleanly.
-#
-# Note: ``dispatch_anthropic_messages`` additionally enforces
-# ``ALLOWED_MESSAGES_REQUEST_FIELDS``, which already excludes all of these.
-# This tuple remains for ``gemini_messages``, which pops them explicitly.
+# Providers litellm reached through the openai SDK, which retried
+# 408/409/429/5xx and connection failures twice.
+_RETRYING_PROVIDERS = frozenset(
+    {"openai", "azure", "perplexity", "cerebras", "nvidia_nim", "moonshot"}
+)
+
+# Anthropic-Messages-only fields that don't translate to OpenAI Chat
+# Completions. ``dispatch_anthropic_messages`` enforces
+# ``ALLOWED_MESSAGES_REQUEST_FIELDS``, which already excludes all of these;
+# ``gemini_messages`` pops them explicitly.
 ANTHROPIC_ONLY_FIELDS: tuple[str, ...] = (
     "thinking",
     "cache_control",
@@ -112,12 +129,11 @@ def prune_blank_system_blocks(body: dict) -> None:
         body.pop("system", None)
 
 
-def coerce_litellm_payload(payload: object) -> dict:
-    """Convert a litellm event into a plain dict.
+def coerce_event_payload(payload: object) -> dict:
+    """Convert an event or aggregated message into a plain dict.
 
-    Non-streaming responses come back as Anthropic-shaped pydantic models
-    or dicts. Streaming may yield raw bytes/str (SSE-encoded); those go
-    through ``events_from_chunk`` instead, not here.
+    Streaming yields raw bytes/str (SSE-encoded); those go through
+    ``events_from_chunk`` instead, not here.
     """
     if isinstance(payload, dict):
         return dict(payload)
@@ -171,9 +187,8 @@ def parse_sse_blocks(buffer: bytes) -> tuple[list[dict], bytes]:
 def events_from_chunk(chunk: object, sse_buffer: bytes) -> tuple[list[dict], bytes]:
     """Normalize a stream chunk into one or more event dicts.
 
-    ``litellm.anthropic.messages.acreate(stream=True)`` yields raw SSE
-    bytes in practice; some adapters yield strings or typed events. Handle
-    all three.
+    Upstream streams yield raw SSE bytes; provider stream transforms may
+    yield strings or event dicts. Handle all three.
     """
     if isinstance(chunk, (bytes, bytearray)):
         sse_buffer += bytes(chunk)
@@ -183,7 +198,7 @@ def events_from_chunk(chunk: object, sse_buffer: bytes) -> tuple[list[dict], byt
         sse_buffer += chunk.encode("utf-8")
         events, sse_buffer = parse_sse_blocks(sse_buffer)
         return events, sse_buffer
-    return [coerce_litellm_payload(chunk)], sse_buffer
+    return [coerce_event_payload(chunk)], sse_buffer
 
 
 async def aggregate_anthropic_events_to_message(
@@ -191,8 +206,8 @@ async def aggregate_anthropic_events_to_message(
 ) -> dict:
     """Drain an Anthropic-Messages event iterator into a single Message dict.
 
-    Produces the shape ``litellm.anthropic.messages.acreate(stream=False)``
-    would have returned. Used to transparently stream from upstream while
+    Produces the shape a non-streaming Messages call returns. Used to
+    transparently stream from upstream while
     still returning a non-streaming response to the client. Lets us
     sidestep upstream quirks (e.g. Fireworks rejects ``max_tokens > 4096``
     unless ``stream=true``) without leaking that into client-visible
@@ -432,7 +447,7 @@ async def stream_annotated_events(
     iterator: AsyncIterator[Any],
     requested_model: str | None,
 ) -> AsyncGenerator[AnnotatedEvent, None]:
-    """Yield annotated, SSE-serialized events from a litellm stream.
+    """Yield annotated, SSE-serialized events from an upstream stream.
 
     Both streaming paths in ``BaseUpstreamProvider`` consume this; the only
     divergence between them — yield-as-you-go vs buffer-then-replay — stays
@@ -488,25 +503,15 @@ def compute_refund(amount: int, unit: str, cost_msats: int) -> int:
 _MAX_UPSTREAM_MESSAGE_CHARS = 300
 
 
-def collapse_litellm_message(message: str) -> str:
-    """Keep the innermost provider message and cap its length."""
-    tail = message.rsplit("Original exception:", 1)[-1].strip()
-    while True:
-        stripped = tail.removeprefix("litellm.")
-        head, _, rest = stripped.partition(": ")
-        if rest and head.endswith(("Error", "Exception")):
-            stripped = rest.strip()
-        if stripped == tail:
-            break
-        tail = stripped
-    if len(tail) > _MAX_UPSTREAM_MESSAGE_CHARS:
-        tail = tail[: _MAX_UPSTREAM_MESSAGE_CHARS - 1].rstrip() + "…"
-    return tail
-
-
 def is_provider_exception(exc: BaseException) -> bool:
-    """Distinguish SDK failures from bugs in our stream handling."""
-    return type(exc).__module__.split(".", 1)[0] in {"litellm", "openai"}
+    """Distinguish upstream failures from bugs in our stream handling."""
+    return isinstance(exc, (UpstreamHTTPError, StreamPayloadError, httpx.HTTPError))
+
+
+def _cap(message: str) -> str:
+    if len(message) > _MAX_UPSTREAM_MESSAGE_CHARS:
+        return message[: _MAX_UPSTREAM_MESSAGE_CHARS - 1].rstrip() + "…"
+    return message
 
 
 def upstream_error_from_exception(
@@ -516,43 +521,98 @@ def upstream_error_from_exception(
     log_extra: dict[str, Any] | None = None,
 ) -> UpstreamError:
     """Redact and classify provider failures, including mid-stream errors."""
-    raw_message = getattr(exc, "message", None) or str(exc) or repr(exc)
-    # Redact provider account ids before the message reaches logs or the client.
-    exc_message = collapse_litellm_message(redact_org_ids(raw_message))
-    exc_status = getattr(exc, "status_code", None)
-    exc_response = getattr(exc, "response", None)
-    response_text = None
-    if exc_response is not None:
-        try:
-            response_text = redact_org_ids(
-                getattr(exc_response, "text", str(exc_response))
-            )
-        except Exception:
-            response_text = "<unreadable>"
-    status_for_classify = exc_status if isinstance(exc_status, int) else 502
-    rate_limit = classify_rate_limit(
-        status_for_classify, exc_message, getattr(exc, "headers", None)
-    )
+    if isinstance(exc, (UpstreamHTTPError, StreamPayloadError)):
+        status = exc.status_code
+        raw = exc.message
+    elif isinstance(exc, httpx.PoolTimeout):
+        status, raw = 503, "Upstream connection pool is busy"
+    elif isinstance(exc, httpx.TimeoutException):
+        status, raw = 408, f"Request timed out: {exc}"
+    elif isinstance(exc, httpx.HTTPError):
+        status, raw = 500, f"Connection error: {exc}"
+    else:
+        code = getattr(exc, "status_code", None)
+        status = code if isinstance(code, int) else 502
+        raw = getattr(exc, "message", None) or str(exc) or repr(exc)
+    message = _cap(redact_org_ids(str(raw)))
+    headers = getattr(exc, "headers", None)
+    rate_limit = classify_rate_limit(status, message, headers)
+    body = getattr(exc, "body", None)
     logger.error(
         log_message,
         extra={
-            "error": exc_message,
+            "error": message,
             "error_type": type(exc).__name__,
-            "status_code": exc_status,
+            "status_code": status,
             "error_code": rate_limit.code if rate_limit else None,
-            "llm_provider": getattr(exc, "llm_provider", None),
-            "body": redact_org_ids(str(getattr(exc, "body", "") or "")) or None,
-            "response_text": response_text,
+            "body": redact_org_ids(str(body))[:1000] if body else None,
             **(log_extra or {}),
         },
     )
     return UpstreamError(
-        f"Upstream error via litellm: {exc_message}",
-        status_code=status_for_classify,
+        f"Upstream error: {message}",
+        status_code=status,
         code=rate_limit.code if rate_limit else None,
         details=rate_limit.as_details() if rate_limit else None,
-        from_upstream_response=True,
+        # Transport failures are this node's, so the proxy must not retry them
+        # in place (a pool timeout would just queue on the same pool again).
+        from_upstream_response=isinstance(exc, (UpstreamHTTPError, StreamPayloadError)),
     )
+
+
+def _usage_estimator(call: UpstreamCall) -> Callable[[str], tuple[int, int]]:
+    messages = call.estimate_messages or call.body.get("messages") or []
+
+    def estimate(completion_text: str) -> tuple[int, int]:
+        try:
+            prompt = count_message_tokens(call.model, messages)
+        except Exception:
+            prompt = 0
+        try:
+            completion = count_text_tokens(call.model, completion_text)
+        except Exception:
+            completion = 0
+        return prompt, completion
+
+    return estimate
+
+
+async def open_events(
+    call: UpstreamCall, *, read_timeout: float = STREAM_READ_TIMEOUT_SECONDS
+) -> AsyncIterator[bytes]:
+    """Send ``call`` and return its Anthropic SSE byte stream."""
+    sdk_call = call.wire == "openai" and call.provider in _RETRYING_PROVIDERS
+    retries = MAX_RETRIES if sdk_call else 0
+    response = await open_stream(
+        url=call.url,
+        headers=call.headers,
+        body=call.body,
+        retries=retries,
+        raw_errors=call.wire == "anthropic",
+        read_timeout=read_timeout,
+    )
+    if call.wire == "anthropic":
+        return ResponseOwnedIterator(response.aiter_bytes(), response)
+
+    async def events() -> AsyncGenerator[bytes, None]:
+        if call.wire == "ollama":
+            chunks = ollama_chat_chunks(iter_ndjson(response))
+        elif call.wire == "responses":
+            chunks = responses_chat_chunks(iter_sse_json(response))
+        else:
+            chunks = iter_sse_json(response, skip_malformed=call.skip_malformed_events)
+        async for event in anthropic_events_from_chat_stream(
+            chunks,
+            model=call.model,
+            tool_name_mapping=call.tool_name_mapping,
+            http_handler=call.http_handler,
+            estimate_usage=_usage_estimator(call),
+            prepare_chunk=call.prepare_chunk,
+            refusal_on_content_filter=call.refusal_on_content_filter,
+        ):
+            yield encode_event(event)
+
+    return ResponseOwnedIterator(events(), response)
 
 
 async def dispatch_anthropic_messages(
@@ -566,25 +626,28 @@ async def dispatch_anthropic_messages(
     adapt_request: Callable[[dict], str] | None = None,
     transform_stream: Callable[[AsyncIterator[Any]], AsyncIterator[Any]] | None = None,
     log_extra: dict[str, Any] | None = None,
+    api_version: str | None = None,
 ) -> tuple[bool, Any, str | None]:
-    """Call ``litellm.anthropic.messages.acreate`` and return
+    """Forward an Anthropic ``/v1/messages`` body and return
     ``(client_stream, result, requested_model)``.
 
-    Shared by the bearer-key and x-cashu paths. Raises :class:`UpstreamError`
-    on bad input or upstream failure.
+    ``result`` is an async iterator of Anthropic SSE bytes when the client
+    streams, else the aggregated Message dict: the upstream is always
+    streamed, which sidesteps provider caps on non-streaming calls (e.g.
+    Fireworks rejects ``max_tokens > 4096`` unless ``stream=true``).
 
     ``adapt_request`` is the provider's last word on the allowlisted body: it
     may rewrite it in place and returns a suffix for the upstream model name,
-    which is how a provider expresses a feature litellm would otherwise
-    translate into a parameter the upstream rejects.
+    which is how a provider expresses a feature the translation would
+    otherwise turn into a parameter the upstream rejects.
 
-    ``transform_stream`` rewrites the upstream event stream before it is
-    aggregated or handed to the client, so a provider can repair events
-    litellm translates faithfully but clients cannot use.
+    ``transform_stream`` rewrites the Anthropic event stream before it is
+    aggregated or handed to the client.
+
+    Raises :class:`UpstreamError` on bad input or upstream failure.
     """
     if not request_body:
         raise UpstreamError("Missing request body for /v1/messages", status_code=400)
-
     try:
         body: dict = json.loads(request_body)
     except json.JSONDecodeError as exc:
@@ -593,50 +656,32 @@ async def dispatch_anthropic_messages(
         ) from exc
 
     body.pop("model", None)
-    # `stream` here is what the **client** asked for. Upstream is always
-    # streamed (see `upstream_stream` below); when the client asked for a
-    # non-streaming response we drain and aggregate the events into a
-    # single Anthropic Message dict before returning. This sidesteps
-    # provider-specific non-streaming caps (e.g. Fireworks rejects
-    # `max_tokens > 4096` unless `stream=true`).
     client_stream = bool(body.pop("stream", False))
-    upstream_stream = True
-
-    adapt_messages_body_for_litellm(body, model_obj)
-
-    # Forward only allowlisted Anthropic Messages request fields. Any
-    # other client-supplied key is dropped so it cannot leak into the
-    # upstream request. See ALLOWED_MESSAGES_REQUEST_FIELDS.
-    dropped = sorted(set(body) - ALLOWED_MESSAGES_REQUEST_FIELDS)
-    if dropped:
-        logger.debug(
-            "Dropped non-forwardable fields before litellm dispatch",
-            extra={"dropped_keys": dropped},
-        )
+    adapt_messages_body_for_translation(body, model_obj)
     body = {k: v for k, v in body.items() if k in ALLOWED_MESSAGES_REQUEST_FIELDS}
-
     prune_blank_system_blocks(body)
-
     model_suffix = adapt_request(body) if adapt_request else ""
 
-    # LiteLLM turns Anthropic's server-side web_search tool into the OpenAI
-    # `web_search_options` parameter. Generic OpenAI-compatible chat endpoints
-    # (including those serving Claude through a proxy) may reject that field.
-    # Only a provider with an explicit adaptation (e.g. Venice's model suffix)
-    # can preserve search semantics; do not silently remove the tool and return
-    # an answer that never searched. Native /v1/messages providers bypass this
-    # dispatcher and receive the original tool unchanged.
+    # Anthropic's server-side web_search tool becomes the OpenAI
+    # `web_search_options` parameter, which generic OpenAI-compatible endpoints
+    # may reject. Only a provider with an explicit adaptation (e.g. Venice's
+    # model suffix) can preserve search semantics; never silently drop the tool
+    # and return an answer that never searched.
     tools = body.get("tools")
-    if provider_prefix == "openai/" and isinstance(tools, list) and any(
-        isinstance(tool, dict)
-        and (
-            (
-                isinstance(tool.get("type"), str)
-                and tool["type"].startswith("web_search")
+    if (
+        provider_prefix == "openai/"
+        and isinstance(tools, list)
+        and any(
+            isinstance(tool, dict)
+            and (
+                (
+                    isinstance(tool.get("type"), str)
+                    and tool["type"].startswith("web_search")
+                )
+                or tool.get("name") == "web_search"
             )
-            or tool.get("name") == "web_search"
+            for tool in tools
         )
-        for tool in tools
     ):
         raise UpstreamError(
             "This upstream does not support Anthropic web search through "
@@ -645,77 +690,90 @@ async def dispatch_anthropic_messages(
             code="UNSUPPORTED_WEB_SEARCH",
         )
 
-    # Convention: `model.id` is the canonical upstream model name;
-    # `forwarded_model_id` is the public alias the internal API exposes
-    # and echoes back to the client.
     requested_model = (
         (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
     )
     upstream_model = f"{transform_model_name(model_obj.id)}{model_suffix}"
-    litellm_model = f"{provider_prefix}{upstream_model}"
-
-    kwargs: dict = {
-        "model": litellm_model,
-        "api_base": base_url,
-        "api_key": api_key or KEYLESS_UPSTREAM_API_KEY,
-        "stream": upstream_stream,
-        **body,
-    }
+    try:
+        call = build_upstream_call(
+            prefix=provider_prefix,
+            base_url=base_url,
+            api_key=api_key or KEYLESS_UPSTREAM_API_KEY,
+            upstream_model=upstream_model,
+            body=body,
+            api_version=api_version,
+        )
+    except (ValueError, KeyError, TypeError, RecursionError) as exc:
+        raise UpstreamError(
+            f"Invalid /v1/messages request: {exc}", status_code=400
+        ) from exc
 
     logger.info(
-        "Dispatching /v1/messages via litellm",
+        "Dispatching /v1/messages upstream",
         extra={
-            "model": litellm_model,
+            "model": upstream_model,
             "resolved_provider": provider_prefix.rstrip("/"),
+            "wire": call.wire,
             "client_stream": client_stream,
-            "upstream_stream": upstream_stream,
             **(log_extra or {}),
         },
     )
+    return await send_call(
+        call,
+        client_stream=client_stream,
+        requested_model=requested_model,
+        transform_stream=transform_stream,
+        log_extra={"model": upstream_model, "api_base": base_url},
+    )
 
+
+async def send_call(
+    call: UpstreamCall,
+    *,
+    client_stream: bool,
+    requested_model: str | None,
+    transform_stream: Callable[[AsyncIterator[Any]], AsyncIterator[Any]] | None = None,
+    read_timeout: float = STREAM_READ_TIMEOUT_SECONDS,
+    log_extra: dict[str, Any] | None = None,
+) -> tuple[bool, Any, str | None]:
+    """Run ``call``; stream the events or aggregate them for the client."""
     try:
-        result = await litellm.anthropic.messages.acreate(**kwargs)
+        result: Any = await open_events(call, read_timeout=read_timeout)
     except Exception as exc:
+        if not is_provider_exception(exc):
+            raise
         raise upstream_error_from_exception(
             exc,
-            log_message="litellm dispatch failed",
-            log_extra={"model": litellm_model, "api_base": base_url},
+            log_message="Upstream /v1/messages dispatch failed",
+            log_extra=log_extra,
         ) from exc
 
-    if transform_stream is not None and hasattr(result, "__aiter__"):
+    if transform_stream is not None:
         result = transform_stream(cast(AsyncIterator[Any], result))
-
-    if not client_stream and hasattr(result, "__aiter__"):
-        # Client asked for a non-streaming response but we always stream
-        # from upstream — drain the events into a single Anthropic Message
-        # dict so the rest of the pipeline can treat it as if upstream had
-        # returned non-streaming. Some litellm adapters return a
-        # non-streaming dict even when ``stream=True``; in that case,
-        # leave the result as-is.
-        try:
-            aggregated: Any = await aggregate_anthropic_events_to_message(
-                cast(AsyncIterator[Any], result)
-            )
-        except Exception as exc:
-            if is_provider_exception(exc):
-                # Upstream failed part-way through, not an aggregation bug.
-                raise upstream_error_from_exception(
-                    exc,
-                    log_message="Upstream stream failed mid-flight",
-                    log_extra={"model": litellm_model, "api_base": base_url},
-                ) from exc
-            logger.error(
-                "Failed to aggregate streamed events into message",
-                extra={
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "model": litellm_model,
-                },
-            )
-            raise UpstreamError(
-                f"Failed to aggregate upstream stream: {exc}",
-                status_code=502,
+    if client_stream:
+        return client_stream, result, requested_model
+    try:
+        aggregated = await aggregate_anthropic_events_to_message(result)
+    except Exception as exc:
+        if is_provider_exception(exc):
+            raise upstream_error_from_exception(
+                exc,
+                log_message="Upstream stream failed mid-flight",
+                log_extra=log_extra,
             ) from exc
-        return client_stream, aggregated, requested_model
-
-    return client_stream, result, requested_model
+        logger.error(
+            "Failed to aggregate streamed events into message",
+            extra={
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                **(log_extra or {}),
+            },
+        )
+        raise UpstreamError(
+            f"Failed to aggregate upstream stream: {exc}", status_code=502
+        ) from exc
+    finally:
+        close = getattr(result, "aclose", None)
+        if close is not None:
+            await close()
+    return client_stream, aggregated, requested_model

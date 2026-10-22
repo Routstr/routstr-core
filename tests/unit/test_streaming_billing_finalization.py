@@ -866,7 +866,7 @@ async def test_messages_streaming_releases_and_raises_on_billing_failure(
         patch("routstr.upstream.base.create_session", return_value=session_context),
     ):
         if via_litellm:
-            response = provider._stream_litellm_messages(
+            response = provider._stream_translated_messages(
                 iterator=litellm_chunks(),
                 key=key,
                 max_cost_for_model=500,
@@ -931,12 +931,7 @@ async def test_gemini_messages_finalizes_when_response_start_fails() -> None:
     with (
         patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
         patch("routstr.upstream.base.create_session", return_value=session_context),
-        patch.object(
-            gemini_messages,
-            "_translate_anthropic_to_openai",
-            return_value={"messages": []},
-        ),
-        patch.object(gemini_messages, "_post_and_stream", post_and_stream),
+        patch("routstr.upstream.messages_dispatch.open_stream", post_and_stream),
     ):
         (
             client_stream,
@@ -944,7 +939,12 @@ async def test_gemini_messages_finalizes_when_response_start_fails() -> None:
             requested_model,
         ) = await gemini_messages.dispatch_gemini_messages(
             request_body=json.dumps(
-                {"model": model.id, "messages": [], "stream": True}
+                {
+                    "model": model.id,
+                    "max_tokens": 8,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                }
             ).encode(),
             model_obj=model,
             base_url="https://gemini.example",
@@ -953,7 +953,7 @@ async def test_gemini_messages_finalizes_when_response_start_fails() -> None:
         )
         assert client_stream is True
         assert requested_model == model.id
-        response = provider._stream_litellm_messages(
+        response = provider._stream_translated_messages(
             iterator=iterator,
             key=key,
             max_cost_for_model=500,
@@ -1083,9 +1083,9 @@ async def test_client_disconnect_midstream_estimates_usage_and_stops_heartbeat()
                 "routstr.upstream.base.adjust_payment_for_tokens",
                 auth_module.adjust_payment_for_tokens,
             ),
-            patch("routstr.upstream.count_tokens._count_with_litellm", return_value=3),
+            patch("routstr.upstream.count_tokens._count_tokens", return_value=3),
             patch(
-                "routstr.upstream.count_tokens._count_text_with_litellm",
+                "routstr.upstream.count_tokens.count_text_tokens",
                 return_value=2,
             ),
             patch(

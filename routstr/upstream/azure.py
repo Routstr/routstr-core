@@ -13,7 +13,7 @@ class AzureUpstreamProvider(BaseUpstreamProvider):
     provider_type = "azure"
     default_base_url = None
     platform_url = "https://portal.azure.com/"
-    litellm_provider_prefix = "azure/"
+    provider_prefix = "azure/"
 
     def __init__(
         self,
@@ -69,15 +69,17 @@ class AzureUpstreamProvider(BaseUpstreamProvider):
             headers.pop("authorization", None)
         return headers
 
+    def configured_api_version(self) -> str | None:
+        """The row's version; unset (or the version-less ``v1``) uses the default."""
+        version = (self.api_version or "").replace("\ufeff", "").strip()
+        return None if not version or version.lower() == "v1" else version
+
     def prepare_params(
         self, path: str, query_params: Mapping[str, str] | None
     ) -> Mapping[str, str]:
         """Prepare query parameters for Azure OpenAI, adding API version."""
         params = dict(query_params or {})
-        version = (self.api_version or "").replace("\ufeff", "").strip()
-        if not version or version.lower() == "v1":
-            version = "2024-02-15-preview"
-        params["api-version"] = version
+        params["api-version"] = self.configured_api_version() or "2024-02-15-preview"
         return params
 
     def normalize_request_path(

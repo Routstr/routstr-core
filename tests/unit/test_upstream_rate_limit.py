@@ -219,7 +219,7 @@ def test_create_upstream_error_response_preserves_structure() -> None:
     info = classify_rate_limit(429, RATE_LIMIT_MESSAGE)
     assert info is not None
     err = UpstreamError(
-        f"Upstream error via litellm: {RATE_LIMIT_MESSAGE}",
+        f"Upstream error: {RATE_LIMIT_MESSAGE}",
         status_code=429,
         code=info.code,
         details=info.as_details(),
@@ -364,7 +364,7 @@ async def test_proxy_loop_surfaces_rate_limit_and_reverts_once() -> None:
     upstream.prepare_headers = MagicMock(side_effect=lambda h: h)
     upstream.forward_request = AsyncMock(
         side_effect=UpstreamError(
-            f"Upstream error via litellm: {RATE_LIMIT_MESSAGE}",
+            f"Upstream error: {RATE_LIMIT_MESSAGE}",
             status_code=429,
             code=info.code,
             details=info.as_details(),

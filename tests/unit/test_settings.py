@@ -152,13 +152,21 @@ def test_cashu_import_cannot_override_operator_environment() -> None:
 
 def test_import_preserves_environment_added_by_dependencies() -> None:
     env = dict(os.environ)
-    env.pop("TIKTOKEN_CACHE_DIR", None)
+    env.pop("ROUTSTR_TEST_DEPENDENCY_VAR", None)
+    # Stand-in for a dependency that sets a variable while being imported.
+    script = """
+import builtins, os
+real_import = builtins.__import__
+def tracking_import(name, *args, **kwargs):
+    if name == "fastapi":
+        os.environ.setdefault("ROUTSTR_TEST_DEPENDENCY_VAR", "1")
+    return real_import(name, *args, **kwargs)
+builtins.__import__ = tracking_import
+import routstr
+print(bool(os.environ.get("ROUTSTR_TEST_DEPENDENCY_VAR")))
+"""
     result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import os, routstr; print(bool(os.environ.get('TIKTOKEN_CACHE_DIR')))",
-        ],
+        [sys.executable, "-c", script],
         check=True,
         capture_output=True,
         text=True,

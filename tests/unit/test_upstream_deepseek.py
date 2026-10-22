@@ -18,10 +18,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
-import litellm
 import pytest
 
-from routstr.upstream import upstream_provider_classes
+from routstr.payment.models import Architecture, Model, Pricing
+from routstr.upstream import messages_dispatch, upstream_provider_classes
 from routstr.upstream.deepseek import DeepSeekUpstreamProvider
 
 
@@ -104,9 +104,9 @@ def test_build_from_row_ignores_row_base_url() -> None:
     assert provider.base_url == "https://api.deepseek.com"
 
 
-def test_litellm_prefix_is_deepseek() -> None:
+def test_provider_prefix_is_deepseek() -> None:
     provider = DeepSeekUpstreamProvider(api_key="sk-test")
-    assert provider.get_litellm_provider_prefix() == "deepseek/"
+    assert provider.get_provider_prefix() == "deepseek/"
 
 
 @pytest.mark.parametrize(
@@ -191,7 +191,7 @@ async def test_cache_rate_survives_fee_and_is_not_replaced_by_litellm() -> None:
     models, _, _ = await _fetch()
     provider = DeepSeekUpstreamProvider(api_key="sk-test", provider_fee=1.05)
     stale = {"cache_read_input_token_cost": 1.4e-08}
-    with patch("routstr.payment.models.litellm_cost_entry", return_value=stale):
+    with patch("routstr.payment.models.model_cost_entry", return_value=stale):
         priced = provider._apply_provider_fee_to_model(models["deepseek-v4-flash"])
     assert priced.pricing.input_cache_read == pytest.approx(0.006e-6 * 1.05)
     assert priced.pricing.prompt == pytest.approx(0.30e-6 * 1.05)
@@ -278,20 +278,43 @@ def anthropic_stub() -> Iterator[tuple[str, list[tuple[str, dict[str, Any]]]]]:
 async def test_messages_stream_reaches_deepseek_anthropic_endpoint(
     anthropic_stub: tuple[str, list[tuple[str, dict[str, Any]]]],
 ) -> None:
-    # litellm sends deepseek/ Messages calls to DeepSeek's /anthropic endpoint;
-    # its stream iterator imports litellm.proxy, which needs ``backoff``.
+    # deepseek/ Messages calls go to DeepSeek's native /anthropic endpoint.
     api_base, seen = anthropic_stub
-    stream = await litellm.anthropic.messages.acreate(
-        model=DeepSeekUpstreamProvider.litellm_provider_prefix + "deepseek-flash",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
-        stream=True,
+    _, stream, _ = await messages_dispatch.dispatch_anthropic_messages(
+        request_body=json.dumps(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 8,
+                "stream": True,
+            }
+        ).encode(),
+        model_obj=_messages_model("deepseek-flash"),
+        base_url=api_base,
         api_key="sk-test",
-        api_base=api_base,
+        provider_prefix=DeepSeekUpstreamProvider.provider_prefix or "",
+        transform_model_name=lambda name: name,
     )
-    chunks = [chunk async for chunk in stream]  # type: ignore[union-attr]
+    chunks = [chunk async for chunk in stream]
 
     assert b"message_stop" in b"".join(chunks)
     assert len(seen) == 1
     assert seen[0][0] == "/anthropic/v1/messages"
     assert seen[0][1]["model"] == "deepseek-flash"
+
+
+def _messages_model(model_id: str) -> Model:
+    return Model(
+        id=model_id,
+        name=model_id,
+        created=0,
+        description="",
+        context_length=8192,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="x",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.0, completion=0.0),
+    )

@@ -45,9 +45,9 @@ _UNPRICED_IMAGE_OPTIONS = ("enhance_prompt", "enable_web_search")
 
 # Venice runs search itself and reports it back through ``venice_parameters``;
 # it has no Anthropic-shaped server tool and rejects the ``web_search_options``
-# that litellm's Anthropic adapter derives from one. ``auto`` matches Anthropic
+# that the Anthropic translation derives from one. ``auto`` matches Anthropic
 # semantics, where declaring the tool leaves the decision to the model.
-# Citations are asked for because litellm's Anthropic response translation
+# Citations are asked for because the Anthropic response translation
 # carries no ``venice_parameters``, so the inline ``^n^`` markers Venice writes
 # into the text are the only way a caller sees that sources were used.
 _WEB_SEARCH_SUFFIX = ":enable_web_search=auto&enable_web_citations=true"
@@ -63,7 +63,7 @@ _UNENFORCEABLE_WEB_SEARCH_KEYS = frozenset(
 )
 
 # Venice streams OpenAI reasoning models' encrypted reasoning as a trailing
-# ``reasoning_content`` delta carrying this marker. litellm turns it into a
+# ``reasoning_content`` delta carrying this marker. The translation turns it into a
 # plaintext ``thinking`` block after the answer, which clients render as
 # gibberish and which makes Claude Code report an empty final result.
 _ENCRYPTED_REASONING_MARKER = "__ENCRYPTED_REASONING__"
@@ -133,9 +133,9 @@ async def _drop_encrypted_reasoning(
 def _is_web_search_tool(tool: Any) -> bool:
     """An Anthropic server-side web-search tool, by either of its markers.
 
-    Matches litellm's own detection (``litellm/llms/anthropic/
-    experimental_pass_through/adapters/transformation.py``), so every tool it
-    would turn into ``web_search_options`` is caught here first.
+    Matches the translator's own detection
+    (``anthropic_openai.is_web_search_tool``), so every tool it would turn
+    into ``web_search_options`` is caught here first.
     """
     if not isinstance(tool, dict):
         return False
@@ -283,7 +283,7 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
     def _adapt_web_search(self, body: dict) -> str:
         """Trade an Anthropic web-search tool for Venice's own search switch.
 
-        Left in the body, litellm's Anthropic adapter rewrites the tool into a
+        Left in the body, the Anthropic translation rewrites the tool into a
         top-level ``web_search_options``, which Venice answers with a 400. The
         tool is lifted out here and the same intent re-expressed as a model
         feature suffix, the one form of ``venice_parameters`` that survives
@@ -341,7 +341,7 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
 
         remaining = [tool for tool in tools if not _is_web_search_tool(tool)]
         if remaining:
-            # A caller's ``tool_choice: any`` is kept and litellm maps it to
+            # A caller's ``tool_choice: any`` is kept and translates to
             # OpenAI ``required``, so one of the remaining function tools must
             # now be called where Anthropic would have let a search satisfy it.
             # Deliberate: OpenRouter never rewrites tool_choice for web search

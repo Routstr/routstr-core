@@ -36,7 +36,6 @@ from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_perio
 from ..refund import periodic_refund_reconcile
 from ..upstream.auto_topup import periodic_auto_topup
 from ..upstream.http_client import close_upstream_http_client
-from ..upstream.litellm_routing import configure_litellm
 from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
 from .admin import admin_router
 from .db import create_session, init_db, run_migrations
@@ -86,10 +85,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # repeating it here keeps startup correct for any future module that
         # reaches cashu's mint client without going through those two.
         install_cashu_httpx_shim()
-
-        # Apply litellm-wide settings (drop_params, chat-completions URL,
-        # debug logging) before any upstream provider dispatches a request.
-        configure_litellm()
 
         # Run database migrations on startup
         run_migrations()

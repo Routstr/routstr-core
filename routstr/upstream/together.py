@@ -146,7 +146,7 @@ class TogetherUpstreamProvider(BaseUpstreamProvider):
     provider_type = "together"
     default_base_url = "https://api.together.xyz/v1"
     platform_url = "https://api.together.ai/settings/api-keys"
-    litellm_provider_prefix = "together_ai/"
+    provider_prefix = "together_ai/"
 
     def __init__(
         self,

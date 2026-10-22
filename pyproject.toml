@@ -20,9 +20,8 @@ dependencies = [
     "nostr-sdk>=0.45.1,<0.46",
     "mdurl==0.1.2",
     "pillow>=10",
+    "tiktoken>=0.7",
     "openai>=1.98.0",
-    "litellm>=1.101.2,<1.102",
-    "backoff>=2.2",  # litellm's native Anthropic-messages streaming (e.g. deepseek/) imports litellm.proxy, which needs it
     "orjson>=3.10",
 ]
 
@@ -74,6 +73,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["routstr"]
 
+[tool.setuptools.package-data]
+routstr = ["payment/data/*.json", "upstream/data/*.tiktoken.xz"]
+
 [tool.ruff]
 extend-exclude = ["examples"]
 
@@ -101,8 +103,8 @@ routstr = { workspace = true }
 # scikit-build-core 0.10. This keeps its source build working on Python 3.14.
 build-constraint-dependencies = ["scikit-build-core<0.10"]
 override-dependencies = [
-    # httpx 0.28 (required by litellm 1.93) removed the `proxies` kwarg cashu
-    # passes on every mint call; routstr/cashu_compat.py restores it for cashu.
+    # routstr needs httpx>=0.28, which removed the `proxies` kwarg cashu passes
+    # on every mint call; routstr/cashu_compat.py restores it for cashu.
     "httpx[socks]>=0.28.1,<1.0",
     "importlib-metadata>=8.0.0,<9.0",
     "h11>=0.16.0",

@@ -1122,7 +1122,7 @@ async def certify_upstream_url(
     check_cache: bool = True,
 ) -> dict[str, Any]:
     """Certify an arbitrary upstream URL without touching the node's DB."""
-    from ..payment.models import litellm_cost_entry
+    from ..payment.models import model_cost_entry
 
     sats_to_usd = await _resolve_sats_usd_price(sats_usd_price)
     target: dict[str, Any] = {"base_url": base_url, "model_id": model_id}
@@ -1163,7 +1163,7 @@ async def certify_upstream_url(
                 "checklist": build_checklist(rows),
             }
 
-    entry = litellm_cost_entry(model_id) or {}
+    entry = model_cost_entry(model_id) or {}
     resolved_prompt = (
         _as_price(prompt_price)
         if prompt_price is not None

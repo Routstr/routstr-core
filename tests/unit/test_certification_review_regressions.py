@@ -132,7 +132,7 @@ async def test_standalone_preserves_fee_cache_rates_and_usd_fee(
     monkeypatch.setattr(price, "BTC_USD_PRICE", None)
     monkeypatch.setattr(
         models,
-        "litellm_cost_entry",
+        "model_cost_entry",
         lambda _: {
             "input_cost_per_token": 1e-6,
             "output_cost_per_token": 2e-6,

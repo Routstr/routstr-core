@@ -497,8 +497,7 @@ async def test_responses_transform_failure_falls_back_to_worst_case() -> None:
         patch.object(settings, "min_request_msat", 1000),
         patch("routstr.payment.helpers._fetch_image_from_url", new=fetch),
         patch(
-            "routstr.payment.responses_input.LiteLLMCompletionResponsesConfig."
-            "transform_responses_api_input_to_messages",
+            "routstr.payment.responses_input._to_messages",
             side_effect=RuntimeError("boom"),
         ),
     ):
@@ -736,7 +735,7 @@ def test_responses_input_to_messages_shapes() -> None:
     }
     assert messages[1]["role"] == "tool"
 
-    # dict-form image_url: litellm nests it verbatim, so it is flattened first.
+    # dict-form image_url is flattened to a plain URL string.
     nested = responses_input_to_messages(
         [
             {

@@ -407,7 +407,7 @@ def _get_pricing_rates(
         return None
 
     from ..proxy import get_model_instance
-    from .models import litellm_cost_entry
+    from .models import model_cost_entry
 
     response_model = response_data.get("model", "")
     if model_obj is None:
@@ -437,7 +437,7 @@ def _get_pricing_rates(
         pricing_model = (
             model_obj.forwarded_model_id if model_obj else None
         ) or response_model
-        pricing = litellm_cost_entry(pricing_model)
+        pricing = model_cost_entry(pricing_model)
         if pricing is None:
             logger.error(
                 "Model pricing not found in configured models or LiteLLM",

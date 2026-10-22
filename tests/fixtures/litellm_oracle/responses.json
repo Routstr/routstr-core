@@ -1,0 +1,3867 @@
+[
+ {
+  "case_id": "generic-local__text_only",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hello\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \", world\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [], \"usage\": {\"prompt_tokens\": 10, \"completion_tokens\": 3, \"total_tokens\": 13}}",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Hello"
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": ", world"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 10,
+     "output_tokens": 3
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "Hello, world"
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 10,
+    "output_tokens": 3,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__text_usage_cached_tokens",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Cached!\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 1200, \"completion_tokens\": 2, \"total_tokens\": 1202, \"prompt_tokens_details\": {\"cached_tokens\": 1024}, \"completion_tokens_details\": {\"reasoning_tokens\": 0}}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Cached!"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 176,
+     "output_tokens": 2,
+     "cache_read_input_tokens": 1024
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "Cached!"
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 176,
+    "output_tokens": 2,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 1024
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__reasoning_content_then_text",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": null, \"reasoning_content\": \"\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"Let me think. \"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"2+2 is 4.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"4\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 8, \"completion_tokens\": 12, \"total_tokens\": 20, \"completion_tokens_details\": {\"reasoning_tokens\": 10}}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "Let me think. "
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "2+2 is 4."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "4"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 8,
+     "output_tokens": 12
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "Let me think. 2+2 is 4.",
+     "signature": ""
+    },
+    {
+     "type": "text",
+     "text": "4"
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 8,
+    "output_tokens": 12,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__reasoning_field_then_text",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\", \"reasoning\": \"Hmm, \"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"\", \"reasoning\": \"thinking hard.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Answer.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 8, \"completion_tokens\": 6, \"total_tokens\": 14}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "Hmm, "
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "thinking hard."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "Answer."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 8,
+     "output_tokens": 6
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "Hmm, thinking hard.",
+     "signature": ""
+    },
+    {
+     "type": "text",
+     "text": "Answer."
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 8,
+    "output_tokens": 6,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__reasoning_details_then_text",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\", \"reasoning\": \"Step one.\", \"reasoning_details\": [{\"type\": \"reasoning.text\", \"text\": \"Step one.\", \"index\": 0}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Done.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 4, \"completion_tokens\": 4, \"total_tokens\": 8}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "Step one."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "Done."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 4,
+     "output_tokens": 4
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "Step one.",
+     "signature": ""
+    },
+    {
+     "type": "text",
+     "text": "Done."
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 4,
+    "output_tokens": 4,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__parallel_tool_calls_split_args",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": null}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_w1\", \"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"arguments\": \"\"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"city\\\": \"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 1, \"id\": \"call_t2\", \"type\": \"function\", \"function\": {\"name\": \"get_time\", \"arguments\": \"{\\\"tz\\\"\"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"\\\"Paris\\\"}\"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 1, \"function\": {\"arguments\": \": \\\"UTC\\\"}\"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}], \"usage\": {\"prompt_tokens\": 40, \"completion_tokens\": 20, \"total_tokens\": 60}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "tool_use",
+     "id": "call_w1",
+     "name": "get_weather",
+     "input": {}
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "{\"city\": "
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "tool_use",
+     "id": "call_t2",
+     "name": "get_time",
+     "input": {}
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "{\"tz\""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "\"Paris\"}"
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": ": \"UTC\"}"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "tool_use"
+    },
+    "usage": {
+     "input_tokens": 40,
+     "output_tokens": 20
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "tool_use",
+     "id": "call_w1",
+     "name": "get_weather",
+     "input": "{\"city\": "
+    },
+    {
+     "type": "tool_use",
+     "id": "call_t2",
+     "name": "get_time",
+     "input": "{\"tz\"\"Paris\"}: \"UTC\"}"
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "tool_use",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 40,
+    "output_tokens": 20,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__text_then_tool_call",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Checking.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_x9\", \"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"arguments\": \"{\\\"city\\\":\\\"Rome\\\"}\"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}], \"usage\": {\"prompt_tokens\": 20, \"completion_tokens\": 9, \"total_tokens\": 29}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Checking."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "tool_use",
+     "id": "call_x9",
+     "name": "get_weather",
+     "input": {}
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "{\"city\":\"Rome\"}"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "tool_use"
+    },
+    "usage": {
+     "input_tokens": 20,
+     "output_tokens": 9
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "Checking."
+    },
+    {
+     "type": "tool_use",
+     "id": "call_x9",
+     "name": "get_weather",
+     "input": {
+      "city": "Rome"
+     }
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "tool_use",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 20,
+    "output_tokens": 9,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__tool_call_empty_args",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": null}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_e0\", \"type\": \"function\", \"function\": {\"name\": \"get_time\", \"arguments\": \"\"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}], \"usage\": {\"prompt_tokens\": 9, \"completion_tokens\": 3, \"total_tokens\": 12}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "tool_use",
+     "id": "call_e0",
+     "name": "get_time",
+     "input": {}
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "tool_use"
+    },
+    "usage": {
+     "input_tokens": 9,
+     "output_tokens": 3
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "tool_use",
+     "id": "call_e0",
+     "name": "get_time",
+     "input": {}
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "tool_use",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 9,
+    "output_tokens": 3,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__finish_length",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Truncat\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"length\"}], \"usage\": {\"prompt_tokens\": 5, \"completion_tokens\": 64, \"total_tokens\": 69}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Truncat"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "max_tokens"
+    },
+    "usage": {
+     "input_tokens": 5,
+     "output_tokens": 64
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "Truncat"
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "max_tokens",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 5,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__finish_content_filter",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"I can\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"content_filter\"}], \"usage\": {\"prompt_tokens\": 5, \"completion_tokens\": 2, \"total_tokens\": 7}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "I can"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 5,
+     "output_tokens": 2
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "I can"
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 5,
+    "output_tokens": 2,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__finish_tool_calls_without_tools",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"odd\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}]}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "odd"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "tool_use"
+    },
+    "usage": {
+     "input_tokens": 8,
+     "output_tokens": 1
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "odd"
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "tool_use",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 8,
+    "output_tokens": 1,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__usage_only_final_chunk_no_choices",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Hi\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [], \"usage\": {\"prompt_tokens\": 7, \"completion_tokens\": 1, \"total_tokens\": 8}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Hi"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 7,
+     "output_tokens": 1
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "Hi"
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 7,
+    "output_tokens": 1,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__no_usage_at_all",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Hi\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Hi"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 8,
+     "output_tokens": 1
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "Hi"
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 8,
+    "output_tokens": 1,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__usage_with_cost_fields",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Priced\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [], \"usage\": {\"prompt_tokens\": 100, \"completion_tokens\": 10, \"total_tokens\": 110, \"cost\": 0.00123, \"is_byok\": false, \"cost_details\": {\"upstream_inference_cost\": null, \"upstream_inference_prompt_cost\": 0.001, \"upstream_inference_completions_cost\": 0.00023}, \"prompt_tokens_details\": {\"cached_tokens\": 0}}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Priced"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 100,
+     "output_tokens": 10
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "Priced"
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 100,
+    "output_tokens": 10,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__error_object_mid_stream",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Partial\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"error\": {\"message\": \"Upstream overloaded\", \"type\": \"server_error\", \"code\": \"overloaded\"}}",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Partial"
+    }
+   }
+  ],
+  "expected_stream_exception": {
+   "type": "MidStreamFallbackError",
+   "message": "litellm.MidStreamFallbackError: litellm.APIConnectionError: APIConnectionError: OpenAIException - Upstream overloaded Original exception: APIConnectionError: litellm.APIConnectionError: APIConnectionError: OpenAIException - Upstream overloaded"
+  },
+  "expected_aggregate_error": {
+   "status_code": 500,
+   "code": null,
+   "message": "Upstream error via litellm: OpenAIException - Upstream overloaded",
+   "details": null,
+   "from_upstream_response": true
+  },
+  "expected_aggregate": null
+ },
+ {
+  "case_id": "generic-local__id_and_model_change",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-first\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"m-1\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"A\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-second\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"m-2\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"B\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-second\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"m-2\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "A"
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "B"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 3,
+     "output_tokens": 2
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "AB"
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 3,
+    "output_tokens": 2,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__empty_stream_done_only",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 0,
+     "output_tokens": 0
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": ""
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__role_only_then_stop",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 0, \"total_tokens\": 3}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 3,
+     "output_tokens": 0
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": ""
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 3,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-local__encrypted_reasoning_trailer",
+  "provider": "generic-local",
+  "requested_model": "gpt-4o",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\", \"reasoning_content\": \"Plan.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Answer.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"__ENCRYPTED_REASONING__gAAAAABblob\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 6, \"completion_tokens\": 9, \"total_tokens\": 15}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "gpt-4o",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "Plan."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "Answer."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "content_block_start",
+    "index": 2,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 2,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "__ENCRYPTED_REASONING__gAAAAABblob"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 2
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 6,
+     "output_tokens": 9
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "Plan.",
+     "signature": ""
+    },
+    {
+     "type": "text",
+     "text": "Answer."
+    },
+    {
+     "type": "thinking",
+     "thinking": "__ENCRYPTED_REASONING__gAAAAABblob",
+     "signature": ""
+    }
+   ],
+   "model": "gpt-4o",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 6,
+    "output_tokens": 9,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "venice__text_only",
+  "provider": "venice",
+  "requested_model": "openai-gpt-oss-120b",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hello\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \", world\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [], \"usage\": {\"prompt_tokens\": 10, \"completion_tokens\": 3, \"total_tokens\": 13}}",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "openai-gpt-oss-120b",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Hello"
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": ", world"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 10,
+     "output_tokens": 3
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "Hello, world"
+    }
+   ],
+   "model": "openai-gpt-oss-120b",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 10,
+    "output_tokens": 3,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "venice__reasoning_content_then_text",
+  "provider": "venice",
+  "requested_model": "openai-gpt-oss-120b",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": null, \"reasoning_content\": \"\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"Let me think. \"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"2+2 is 4.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"4\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 8, \"completion_tokens\": 12, \"total_tokens\": 20, \"completion_tokens_details\": {\"reasoning_tokens\": 10}}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "openai-gpt-oss-120b",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "Let me think. "
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "2+2 is 4."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "4"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 8,
+     "output_tokens": 12
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "Let me think. 2+2 is 4.",
+     "signature": ""
+    },
+    {
+     "type": "text",
+     "text": "4"
+    }
+   ],
+   "model": "openai-gpt-oss-120b",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 8,
+    "output_tokens": 12,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "venice__reasoning_field_then_text",
+  "provider": "venice",
+  "requested_model": "openai-gpt-oss-120b",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\", \"reasoning\": \"Hmm, \"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"\", \"reasoning\": \"thinking hard.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Answer.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 8, \"completion_tokens\": 6, \"total_tokens\": 14}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "openai-gpt-oss-120b",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "Hmm, "
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "thinking hard."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "Answer."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 8,
+     "output_tokens": 6
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "Hmm, thinking hard.",
+     "signature": ""
+    },
+    {
+     "type": "text",
+     "text": "Answer."
+    }
+   ],
+   "model": "openai-gpt-oss-120b",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 8,
+    "output_tokens": 6,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "venice__encrypted_reasoning_trailer",
+  "provider": "venice",
+  "requested_model": "openai-gpt-oss-120b",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\", \"reasoning_content\": \"Plan.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Answer.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"__ENCRYPTED_REASONING__gAAAAABblob\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 6, \"completion_tokens\": 9, \"total_tokens\": 15}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "openai-gpt-oss-120b",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "Plan."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "Answer."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 6,
+     "output_tokens": 9
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "Plan.",
+     "signature": ""
+    },
+    {
+     "type": "text",
+     "text": "Answer."
+    }
+   ],
+   "model": "openai-gpt-oss-120b",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 6,
+    "output_tokens": 9,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "venice__parallel_tool_calls_split_args",
+  "provider": "venice",
+  "requested_model": "openai-gpt-oss-120b",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": null}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_w1\", \"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"arguments\": \"\"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"city\\\": \"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 1, \"id\": \"call_t2\", \"type\": \"function\", \"function\": {\"name\": \"get_time\", \"arguments\": \"{\\\"tz\\\"\"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"\\\"Paris\\\"}\"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 1, \"function\": {\"arguments\": \": \\\"UTC\\\"}\"}}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}], \"usage\": {\"prompt_tokens\": 40, \"completion_tokens\": 20, \"total_tokens\": 60}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "openai-gpt-oss-120b",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "tool_use",
+     "id": "call_w1",
+     "name": "get_weather",
+     "input": {}
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "{\"city\": "
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "tool_use",
+     "id": "call_t2",
+     "name": "get_time",
+     "input": {}
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "{\"tz\""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "\"Paris\"}"
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": ": \"UTC\"}"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "tool_use"
+    },
+    "usage": {
+     "input_tokens": 40,
+     "output_tokens": 20
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "tool_use",
+     "id": "call_w1",
+     "name": "get_weather",
+     "input": "{\"city\": "
+    },
+    {
+     "type": "tool_use",
+     "id": "call_t2",
+     "name": "get_time",
+     "input": "{\"tz\"\"Paris\"}: \"UTC\"}"
+    }
+   ],
+   "model": "openai-gpt-oss-120b",
+   "stop_reason": "tool_use",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 40,
+    "output_tokens": 20,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "venice__usage_with_cost_fields",
+  "provider": "venice",
+  "requested_model": "openai-gpt-oss-120b",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Priced\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [], \"usage\": {\"prompt_tokens\": 100, \"completion_tokens\": 10, \"total_tokens\": 110, \"cost\": 0.00123, \"is_byok\": false, \"cost_details\": {\"upstream_inference_cost\": null, \"upstream_inference_prompt_cost\": 0.001, \"upstream_inference_completions_cost\": 0.00023}, \"prompt_tokens_details\": {\"cached_tokens\": 0}}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "openai-gpt-oss-120b",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Priced"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 100,
+     "output_tokens": 10
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "Priced"
+    }
+   ],
+   "model": "openai-gpt-oss-120b",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 100,
+    "output_tokens": 10,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "deepseek__anthropic_text",
+  "provider": "deepseek",
+  "requested_model": "deepseek-reasoner",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "event: message_start",
+    "data: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_upstream01\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"upstream-model\", \"content\": [], \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 5, \"output_tokens\": 0}}}",
+    "",
+    "event: content_block_start",
+    "data: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}",
+    "",
+    "event: content_block_delta",
+    "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Hello from native\"}}",
+    "",
+    "event: content_block_stop",
+    "data: {\"type\": \"content_block_stop\", \"index\": 0}",
+    "",
+    "event: message_delta",
+    "data: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\", \"stop_sequence\": null}, \"usage\": {\"output_tokens\": 1}}",
+    "",
+    "event: message_stop",
+    "data: {\"type\": \"message_stop\"}",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "msg_upstream01",
+     "type": "message",
+     "role": "assistant",
+     "model": "upstream-model",
+     "content": [],
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 5,
+      "output_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Hello from native"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn",
+     "stop_sequence": null
+    },
+    "usage": {
+     "output_tokens": 1
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "msg_upstream01",
+   "type": "message",
+   "role": "assistant",
+   "model": "upstream-model",
+   "content": [
+    {
+     "type": "text",
+     "text": "Hello from native"
+    }
+   ],
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 5,
+    "output_tokens": 1
+   }
+  }
+ },
+ {
+  "case_id": "deepseek__anthropic_thinking_signature_text",
+  "provider": "deepseek",
+  "requested_model": "deepseek-reasoner",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "event: message_start",
+    "data: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_native02\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"deepseek-reasoner\", \"content\": [], \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 12, \"output_tokens\": 0, \"cache_read_input_tokens\": 8}}}",
+    "",
+    "event: content_block_start",
+    "data: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"thinking\", \"thinking\": \"\", \"signature\": \"\"}}",
+    "",
+    "event: content_block_delta",
+    "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"thinking_delta\", \"thinking\": \"Reasoning...\"}}",
+    "",
+    "event: content_block_delta",
+    "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"signature_delta\", \"signature\": \"c2lnbmF0dXJl\"}}",
+    "",
+    "event: content_block_stop",
+    "data: {\"type\": \"content_block_stop\", \"index\": 0}",
+    "",
+    "event: content_block_start",
+    "data: {\"type\": \"content_block_start\", \"index\": 1, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}",
+    "",
+    "event: content_block_delta",
+    "data: {\"type\": \"content_block_delta\", \"index\": 1, \"delta\": {\"type\": \"text_delta\", \"text\": \"Result.\"}}",
+    "",
+    "event: content_block_stop",
+    "data: {\"type\": \"content_block_stop\", \"index\": 1}",
+    "",
+    "event: message_delta",
+    "data: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\", \"stop_sequence\": null}, \"usage\": {\"output_tokens\": 30}}",
+    "",
+    "event: message_stop",
+    "data: {\"type\": \"message_stop\"}",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "msg_native02",
+     "type": "message",
+     "role": "assistant",
+     "model": "deepseek-reasoner",
+     "content": [],
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 12,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 8
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "Reasoning..."
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "signature_delta",
+     "signature": "c2lnbmF0dXJl"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "Result."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn",
+     "stop_sequence": null
+    },
+    "usage": {
+     "output_tokens": 30
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "msg_native02",
+   "type": "message",
+   "role": "assistant",
+   "model": "deepseek-reasoner",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "Reasoning...",
+     "signature": "c2lnbmF0dXJl"
+    },
+    {
+     "type": "text",
+     "text": "Result."
+    }
+   ],
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 12,
+    "output_tokens": 30,
+    "cache_read_input_tokens": 8
+   }
+  }
+ },
+ {
+  "case_id": "deepseek__anthropic_tool_use",
+  "provider": "deepseek",
+  "requested_model": "deepseek-reasoner",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "event: message_start",
+    "data: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_native03\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"deepseek-chat\", \"content\": [], \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 50, \"output_tokens\": 0}}}",
+    "",
+    "event: content_block_start",
+    "data: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_native1\", \"name\": \"get_weather\", \"input\": {}}}",
+    "",
+    "event: content_block_delta",
+    "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"city\\\":\"}}",
+    "",
+    "event: content_block_delta",
+    "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"\\\"Oslo\\\"}\"}}",
+    "",
+    "event: content_block_stop",
+    "data: {\"type\": \"content_block_stop\", \"index\": 0}",
+    "",
+    "event: message_delta",
+    "data: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"tool_use\", \"stop_sequence\": null}, \"usage\": {\"output_tokens\": 15}}",
+    "",
+    "event: message_stop",
+    "data: {\"type\": \"message_stop\"}",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "msg_native03",
+     "type": "message",
+     "role": "assistant",
+     "model": "deepseek-chat",
+     "content": [],
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 50,
+      "output_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "tool_use",
+     "id": "toolu_native1",
+     "name": "get_weather",
+     "input": {}
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "{\"city\":"
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "\"Oslo\"}"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "tool_use",
+     "stop_sequence": null
+    },
+    "usage": {
+     "output_tokens": 15
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "msg_native03",
+   "type": "message",
+   "role": "assistant",
+   "model": "deepseek-chat",
+   "content": [
+    {
+     "type": "tool_use",
+     "id": "toolu_native1",
+     "name": "get_weather",
+     "input": {
+      "city": "Oslo"
+     }
+    }
+   ],
+   "stop_reason": "tool_use",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 50,
+    "output_tokens": 15
+   }
+  }
+ },
+ {
+  "case_id": "deepseek__anthropic_ping_and_error",
+  "provider": "deepseek",
+  "requested_model": "deepseek-reasoner",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "event: message_start",
+    "data: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_upstream01\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"upstream-model\", \"content\": [], \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 5, \"output_tokens\": 0}}}",
+    "",
+    "event: content_block_start",
+    "data: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}",
+    "",
+    "event: content_block_delta",
+    "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"x\"}}",
+    "",
+    "event: ping",
+    "data: {\"type\": \"ping\"}",
+    "",
+    "event: error",
+    "data: {\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"Overloaded\"}}",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "msg_upstream01",
+     "type": "message",
+     "role": "assistant",
+     "model": "upstream-model",
+     "content": [],
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 5,
+      "output_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "x"
+    }
+   },
+   {
+    "type": "ping"
+   },
+   {
+    "type": "error",
+    "error": {
+     "type": "overloaded_error",
+     "message": "Overloaded"
+    }
+   }
+  ],
+  "expected_aggregate": {
+   "id": "msg_upstream01",
+   "type": "message",
+   "role": "assistant",
+   "model": "upstream-model",
+   "content": [
+    {
+     "type": "text",
+     "text": "x"
+    }
+   ],
+   "stop_reason": null,
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 5,
+    "output_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-minimax__anthropic_text",
+  "provider": "generic-minimax",
+  "requested_model": "MiniMax-M2",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "event: message_start",
+    "data: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_upstream01\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"upstream-model\", \"content\": [], \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 5, \"output_tokens\": 0}}}",
+    "",
+    "event: content_block_start",
+    "data: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}",
+    "",
+    "event: content_block_delta",
+    "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Hello from native\"}}",
+    "",
+    "event: content_block_stop",
+    "data: {\"type\": \"content_block_stop\", \"index\": 0}",
+    "",
+    "event: message_delta",
+    "data: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\", \"stop_sequence\": null}, \"usage\": {\"output_tokens\": 1}}",
+    "",
+    "event: message_stop",
+    "data: {\"type\": \"message_stop\"}",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "msg_upstream01",
+     "type": "message",
+     "role": "assistant",
+     "model": "upstream-model",
+     "content": [],
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 5,
+      "output_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Hello from native"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn",
+     "stop_sequence": null
+    },
+    "usage": {
+     "output_tokens": 1
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "msg_upstream01",
+   "type": "message",
+   "role": "assistant",
+   "model": "upstream-model",
+   "content": [
+    {
+     "type": "text",
+     "text": "Hello from native"
+    }
+   ],
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 5,
+    "output_tokens": 1
+   }
+  }
+ },
+ {
+  "case_id": "generic-minimax__anthropic_tool_use",
+  "provider": "generic-minimax",
+  "requested_model": "MiniMax-M2",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "event: message_start",
+    "data: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_native03\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"deepseek-chat\", \"content\": [], \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 50, \"output_tokens\": 0}}}",
+    "",
+    "event: content_block_start",
+    "data: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_native1\", \"name\": \"get_weather\", \"input\": {}}}",
+    "",
+    "event: content_block_delta",
+    "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"city\\\":\"}}",
+    "",
+    "event: content_block_delta",
+    "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"\\\"Oslo\\\"}\"}}",
+    "",
+    "event: content_block_stop",
+    "data: {\"type\": \"content_block_stop\", \"index\": 0}",
+    "",
+    "event: message_delta",
+    "data: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"tool_use\", \"stop_sequence\": null}, \"usage\": {\"output_tokens\": 15}}",
+    "",
+    "event: message_stop",
+    "data: {\"type\": \"message_stop\"}",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "msg_native03",
+     "type": "message",
+     "role": "assistant",
+     "model": "deepseek-chat",
+     "content": [],
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 50,
+      "output_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "tool_use",
+     "id": "toolu_native1",
+     "name": "get_weather",
+     "input": {}
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "{\"city\":"
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "\"Oslo\"}"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "tool_use",
+     "stop_sequence": null
+    },
+    "usage": {
+     "output_tokens": 15
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "msg_native03",
+   "type": "message",
+   "role": "assistant",
+   "model": "deepseek-chat",
+   "content": [
+    {
+     "type": "tool_use",
+     "id": "toolu_native1",
+     "name": "get_weather",
+     "input": {
+      "city": "Oslo"
+     }
+    }
+   ],
+   "stop_reason": "tool_use",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 50,
+    "output_tokens": 15
+   }
+  }
+ },
+ {
+  "case_id": "generic-openrouter__text_only",
+  "provider": "generic-openrouter",
+  "requested_model": "anthropic/claude-sonnet-4.5",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Hello\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \", world\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [], \"usage\": {\"prompt_tokens\": 10, \"completion_tokens\": 3, \"total_tokens\": 13}}",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "anthropic/claude-sonnet-4.5",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Hello"
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": ", world"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 10,
+     "output_tokens": 3
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "Hello, world"
+    }
+   ],
+   "model": "anthropic/claude-sonnet-4.5",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 10,
+    "output_tokens": 3,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-openrouter__reasoning_field_then_text",
+  "provider": "generic-openrouter",
+  "requested_model": "anthropic/claude-sonnet-4.5",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\", \"reasoning\": \"Hmm, \"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"\", \"reasoning\": \"thinking hard.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Answer.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 8, \"completion_tokens\": 6, \"total_tokens\": 14}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "anthropic/claude-sonnet-4.5",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "Hmm, "
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "thinking hard."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "Answer."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 8,
+     "output_tokens": 6
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "Hmm, thinking hard.",
+     "signature": ""
+    },
+    {
+     "type": "text",
+     "text": "Answer."
+    }
+   ],
+   "model": "anthropic/claude-sonnet-4.5",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 8,
+    "output_tokens": 6,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-openrouter__reasoning_details_then_text",
+  "provider": "generic-openrouter",
+  "requested_model": "anthropic/claude-sonnet-4.5",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\", \"reasoning\": \"Step one.\", \"reasoning_details\": [{\"type\": \"reasoning.text\", \"text\": \"Step one.\", \"index\": 0}]}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Done.\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 4, \"completion_tokens\": 4, \"total_tokens\": 8}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "anthropic/claude-sonnet-4.5",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "Step one."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "Done."
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 1
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 4,
+     "output_tokens": 4
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "Step one.",
+     "signature": ""
+    },
+    {
+     "type": "text",
+     "text": "Done."
+    }
+   ],
+   "model": "anthropic/claude-sonnet-4.5",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 4,
+    "output_tokens": 4,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ },
+ {
+  "case_id": "generic-openrouter__usage_with_cost_fields",
+  "provider": "generic-openrouter",
+  "requested_model": "anthropic/claude-sonnet-4.5",
+  "upstream": {
+   "status": 200,
+   "headers": {
+    "content-type": "text/event-stream"
+   },
+   "sse_lines": [
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Priced\"}, \"finish_reason\": null}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}",
+    "",
+    "data: {\"id\": \"chatcmpl-oracle1\", \"object\": \"chat.completion.chunk\", \"created\": 1700000000, \"model\": \"upstream-model\", \"choices\": [], \"usage\": {\"prompt_tokens\": 100, \"completion_tokens\": 10, \"total_tokens\": 110, \"cost\": 0.00123, \"is_byok\": false, \"cost_details\": {\"upstream_inference_cost\": null, \"upstream_inference_prompt_cost\": 0.001, \"upstream_inference_completions_cost\": 0.00023}, \"prompt_tokens_details\": {\"cached_tokens\": 0}}}",
+    "",
+    "data: [DONE]",
+    "",
+    ""
+   ]
+  },
+  "expected_events": [
+   {
+    "type": "message_start",
+    "message": {
+     "id": "<id>",
+     "type": "message",
+     "role": "assistant",
+     "content": [],
+     "model": "anthropic/claude-sonnet-4.5",
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+     }
+    }
+   },
+   {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "Priced"
+    }
+   },
+   {
+    "type": "content_block_stop",
+    "index": 0
+   },
+   {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn"
+    },
+    "usage": {
+     "input_tokens": 100,
+     "output_tokens": 10
+    }
+   },
+   {
+    "type": "message_stop"
+   }
+  ],
+  "expected_aggregate": {
+   "id": "<id>",
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "Priced"
+    }
+   ],
+   "model": "anthropic/claude-sonnet-4.5",
+   "stop_reason": "end_turn",
+   "stop_sequence": null,
+   "usage": {
+    "input_tokens": 100,
+    "output_tokens": 10,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+   }
+  }
+ }
+]
