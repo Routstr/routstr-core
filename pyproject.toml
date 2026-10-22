@@ -43,6 +43,8 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Tests import `scripts.*`; litellm used to put the repo root on sys.path.
+pythonpath = ["."]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
