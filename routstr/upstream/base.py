@@ -19,6 +19,7 @@ from ..auth import (
     adjust_payment_for_tokens,
     get_reservation_snapshot,
     release_reservation,
+    revert_pay_for_request,
 )
 from ..core import get_logger
 from ..core.db import (
@@ -3655,7 +3656,13 @@ class BaseUpstreamProvider:
             path.endswith("messages/count_tokens")
             and not self.supports_anthropic_messages
         ):
-            return count_tokens_locally(request_body, model_obj)
+            # Counted locally for free: release the reservation, or it stays
+            # locked until the stale-reservation sweep.
+            result = count_tokens_locally(request_body, model_obj)
+            await revert_pay_for_request(
+                key, session, max_cost_for_model, reservation_snapshot
+            )
+            return result
 
         if (
             path.endswith("messages")
