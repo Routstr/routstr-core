@@ -923,6 +923,22 @@ class CliToken(SQLModel, table=True):  # type: ignore
     )
 
 
+async def revoke_cli_token_value(session: AsyncSession, token: str) -> bool:
+    """Delete the CLI token whose bearer value is ``token``; True if one existed."""
+    result = await session.exec(  # type: ignore[call-overload]
+        delete(CliToken).where(col(CliToken.token) == token)
+    )
+    await session.commit()
+    return bool(result.rowcount)
+
+
+async def revoke_all_cli_tokens(session: AsyncSession) -> int:
+    """Delete every CLI token; return how many were revoked."""
+    result = await session.exec(delete(CliToken))  # type: ignore[call-overload]
+    await session.commit()
+    return int(result.rowcount or 0)
+
+
 async def accumulate_routstr_fee(session: AsyncSession, amount_msats: int) -> None:
     stmt = (
         update(RoutstrFee)
