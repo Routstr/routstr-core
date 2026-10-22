@@ -745,7 +745,8 @@ async def test_deeply_nested_tool_schema_is_a_client_error(
     prefix: str, base_url: str
 ) -> None:
     schema: dict[str, Any] = {"type": "string"}
-    for _ in range(3000):
+    # Past the old deepcopy recursion limit, within json's on every Python.
+    for _ in range(300):
         schema = {"type": "object", "properties": {"a": schema}}
     error, _ = await _run(
         prefix,

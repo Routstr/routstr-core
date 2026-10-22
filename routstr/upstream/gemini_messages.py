@@ -140,7 +140,7 @@ async def dispatch_gemini_messages(
 
     try:
         body: dict = json.loads(request_body)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise UpstreamError(
             f"Invalid JSON in /v1/messages body: {exc}", status_code=400
         ) from exc

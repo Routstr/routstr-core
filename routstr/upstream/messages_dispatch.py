@@ -650,7 +650,7 @@ async def dispatch_anthropic_messages(
         raise UpstreamError("Missing request body for /v1/messages", status_code=400)
     try:
         body: dict = json.loads(request_body)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise UpstreamError(
             f"Invalid JSON in /v1/messages body: {exc}", status_code=400
         ) from exc
