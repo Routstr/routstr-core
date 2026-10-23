@@ -319,6 +319,25 @@ async def test_anthropic_cache_write_billed_at_write_rate(model_pricing: Mock) -
 
 
 @pytest.mark.asyncio
+async def test_web_search_requests_billed_at_listed_rate(model_pricing: Mock) -> None:
+    model_pricing.sats_pricing.web_search = 10.0
+    response = {
+        "model": "claude-haiku-5.5",
+        "usage": {
+            "input_tokens": 300,
+            "output_tokens": 100,
+            "server_tool_use": {"web_search_requests": 2},
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=100000, model_obj=model_pricing)
+
+    assert isinstance(result, CostData)
+    # 300 @ 1 + 100 @ 2 + 2 searches @ 10 sats
+    assert result.total_msats == 20500
+
+
+@pytest.mark.asyncio
 async def test_missing_cache_rate_falls_back_to_input_rate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
