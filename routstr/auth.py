@@ -23,7 +23,7 @@ from .core.db import (
 from .core.settings import settings
 from .core.terminal_outcomes import (
     TerminalOutcomeContext,
-    mark_terminal_outcome_loss,
+    mark_terminal_outcome_unknown,
     record_terminal_outcome,
 )
 from .payment.cost_calculation import (
@@ -1311,7 +1311,9 @@ async def _adjust_payment_for_tokens(
             await session.commit()
         except BaseException:
             if terminal_outcome is not None:
-                mark_terminal_outcome_loss("prepaid_commit_ambiguous")
+                mark_terminal_outcome_unknown(
+                    terminal_outcome, "prepaid_commit_ambiguous"
+                )
             raise
         if terminal_outcome is not None:
             recorded_usage = response_data.get("usage")

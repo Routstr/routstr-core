@@ -29,6 +29,7 @@ from routstr.core.terminal_outcome_writer import (
 from routstr.core.terminal_outcomes import (
     TerminalOutcomeContext,
     cashu_retained_msats,
+    mark_terminal_outcome_unknown,
     record_terminal_outcome,
 )
 
@@ -303,6 +304,40 @@ async def test_continuity_loss_still_stores_the_rows_already_queued(
     assert await writer.flush(timeout=1)
     async with sessions() as session:
         assert len((await session.exec(select(TerminalOutcome))).all()) == 5
+    assert await writer.stop(timeout=1)
+
+
+async def test_failed_settlement_marks_only_its_own_request_unknown(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, sessions = ledger
+    day = date(2026, 9, 1)
+    clock = MutableClock(_timestamp(day))
+    writer = TerminalOutcomeWriter(
+        session_factory=sessions, retry_seconds=0.01, clock=clock
+    )
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+
+    assert await writer.start()
+    clock.value = _timestamp(day + timedelta(days=1))
+    _record("request-before", clock.value)
+    failed = TerminalOutcomeContext("request-refund-failed", "author/model")
+    mark_terminal_outcome_unknown(failed, "X-Cashu refund commit ambiguous")
+    clock.value += 1
+    mark_terminal_outcome_unknown(failed, "X-Cashu LiteLLM settlement failed")
+    _record("request-after", clock.value)
+    assert await writer.flush(timeout=1)
+
+    async with sessions() as session:
+        stored = (await session.exec(select(TerminalOutcome))).all()
+        epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
+    unknown = [row for row in stored if row.pricing_source == "unknown"]
+    assert len(stored) == 3 and len(unknown) == 1
+    assert unknown[0].revenue_msats == 0 and unknown[0].input_source == "missing"
+    assert [(e.coverage_start_day, e.coverage_end_day) for e in epochs] == [
+        (day + timedelta(days=1), None)
+    ]
     assert await writer.stop(timeout=1)
 
 

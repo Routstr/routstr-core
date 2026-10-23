@@ -30,6 +30,7 @@ _LEASE_TIMEOUT_SECONDS = 90.0
 # A lost race means another writer moved on; one that keeps losing is broken.
 _RACE_ATTEMPTS = 10
 _PERSIST_ATTEMPTS = 30
+UNKNOWN_PRICING_SOURCE = "unknown"
 
 SessionFactory = Callable[[], AsyncContextManager[AsyncSession]]
 Clock = Callable[[], int]
@@ -611,6 +612,7 @@ class TerminalOutcomeWriter:
         return (
             _PersistResult.STORED
             if _same_outcome(existing, queued)
+            or queued.pricing_source == UNKNOWN_PRICING_SOURCE
             else _PersistResult.CONFLICT
         )
 

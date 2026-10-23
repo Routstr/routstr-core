@@ -223,7 +223,7 @@ async def test_malformed_events_do_not_retain_whole_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancelled_refund_marks_continuity_loss() -> None:
+async def test_cancelled_refund_marks_the_outcome_unknown() -> None:
     provider = _make_provider()
     mark_loss = MagicMock()
     record_outcome = MagicMock()
@@ -238,7 +238,7 @@ async def test_cancelled_refund_marks_continuity_loss() -> None:
             "send_refund",
             new=AsyncMock(side_effect=asyncio.CancelledError()),
         ),
-        patch("routstr.upstream.base.mark_terminal_outcome_loss", mark_loss),
+        patch("routstr.upstream.base.mark_terminal_outcome_unknown", mark_loss),
         patch("routstr.upstream.terminal_outcome_tracking.record_terminal_outcome", record_outcome),
     ):
         with pytest.raises(asyncio.CancelledError):
@@ -250,5 +250,6 @@ async def test_cancelled_refund_marks_continuity_loss() -> None:
                 request_id="cancelled-refund",
             )
 
-    mark_loss.assert_called_once_with("X-Cashu Responses stream settlement cancelled")
+    mark_loss.assert_called_once()
+    assert mark_loss.call_args.args[1] == "X-Cashu Responses stream settlement cancelled"
     record_outcome.assert_not_called()
