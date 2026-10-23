@@ -44,7 +44,7 @@ from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..core.terminal_outcomes import (
     TerminalOutcomeContext,
-    mark_terminal_outcome_loss,
+    mark_terminal_outcome_unknown,
 )
 from ..payment.cost_calculation import (
     CostData,
@@ -3242,8 +3242,8 @@ class BaseUpstreamProvider:
                             request_id=request_id,
                         )
                     except BaseException:
-                        mark_terminal_outcome_loss(
-                            "X-Cashu LiteLLM refund commit ambiguous"
+                        mark_terminal_outcome_unknown(
+                            terminal_outcome, "X-Cashu LiteLLM refund commit ambiguous"
                         )
                         raise
                     response_headers["X-Cashu"] = refund_token
@@ -3265,7 +3265,9 @@ class BaseUpstreamProvider:
                     refund_amount=refund_amount_sent,
                 )
         except Exception as exc:
-            mark_terminal_outcome_loss("X-Cashu LiteLLM settlement failed")
+            mark_terminal_outcome_unknown(
+                terminal_outcome, "X-Cashu LiteLLM settlement failed"
+            )
             logger.error(
                 "Error settling non-streaming /v1/messages",
                 extra={
@@ -3656,13 +3658,15 @@ class BaseUpstreamProvider:
                             },
                         )
             except asyncio.CancelledError:
-                mark_terminal_outcome_loss(
-                    "X-Cashu LiteLLM stream settlement cancelled"
+                mark_terminal_outcome_unknown(
+                    terminal_outcome, "X-Cashu LiteLLM stream settlement cancelled"
                 )
                 raise
             except Exception as exc:
                 settlement_failed = True
-                mark_terminal_outcome_loss("X-Cashu LiteLLM stream settlement failed")
+                mark_terminal_outcome_unknown(
+                    terminal_outcome, "X-Cashu LiteLLM stream settlement failed"
+                )
                 logger.error(
                     "Error calculating cost for streaming /v1/messages",
                     extra={
@@ -4850,12 +4854,16 @@ class BaseUpstreamProvider:
                 _inject_cost_response_headers(response_headers, cost_data)
         except asyncio.CancelledError:
             if terminal_outcome is not None:
-                mark_terminal_outcome_loss("X-Cashu streaming settlement cancelled")
+                mark_terminal_outcome_unknown(
+                    terminal_outcome, "X-Cashu streaming settlement cancelled"
+                )
             raise
         except Exception as e:
             settlement_failed = True
             if terminal_outcome is not None:
-                mark_terminal_outcome_loss("X-Cashu streaming settlement failed")
+                mark_terminal_outcome_unknown(
+                    terminal_outcome, "X-Cashu streaming settlement failed"
+                )
             logger.error(
                 "Error calculating cost for streaming response",
                 extra={
@@ -5025,7 +5033,9 @@ class BaseUpstreamProvider:
                     )
                 except BaseException:
                     if terminal_outcome is not None:
-                        mark_terminal_outcome_loss("X-Cashu refund commit ambiguous")
+                        mark_terminal_outcome_unknown(
+                            terminal_outcome, "X-Cashu refund commit ambiguous"
+                        )
                     raise
                 response_headers["X-Cashu"] = refund_token
 
@@ -5965,11 +5975,15 @@ class BaseUpstreamProvider:
                 # inputMsats/outputMsats/totalMsats for x-cashu requests.
                 _inject_cost_response_headers(response_headers, cost_data)
         except asyncio.CancelledError:
-            mark_terminal_outcome_loss("X-Cashu Responses stream settlement cancelled")
+            mark_terminal_outcome_unknown(
+                terminal_outcome, "X-Cashu Responses stream settlement cancelled"
+            )
             raise
         except Exception as e:
             settlement_failed = True
-            mark_terminal_outcome_loss("X-Cashu Responses stream settlement failed")
+            mark_terminal_outcome_unknown(
+                terminal_outcome, "X-Cashu Responses stream settlement failed"
+            )
             logger.error(
                 "Error calculating cost for streaming Responses API response",
                 extra={
@@ -6123,8 +6137,8 @@ class BaseUpstreamProvider:
                         request_id=request_id,
                     )
                 except BaseException:
-                    mark_terminal_outcome_loss(
-                        "X-Cashu Responses refund commit ambiguous"
+                    mark_terminal_outcome_unknown(
+                        terminal_outcome, "X-Cashu Responses refund commit ambiguous"
                     )
                     raise
                 response_headers["X-Cashu"] = refund_token

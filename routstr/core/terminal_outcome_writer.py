@@ -30,6 +30,8 @@ _LEASE_TIMEOUT_SECONDS = 90.0
 # A lost race means another writer moved on; one that keeps losing is broken.
 _RACE_ATTEMPTS = 10
 _PERSIST_ATTEMPTS = 30
+_SHORT_RESTART_MS = 10 * 60 * 1000
+UNKNOWN_PRICING_SOURCE = "unknown"
 
 SessionFactory = Callable[[], AsyncContextManager[AsyncSession]]
 Clock = Callable[[], int]
@@ -556,13 +558,16 @@ class TerminalOutcomeWriter:
                         .limit(1)
                     )
                 ).first()
-                # A restart later the same UTC day leaves too little unattended
-                # time to drop the whole day from coverage.
+                # A restart later the same UTC day, or a short one across midnight,
+                # leaves too little unattended time to drop a whole day from coverage.
                 if (
                     newest is not None
                     and newest.status == "clean"
                     and newest.closed_at_ms is not None
-                    and _utc_day_from_ms(newest.closed_at_ms) == _utc_day_from_ms(now)
+                    and (
+                        _utc_day_from_ms(newest.closed_at_ms) == _utc_day_from_ms(now)
+                        or now - newest.closed_at_ms <= _SHORT_RESTART_MS
+                    )
                 ):
                     return
                 last_clean_close = (
@@ -611,6 +616,7 @@ class TerminalOutcomeWriter:
         return (
             _PersistResult.STORED
             if _same_outcome(existing, queued)
+            or queued.pricing_source == UNKNOWN_PRICING_SOURCE
             else _PersistResult.CONFLICT
         )
 
@@ -649,23 +655,31 @@ class TerminalOutcomeWriter:
         )
         return None
 
-    def _discard_queue(self) -> None:
+    async def _store_queue(self) -> None:
         if self._queue is None:
             return
+        storing = True
         while True:
             try:
                 queued = self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 return
-            else:
+            stored = False
+            try:
+                if storing:
+                    result = await self._persist_once(queued)
+                    storing = result is not _PersistResult.RETRY
+                    stored = result is _PersistResult.STORED
+            finally:
+                self._queue.task_done()
+            if not stored:
                 self.declare_loss(
                     "queued terminal outcome discarded after continuity loss",
                     queued.terminal_day,
                 )
-                self._queue.task_done()
 
     async def _recover_loss(self) -> None:
-        self._discard_queue()
+        await self._store_queue()
         rotated_for: date | None = None
         while self._loss_pending:
             lost_day = self._loss_day or _utc_day_from_ms(self._now_ms())
