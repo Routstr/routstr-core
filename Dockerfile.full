@@ -32,6 +32,9 @@ RUN apt-get update \
         libtool \
     && rm -rf /var/lib/apt/lists/*
 
+# Match the backend image: compile dependencies once at build time.
+ENV UV_COMPILE_BYTECODE=1
+
 COPY uv.lock pyproject.toml ./
 
 RUN uv sync --no-dev --no-install-project
@@ -39,6 +42,8 @@ RUN uv sync --no-dev --no-install-project
 WORKDIR /app
 
 COPY . .
+
+RUN /.venv/bin/python -m compileall -q routstr
 
 # Copy the built UI from the ui-builder stage
 COPY --from=ui-builder /app/ui/out ./ui_out

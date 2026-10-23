@@ -3,6 +3,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_published_image_precompiles_dependencies_and_application() -> None:
+    for name in ("Dockerfile", "Dockerfile.full"):
+        dockerfile = (REPO_ROOT / name).read_text()
+        assert dockerfile.index("ENV UV_COMPILE_BYTECODE=1") < dockerfile.index("RUN uv sync")
+        assert dockerfile.index("COPY . .") < dockerfile.index(
+            "RUN /.venv/bin/python -m compileall -q routstr"
+        )
+
+
 def test_backend_docker_context_excludes_generated_and_runtime_state() -> None:
     patterns = {
         line.strip()

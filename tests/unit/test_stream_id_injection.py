@@ -6,7 +6,18 @@ import pytest
 
 from routstr.auth import ReservationSnapshot
 from routstr.core.db import ApiKey
+from routstr.upstream import base
 from routstr.upstream.base import BaseUpstreamProvider
+
+
+@pytest.fixture(autouse=True)
+def _restore_base_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The tests below assign these directly; registering them here makes
+    # monkeypatch put the originals back so later tests get the real DB session.
+    monkeypatch.setattr(base, "create_session", base.create_session)
+    monkeypatch.setattr(
+        base, "adjust_payment_for_tokens", base.adjust_payment_for_tokens
+    )
 
 
 @pytest.mark.asyncio

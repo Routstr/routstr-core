@@ -26,6 +26,7 @@ from .core.db import (
 )
 from .core.error_scope import (
     ERROR_SCOPE_HEADER,
+    ERROR_SCOPE_NODE,
     ERROR_SCOPE_UPSTREAM,
     UPSTREAM_ERROR_STATUS,
     UPSTREAM_UNAVAILABLE,
@@ -47,7 +48,7 @@ from .payment.image_pricing import (
     quote_image_endpoint,
     requested_image_count,
 )
-from .payment.models import Model, is_decision_model
+from .payment.models import Model, _update_model_sats_pricing, is_decision_model
 from .payment.price import sats_usd_price
 from .upstream import BaseUpstreamProvider
 from .upstream.cooldown import (
@@ -77,9 +78,17 @@ from .upstream.request_correction import (
 logger = get_logger(__name__)
 
 MODEL_PATH_HEADER = "x-routstr-model-path"
+MODELS_WARMING_UP = "MODELS_WARMING_UP"
+WARMING_UP_RETRY_AFTER_SECONDS = 2
 proxy_router = APIRouter()
 
+# Startup loads providers in the background, so until that first load finishes
+# an unknown model may just not be loaded yet.
+_warming_up = False
+
 _upstreams: list[BaseUpstreamProvider] = []
+_pending_upstreams: list[BaseUpstreamProvider] | None = None
+_upstreams_initialization_lock = asyncio.Lock()
 _provider_map: dict[
     str, list[tuple[Model, BaseUpstreamProvider]]
 ] = {}  # All aliases -> sorted [(candidate Model, its Provider)]
@@ -93,23 +102,87 @@ async def _finish_read_transaction(session: AsyncSession) -> None:
         await commit_result
 
 
+async def _publish_pending_upstreams() -> None:
+    """Called with the initialization lock held; retain pending state on price failure."""
+    global _upstreams, _pending_upstreams
+    if _pending_upstreams is None:
+        return
+    for upstream in _pending_upstreams:
+        cached_models = upstream.get_cached_models()
+        if not cached_models:
+            continue
+        sats_to_usd = sats_usd_price()
+        models = [
+            _update_model_sats_pricing(model, sats_to_usd)
+            for model in cached_models
+        ]
+        if any(model.sats_pricing is None for model in models):
+            raise ValueError("Cannot publish models without sats pricing")
+        upstream._models_cache = models
+        upstream._models_by_id = {
+            model.forwarded_model_id or model.id: model for model in models
+        }
+    _upstreams = _pending_upstreams
+    _pending_upstreams = None
+    await refresh_model_maps()
+
+
+async def activate_pending_upstreams() -> None:
+    """Let existing pricing refresh work activate a previously unpriced snapshot."""
+    async with _upstreams_initialization_lock:
+        await _publish_pending_upstreams()
+
+
+async def _load_priced_upstreams() -> None:
+    """Serialize snapshot loads and price candidates before publishing them."""
+    global _pending_upstreams
+    async with _upstreams_initialization_lock:
+        # An admin mutation supersedes pending discovery even if its reload fails.
+        _pending_upstreams = None
+        _pending_upstreams = await init_upstreams()
+        await _publish_pending_upstreams()
+
+
 async def initialize_upstreams() -> None:
     """Initialize upstream providers from database during application startup."""
-    global _upstreams
-    _upstreams = await init_upstreams()
-    logger.info(f"Initialized {len(_upstreams)} upstream providers")
-    await refresh_model_maps()
+    global _warming_up
+    try:
+        await _load_priced_upstreams()
+        logger.info(f"Initialized {len(_upstreams)} upstream providers")
+    finally:
+        _warming_up = False
+
+
+def mark_warming_up() -> None:
+    """Answer unknown models with a retryable 503 until initialize_upstreams() ends."""
+    global _warming_up
+    _warming_up = True
+
+
+def is_warming_up() -> bool:
+    return _warming_up
+
+
+def models_warming_up_response(request: Request) -> Response:
+    response = create_error_response(
+        "service_unavailable",
+        "Models are still loading, retry shortly",
+        503,
+        request=request,
+        code=MODELS_WARMING_UP,
+        error_scope=ERROR_SCOPE_NODE,
+    )
+    response.headers["Retry-After"] = str(WARMING_UP_RETRY_AFTER_SECONDS)
+    return response
 
 
 async def reinitialize_upstreams() -> None:
     """Re-initialize upstream providers from database (called after admin changes)."""
-    global _upstreams
-    _upstreams = await init_upstreams()
+    await _load_priced_upstreams()
     logger.info(
         "Re-initialized upstream providers from admin action",
         extra={"provider_count": len(_upstreams)},
     )
-    await refresh_model_maps()
 
 
 def get_upstreams() -> list[BaseUpstreamProvider]:
@@ -809,6 +882,8 @@ async def _proxy(
     candidates = get_candidates(model_id)
 
     if not candidates:
+        if is_warming_up():
+            return models_warming_up_response(request)
         return create_error_response(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
         )
