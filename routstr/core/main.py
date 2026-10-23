@@ -18,6 +18,8 @@ from ..auth import (
 )
 from ..balance import balance_router, deprecated_wallet_router
 from ..cashu_compat import install_cashu_httpx_shim
+from ..confidential import confidential_router
+from ..confidential_ws import confidential_ws_router
 from ..foreign_mint_swap import periodic_swap_reconcile
 from ..lightning import (
     lightning_router,
@@ -90,6 +92,16 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # Apply litellm-wide settings (drop_params, chat-completions URL,
         # debug logging) before any upstream provider dispatches a request.
         configure_litellm()
+
+        # Confidential mode keeps its offers and sessions in this process:
+        # refuse to start as one of several workers.
+        if global_settings.confidential_sidecar_url:
+            from ..confidential import warn_unprotected_sidecar
+            from ..confidential_ws import claim_single_worker
+            from .db import DATABASE_URL
+
+            claim_single_worker(DATABASE_URL)
+            warn_unprotected_sidecar()
 
         # Run database migrations on startup
         run_migrations()
@@ -457,10 +469,17 @@ else:
 
 
 app.include_router(models_router)
+# Confidential-upstream HTTP routes are registered *before* the proxy catch-all
+# (like models_router): `/{path:path}` would otherwise claim /v1/confidential/*.
+# Registered only when a sidecar is configured.
+if global_settings.confidential_sidecar_url:
+    app.include_router(confidential_router)
 app.include_router(admin_router)
 app.include_router(balance_router)
 app.include_router(lightning_router)
 app.include_router(v2_lightning_router)
 app.include_router(deprecated_wallet_router)
 app.include_router(providers_router)
+if global_settings.confidential_sidecar_url:
+    app.include_router(confidential_ws_router)
 app.include_router(proxy_router)

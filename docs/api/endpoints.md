@@ -699,6 +699,65 @@ X-Cashu: cashuAeyJ0...
 
 Returns the change token in the body and in an `X-Cashu` response header. `404` if no matching request exists, `425` while the change is still being minted, `410` if it was swept.
 
+## Confidential Upstream
+
+Present only when the node sets `CONFIDENTIAL_SIDECAR_URL`; see
+[Confidential upstream](../confidential-upstream.md).
+
+### Get Offer
+
+```http
+GET /v1/confidential/offer
+```
+
+The node's Nostr-signed offer: protocol version range, `upstream_host`,
+websocket URL (`ws`; relative when `HTTP_URL` is unset), head template, pinned
+suffix keys, `max_tokens_cap`, a signed per-model rate snapshot (`price_list`:
+`in`, `cached_in`, `out` in msats per 1k tokens), `notary_pubkey`, `sig` and
+`sig_payload` (the exact signed bytes). The node honours an offer's rates for
+sessions set up within 10 minutes of serving it.
+
+### Session
+
+```http
+GET /v1/confidential/ws?session_id=<uuid>&v=<version>   (WebSocket)
+GET /v1/confidential/zk?proof=<pi_c1|pi_n|pi_c2|pi_c3>&session_id=<sid>   (WebSocket)
+```
+
+The session's control and TLS-record channel, and one channel per proof.
+
+The first frame must be `setup`, within 15 s:
+
+```json
+{"type": "setup", "model": "…", "max_tokens": 256, "len": 1834,
+ "nonce_c": "<64 hex>", "auth": "sk-…|cashu…", "offer_sig": "<offer sig>"}
+```
+
+`auth` is the client's normal bearer. `offer_sig` (optional) selects the
+signed offer whose rates bill the session. `max_tokens` must be in
+`[1, max_tokens_cap]` and `len` in `[1, 8 MiB]`. The node reserves the
+model's full-context prompt plus `max_tokens` at those rates, then opens the
+sidecar session. At most 32 sessions run at once, each for at most 10 minutes.
+
+A refusal or failure is sent before the socket closes as
+`{"type":"error","status":<int>,"reason":"…","detail":…}`: `400` bad setup,
+`402` insufficient balance (same detail as an HTTP request), `408` setup or
+session timeout, `409` with `detail.error.type = "offer_expired"` (refetch the
+offer and retry), `502`/`503` sidecar unavailable or too many sessions, `500`
+settlement failure.
+
+After settlement the node sends
+`{"type":"receipt","receipt":{…},"receipt_json":"…","sig":"…","sig_scheme":"schnorr-secp256k1"}`
+with receipt fields `v`, `sid`, `model`, `usage`, `cost_msats`,
+`reserved_msats`, `balance_msats`, `rates`, `notary_pubkey`,
+`attestation_hash` (sha256 of the attestation's `a_json`) and `time`.
+`cost_msats` is the usage at the frozen `rates`. On an upstream HTTP error,
+`usage` is `{"error_status": <int>, "choices": []}`: the node learns the status
+line and headers, not the body.
+
+Models served this way carry an additive field in `GET /v1/models`:
+`"confidential_upstream": {"v": 1, "offer_url": "…/v1/confidential/offer"}`.
+
 ## Provider Discovery
 
 ## Admin Settings

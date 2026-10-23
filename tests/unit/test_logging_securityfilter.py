@@ -116,3 +116,24 @@ def test_is_case_insensitive_for_standalone(
     original = "Using NSEC1a8d9f8s7d9f8a7s6d5f4a3s2d1f9a8s7d6f5a4s3d2f1a9s8d7f6a5s4d3f and CaShuA123abc"
     expected = "Using [REDACTED] and [REDACTED]"
     assert filter_message(original) == expected
+
+
+def test_confidential_session_id_is_shortened(
+    filter_message: Callable[[str], str],
+) -> None:
+    sid = "8a6e5426" + "ab" * 28
+    out = filter_message(
+        f"('10.0.0.3', 1) - \"WebSocket /v1/confidential/zk?proof=zkchan&session_id={sid}\" [accepted]"
+    )
+    assert sid not in out
+    assert "session_id=8a6e5426abab…" in out
+    out = filter_message(f"GET /zk?proof=pi_nk&sid={sid}")
+    assert sid not in out and "sid=8a6e5426abab…" in out
+
+
+def test_zk_token_is_removed(filter_message: Callable[[str], str]) -> None:
+    token = "cd" * 32
+    out = filter_message(
+        f'"WebSocket /v1/confidential/zk?proof=zkchan&session_id=ab&zk_token={token}" [accepted]'
+    )
+    assert token not in out and "zk_token=[REDACTED]" in out
