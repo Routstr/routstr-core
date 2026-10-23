@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
 import traceback
 import typing
 import uuid
@@ -102,6 +103,11 @@ if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
 
 logger = get_logger(__name__)
+
+# A stored catalog younger than this share of the refresh interval is reused
+# instead of fetched again, so N workers cost roughly one upstream fetch per
+# provider per interval rather than N.
+SNAPSHOT_REUSE_FRACTION = 0.9
 
 # One image call may ask for several images, so an image model's max cost
 # covers a small batch at its ceiling price rather than a token window.
@@ -545,6 +551,10 @@ class BaseUpstreamProvider:
     db_id: int | None = None
     _models_cache: list[Model] = []
     _models_by_id: dict[str, Model] = {}
+    # Last non-empty catalog this worker obtained, before DB overrides and fees.
+    # Only ever rebound, never mutated, so the class-level default is safe.
+    _upstream_catalog: list[Model] = []
+    _upstream_catalog_config_hash: str | None = None
 
     def __init__(self, base_url: str, api_key: str, provider_fee: float = 1.01):
         """Initialize the upstream provider.
@@ -6308,7 +6318,7 @@ class BaseUpstreamProvider:
                     apply_fees=False,
                 )
                 db_model_ids: set[str] = {model.id for model in db_models}
-                models = await self.fetch_models()
+                models = list(await self._shared_upstream_models(provider.id))
                 model_ids = [model.id for model in models]
                 diff = set(db_model_ids) - set(model_ids)
 
@@ -6344,6 +6354,77 @@ class BaseUpstreamProvider:
                 f"Failed to refresh models cache for {self.provider_type or self.base_url}",
                 extra={"error": repr(e), "error_type": type(e).__name__},
             )
+
+    def _catalog_settings(self) -> dict[str, object]:
+        """Provider configuration used to discover or price the raw catalog."""
+        return {}
+
+    def _restore_catalog_state(self, models: list[Model]) -> None:
+        """Restore adapter state normally derived during ``fetch_models``."""
+
+    async def _shared_upstream_models(self, provider_id: int) -> list[Model]:
+        """This provider's upstream catalog, shared with the other workers.
+
+        ``fetch_models`` generally reports failure as an empty list. Taken at face
+        value, one rate-limited refresh wiped a worker's catalog until the next
+        one, and behind a load balancer the node answered most requests with
+        "model not found". A recent catalog stored by any worker is used without
+        fetching again, and a failed fetch falls back to the last good one.
+        """
+        from .model_snapshots import (
+            load_snapshot,
+            provider_config_hash,
+            save_snapshot,
+        )
+
+        config_hash = provider_config_hash(
+            self.provider_type, self.base_url, self.api_key, self._catalog_settings()
+        )
+        from ..core.settings import settings
+
+        if self._upstream_catalog_config_hash != config_hash:
+            self._upstream_catalog = []
+            self._restore_catalog_state([])
+            self._upstream_catalog_config_hash = config_hash
+
+        snapshot = await load_snapshot(provider_id, config_hash)
+        interval = settings.models_refresh_interval_seconds
+        if (
+            snapshot is not None
+            and interval > 0
+            and time.time() - snapshot[1] < interval * SNAPSHOT_REUSE_FRACTION
+        ):
+            self._restore_catalog_state(snapshot[0])
+            self._upstream_catalog = snapshot[0]
+            return snapshot[0]
+
+        try:
+            fetched = await self.fetch_models()
+        except Exception as e:
+            # Native discovery can raise instead of returning an empty catalog.
+            logger.warning(
+                "Model fetch failed, trying last good catalog",
+                extra={"provider_id": provider_id, "error_type": type(e).__name__},
+            )
+            fetched = []
+        if fetched:
+            await save_snapshot(provider_id, config_hash, fetched)
+            self._upstream_catalog = fetched
+            return fetched
+
+        fallback = snapshot[0] if snapshot is not None else self._upstream_catalog
+        if fallback:
+            logger.warning(
+                "Model fetch returned nothing, keeping last good catalog",
+                extra={
+                    "provider": self.provider_type or self.base_url,
+                    "models": len(fallback),
+                    "source": "shared" if snapshot is not None else "local",
+                },
+            )
+            self._restore_catalog_state(fallback)
+            self._upstream_catalog = fallback
+        return fallback
 
     def get_cached_models(self) -> list[Model]:
         """Get cached models for this provider.

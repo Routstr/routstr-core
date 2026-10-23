@@ -263,7 +263,7 @@ Use environment variables for:
 | `ADMIN_PASSWORD`     | Legacy seed for the dashboard password (otherwise generated + logged on first start) | (auto-generated) |
 | `ROUTSTR_SECRET_KEY` | Master key encrypting node secrets at rest. Auto-generated to a key file if unset | (auto-generated) |
 | `ROUTSTR_SECRET_KEY_FILE` | Path to the generated key file (used when `ROUTSTR_SECRET_KEY` is unset) | `routstr_secret.key` beside the database |
-| `DATABASE_URL`       | Database connection string        | `sqlite+aiosqlite:///keys.db`        |
+| `DATABASE_URL`       | Database connection string. SQLite or PostgreSQL, e.g. `postgresql+asyncpg://user:pass@host:5432/routstr` | `sqlite+aiosqlite:///keys.db` |
 | `NAME`               | Node display name                 | `ARoutstrNode`                       |
 | `DESCRIPTION`        | Node description                  | `A Routstr Node`                     |
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
@@ -331,6 +331,43 @@ in your backups. If it is lost or changed, previously encrypted secrets can't be
 decrypted and must be re-entered — there is no rotation. To keep the key off the
 data volume, set `ROUTSTR_SECRET_KEY` explicitly (an env value always takes
 precedence over the file). See also [Deployment](deployment.md).
+
+**On PostgreSQL, set the key explicitly.** There is no local database file to sit
+beside, so the generated key lands in the working directory. If that directory
+isn't persisted, the key is gone on the next start and a node with a stored nsec
+refuses to boot with `ROUTSTR_SECRET_KEY is not set`. Set `ROUTSTR_SECRET_KEY`, or
+point `ROUTSTR_SECRET_KEY_FILE` at a persistent path.
+
+### PostgreSQL and Multiple Workers
+
+SQLite serves a single process. To run several uvicorn workers (`--workers N`) or
+replicas behind one load balancer, point them all at one PostgreSQL database:
+
+```bash
+DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/routstr
+```
+
+- Every worker runs the schema migrations on startup; on PostgreSQL they queue on
+  an advisory lock, so an empty database can be brought up by all workers at once.
+- `RESET_RESERVED_BALANCE_ON_STARTUP` (default `true`) clears reservations a
+  previous process left behind. On SQLite that is every active reservation. On
+  PostgreSQL only reservations whose lease stopped being renewed are released,
+  so a respawned worker never touches the requests its siblings are billing.
+- Each provider's model catalog is stored in the database after a successful
+  fetch. Workers reuse a recent copy instead of fetching it again, and a worker
+  whose fetch fails or is rate limited serves the last good catalog rather than
+  answering "model not found". A worker that still has no models retries after
+  30 seconds, backing off up to `MODELS_REFRESH_INTERVAL_SECONDS`.
+- Dashboard logins are stored in the database, so a session issued by one worker
+  is valid on all of them.
+- Pool sizing is per worker: `DATABASE_POOL_SIZE` and `DATABASE_MAX_OVERFLOW`
+  (defaults 10 and 20) are multiplied by the worker count on the server side.
+
+An existing SQLite database moves over with
+`uv run python scripts/migrate_sqlite_to_postgres.py --source keys.db --target <url>`.
+It copies into an empty database inside one transaction, verifies every row, and
+refuses to drop data silently; run it with `--dry-run` first. Keep the same
+`ROUTSTR_SECRET_KEY`, or the copied encrypted secrets cannot be read.
 
 ---
 

@@ -2740,6 +2740,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
+    { name = "asyncpg" },
     { name = "backoff" },
     { name = "cashu" },
     { name = "fastapi", extra = ["standard-no-fastapi-cloud-cli"] },
@@ -2778,6 +2779,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "alembic", specifier = ">=1.13" },
+    { name = "asyncpg", specifier = ">=0.30" },
     { name = "backoff", specifier = ">=2.2" },
     { name = "cashu", specifier = ">=0.20" },
     { name = "fastapi", extras = ["standard-no-fastapi-cloud-cli"], specifier = ">=0.141" },
