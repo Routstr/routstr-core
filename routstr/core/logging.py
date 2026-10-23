@@ -60,7 +60,7 @@ from pythonjsonlogger import jsonlogger
 from rich.console import Console
 from rich.logging import RichHandler
 
-from .redaction import redact_field, redact_org_ids
+from .redaction import redact_field, redact_org_ids, redact_secret_text
 
 # Only use RichHandler when stdout is a real TTY. In non-TTY contexts
 # (docker logs, pipes, CI) Rich pads every line to width and wraps long
@@ -490,8 +490,23 @@ class SecurityFilter(logging.Filter):
                         message = re.sub(
                             pattern, f"{key}: [REDACTED]", message, flags=re.IGNORECASE
                         )
+            # The value shapes (sk- keys, 64-hex key hashes, secret query
+            # parameters…) that structured fields are already stripped of.
+            message = redact_secret_text(message)
             record.msg = message
             record.args = ()
+
+            # A traceback is rendered by the formatter after every filter ran,
+            # and exception text (a dependency's error, a failed URL) can carry
+            # a credential: render it here, redacted, and keep only the text,
+            # which both the plain and the JSON formatter print.
+            if record.exc_info:
+                record.exc_text = logging.Formatter().formatException(record.exc_info)
+                record.exc_info = None
+            if record.exc_text:
+                record.exc_text = redact_secret_text(record.exc_text)
+            if record.stack_info:
+                record.stack_info = redact_secret_text(record.stack_info)
 
             # Structured `extra={...}` fields are emitted by the JSON formatter
             # straight from the record dict and never pass through the message
