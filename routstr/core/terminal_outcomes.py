@@ -4,11 +4,12 @@ import hashlib
 import hmac
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..payment.usage import NormalizedUsage, normalize_usage, usage_field_presence
 from .logging import get_logger
 from .terminal_outcome_writer import (
+    UNKNOWN_PRICING_SOURCE,
     TerminalOutcomeWriter,
     _QueuedOutcome,
     _utc_day_from_ms,
@@ -125,6 +126,31 @@ def record_terminal_outcome(
 
 def _outcome_id(request_id: str) -> str:
     return hmac.new(_OUTCOME_ID_KEY, request_id.encode(), hashlib.sha256).hexdigest()
+
+
+def mark_terminal_outcome_unknown(
+    context: TerminalOutcomeContext | None, reason: str
+) -> None:
+    """One request's settlement failed. Its row says the outcome is unknown, and
+    the writer and the rest of the day carry on."""
+    if context is None:
+        return
+    logger.error("Terminal outcome unknown", extra={"reason": reason})
+    record_terminal_outcome(
+        replace(
+            context,
+            pricing_source=UNKNOWN_PRICING_SOURCE,
+            input_source=None,
+            output_source=None,
+            cache_read_source=None,
+            cache_creation_source=None,
+        ),
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_input_tokens=0,
+        cache_creation_input_tokens=0,
+        revenue_msats=0,
+    )
 
 
 def mark_terminal_outcome_loss(reason: str) -> None:
