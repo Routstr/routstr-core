@@ -2692,6 +2692,7 @@ class BaseUpstreamProvider:
             output_tokens: int = 0
             cache_read_input_tokens: int = 0
             cache_creation_input_tokens: int = 0
+            server_tool_use: dict = {}
             total_cost: float = 0.0
             input_cost: float = 0.0
             output_cost: float = 0.0
@@ -2825,6 +2826,10 @@ class BaseUpstreamProvider:
                                                     or 0
                                                 ),
                                             )
+                                            server_tool_use = (
+                                                usage.get("server_tool_use")
+                                                or server_tool_use
+                                            )
                                             _absorb_usd(usage)
                                         # Some upstreams attach cost fields at
                                         # the event root rather than nested
@@ -2841,12 +2846,14 @@ class BaseUpstreamProvider:
                     except Exception:
                         yield chunk
 
-                usage_data = {
+                usage_data: dict[str, object] = {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "cache_read_input_tokens": cache_read_input_tokens,
                     "cache_creation_input_tokens": cache_creation_input_tokens,
                 }
+                if server_tool_use:
+                    usage_data["server_tool_use"] = server_tool_use
                 messages_dispatch.embed_usd_costs(
                     usage_data,
                     total_cost,

@@ -757,7 +757,8 @@ async def test_messages_streaming_bills_cumulative_usage_once() -> None:
         yield (
             b'event: message_delta\ndata: {"type":"message_delta","delta":{},'
             b'"usage":{"input_tokens":6,"output_tokens":143,'
-            b'"cache_creation_input_tokens":10661,"cache_read_input_tokens":2839}}\n\n'
+            b'"cache_creation_input_tokens":10661,"cache_read_input_tokens":2839,'
+            b'"server_tool_use":{"web_search_requests":1}}}\n\n'
         )
         yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
 
@@ -796,6 +797,7 @@ async def test_messages_streaming_bills_cumulative_usage_once() -> None:
     assert usage["output_tokens"] == 143
     assert usage["cache_creation_input_tokens"] == 10661
     assert usage["cache_read_input_tokens"] == 2839
+    assert usage["server_tool_use"] == {"web_search_requests": 1}
 
 
 @pytest.mark.asyncio
