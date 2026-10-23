@@ -8,10 +8,11 @@ must never touch the database (so nobody resets their password by accident).
 """
 
 import pytest
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core import vault
-from routstr.core.db import get_secret, set_admin_password
+from routstr.core.db import CliToken, get_secret, set_admin_password
 from scripts.reset_admin_password import apply_reset, build_parser, main
 
 
@@ -55,6 +56,40 @@ async def test_password_below_min_length_is_rejected(
     # The existing password is untouched by the rejected reset.
     secret = await get_secret(integration_session)
     assert vault.verify_password("old-password-9", secret.admin_password_hash or "")
+
+
+async def _cli_token_count(session: AsyncSession) -> int:
+    return len((await session.exec(select(CliToken))).all())
+
+
+@pytest.mark.asyncio
+async def test_reset_keeps_cli_tokens_by_default(
+    integration_session: AsyncSession,
+) -> None:
+    integration_session.add(CliToken(token="tok-kept", name="kept"))
+    await integration_session.commit()
+
+    await apply_reset(integration_session, password="recover-me-123")
+
+    assert await _cli_token_count(integration_session) == 1
+
+
+@pytest.mark.asyncio
+async def test_revoke_cli_tokens_revokes_every_token(
+    integration_session: AsyncSession,
+) -> None:
+    integration_session.add(CliToken(token="tok-a", name="a"))
+    integration_session.add(CliToken(token="tok-b", name="b"))
+    await integration_session.commit()
+
+    message = await apply_reset(
+        integration_session, password="recover-me-123", revoke_cli_tokens=True
+    )
+
+    assert "Revoked 2 CLI token(s)." in message
+    assert await _cli_token_count(integration_session) == 0
+    secret = await get_secret(integration_session)
+    assert vault.verify_password("recover-me-123", secret.admin_password_hash or "")
 
 
 def test_password_and_regenerate_are_mutually_exclusive() -> None:
