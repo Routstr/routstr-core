@@ -79,7 +79,8 @@ _SECRET_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
 _MAX_REDACTION_DEPTH = 12
 
 
-def _redact_secret_text(text: str) -> str:
+def redact_secret_text(text: str) -> str:
+    """Strip spendable credential shapes (and org IDs) from free text."""
     for pattern in _SECRET_VALUE_PATTERNS:
         text = pattern.sub(
             lambda match: (match.group(1) if match.groups() else "")
@@ -98,7 +99,7 @@ def _is_secret_key(key: object) -> bool:
 
 def _redact_secrets(obj: Any, depth: int, seen: frozenset[int]) -> Any:
     if isinstance(obj, str):
-        return _redact_secret_text(obj)
+        return redact_secret_text(obj)
     if not isinstance(obj, (dict, list, tuple)):
         return obj
     if depth >= _MAX_REDACTION_DEPTH or id(obj) in seen:
