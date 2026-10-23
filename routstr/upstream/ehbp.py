@@ -43,7 +43,7 @@ from ..core.exceptions import EhbpTimeoutError, UpstreamError
 from ..core.settings import settings
 from ..core.terminal_outcomes import (
     TerminalOutcomeContext,
-    mark_terminal_outcome_loss,
+    mark_terminal_outcome_unknown,
     record_terminal_outcome,
 )
 from ..payment.cost_calculation import (
@@ -857,7 +857,7 @@ async def finalize_ehbp_actual_cost_payment(
         await session.commit()
     except BaseException:
         if terminal_outcome is not None:
-            mark_terminal_outcome_loss("ehbp_commit_ambiguous")
+            mark_terminal_outcome_unknown(terminal_outcome, "ehbp_commit_ambiguous")
         raise
     if terminal_outcome is not None:
         record_terminal_outcome(
@@ -942,7 +942,9 @@ async def finalize_ehbp_max_cost_payment(
         )
     except BaseException:
         if terminal_outcome is not None:
-            mark_terminal_outcome_loss("ehbp_release_commit_ambiguous")
+            mark_terminal_outcome_unknown(
+                terminal_outcome, "ehbp_release_commit_ambiguous"
+            )
         raise
     if not released:
         await _stop_reservation_heartbeat(reservation.release_id)
@@ -1465,7 +1467,9 @@ async def forward_ehbp_x_cashu_request(
                         refund_amount, unit, mint, request_id
                     )
                 except BaseException:
-                    mark_terminal_outcome_loss("ehbp_x_cashu_refund_commit_ambiguous")
+                    mark_terminal_outcome_unknown(
+                        terminal_outcome, "ehbp_x_cashu_refund_commit_ambiguous"
+                    )
                     raise
                 persisted_refund_amount = refund_amount
 
