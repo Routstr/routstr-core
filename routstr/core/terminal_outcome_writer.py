@@ -30,6 +30,7 @@ _LEASE_TIMEOUT_SECONDS = 90.0
 # A lost race means another writer moved on; one that keeps losing is broken.
 _RACE_ATTEMPTS = 10
 _PERSIST_ATTEMPTS = 30
+_SHORT_RESTART_MS = 10 * 60 * 1000
 UNKNOWN_PRICING_SOURCE = "unknown"
 
 SessionFactory = Callable[[], AsyncContextManager[AsyncSession]]
@@ -557,13 +558,16 @@ class TerminalOutcomeWriter:
                         .limit(1)
                     )
                 ).first()
-                # A restart later the same UTC day leaves too little unattended
-                # time to drop the whole day from coverage.
+                # A restart later the same UTC day, or a short one across midnight,
+                # leaves too little unattended time to drop a whole day from coverage.
                 if (
                     newest is not None
                     and newest.status == "clean"
                     and newest.closed_at_ms is not None
-                    and _utc_day_from_ms(newest.closed_at_ms) == _utc_day_from_ms(now)
+                    and (
+                        _utc_day_from_ms(newest.closed_at_ms) == _utc_day_from_ms(now)
+                        or now - newest.closed_at_ms <= _SHORT_RESTART_MS
+                    )
                 ):
                     return
                 last_clean_close = (
