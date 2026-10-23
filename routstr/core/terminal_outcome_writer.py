@@ -649,23 +649,31 @@ class TerminalOutcomeWriter:
         )
         return None
 
-    def _discard_queue(self) -> None:
+    async def _store_queue(self) -> None:
         if self._queue is None:
             return
+        storing = True
         while True:
             try:
                 queued = self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 return
-            else:
+            stored = False
+            try:
+                if storing:
+                    result = await self._persist_once(queued)
+                    storing = result is not _PersistResult.RETRY
+                    stored = result is _PersistResult.STORED
+            finally:
+                self._queue.task_done()
+            if not stored:
                 self.declare_loss(
                     "queued terminal outcome discarded after continuity loss",
                     queued.terminal_day,
                 )
-                self._queue.task_done()
 
     async def _recover_loss(self) -> None:
-        self._discard_queue()
+        await self._store_queue()
         rotated_for: date | None = None
         while self._loss_pending:
             lost_day = self._loss_day or _utc_day_from_ms(self._now_ms())

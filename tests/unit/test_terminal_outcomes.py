@@ -280,8 +280,29 @@ async def test_queue_overflow_is_nonblocking_and_rotates_epoch(
             )
         ).all()
     assert [epoch.epoch for epoch in epochs] == [0, 1]
-    assert epochs[0].coverage_end_day == queued_day - timedelta(days=1)
+    assert epochs[0].coverage_end_day == overflow_day - timedelta(days=1)
     assert epochs[1].coverage_start_day == overflow_day + timedelta(days=1)
+    assert await writer.stop(timeout=1)
+
+
+async def test_continuity_loss_still_stores_the_rows_already_queued(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, sessions = ledger
+    timestamp = _timestamp(date(2026, 8, 31))
+    writer = TerminalOutcomeWriter(
+        session_factory=sessions, retry_seconds=0.01, clock=MutableClock(timestamp)
+    )
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+
+    assert await writer.start()
+    for index in range(5):
+        _record(f"request-queued-{index}", timestamp)
+    writer.declare_loss("terminal outcome writer failed")
+    assert await writer.flush(timeout=1)
+    async with sessions() as session:
+        assert len((await session.exec(select(TerminalOutcome))).all()) == 5
     assert await writer.stop(timeout=1)
 
 
