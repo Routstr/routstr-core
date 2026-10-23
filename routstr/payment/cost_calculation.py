@@ -380,7 +380,10 @@ def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
         if not isinstance(source, dict):
             continue
         for field in ("total_cost", "cost"):
-            cost = _coerce_usd(source.get(field))
+            value = source.get(field)
+            if isinstance(value, dict):
+                value = value.get("total_usd")
+            cost = _coerce_usd(value)
             if cost > 0:
                 return cost
 
