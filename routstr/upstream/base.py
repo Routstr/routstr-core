@@ -2798,9 +2798,13 @@ class BaseUpstreamProvider:
                                             _absorb_usd(usage)
 
                                         if usage := data.get("usage"):
-                                            input_tokens += usage.get("input_tokens", 0)
-                                            output_tokens += usage.get(
-                                                "output_tokens", 0
+                                            input_tokens = max(
+                                                input_tokens,
+                                                usage.get("input_tokens", 0),
+                                            )
+                                            output_tokens = max(
+                                                output_tokens,
+                                                usage.get("output_tokens", 0),
                                             )
                                             cache_read_input_tokens = max(
                                                 cache_read_input_tokens,
