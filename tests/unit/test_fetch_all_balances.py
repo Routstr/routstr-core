@@ -2,7 +2,7 @@ import asyncio
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import httpx
 import pytest
@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.wallet import fetch_all_balances
+from routstr.wallet import BalanceDetail, fetch_all_balances
 
 
 @pytest.fixture(autouse=True)
@@ -19,13 +19,19 @@ def clear_balance_fetch_state() -> Generator[None, None, None]:
 
     wallet._balance_fetch_failures.clear()
     wallet._balance_fetch_locks.clear()
+    wallet._balance_rate_limits.clear()
     wallet._mint_supported_units.clear()
+    wallet._mint_metadata_last_load.clear()
     wallet._MintRateGuard._guards.clear()
+    wallet.invalidate_balance_cache()
     yield
     wallet._balance_fetch_failures.clear()
     wallet._balance_fetch_locks.clear()
+    wallet._balance_rate_limits.clear()
     wallet._mint_supported_units.clear()
+    wallet._mint_metadata_last_load.clear()
     wallet._MintRateGuard._guards.clear()
+    wallet.invalidate_balance_cache()
 
 
 @asynccontextmanager
@@ -138,6 +144,7 @@ async def test_supported_mint_units_come_from_active_keysets() -> None:
     usd.unit.name = "usd"
     wallet = MagicMock(url="http://mint:3338", db=MagicMock())
     wallet.load_mint_keysets = AsyncMock()
+    wallet.load_mint_info = AsyncMock()
     get_wallet = AsyncMock(return_value=wallet)
     get_keysets = AsyncMock(return_value=[usd, msat, sat])
 
@@ -153,6 +160,7 @@ async def test_supported_mint_units_come_from_active_keysets() -> None:
     assert cached_units == units
     get_wallet.assert_awaited_once_with("http://mint:3338", "sat", load=False)
     wallet.load_mint_keysets.assert_awaited_once()
+    wallet.load_mint_info.assert_awaited_once_with(reload=True)
     get_keysets.assert_awaited_once_with(mint_url=wallet.url, db=wallet.db)
 
 
@@ -191,9 +199,12 @@ async def test_supported_mint_units_filter_bolt11_mint_methods() -> None:
 
     assert mint_units == ["sat"]
     assert melt_units == ["msat"]
-    assert wallet.load_mint_keysets.await_count == 2
-    assert wallet.load_mint_info.await_count == 2
-    wallet.load_mint_info.assert_awaited_with(reload=True)
+    # The second lookup reuses the metadata the first one just fetched.
+    wallet.load_mint_keysets.assert_awaited_once()
+    assert wallet.load_mint_info.await_args_list == [
+        call(reload=True),
+        call(reload=False),
+    ]
 
 
 @pytest.mark.asyncio
@@ -525,3 +536,144 @@ async def test_liability_error_keeps_more_specific_mint_error() -> None:
         details, *_ = await fetch_all_balances(units=["sat"])
 
     assert details[0]["error"] == "mint down"
+
+
+def _rate_limited() -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://mint:3338/v1/checkstate")
+    response = httpx.Response(429, request=request)
+    return httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+
+@pytest.mark.asyncio
+async def test_balance_rate_limit_backs_off_locally_without_shared_cooldown() -> None:
+    from routstr.core.settings import settings
+    from routstr.wallet import _mint_cooldown_remaining
+
+    mint = "http://mint:3338"
+    get_wallet = AsyncMock(side_effect=_rate_limited())
+    with (
+        patch.object(settings, "cashu_mints", [mint]),
+        patch.object(settings, "primary_mint", mint),
+        patch("routstr.wallet.get_wallet", get_wallet),
+        patch("routstr.wallet.db.create_session", _fake_session),
+    ):
+        details, *_ = await fetch_all_balances(units=["sat", "msat"])
+        again, *_ = await fetch_all_balances(units=["sat", "msat"])
+
+    # A dashboard read must not stall payments through the shared guard.
+    assert _mint_cooldown_remaining(mint) == 0
+    assert get_wallet.await_count == 1
+    assert [d["error_code"] for d in details + again] == ["rate_limited"] * 4
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_discovery_is_not_retried_during_backoff() -> None:
+    from routstr.core.settings import settings
+
+    mint = "http://mint:3338"
+    discover = AsyncMock(side_effect=_rate_limited())
+    with (
+        patch.object(settings, "cashu_mints", [mint]),
+        patch.object(settings, "primary_mint", mint),
+        patch("routstr.wallet._get_supported_mint_units", discover),
+        patch("routstr.wallet.db.create_session", _fake_session),
+    ):
+        first, *_ = await fetch_all_balances()
+        second, *_ = await fetch_all_balances()
+
+    discover.assert_awaited_once()
+    assert first[0]["error_code"] == second[0]["error_code"] == "rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_cached_balances_share_one_scan() -> None:
+    from routstr import wallet
+
+    result: tuple[list[BalanceDetail], int, int, int] = ([], 0, 0, 0)
+    fetch = AsyncMock(return_value=result)
+    with patch("routstr.wallet.fetch_all_balances", fetch):
+        first = await wallet.get_cached_balances()
+        second = await wallet.get_cached_balances()
+        forced_too_soon = await wallet.get_cached_balances(force_refresh=True)
+
+    assert first is second is forced_too_soon is result
+    fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cached_balances_expire_and_force_refresh() -> None:
+    from routstr import wallet
+
+    fetch = AsyncMock(return_value=([], 0, 0, 0))
+    with (
+        patch("routstr.wallet.fetch_all_balances", fetch),
+        patch("routstr.wallet.time.monotonic", return_value=100.0),
+    ):
+        await wallet.get_cached_balances()
+    with (
+        patch("routstr.wallet.fetch_all_balances", fetch),
+        patch("routstr.wallet.time.monotonic", return_value=115.0),
+    ):
+        await wallet.get_cached_balances()
+        assert fetch.await_count == 1
+        await wallet.get_cached_balances(force_refresh=True)
+        assert fetch.await_count == 2
+    with (
+        patch("routstr.wallet.fetch_all_balances", fetch),
+        patch("routstr.wallet.time.monotonic", return_value=176.0),
+    ):
+        await wallet.get_cached_balances()
+    assert fetch.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_invalidation_discards_scan_started_before_wallet_change() -> None:
+    from routstr import wallet
+
+    stale = ([{"mint_url": "stale"}], 0, 0, 0)
+
+    async def scan_then_withdraw() -> tuple:
+        wallet.invalidate_balance_cache()
+        return stale
+
+    fetch = AsyncMock(side_effect=scan_then_withdraw)
+    with patch("routstr.wallet.fetch_all_balances", fetch):
+        assert await wallet.get_cached_balances() is stale
+        await wallet.get_cached_balances()
+
+    assert fetch.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_wallet_operation_drops_cached_balances(tmp_path: Path) -> None:
+    from routstr import wallet
+
+    fetch = AsyncMock(return_value=([], 0, 0, 0))
+    with (
+        patch("routstr.wallet.fetch_all_balances", fetch),
+        patch("routstr.wallet._WALLET_OPERATION_LOCK", tmp_path / "op.lock"),
+    ):
+        await wallet.get_cached_balances()
+        # A payout, melt or send moves proofs; the next read must rescan
+        # rather than return a stale cached balance.
+        async with wallet.wallet_operation_guard():
+            pass
+        await wallet.get_cached_balances()
+
+    assert fetch.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_balances_api_forwards_refresh_flag() -> None:
+    from routstr.core.admin import get_balances_api
+
+    cached = AsyncMock(return_value=([{"mint_url": "m"}], 0, 0, 0))
+    with patch("routstr.core.admin.get_cached_balances", cached):
+        polled = await get_balances_api(MagicMock())
+        forced = await get_balances_api(MagicMock(), refresh=True)
+
+    assert polled == forced == [{"mint_url": "m"}]
+    assert cached.await_args_list == [
+        call(force_refresh=False),
+        call(force_refresh=True),
+    ]

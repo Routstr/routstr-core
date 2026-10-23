@@ -74,6 +74,78 @@ def test_native_output_config_preserves_effort_and_format(model: Model) -> None:
     assert "reasoning" not in body
 
 
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_native_output_config_effort_alone_is_accepted(
+    model: Model, effort: str
+) -> None:
+    """The native spelling is validated and forwarded verbatim."""
+    body = prepare(model, output_config={"effort": effort})
+    assert body["output_config"] == {"effort": effort}
+    assert "reasoning_effort" not in body
+    assert "reasoning" not in body
+
+
+@pytest.mark.parametrize(
+    "effort", ["none", "minimal", "unknown", "HIGH", "", 12, {}, True, ["high"]]
+)
+def test_invalid_native_output_config_effort_is_rejected(
+    model: Model, effort: object
+) -> None:
+    """Native ``output_config.effort`` gets the same 400 as ``reasoning_effort``."""
+    with pytest.raises(UpstreamError, match="Unsupported Anthropic effort") as exc:
+        prepare(model, output_config={"effort": effort})
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"reasoning": {"effort": "low"}, "output_config": {"effort": "high"}},
+        {
+            "reasoning_effort": "low",
+            "reasoning": {"effort": "low"},
+            "output_config": {"effort": "max"},
+        },
+        {
+            "reasoning_effort": "medium",
+            "reasoning": {"effort": "max"},
+            "output_config": {"effort": "medium"},
+        },
+    ],
+)
+def test_native_output_config_effort_conflicts_are_rejected(
+    model: Model, fields: dict
+) -> None:
+    with pytest.raises(UpstreamError, match="Conflicting Anthropic effort") as exc:
+        prepare(model, **fields)
+    assert exc.value.status_code == 400
+
+
+def test_native_output_config_effort_matches_generic_spelling(model: Model) -> None:
+    config = {
+        "effort": "max",
+        "format": {"type": "json_schema", "schema": {"type": "object"}},
+    }
+    body = prepare(model, output_config=config, reasoning_effort="max")
+    assert body["output_config"] == config
+    assert "reasoning_effort" not in body
+
+
+def test_invalid_native_output_config_is_not_replaced(model: Model) -> None:
+    """A malformed ``output_config`` alone is a client error, not a passthrough."""
+    with pytest.raises(UpstreamError, match="output_config must be an object") as exc:
+        prepare(model, output_config=[])
+    assert exc.value.status_code == 400
+
+
+def test_native_output_config_without_effort_is_untouched(model: Model) -> None:
+    config = {"format": {"type": "json_schema", "schema": {"type": "object"}}}
+    body = prepare(model, output_config=config)
+    assert body["output_config"] == config
+    assert "reasoning_effort" not in body
+    assert "reasoning" not in body
+
+
 def test_translation_merges_output_config(model: Model) -> None:
     config = {"format": {"type": "json_schema", "schema": {"type": "object"}}}
     body = prepare(model, output_config=config, reasoning_effort="medium")

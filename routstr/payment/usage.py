@@ -93,6 +93,7 @@ class NormalizedUsage(BaseModel):
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    web_search_requests: int = 0
 
 
 def parse_token_count(value: object) -> int:
@@ -198,8 +199,8 @@ def _extract_cache_tokens(usage_data: dict) -> tuple[int, int]:
     * Anthropic top-level: ``cache_read_input_tokens`` /
       ``cache_creation_input_tokens``.
     * Nested ``prompt_tokens_details``: ``cached_tokens`` for reads;
-      ``cache_creation_tokens`` (litellm) or ``cache_write_tokens``
-      (OpenRouter) for writes.
+      ``cache_creation_tokens`` (litellm), ``cache_write_tokens``
+      (OpenRouter) or ``cache_creation_input_tokens`` (Venice) for writes.
     * Nested ``input_tokens_details`` (OpenAI Responses API): ``cached_tokens``
       for reads, ``cache_write_tokens`` for writes.
     * DeepSeek: ``prompt_cache_hit_tokens`` for reads (no write concept).
@@ -213,7 +214,10 @@ def _extract_cache_tokens(usage_data: dict) -> tuple[int, int]:
             cache_read = parse_token_count(prompt_details.get("cached_tokens", 0))
         if not cache_write:
             cache_write = _first_token_count(
-                prompt_details, "cache_creation_tokens", "cache_write_tokens"
+                prompt_details,
+                "cache_creation_tokens",
+                "cache_write_tokens",
+                "cache_creation_input_tokens",
             )
 
     input_details = usage_data.get("input_tokens_details")
@@ -264,9 +268,17 @@ def normalize_usage(usage_data: object) -> NormalizedUsage | None:
     else:
         input_tokens = parse_token_count(usage_data.get("input_tokens", 0))
 
+    server_tool_use = usage_data.get("server_tool_use")
+    web_search_requests = (
+        parse_token_count(server_tool_use.get("web_search_requests"))
+        if isinstance(server_tool_use, dict)
+        else 0
+    )
+
     return NormalizedUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
+        web_search_requests=web_search_requests,
     )

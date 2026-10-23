@@ -28,7 +28,10 @@ MINT_TRANSPORT_COOLDOWN_SECONDS = 30.0
 _MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS = 60.0
 _MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS = 7 * 60 * 60
 
+_PASSIVE_REQUEST_SPACING_SECONDS = 0.25
+
 _fail_fast_depth: ContextVar[int] = ContextVar("mint_fail_fast_depth", default=0)
+_passive_depth: ContextVar[int] = ContextVar("mint_passive_depth", default=0)
 
 
 class MintError(Exception):
@@ -74,6 +77,24 @@ async def fail_fast_mint_operations() -> AsyncGenerator[None, None]:
         _fail_fast_depth.reset(token)
 
 
+@asynccontextmanager
+async def passive_mint_reads() -> AsyncGenerator[None, None]:
+    """Run observational mint reads without touching shared rate-limit state.
+
+    Dashboard balance checks must not open or extend the node-wide cooldown a
+    429 triggers, or a read-only page stalls redemptions and payouts. Reads in
+    this scope fail fast, skip 429 retries, and are spaced per mint so a cold
+    load does not arrive as a burst.
+    """
+
+    token = _passive_depth.set(_passive_depth.get() + 1)
+    try:
+        async with fail_fast_mint_operations():
+            yield
+    finally:
+        _passive_depth.reset(token)
+
+
 class MintRateGuard:
     """Limit concurrency and remember per-mint cooldown/probe state."""
 
@@ -107,6 +128,19 @@ class MintRateGuard:
         self._consecutive_rate_limits = 0
         self._needs_probe = False
         self._probe_lock = asyncio.Lock()
+        self._passive_lock = asyncio.Lock()
+        self._last_passive_request = 0.0
+
+    async def space_passive_request(self) -> None:
+        async with self._passive_lock:
+            wait = (
+                self._last_passive_request
+                + _PASSIVE_REQUEST_SPACING_SECONDS
+                - time.monotonic()
+            )
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_passive_request = time.monotonic()
 
     def apply_cooldown(self, delay: float, *, reason: str | None = None) -> None:
         deadline = time.monotonic() + max(0.0, delay)
@@ -173,10 +207,13 @@ class MintRateGuard:
             result = await factory()
         except Exception as error:
             if is_mint_rate_limited(error):
-                retry_after = None
-                if isinstance(error, httpx.HTTPStatusError):
-                    retry_after = parse_retry_after(error.response.headers)
-                self.apply_rate_limit_cooldown(retry_after)
+                # A passive probe leaves the probe pending for the next real
+                # operation instead of escalating the shared backoff.
+                if not _passive_depth.get():
+                    retry_after = None
+                    if isinstance(error, httpx.HTTPStatusError):
+                        retry_after = parse_retry_after(error.response.headers)
+                    self.apply_rate_limit_cooldown(retry_after)
             elif is_mint_transport_error(error):
                 self.apply_cooldown(MINT_TRANSPORT_COOLDOWN_SECONDS, reason="transport")
             else:
@@ -295,7 +332,11 @@ async def run_mint_operation(
             return await asyncio.wait_for(factory(), timeout=timeout)
         return await factory()
 
+    passive = bool(_passive_depth.get())
+
     async def invoke() -> Any:
+        if guard is not None and passive:
+            await guard.space_passive_request()
         if guard is not None and not allow_during_cooldown:
             return await guard.run(timed_factory)
         return await timed_factory()
@@ -333,6 +374,13 @@ async def run_mint_operation(
                     guard.apply_cooldown(
                         MINT_TRANSPORT_COOLDOWN_SECONDS, reason="transport"
                     )
+                raise
+
+            if passive:
+                logger.warning(
+                    "Mint rate-limited a passive read; shared cooldown untouched",
+                    extra={"op_name": op_name, "mint_url": mint_url},
+                )
                 raise
 
             backoff = (2**attempt) + (time.monotonic() % 1.0)
