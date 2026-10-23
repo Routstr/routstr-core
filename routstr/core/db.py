@@ -147,20 +147,6 @@ class ApiKey(SQLModel, table=True):  # type: ignore
         return self.balance - self.reserved_balance
 
 
-async def reset_all_reserved_balances(session: AsyncSession) -> None:
-    """Release every active durable reservation during explicit startup reset."""
-    await session.exec(  # type: ignore[call-overload]
-        update(ReservationRelease)
-        .where(col(ReservationRelease.status) == "active")
-        .values(status="released")
-    )
-    await session.exec(  # type: ignore[call-overload]
-        update(ApiKey).values(reserved_balance=0, reserved_at=None)
-    )
-    await session.commit()
-    logger.info("Reset reserved balances on startup")
-
-
 async def _transition_stale_reservation(
     session: AsyncSession, reservation_id: str, cutoff: int
 ) -> bool:
