@@ -567,3 +567,63 @@ async def test_local_count_tokens_releases_reservation(
     assert key.total_requests == 0
     release = await session.get(ReservationRelease, snapshot.release_id)
     assert release is not None and release.status == "released"
+
+
+@pytest.mark.asyncio
+async def test_native_count_tokens_is_free_and_releases_reservation(
+    session: AsyncSession,
+) -> None:
+    import httpx
+
+    from routstr.payment.models import Architecture, Model, Pricing
+    from routstr.upstream.anthropic import AnthropicUpstreamProvider
+
+    key = ApiKey(hashed_key="nativecount", balance=10_000)
+    session.add(key)
+    await session.commit()
+    snapshot = await pay_for_request(key, 1_000, session)
+    model = Model(
+        id="claude-haiku-4-5",
+        name="claude-haiku-4-5",
+        created=0,
+        description="",
+        context_length=200_000,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="Claude",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.000001, completion=0.000005),
+    )
+    body = b'{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"hi"}]}'
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"input_tokens": 9})
+        )
+    )
+
+    with patch(
+        "routstr.upstream.base.acquire_upstream_http_client", return_value=client
+    ):
+        response = await AnthropicUpstreamProvider(api_key="sk-test").forward_request(
+            MagicMock(),
+            "v1/messages/count_tokens",
+            {},
+            body,
+            key,
+            1_000,
+            session,
+            model,
+            snapshot,
+        )
+
+    assert response.status_code == 200
+    await session.refresh(key)
+    assert key.balance == 10_000
+    assert key.reserved_balance == 0
+    assert key.total_requests == 0
+    release = await session.get(ReservationRelease, snapshot.release_id)
+    assert release is not None and release.status == "released"
+    assert response.body == b'{"input_tokens":9}'
