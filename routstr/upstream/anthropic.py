@@ -106,6 +106,8 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
             data = json.loads(body)
         except ValueError:
             return body
+        if isinstance(data, dict) and data.pop("speed", None) is not None:
+            body = json.dumps(data).encode()
         # Anthropic 400s when both caps are set. Keep the larger, matching the
         # cap the reservation was priced against.
         if (
