@@ -43,7 +43,7 @@ import sqlite3
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -200,6 +200,18 @@ def _coerce(value: Any, column: sa.Column[Any], where: str) -> Any:
         if timezone_aware:
             return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
         return _to_naive_utc(parsed)
+    # SQLite keeps DATE as ISO text, which asyncpg will not bind to a DATE.
+    if _is_type(ctype, sa.Date):
+        if isinstance(value, date):
+            return value
+        try:
+            return date.fromisoformat(str(value))
+        except ValueError:
+            raise MigrationError(f"{where}: {value!r} is not a date") from None
+    if _is_type(ctype, sa.LargeBinary):
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value)
+        raise MigrationError(f"{where}: {value!r} is not binary data")
     if isinstance(value, bytes):
         try:
             value = value.decode("utf-8")
