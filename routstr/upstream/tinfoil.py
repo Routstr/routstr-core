@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic.v1 import BaseModel
+from pydantic.v1 import BaseModel, validator
 
 from ..core.error_scope import (
     ERROR_SCOPE_HEADER,
@@ -16,7 +16,7 @@ from ..core.error_scope import (
 )
 from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
-from ..payment.models import Architecture, Model, Pricing
+from ..payment.models import Architecture, Model, Pricing, Reasoning
 from .base import BaseUpstreamProvider
 from .ehbp import (
     _ENCLAVE_URL_HEADER,
@@ -39,16 +39,123 @@ class TinfoilModelPricing(BaseModel):
     requestPrice: float = 0.0
 
 
+class TinfoilReasoningParams(BaseModel):
+    """Reasoning metadata Tinfoil publishes for a model.
+
+    ``effort_map`` translates a caller-facing level (``low``/``medium``/``high``)
+    into the value the model's chat template accepts — for example DeepSeek V4.1
+    maps ``medium`` to ``high`` and rejects a literal ``medium``. ``params``
+    documents the per-route enable/disable body shapes, with ``$EFFORT`` standing
+    in for the mapped value.
+
+    Both fields are typed permissively on purpose: this is upstream metadata, and
+    a shape change here must not fail ``TinfoilModel`` parsing and drop the model
+    from the catalog. Only well-formed pairs survive into ``Reasoning``.
+    """
+
+    effort_map: dict[str, Any] | None = None
+    params: dict[str, Any] | None = None
+
+    @validator("effort_map", "params", pre=True)
+    def _object_or_none(cls, value: object) -> object:  # noqa: N805
+        return value if isinstance(value, dict) else None
+
+
 class TinfoilModel(BaseModel):
     id: str
     context_window: int = 0
     created: int = 0
     multimodal: bool = False
     reasoning: bool = False
+    # Declared for completeness; the quality scores have no ``Reasoning`` field.
+    intelligence: dict[str, Any] | None = None
+    reasoning_params: TinfoilReasoningParams | None = None
     tool_calling: bool = False
     type: str = "chat"
     pricing: TinfoilModelPricing = TinfoilModelPricing()
     endpoints: list[str] = []
+
+    @validator("intelligence", "reasoning_params", pre=True)
+    def _metadata_or_none(cls, value: object) -> object:  # noqa: N805
+        """Tolerate a metadata shape change instead of dropping the model."""
+        return value if isinstance(value, (dict, TinfoilReasoningParams)) else None
+
+
+def _clean_effort_map(
+    reasoning_params: TinfoilReasoningParams | None,
+) -> dict[str, str]:
+    """Return only caller-level -> native-effort pairs that are usable."""
+    if reasoning_params is None or not reasoning_params.effort_map:
+        return {}
+    return {
+        level: effort
+        for level, effort in reasoning_params.effort_map.items()
+        if isinstance(level, str)
+        and level.strip()
+        and isinstance(effort, str)
+        and effort.strip()
+    }
+
+
+def _reasoning_disableable(
+    reasoning_params: TinfoilReasoningParams | None,
+) -> bool:
+    """True when Tinfoil publishes a disable shape for any route."""
+    params = reasoning_params.params if reasoning_params else None
+    if not isinstance(params, dict):
+        return False
+    return any(
+        isinstance(route, dict) and "disable" in route for route in params.values()
+    )
+
+
+def _reasoning_mandatory(tf: TinfoilModel) -> bool | None:
+    """Whether the model reasons without being asked to.
+
+    ``intelligence`` is keyed by the levels the model supports, including the
+    special level ``off`` when reasoning can be turned off at all. Levels
+    without ``off`` mean the model always reasons: GLM 5.3, Kimi K3 and
+    gpt-oss-120b publish no ``off`` and no disable shape, so a caller cannot
+    ask them for a non-reasoning answer.
+
+    Without either signal the answer is unknown rather than assumed, so a
+    shape change upstream cannot silently flip the flag.
+    """
+    intelligence = tf.intelligence if isinstance(tf.intelligence, dict) else {}
+    if intelligence and "off" not in intelligence:
+        return True
+    if _reasoning_disableable(tf.reasoning_params):
+        return False
+    return None
+
+
+def _tinfoil_reasoning(tf: TinfoilModel) -> Reasoning | None:
+    """Translate a Tinfoil model's reasoning metadata into ``Reasoning``.
+
+    Tinfoil publishes an effort *map*, not an allowlist: the keys are the
+    caller-facing levels a UI offers (``low``/``medium``/``high``), the values
+    the exact spelling the model's chat template accepts. It is therefore
+    published as ``effort_map`` only, never as ``supported_efforts``.
+
+    That distinction matters downstream: ``supported_efforts`` is not merely
+    advertised, it is applied - ``routstr.upstream.reasoning_effort`` snaps any
+    requested level onto the nearest member, which is what kept turning a
+    deliberate ``reasoning_effort: "none"`` into ``"low"`` (reasoning on) and
+    downgrading ``"max"``. Tinfoil accepts more than the map's values anyway
+    (``none``, ``max``, and integers inside ``chat_template_kwargs``), so no
+    truthful allowlist exists to publish.
+
+    Defaults stay unset because the catalog publishes none, and a model whose
+    reasoning is a plain toggle publishes no effort map - only ``mandatory``,
+    when it can be determined.
+    """
+    if not tf.reasoning:
+        return None
+    effort_map = _clean_effort_map(tf.reasoning_params)
+    mandatory = _reasoning_mandatory(tf)
+    if not effort_map and mandatory is None:
+        return None
+    return Reasoning(effort_map=effort_map or None, mandatory=mandatory)
 
 
 class TinfoilUpstreamProvider(BaseUpstreamProvider):
@@ -112,6 +219,50 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
 
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("tinfoil/")
+
+    def _apply_reasoning_effort(self, data: dict, model_obj: Model) -> bool:
+        """Rescue effort levels the gateway accepts but the model rejects.
+
+        Tinfoil's gateway advertises the OpenAI literals
+        (``none|minimal|low|medium|high|xhigh|max``), while a model's chat
+        template can be narrower: DeepSeek V4.1 and GLM 5.3 reject a literal
+        ``medium``. Translate only those levels, using the model's published
+        ``effort_map``; every other value is already native and is left exactly
+        as sent.
+
+        Deliberately narrow: ``none`` is a valid, meaningful input (it disables
+        reasoning) and ``max`` is a stronger level than ``xhigh``, so a rewrite
+        that reshaped either - which snapping onto an allowlist did - silently
+        changed what the caller asked for.
+
+        Only readable bodies reach here. EHBP requests are sealed ciphertext, so
+        the routing client applies the same map before encrypting.
+        """
+        reasoning = getattr(model_obj, "reasoning", None)
+        effort_map = (reasoning.effort_map if reasoning else None) or {}
+        if not effort_map:
+            return False
+        native = set(effort_map.values())
+        changed = False
+        for holder, key in (
+            (data, "reasoning_effort"),
+            (data.get("reasoning"), "effort"),
+            (data.get("chat_template_kwargs"), "reasoning_effort"),
+        ):
+            if not isinstance(holder, dict):
+                continue
+            value = holder.get(key)
+            if not isinstance(value, str):
+                continue
+            effort = value.strip().lower()
+            if effort in native:
+                continue
+            mapped = effort_map.get(effort)
+            if mapped is None or mapped == value:
+                continue
+            holder[key] = mapped
+            changed = True
+        return changed
 
     def get_confidential_inference_profile(self) -> ConfidentialInferenceProfile:
         return self.confidential_inference_profile
@@ -267,6 +418,7 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
                                     input_cache_read=cached_price / 1_000_000,
                                     input_cache_write=input_price / 1_000_000,
                                 ),
+                                reasoning=_tinfoil_reasoning(tf),
                             )
                         )
                     except Exception as e:

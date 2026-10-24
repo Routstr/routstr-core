@@ -667,7 +667,11 @@ class TerminalOutcomeWriter:
             stored = False
             try:
                 if storing:
-                    result = await self._persist_once(queued)
+                    for _ in range(_PERSIST_ATTEMPTS):
+                        result = await self._persist_once(queued)
+                        if result is not _PersistResult.RETRY:
+                            break
+                        await asyncio.sleep(self._retry_seconds)
                     storing = result is not _PersistResult.RETRY
                     stored = result is _PersistResult.STORED
             finally:

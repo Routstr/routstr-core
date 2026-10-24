@@ -377,6 +377,12 @@ async def calculate_cost(
             **presence.sources_dict(),
         )
 
+    web_search_msats = 0.0
+    if pricing_rates is not None and model_obj and model_obj.sats_pricing:
+        web_search_msats = (
+            usage.web_search_requests * model_obj.sats_pricing.web_search * 1000
+        )
+
     return _calculate_from_tokens(
         input_tokens,
         output_tokens,
@@ -387,6 +393,7 @@ async def calculate_cost(
         cache_read_rate,
         cache_creation_rate,
         response_data,
+        web_search_msats,
         presence,
         pricing_source,
     )
@@ -695,6 +702,7 @@ def _calculate_from_tokens(
     cache_read_rate: float,
     cache_creation_rate: float,
     response_data: dict,
+    web_search_msats: float,
     usage_presence: UsageFieldPresence | None = None,
     pricing_source: str = "missing",
 ) -> CostData:
@@ -710,6 +718,7 @@ def _calculate_from_tokens(
         + calc_output_msats
         + calc_cache_read_msats
         + calc_cache_write_msats
+        + web_search_msats
     )
     total_usd = (token_based_cost / 1000.0) * sats_usd_price()
 
