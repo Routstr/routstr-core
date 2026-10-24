@@ -30,6 +30,7 @@ _LEASE_TIMEOUT_SECONDS = 90.0
 # A lost race means another writer moved on; one that keeps losing is broken.
 _RACE_ATTEMPTS = 10
 _PERSIST_ATTEMPTS = 30
+_RECOVERY_BACKOFF_MAX_SECONDS = 60.0
 _SHORT_RESTART_MS = 10 * 60 * 1000
 UNKNOWN_PRICING_SOURCE = "unknown"
 
@@ -174,7 +175,7 @@ class TerminalOutcomeWriter:
 
     async def stop(self, *, timeout: float = 5.0) -> bool:
         if not self._enabled:
-            return True
+            return not self._loss_pending
         self._stopping = True
         self._accepting = False
         if self._wake is not None:
@@ -613,12 +614,36 @@ class TerminalOutcomeWriter:
             return _PersistResult.RETRY
         if existing is None:
             return _PersistResult.RETRY
-        return (
-            _PersistResult.STORED
-            if _same_outcome(existing, queued)
-            or queued.pricing_source == UNKNOWN_PRICING_SOURCE
-            else _PersistResult.CONFLICT
-        )
+        if _same_outcome(existing, queued) or (
+            queued.pricing_source == UNKNOWN_PRICING_SOURCE
+        ):
+            return _PersistResult.STORED
+        if existing.pricing_source == UNKNOWN_PRICING_SOURCE:
+            return await self._settle_unknown(queued)
+        return _PersistResult.CONFLICT
+
+    async def _settle_unknown(self, queued: _QueuedOutcome) -> _PersistResult:
+        """A request first marked unknown settled after all, e.g. on a failover
+        candidate; its real usage replaces the placeholder."""
+        values = asdict(queued)
+        outcome_id = values.pop("outcome_id")
+        try:
+            async with self._session_factory() as session:
+                result = await session.exec(  # type: ignore[call-overload]
+                    update(TerminalOutcome)
+                    .where(col(TerminalOutcome.outcome_id) == outcome_id)
+                    .where(
+                        col(TerminalOutcome.pricing_source) == UNKNOWN_PRICING_SOURCE
+                    )
+                    .values(**values)
+                )
+                await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return _PersistResult.RETRY
+        # Zero rows means another writer settled it first; reconcile against that.
+        return _PersistResult.STORED if result.rowcount == 1 else _PersistResult.RETRY
 
     async def _persist_once(self, queued: _QueuedOutcome) -> _PersistResult:
         try:
@@ -671,6 +696,11 @@ class TerminalOutcomeWriter:
                         result = await self._persist_once(queued)
                         if result is not _PersistResult.RETRY:
                             break
+                        # Keep the lease while recovery retries.
+                        try:
+                            await self._touch_run()
+                        except Exception:
+                            pass
                         await asyncio.sleep(self._retry_seconds)
                     storing = result is not _PersistResult.RETRY
                     stored = result is _PersistResult.STORED
@@ -683,8 +713,11 @@ class TerminalOutcomeWriter:
                 )
 
     async def _recover_loss(self) -> None:
+        # Unbounded on purpose: a writer that gives up never rotates at its loss
+        # day, so days another worker covers meanwhile would read as complete.
         await self._store_queue()
         rotated_for: date | None = None
+        failures = 0
         while self._loss_pending:
             lost_day = self._loss_day or _utc_day_from_ms(self._now_ms())
             try:
@@ -697,11 +730,20 @@ class TerminalOutcomeWriter:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                failures += 1
                 logger.critical(
-                    "Terminal outcome continuity recovery failed", exc_info=True
+                    "Terminal outcome continuity recovery failed",
+                    extra={"attempt": failures},
+                    exc_info=True,
                 )
-                await asyncio.sleep(self._retry_seconds)
+                await asyncio.sleep(
+                    min(
+                        self._retry_seconds * 2 ** min(failures - 1, 16),
+                        _RECOVERY_BACKOFF_MAX_SECONDS,
+                    )
+                )
                 continue
+            failures = 0
             if self._loss_day is not None and self._loss_day < lost_day:
                 continue
             self._loss_pending = False
