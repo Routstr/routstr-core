@@ -51,6 +51,8 @@ class NormalizedUsage(BaseModel):
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     web_search_requests: int = 0
+    us_inference: bool = False
+    fast_mode: bool = False
 
 
 def parse_token_count(value: object) -> int:
@@ -175,4 +177,6 @@ def normalize_usage(usage_data: object) -> NormalizedUsage | None:
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
         web_search_requests=web_search_requests,
+        us_inference=usage_data.get("inference_geo") == "us",
+        fast_mode=usage_data.get("speed") == "fast",
     )

@@ -338,6 +338,34 @@ async def test_web_search_requests_billed_at_listed_rate(model_pricing: Mock) ->
 
 
 @pytest.mark.asyncio
+async def test_us_inference_billed_at_anthropic_premium(model_pricing: Mock) -> None:
+    response = {
+        "model": "claude-haiku-5.5",
+        "usage": {"input_tokens": 300, "output_tokens": 100, "inference_geo": "us"},
+    }
+
+    result = await calculate_cost(response, max_cost=100000, model_obj=model_pricing)
+
+    assert isinstance(result, CostData)
+    # (300 @ 1 + 100 @ 2) x 1.1
+    assert result.total_msats == 550
+
+
+@pytest.mark.asyncio
+async def test_fast_mode_billed_at_twice_the_rates(model_pricing: Mock) -> None:
+    response = {
+        "model": "claude-opus-5.5",
+        "usage": {"input_tokens": 300, "output_tokens": 100, "speed": "fast"},
+    }
+
+    result = await calculate_cost(response, max_cost=100000, model_obj=model_pricing)
+
+    assert isinstance(result, CostData)
+    # (300 @ 1 + 100 @ 2) x 2
+    assert result.total_msats == 1000
+
+
+@pytest.mark.asyncio
 async def test_missing_cache_rate_falls_back_to_input_rate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

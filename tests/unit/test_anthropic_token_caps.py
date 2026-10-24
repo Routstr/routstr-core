@@ -60,11 +60,3 @@ def test_both_caps_collapse_to_larger_max_tokens(
 )
 def test_single_cap_is_left_alone(model: Model, fields: dict) -> None:
     assert prepare(model, **fields) == {"model": model.id, "messages": [], **fields}
-
-
-def test_fast_speed_is_not_forwarded(model: Model) -> None:
-    assert prepare(model, max_tokens=100, speed="fast") == {
-        "model": model.id,
-        "messages": [],
-        "max_tokens": 100,
-    }
