@@ -2724,7 +2724,10 @@ class BaseUpstreamProvider:
                         _coerce_usd(cd.get("output_cost")),
                     )
                 for field in ("total_cost", "cost"):
-                    total_cost = max(total_cost, _coerce_usd(usage_or_root.get(field)))
+                    value = usage_or_root.get(field)
+                    if isinstance(value, dict):
+                        value = value.get("total_usd")
+                    total_cost = max(total_cost, _coerce_usd(value))
 
             try:
                 async for chunk in guarded_chunks:

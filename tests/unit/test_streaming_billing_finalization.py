@@ -1179,3 +1179,54 @@ async def test_client_disconnect_midstream_estimates_usage_and_stops_heartbeat()
     # The heartbeat is gone — no forever-renewing task on an abandoned request.
     assert snapshot.release_id not in auth_module._reservation_heartbeats
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_messages_streaming_bills_upstream_routstr_node_charge() -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield (
+            b'event: message_start\ndata: {"type":"message_start","message":'
+            b'{"model":"test","usage":{"input_tokens":4,"output_tokens":3}}}\n\n'
+        )
+        yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+        yield (
+            b'event: cost\ndata: {"model":"test","usage":{"input_tokens":13506,'
+            b'"output_tokens":143,"cost":{"total_msats":2460,"total_usd":0.000123}}}\n\n'
+        )
+
+    upstream_response = MagicMock(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = "messages-routstr-upstream"
+    key.balance = 10_000
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    usage: dict = {}
+
+    async def adjust(fresh_key: object, data: dict, *args: object) -> dict:
+        usage.update(data["usage"])
+        return {"total_msats": 0, "total_usd": 0.0}
+
+    with (
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+    ):
+        response = await provider.handle_streaming_messages_completion(
+            response=upstream_response,
+            key=key,
+            max_cost_for_model=500,
+        )
+        async for _ in response.body_iterator:
+            pass
+
+    assert usage["cost"] == pytest.approx(0.000123)
