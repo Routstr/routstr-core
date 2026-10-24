@@ -60,7 +60,7 @@ from pythonjsonlogger import jsonlogger
 from rich.console import Console
 from rich.logging import RichHandler
 
-from .redaction import redact_field, redact_org_ids, redact_secret_text
+from .redaction import redact_field, redact_secret_text
 
 # Only use RichHandler when stdout is a real TTY. In non-TTY contexts
 # (docker logs, pipes, CI) Rich pads every line to width and wraps long
@@ -467,33 +467,33 @@ class SecurityFilter(logging.Filter):
         "refund_address",
     }
 
+    def _redact_text(self, message: str) -> str:
+        standalone_patterns = [
+            r"Bearer\s+([a-zA-Z0-9_\-\.]{10,})",  # Bearer token (must be 10 characters or more to reduce false-positives)
+            r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",  # Cashu tokens
+            r"nsec[a-z0-9]+",  # Nostr Public / Private Key
+        ]
+        for pattern in standalone_patterns:
+            message = re.sub(pattern, "[REDACTED]", message, flags=re.IGNORECASE)
+
+        for key in self.SENSITIVE_KEYS:
+            if key in message.lower():
+                key_patterns = [
+                    rf"{key}\s*[:=]\s*([a-zA-Z0-9_\-\.=/+]+)",  # key:value or key=value (including any variant with spaces)
+                    rf'{key}\s*[:=]\s*["\']([^"\']+)["\']',  # key:"value" or key='value' (including any variant with spaces)
+                ]
+                for pattern in key_patterns:
+                    message = re.sub(
+                        pattern, f"{key}: [REDACTED]", message, flags=re.IGNORECASE
+                    )
+        # The value shapes (sk- keys, 64-hex key hashes, secret query
+        # parameters…, org IDs) that structured fields are already stripped of.
+        return redact_secret_text(message)
+
     def filter(self, record: logging.LogRecord) -> bool:
         """Filter out sensitive information from log records."""
         try:
-            message = record.getMessage()
-            message = redact_org_ids(message)
-            standalone_patterns = [
-                r"Bearer\s+([a-zA-Z0-9_\-\.]{10,})",  # Bearer token (must be 10 characters or more to reduce false-positives)
-                r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",  # Cashu tokens
-                r"nsec[a-z0-9]+",  # Nostr Public / Private Key
-            ]
-            for pattern in standalone_patterns:
-                message = re.sub(pattern, "[REDACTED]", message, flags=re.IGNORECASE)
-
-            for key in self.SENSITIVE_KEYS:
-                if key in message.lower():
-                    key_patterns = [
-                        rf"{key}\s*[:=]\s*([a-zA-Z0-9_\-\.=/+]+)",  # key:value or key=value (including any variant with spaces)
-                        rf'{key}\s*[:=]\s*["\']([^"\']+)["\']',  # key:"value" or key='value' (including any variant with spaces)
-                    ]
-                    for pattern in key_patterns:
-                        message = re.sub(
-                            pattern, f"{key}: [REDACTED]", message, flags=re.IGNORECASE
-                        )
-            # The value shapes (sk- keys, 64-hex key hashes, secret query
-            # parameters…) that structured fields are already stripped of.
-            message = redact_secret_text(message)
-            record.msg = message
+            record.msg = self._redact_text(record.getMessage())
             record.args = ()
 
             # A traceback is rendered by the formatter after every filter ran,
@@ -504,9 +504,9 @@ class SecurityFilter(logging.Filter):
                 record.exc_text = logging.Formatter().formatException(record.exc_info)
                 record.exc_info = None
             if record.exc_text:
-                record.exc_text = redact_secret_text(record.exc_text)
+                record.exc_text = self._redact_text(record.exc_text)
             if record.stack_info:
-                record.stack_info = redact_secret_text(record.stack_info)
+                record.stack_info = self._redact_text(record.stack_info)
 
             # Structured `extra={...}` fields are emitted by the JSON formatter
             # straight from the record dict and never pass through the message
@@ -568,8 +568,9 @@ def setup_logging() -> None:
             "level": log_level,
             "show_time": False,
             "show_path": False,
-            "rich_tracebacks": True,
-            "markup": True,
+            # SecurityFilter hands over tracebacks as redacted text, which
+            # markup parsing would mangle or raise on.
+            "markup": False,
             "console": _console,
             "filters": ["request_id_filter", "client_app_filter", "security_filter"],
         }
