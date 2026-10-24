@@ -129,10 +129,16 @@ def _outcome_id(request_id: str) -> str:
 
 
 def mark_terminal_outcome_unknown(
-    context: TerminalOutcomeContext | None, reason: str
+    context: TerminalOutcomeContext | None,
+    reason: str,
+    *,
+    revenue_msats: int | None = 0,
 ) -> None:
     """One request's settlement failed. Its row says the outcome is unknown, and
-    the writer and the rest of the day carry on."""
+    the writer and the rest of the day carry on.
+
+    ``revenue_msats`` is ecash the node is known to keep regardless of how the
+    settlement ended; ``None`` means that amount was itself invalid."""
     if context is None:
         return
     logger.error("Terminal outcome unknown", extra={"reason": reason})
@@ -149,7 +155,7 @@ def mark_terminal_outcome_unknown(
         output_tokens=0,
         cache_read_input_tokens=0,
         cache_creation_input_tokens=0,
-        revenue_msats=0,
+        revenue_msats=revenue_msats or 0,
     )
 
 

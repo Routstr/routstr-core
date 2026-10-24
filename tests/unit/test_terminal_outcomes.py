@@ -1169,3 +1169,106 @@ async def test_writer_task_that_dies_declares_a_loss_and_restarts(
     assert writer.epoch == 1 and not writer.loss_pending
     assert writer.running and writer._task is not first
     await writer.stop(timeout=1)
+
+
+async def test_recovery_keeps_retrying_until_it_rotates(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, sessions = ledger
+    day = date(2026, 9, 1)
+    clock = MutableClock(_timestamp(day))
+    writer = TerminalOutcomeWriter(
+        session_factory=sessions, retry_seconds=0.001, clock=clock
+    )
+    original = writer._rotate_epoch
+    rotations = 0
+
+    async def races_then_rotates(lost_day: date) -> None:
+        nonlocal rotations
+        rotations += 1
+        if rotations <= 6:
+            raise RuntimeError("Terminal outcome epoch kept changing")
+        await original(lost_day)
+
+    monkeypatch.setattr(writer, "_rotate_epoch", races_then_rotates)
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+
+    assert await writer.start()
+    writer.declare_loss("terminal outcome writer failed")
+    _record("request-during-recovery", clock.value)
+    for _ in range(500):
+        if not writer.loss_pending:
+            break
+        await asyncio.sleep(0.01)
+
+    assert rotations == 7
+    assert writer.running and not writer.loss_pending and writer.epoch == 1
+    _record("request-after-recovery", clock.value)
+    assert await writer.flush(timeout=1)
+    async with sessions() as session:
+        stored = (await session.exec(select(TerminalOutcome))).all()
+        epochs = (
+            await session.exec(
+                select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
+            )
+        ).all()
+    assert len(stored) == 1
+    assert epochs[0].coverage_end_day == day - timedelta(days=1)
+    assert epochs[1].coverage_start_day == day + timedelta(days=1)
+    assert await writer.stop(timeout=1)
+
+
+async def test_good_row_after_an_unknown_one_keeps_the_day(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, sessions = ledger
+    timestamp = _timestamp(date(2026, 9, 1))
+    writer = TerminalOutcomeWriter(
+        session_factory=sessions, retry_seconds=0.01, clock=MutableClock(timestamp)
+    )
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+
+    assert await writer.start()
+    mark_terminal_outcome_unknown(
+        TerminalOutcomeContext("request-1", "author/model"), "settlement failed"
+    )
+    assert await writer.flush(timeout=1)
+    _record("request-1", timestamp)
+    assert await writer.flush(timeout=1)
+
+    async with sessions() as session:
+        stored = (await session.exec(select(TerminalOutcome))).one()
+        epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
+    # The request settled after all, so its real usage replaces the placeholder.
+    assert stored.pricing_source is None
+    assert stored.revenue_msats == 2000 and stored.input_tokens == 10
+    assert len(epochs) == 1 and not writer.loss_pending
+    assert await writer.stop(timeout=1)
+
+
+async def test_unknown_row_keeps_the_revenue_the_node_retained(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, sessions = ledger
+    timestamp = _timestamp(date(2026, 9, 1))
+    writer = TerminalOutcomeWriter(
+        session_factory=sessions, retry_seconds=0.01, clock=MutableClock(timestamp)
+    )
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+
+    assert await writer.start()
+    mark_terminal_outcome_unknown(
+        TerminalOutcomeContext("request-1", "author/model"),
+        "X-Cashu refund commit ambiguous",
+        revenue_msats=cashu_retained_msats(10, "sat", 6),
+    )
+    assert await writer.flush(timeout=1)
+
+    async with sessions() as session:
+        stored = (await session.exec(select(TerminalOutcome))).one()
+    assert stored.pricing_source == "unknown"
+    assert stored.revenue_msats == 4000 and stored.input_tokens == 0
+    assert await writer.stop(timeout=1)
