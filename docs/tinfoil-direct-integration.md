@@ -465,6 +465,21 @@ Normal JSON responses use the same contract: `total_msats` and `charged_msats`
 are settled values, while `computed_msats` retains the usage calculation when
 it differs.
 
+### Encrypted error passthrough
+
+EHBP encrypts error bodies as well as successful ones, so the proxy cannot read
+them. For a non-200 enclave response that carries `Ehbp-Response-Nonce`,
+`forward_ehbp_request()` raises `EhbpEncryptedUpstreamError` holding the enclave
+reply reconstructed verbatim (status, nonce and ciphertext). The failure still
+fails over, feeds cooldown accounting and releases its reservation like any
+other upstream error; once the provider chain is exhausted, `proxy.py` returns
+that reply instead of a proxy JSON envelope, and the EHBP client decrypts the
+provider's real error.
+
+Responses without the nonce are plaintext (router/gateway rejections) and keep
+the existing structured-error handling. X-Cashu requests refund the token and
+relay the ciphertext together with the `X-Cashu` refund header.
+
 ### Setup
 
 ```bash

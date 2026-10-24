@@ -90,10 +90,10 @@ export class WalletService {
     }
   }
 
-  static async getDetailedBalances(): Promise<BalanceDetail[]> {
+  static async getDetailedBalances(refresh = false): Promise<BalanceDetail[]> {
     try {
       const response = await apiClient.get<BalanceDetail[]>(
-        '/admin/api/balances'
+        refresh ? '/admin/api/balances?refresh=true' : '/admin/api/balances'
       );
 
       return response;

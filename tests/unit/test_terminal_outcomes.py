@@ -307,6 +307,38 @@ async def test_continuity_loss_still_stores_the_rows_already_queued(
     assert await writer.stop(timeout=1)
 
 
+async def test_continuity_loss_retries_a_queued_row_that_fails_once(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, sessions = ledger
+    timestamp = _timestamp(date(2026, 8, 31))
+    writer = TerminalOutcomeWriter(
+        session_factory=sessions, retry_seconds=0.01, clock=MutableClock(timestamp)
+    )
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+    persist_once = writer._persist_once
+    failed = False
+
+    async def fail_once(queued: _QueuedOutcome) -> _PersistResult:
+        nonlocal failed
+        if not failed:
+            failed = True
+            return _PersistResult.RETRY
+        return await persist_once(queued)
+
+    monkeypatch.setattr(writer, "_persist_once", fail_once)
+
+    assert await writer.start()
+    for index in range(5):
+        _record(f"request-queued-{index}", timestamp)
+    writer.declare_loss("terminal outcome writer failed")
+    assert await writer.flush(timeout=1)
+    async with sessions() as session:
+        assert len((await session.exec(select(TerminalOutcome))).all()) == 5
+    assert await writer.stop(timeout=1)
+
+
 async def test_failed_settlement_marks_only_its_own_request_unknown(
     ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
