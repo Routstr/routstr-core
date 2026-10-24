@@ -10,6 +10,7 @@ import json
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi.responses import Response
 
 from routstr.core.error_scope import (
     ERROR_SCOPE_HEADER,
@@ -58,7 +59,9 @@ def _wallet(
     return minted
 
 
-async def _forward(monkeypatch: pytest.MonkeyPatch, upstream_response: object):
+async def _forward(
+    monkeypatch: pytest.MonkeyPatch, upstream_response: object
+) -> Response:
     monkeypatch.setattr(
         ehbp_module, "forward_with_trailer", AsyncMock(return_value=upstream_response)
     )
