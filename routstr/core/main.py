@@ -25,6 +25,7 @@ from ..lightning import (
     periodic_invoice_watcher,
     v2_lightning_router,
 )
+from ..nano_topup import nano_router
 from ..nostr import (
     announce_provider,
     providers_cache_refresher,
@@ -479,6 +480,7 @@ app.include_router(admin_router)
 app.include_router(balance_router)
 app.include_router(lightning_router)
 app.include_router(v2_lightning_router)
+app.include_router(nano_router)
 app.include_router(deprecated_wallet_router)
 app.include_router(providers_router)
 app.include_router(proxy_router)

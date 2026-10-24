@@ -78,6 +78,11 @@ class Settings(BaseSettings):
         default_factory=lambda: list(DEFAULT_CASHU_MINTS), env="CASHU_MINTS"
     )
     receive_ln_address: str = Field(default="", env="RECEIVE_LN_ADDRESS")
+    # Optional XNO top-ups into an address the operator holds. Offered only when
+    # the address, an RPC node and a rate (raw per sat, integer) are all set.
+    receive_nano_address: str = Field(default="", env="RECEIVE_NANO_ADDRESS")
+    nano_rpc_url: str = Field(default="", env="NANO_RPC_URL")
+    nano_raw_per_sat: str = Field(default="", env="NANO_RAW_PER_SAT")
     primary_mint: str = Field(default="", env="PRIMARY_MINT_URL")
     primary_mint_unit: str = Field(default="sat", env="PRIMARY_MINT_UNIT")
     mint_operation_concurrency: int = Field(

@@ -534,6 +534,33 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     )
 
 
+class NanoTopup(SQLModel, table=True):  # type: ignore
+    """One XNO top-up quote and, once claimed, the send block that paid it."""
+
+    __tablename__ = "nano_topups"
+
+    id: str = Field(primary_key=True, description="Unique invoice identifier")
+    api_key_hash: str = Field(index=True, description="API key credited on claim")
+    amount_sats: int = Field(description="Amount credited in satoshis")
+    amount_raw: str = Field(description="Quoted amount in raw, as a decimal string")
+    raw_tag: int = Field(
+        index=True, description="Low-order raw digits that identify this quote"
+    )
+    address: str = Field(description="Node nano_ address the send must target")
+    status: str = Field(default="pending", index=True, description="pending or paid")
+    block_hash: str | None = Field(
+        default=None,
+        index=True,
+        unique=True,
+        description="Send block hash that paid this quote",
+    )
+    created_at: int = Field(
+        default_factory=lambda: int(time.time()), description="Unix timestamp"
+    )
+    expires_at: int = Field(description="Unix timestamp when the quote expires")
+    paid_at: int | None = Field(default=None, description="Unix timestamp when paid")
+
+
 class CashuTransaction(SQLModel, table=True):  # type: ignore
     __tablename__ = "cashu_transactions"
 
