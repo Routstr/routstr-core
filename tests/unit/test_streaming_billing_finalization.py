@@ -743,6 +743,64 @@ async def test_partial_stream_closes_when_billing_db_is_down(
 
 
 @pytest.mark.asyncio
+async def test_messages_streaming_bills_cumulative_usage_once() -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield (
+            b'event: message_start\ndata: {"type":"message_start","message":'
+            b'{"model":"test","usage":{"input_tokens":4,"output_tokens":3,'
+            b'"cache_creation_input_tokens":2839,"cache_read_input_tokens":0}}}\n\n'
+        )
+        yield (
+            b'event: message_delta\ndata: {"type":"message_delta","delta":{},'
+            b'"usage":{"input_tokens":6,"output_tokens":143,'
+            b'"cache_creation_input_tokens":10661,"cache_read_input_tokens":2839,'
+            b'"server_tool_use":{"web_search_requests":1}}}\n\n'
+        )
+        yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+    upstream_response = MagicMock(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = "messages-cumulative"
+    key.balance = 10_000
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    usage: dict = {}
+
+    async def adjust(fresh_key: object, data: dict, *args: object) -> dict:
+        usage.update(data["usage"])
+        return {"total_msats": 0, "total_usd": 0.0}
+
+    with (
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+    ):
+        response = await provider.handle_streaming_messages_completion(
+            response=upstream_response,
+            key=key,
+            max_cost_for_model=500,
+        )
+        async for _ in response.body_iterator:
+            pass
+
+    assert usage["input_tokens"] == 6
+    assert usage["output_tokens"] == 143
+    assert usage["cache_creation_input_tokens"] == 10661
+    assert usage["cache_read_input_tokens"] == 2839
+    assert usage["server_tool_use"] == {"web_search_requests": 1}
+
+
+@pytest.mark.asyncio
 async def test_responses_streaming_duplicate_publishes_zero_settled_cost() -> None:
     provider = BaseUpstreamProvider(
         base_url="https://api.example.com", api_key="test-key"

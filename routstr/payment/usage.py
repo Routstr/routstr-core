@@ -50,6 +50,7 @@ class NormalizedUsage(BaseModel):
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    web_search_requests: int = 0
 
 
 def parse_token_count(value: object) -> int:
@@ -161,9 +162,17 @@ def normalize_usage(usage_data: object) -> NormalizedUsage | None:
     else:
         input_tokens = parse_token_count(usage_data.get("input_tokens", 0))
 
+    server_tool_use = usage_data.get("server_tool_use")
+    web_search_requests = (
+        parse_token_count(server_tool_use.get("web_search_requests"))
+        if isinstance(server_tool_use, dict)
+        else 0
+    )
+
     return NormalizedUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
+        web_search_requests=web_search_requests,
     )
