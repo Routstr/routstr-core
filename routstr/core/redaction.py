@@ -68,7 +68,7 @@ _SECRET_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"cashu[A-Z][A-Za-z0-9_\-=/+]{20,}"),
     re.compile(r"\bnsec1[a-z0-9]{20,}"),
     re.compile(r"\bBearer\s+[A-Za-z0-9_\-.=]{10,}", re.IGNORECASE),
-    re.compile(r"\bsk-[A-Za-z0-9]{16,}"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
     re.compile(r"\b[0-9a-f]{64}\b"),
     re.compile(
         r"(?<=[?&])([^=&\s]*(?:token|key|secret|password|auth|sig)[^=&\s]*=)[^&\s\"']+",
