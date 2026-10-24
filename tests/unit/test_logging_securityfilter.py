@@ -116,3 +116,43 @@ def test_is_case_insensitive_for_standalone(
     original = "Using NSEC1a8d9f8s7d9f8a7s6d5f4a3s2d1f9a8s7d6f5a4s3d2f1a9s8d7f6a5s4d3f and CaShuA123abc"
     expected = "Using [REDACTED] and [REDACTED]"
     assert filter_message(original) == expected
+
+
+def test_redacts_value_shapes_in_free_text(
+    filter_message: Callable[[str], str],
+) -> None:
+    """A key or key hash in a message is stripped like in a structured field."""
+    key = "sk-" + "A1b2C3d4" * 4
+    digest = "ab" * 32
+    original = f"upstream rejected {key} for wallet {digest} at /v1/x?token=abc123"
+    out = filter_message(original)
+    assert key not in out and digest not in out and "abc123" not in out
+    assert out.startswith("upstream rejected [REDACTED]")
+
+
+def test_redacts_credentials_in_a_traceback(security_filter: SecurityFilter) -> None:
+    """Exception text is rendered after the filters ran, so it is redacted here."""
+    key = "sk-" + "Z9y8X7w6" * 4
+    try:
+        raise RuntimeError(f"connect failed for https://x.example/?api_key={key}")
+    except RuntimeError:
+        import sys
+
+        record = logging.LogRecord(
+            name="test_logger",
+            level=logging.ERROR,
+            pathname="",
+            lineno=0,
+            msg="request failed",
+            args=(),
+            exc_info=sys.exc_info(),
+        )
+    security_filter.filter(record)
+    rendered = logging.Formatter().format(record)
+    assert "RuntimeError: connect failed" in rendered
+    assert key not in rendered
+
+    from pythonjsonlogger import jsonlogger
+
+    rendered_json = jsonlogger.JsonFormatter().format(record)
+    assert "connect failed" in rendered_json and key not in rendered_json
