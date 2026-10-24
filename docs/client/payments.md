@@ -65,6 +65,14 @@ The v2 endpoints return typed errors with stable `type` and `code` fields. The c
 
 `POST /v1/balance/topup` with `{"cashu_token": "..."}` and `Authorization: Bearer sk-...`.
 
+### Via Nano (XNO)
+
+Only on nodes whose operator set `RECEIVE_NANO_ADDRESS`, `NANO_RPC_URL` and `NANO_RAW_PER_SAT`; elsewhere these paths return 404.
+
+1. `POST /v2/nano/invoice` with `Authorization: Bearer sk-...` and `{"amount_sats": 1000}`. The response has the node's `address`, the exact `amount_raw` (a decimal string), a `nano:` `uri` and `expires_at`.
+2. Send at least `amount_raw` to `address` before `expires_at`, keeping its last six digits (they identify your invoice). Paying the `uri` does this.
+3. `POST /v2/nano/claim` with `{"invoice_id": "...", "block_hash": "<send block hash>"}`. Once the node's RPC reports the send confirmed, `amount_sats` is added to the key. A block can be claimed only once.
+
 ---
 
 ## 4. Refund (Withdrawal)

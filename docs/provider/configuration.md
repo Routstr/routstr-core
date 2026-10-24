@@ -280,6 +280,9 @@ Use environment variables for:
 | `FOREIGN_MINT_MAX_CONCURRENCY` | Process-wide cap on in-flight calls to unconfigured mints | `4` |
 | `SWAP_RECONCILE_INTERVAL_SECONDS` | How often unfinished swaps are re-checked against their mints | `60` |
 | `RECEIVE_LN_ADDRESS` | Lightning address for withdrawals | —                                    |
+| `RECEIVE_NANO_ADDRESS` | Your own `nano_` address for optional XNO top-ups (`/v2/nano/*`); off when empty | — |
+| `NANO_RPC_URL` | Nano node RPC used to confirm top-up send blocks (`block_info`) | — |
+| `NANO_RAW_PER_SAT` | XNO rate as an integer number of raw per sat; no rate means no XNO offer | — |
 | `MIN_PAYOUT_SAT`     | Min payout balance in sats (applies to all mints) | `210`                |
 | `MAX_PAYOUT_SAT`     | Maximum gross budget per periodic payout in sats, including fees (all mints) | `250000`             |
 | `PAYOUT_INTERVAL_SECONDS` | Payout loop interval (seconds) | `900`                            |
