@@ -138,9 +138,13 @@ class Settings(BaseSettings):
     tolerance_percentage: float = Field(default=1.0, env="TOLERANCE_PERCENTAGE")
     # Minimum per-request charge in millisatoshis when model pricing is free/zero
     min_request_msat: int = Field(default=1, env="MIN_REQUEST_MSAT")
+    # Release reservations with an expired lease (left behind by a crashed or
+    # restarted process) before serving. Lease-guarded, so it is safe with
+    # several processes on one database; the background sweeper releases the
+    # same reservations within a minute either way.
     reset_reserved_balance_on_startup: bool = Field(
         default=True, env="RESET_RESERVED_BALANCE_ON_STARTUP"
-    )  # deactivate in horizontal scaling setups
+    )
     # Reservations older than this are considered leaked (client disconnect,
     # crash, abandoned stream) and released by the background sweeper and the
     # refund endpoint.

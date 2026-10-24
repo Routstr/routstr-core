@@ -45,6 +45,7 @@ from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..core.terminal_outcomes import (
     TerminalOutcomeContext,
+    cashu_retained_msats,
     mark_terminal_outcome_unknown,
 )
 from ..payment.cost_calculation import (
@@ -288,6 +289,22 @@ class _XCashuRefund:
             headers=headers,
             media_type=media_type,
         )
+
+
+def _retained_after_failed_settlement(
+    amount: int, unit: str, max_cost_for_model: int, refund_attempted: int
+) -> int | None:
+    """``serve_body`` refunds down to the model's maximum unless a refund was
+    already attempted, so that is the least a failed settlement keeps."""
+    refund = refund_attempted
+    if not refund:
+        try:
+            refund = max(
+                0, messages_dispatch.compute_refund(amount, unit, max_cost_for_model)
+            )
+        except ValueError:
+            refund = amount
+    return cashu_retained_msats(amount, unit, refund)
 
 
 def _settled_cost_msats(cost_data: CostMetadata) -> int:
@@ -3229,6 +3246,8 @@ class BaseUpstreamProvider:
 
         response_headers: dict[str, str] = {}
         refund_amount_sent = 0
+        # A refund whose send raised may still have reached the client.
+        refund_attempted = 0
         try:
             cost_data = await self.get_x_cashu_cost(
                 response_json, max_cost_for_model, model_obj
@@ -3249,6 +3268,7 @@ class BaseUpstreamProvider:
                 )
                 if refund_amount > 0:
                     try:
+                        refund_attempted = refund_amount
                         refund_token = await _refund.send(
                             refund_amount,
                             unit,
@@ -3257,7 +3277,11 @@ class BaseUpstreamProvider:
                         )
                     except BaseException:
                         mark_terminal_outcome_unknown(
-                            terminal_outcome, "X-Cashu LiteLLM refund commit ambiguous"
+                            terminal_outcome,
+                            "X-Cashu LiteLLM refund commit ambiguous",
+                            revenue_msats=cashu_retained_msats(
+                                amount, unit, refund_amount
+                            ),
                         )
                         raise
                     response_headers["X-Cashu"] = refund_token
@@ -3280,7 +3304,11 @@ class BaseUpstreamProvider:
                 )
         except Exception as exc:
             mark_terminal_outcome_unknown(
-                terminal_outcome, "X-Cashu LiteLLM settlement failed"
+                terminal_outcome,
+                "X-Cashu LiteLLM settlement failed",
+                revenue_msats=_retained_after_failed_settlement(
+                    amount, unit, max_cost_for_model, refund_attempted
+                ),
             )
             logger.error(
                 "Error settling non-streaming /v1/messages",
@@ -3600,6 +3628,8 @@ class BaseUpstreamProvider:
             "Connection": "keep-alive",
         }
         refund_amount_sent = 0
+        # A refund whose send raised may still have reached the client.
+        refund_attempted = 0
         settlement_failed = False
 
         if (
@@ -3655,6 +3685,7 @@ class BaseUpstreamProvider:
                         amount, unit, cost_data.total_msats
                     )
                     if refund_amount > 0:
+                        refund_attempted = refund_amount
                         refund_token = await _refund.send(
                             refund_amount,
                             unit,
@@ -3673,13 +3704,19 @@ class BaseUpstreamProvider:
                         )
             except asyncio.CancelledError:
                 mark_terminal_outcome_unknown(
-                    terminal_outcome, "X-Cashu LiteLLM stream settlement cancelled"
+                    terminal_outcome,
+                    "X-Cashu LiteLLM stream settlement cancelled",
+                    revenue_msats=cashu_retained_msats(amount, unit, refund_attempted),
                 )
                 raise
             except Exception as exc:
                 settlement_failed = True
                 mark_terminal_outcome_unknown(
-                    terminal_outcome, "X-Cashu LiteLLM stream settlement failed"
+                    terminal_outcome,
+                    "X-Cashu LiteLLM stream settlement failed",
+                    revenue_msats=_retained_after_failed_settlement(
+                        amount, unit, max_cost_for_model, refund_attempted
+                    ),
                 )
                 logger.error(
                     "Error calculating cost for streaming /v1/messages",
@@ -4748,6 +4785,8 @@ class BaseUpstreamProvider:
         cost_data: CostData | MaxCostData | None = None
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
         refund_amount_sent = 0
+        # A refund whose send raised may still have reached the client.
+        refund_attempted = 0
         settlement_failed = False
         outcome_state = TerminalOutcomeState()
 
@@ -4839,6 +4878,7 @@ class BaseUpstreamProvider:
                         },
                     )
 
+                    refund_attempted = refund_amount
                     refund_token = await _refund.send(
                         refund_amount,
                         unit,
@@ -4875,14 +4915,20 @@ class BaseUpstreamProvider:
         except asyncio.CancelledError:
             if terminal_outcome is not None:
                 mark_terminal_outcome_unknown(
-                    terminal_outcome, "X-Cashu streaming settlement cancelled"
+                    terminal_outcome,
+                    "X-Cashu streaming settlement cancelled",
+                    revenue_msats=cashu_retained_msats(amount, unit, refund_attempted),
                 )
             raise
         except Exception as e:
             settlement_failed = True
             if terminal_outcome is not None:
                 mark_terminal_outcome_unknown(
-                    terminal_outcome, "X-Cashu streaming settlement failed"
+                    terminal_outcome,
+                    "X-Cashu streaming settlement failed",
+                    revenue_msats=_retained_after_failed_settlement(
+                        amount, unit, max_cost_for_model, refund_attempted
+                    ),
                 )
             logger.error(
                 "Error calculating cost for streaming response",
@@ -4969,6 +5015,7 @@ class BaseUpstreamProvider:
             "Processing non-streaming response",
             extra={"amount": amount, "unit": unit, "content_length": len(content_str)},
         )
+        refund_attempted = 0
 
         try:
             response_json = json.loads(content_str)
@@ -5040,6 +5087,7 @@ class BaseUpstreamProvider:
 
             if refund_amount > 0:
                 try:
+                    refund_attempted = refund_amount
                     refund_token = await _refund.send(
                         refund_amount,
                         unit,
@@ -5049,7 +5097,11 @@ class BaseUpstreamProvider:
                 except BaseException:
                     if terminal_outcome is not None:
                         mark_terminal_outcome_unknown(
-                            terminal_outcome, "X-Cashu refund commit ambiguous"
+                            terminal_outcome,
+                            "X-Cashu refund commit ambiguous",
+                            revenue_msats=cashu_retained_msats(
+                                amount, unit, refund_amount
+                            ),
                         )
                     raise
                 response_headers["X-Cashu"] = refund_token
@@ -5113,6 +5165,16 @@ class BaseUpstreamProvider:
                 headers=_decoded_response_headers(response.headers),
                 media_type="application/json",
             )
+        except Exception:
+            if terminal_outcome is not None:
+                mark_terminal_outcome_unknown(
+                    terminal_outcome,
+                    "X-Cashu settlement failed",
+                    revenue_msats=_retained_after_failed_settlement(
+                        amount, unit, max_cost_for_model, refund_attempted
+                    ),
+                )
+            raise
 
     async def handle_x_cashu_chat_completion(
         self,
@@ -5874,6 +5936,8 @@ class BaseUpstreamProvider:
         cost_data: CostData | MaxCostData | None = None
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
         refund_amount_sent = 0
+        # A refund whose send raised may still have reached the client.
+        refund_attempted = 0
         settlement_failed = False
         terminal_outcome = terminal_outcome_context(request_id, model_obj)
 
@@ -5960,6 +6024,7 @@ class BaseUpstreamProvider:
                         },
                     )
 
+                    refund_attempted = refund_amount
                     refund_token = await _refund.send(
                         refund_amount,
                         unit,
@@ -5995,13 +6060,19 @@ class BaseUpstreamProvider:
                 _inject_cost_response_headers(response_headers, cost_data)
         except asyncio.CancelledError:
             mark_terminal_outcome_unknown(
-                terminal_outcome, "X-Cashu Responses stream settlement cancelled"
+                terminal_outcome,
+                "X-Cashu Responses stream settlement cancelled",
+                revenue_msats=cashu_retained_msats(amount, unit, refund_attempted),
             )
             raise
         except Exception as e:
             settlement_failed = True
             mark_terminal_outcome_unknown(
-                terminal_outcome, "X-Cashu Responses stream settlement failed"
+                terminal_outcome,
+                "X-Cashu Responses stream settlement failed",
+                revenue_msats=_retained_after_failed_settlement(
+                    amount, unit, max_cost_for_model, refund_attempted
+                ),
             )
             logger.error(
                 "Error calculating cost for streaming Responses API response",
@@ -6076,9 +6147,10 @@ class BaseUpstreamProvider:
             extra={"amount": amount, "unit": unit, "content_length": len(content_str)},
         )
 
+        terminal_outcome = terminal_outcome_context(request_id, model_obj)
+        refund_attempted = 0
         try:
             response_json = json.loads(content_str)
-            terminal_outcome = terminal_outcome_context(request_id, model_obj)
             self._apply_provider_field(response_json)
             _apply_estimated_usage(
                 response_json, request_body, model_obj, amount, unit, "responses"
@@ -6144,6 +6216,7 @@ class BaseUpstreamProvider:
 
             if refund_amount > 0:
                 try:
+                    refund_attempted = refund_amount
                     refund_token = await _refund.send(
                         refund_amount,
                         unit,
@@ -6152,7 +6225,9 @@ class BaseUpstreamProvider:
                     )
                 except BaseException:
                     mark_terminal_outcome_unknown(
-                        terminal_outcome, "X-Cashu Responses refund commit ambiguous"
+                        terminal_outcome,
+                        "X-Cashu Responses refund commit ambiguous",
+                        revenue_msats=cashu_retained_msats(amount, unit, refund_amount),
                     )
                     raise
                 response_headers["X-Cashu"] = refund_token
@@ -6216,6 +6291,15 @@ class BaseUpstreamProvider:
                 headers=_decoded_response_headers(response.headers),
                 media_type="application/json",
             )
+        except Exception:
+            mark_terminal_outcome_unknown(
+                terminal_outcome,
+                "X-Cashu Responses settlement failed",
+                revenue_msats=_retained_after_failed_settlement(
+                    amount, unit, max_cost_for_model, refund_attempted
+                ),
+            )
+            raise
 
     async def handle_x_cashu(
         self,

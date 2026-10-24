@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from sqlmodel.ext.asyncio.session import AsyncSession
 from starlette.exceptions import HTTPException
 from starlette.responses import Response as StarletteResponse
 from starlette.types import Scope
@@ -43,7 +44,12 @@ from ..upstream.http_client import close_upstream_http_client
 from ..upstream.litellm_routing import configure_litellm
 from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
 from .admin import admin_router
-from .db import create_session, init_db, run_migrations
+from .db import (
+    create_session,
+    init_db,
+    release_stale_reservations,
+    run_migrations,
+)
 from .exceptions import (
     general_exception_handler,
     http_exception_handler,
@@ -53,13 +59,28 @@ from .lifecycle import RequestLifecycleMiddleware
 from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
 from .not_found import _NOT_FOUND_HTML, not_found_catch_all  # noqa: F401
-from .settings import SettingsService, bootstrap_secrets
+from .settings import Settings, SettingsService, bootstrap_secrets
 from .settings import settings as global_settings
 from .version import __version__
 
 # Initialize logging first
 setup_logging()
 logger = get_logger(__name__)
+
+
+async def release_leaked_reservations_on_startup(
+    session: AsyncSession, s: Settings
+) -> None:
+    """Release reservations a previous process left behind, before serving.
+
+    Only reservations whose lease has expired are released, the same guard the
+    background sweeper uses. Another process sharing this database (a replica,
+    or the old process during a rolling deploy) keeps renewing the leases of
+    its in-flight reservations, so they survive this process starting.
+    """
+    if not s.reset_reserved_balance_on_startup:
+        return
+    await release_stale_reservations(session, s.stale_reservation_timeout_seconds)
 
 
 @asynccontextmanager
@@ -113,10 +134,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             # a stored secret can't be decrypted.
             await bootstrap_secrets(session)
             s = await SettingsService.initialize(session)
-            if s.reset_reserved_balance_on_startup:
-                from .db import reset_all_reserved_balances
-
-                await reset_all_reserved_balances(session)
+            await release_leaked_reservations_on_startup(session, s)
 
         try:
             await prepare_analytics()
