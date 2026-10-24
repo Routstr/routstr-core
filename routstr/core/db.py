@@ -176,39 +176,6 @@ class ApiKey(SQLModel, table=True):  # type: ignore
         return self.balance - self.reserved_balance
 
 
-async def reset_all_reserved_balances(session: AsyncSession) -> None:
-    """Release every active durable reservation during explicit startup reset."""
-    await session.exec(  # type: ignore[call-overload]
-        update(ReservationRelease)
-        .where(col(ReservationRelease.status) == "active")
-        .values(status="released")
-    )
-    await session.exec(  # type: ignore[call-overload]
-        update(ApiKey).values(reserved_balance=0, reserved_at=None)
-    )
-    await session.commit()
-    logger.info("Reset reserved balances on startup")
-
-
-async def reset_reservations_on_startup(
-    session: AsyncSession, stale_after_seconds: int
-) -> None:
-    """Clear reservations a previous process left behind.
-
-    SQLite serves one process, so everything still active belonged to the one
-    that exited and can go. PostgreSQL is how several workers share a node: a
-    respawned worker must leave its live siblings' reservations alone, so only
-    leases that stopped being renewed are released.
-    """
-    if session.get_bind().dialect.name == "postgresql":
-        released = await release_stale_reservations(session, stale_after_seconds)
-        logger.info(
-            "Released stale reservations on startup", extra={"released": released}
-        )
-        return
-    await reset_all_reserved_balances(session)
-
-
 async def _transition_stale_reservation(
     session: AsyncSession, reservation_id: str, cutoff: int
 ) -> bool:

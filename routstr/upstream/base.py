@@ -20,6 +20,7 @@ from ..auth import (
     adjust_payment_for_tokens,
     get_reservation_snapshot,
     release_reservation,
+    revert_pay_for_request,
 )
 from ..core import get_logger
 from ..core.db import (
@@ -2701,6 +2702,7 @@ class BaseUpstreamProvider:
             output_tokens: int = 0
             cache_read_input_tokens: int = 0
             cache_creation_input_tokens: int = 0
+            server_tool_use: dict = {}
             total_cost: float = 0.0
             input_cost: float = 0.0
             output_cost: float = 0.0
@@ -2807,9 +2809,13 @@ class BaseUpstreamProvider:
                                             _absorb_usd(usage)
 
                                         if usage := data.get("usage"):
-                                            input_tokens += usage.get("input_tokens", 0)
-                                            output_tokens += usage.get(
-                                                "output_tokens", 0
+                                            input_tokens = max(
+                                                input_tokens,
+                                                usage.get("input_tokens", 0),
+                                            )
+                                            output_tokens = max(
+                                                output_tokens,
+                                                usage.get("output_tokens", 0),
                                             )
                                             cache_read_input_tokens = max(
                                                 cache_read_input_tokens,
@@ -2830,6 +2836,10 @@ class BaseUpstreamProvider:
                                                     or 0
                                                 ),
                                             )
+                                            server_tool_use = (
+                                                usage.get("server_tool_use")
+                                                or server_tool_use
+                                            )
                                             _absorb_usd(usage)
                                         # Some upstreams attach cost fields at
                                         # the event root rather than nested
@@ -2846,12 +2856,14 @@ class BaseUpstreamProvider:
                     except Exception:
                         yield chunk
 
-                usage_data = {
+                usage_data: dict[str, object] = {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "cache_read_input_tokens": cache_read_input_tokens,
                     "cache_creation_input_tokens": cache_creation_input_tokens,
                 }
+                if server_tool_use:
+                    usage_data["server_tool_use"] = server_tool_use
                 messages_dispatch.embed_usd_costs(
                     usage_data,
                     total_cost,
@@ -3665,7 +3677,13 @@ class BaseUpstreamProvider:
             path.endswith("messages/count_tokens")
             and not self.supports_anthropic_messages
         ):
-            return count_tokens_locally(request_body, model_obj)
+            # Counted locally for free: release the reservation, or it stays
+            # locked until the stale-reservation sweep.
+            result = count_tokens_locally(request_body, model_obj)
+            await revert_pay_for_request(
+                key, session, max_cost_for_model, reservation_snapshot
+            )
+            return result
 
         if (
             path.endswith("messages")

@@ -349,10 +349,10 @@ DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/routstr
 
 - Every worker runs the schema migrations on startup; on PostgreSQL they queue on
   an advisory lock, so an empty database can be brought up by all workers at once.
-- `RESET_RESERVED_BALANCE_ON_STARTUP` (default `true`) clears reservations a
-  previous process left behind. On SQLite that is every active reservation. On
-  PostgreSQL only reservations whose lease stopped being renewed are released,
-  so a respawned worker never touches the requests its siblings are billing.
+- `RESET_RESERVED_BALANCE_ON_STARTUP` (default `true`) releases reservations a
+  previous process left behind. Only reservations whose lease has expired are
+  released, so a respawned worker never touches the requests its siblings are
+  billing.
 - Each provider's model catalog is stored in the database after a successful
   fetch. Workers reuse a recent copy instead of fetching it again, and a worker
   whose fetch fails or is rate limited serves the last good catalog rather than

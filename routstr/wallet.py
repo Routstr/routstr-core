@@ -34,6 +34,7 @@ from .mint import (
     is_mint_rate_limited,
     mint_cooldown_reason,
     mint_cooldown_remaining,
+    passive_mint_reads,
     run_mint_operation,
 )
 from .payment.lnurl import MeltUnpaidError, raw_send_to_lnurl
@@ -101,6 +102,9 @@ async def wallet_operation_guard() -> AsyncGenerator[None, None]:
     finally:
         if depth_token is not None:
             _wallet_operation_depth.reset(depth_token)
+            # Proofs may have changed (payouts, melts, sends, credits); a cached
+            # scan would keep showing funds that already left the wallet.
+            invalidate_balance_cache()
         if acquired:
             fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
@@ -831,7 +835,7 @@ async def _owner_balance_for_mint_and_unit(
 
 async def maximum_owner_cashu_balance_sats() -> int:
     """Return the largest conservatively owner-funded mint/unit balance."""
-    details, _, _, _ = await fetch_all_balances()
+    details, _, _, _ = await get_cached_balances()
     async with db.create_session() as session:
         liability_sats = _msats_to_sats_ceil(await db.total_user_liability(session))
     balances = [
@@ -1439,8 +1443,14 @@ class BalanceDetail(TypedDict, total=False):
 
 
 _BALANCE_FETCH_RETRY_SECONDS = 60.0
+_BALANCE_CACHE_SECONDS = 60.0
+_BALANCE_FORCED_REFRESH_MIN_SECONDS = 10.0
 _MINT_UNITS_CACHE_SECONDS = 300.0
 _balance_fetch_failures: dict[tuple[str, str], tuple[float, str, str]] = {}
+_balance_rate_limits: dict[str, tuple[float, str]] = {}
+_balance_cache: tuple[float, tuple[list[BalanceDetail], int, int, int]] | None = None
+_balance_cache_lock = asyncio.Lock()
+_balance_cache_generation = 0
 _balance_fetch_locks: dict[str, asyncio.Lock] = {}
 _mint_supported_units: dict[tuple[str, str | None], tuple[float, list[str]]] = {}
 
@@ -1484,19 +1494,30 @@ async def get_supported_mint_units(
     wallet = await get_wallet(mint_url, "sat", load=False)
     lock = _mint_metadata_load_locks.setdefault(mint_url, asyncio.Lock())
     async with lock:
-        await run_mint_operation(
-            wallet.load_mint_keysets,
-            op_name="discover_mint_keysets",
-            mint_url=mint_url,
-            retry_on_rate_limit=False,
+        last = _mint_metadata_last_load.get(mint_url)
+        metadata_fresh = (
+            last is not None
+            and time.monotonic() - last < _WALLET_MINT_RELOAD_MIN_INTERVAL_SECONDS
         )
-        if bolt11_operation is not None:
+        # Share the fetch with Wallet.load_mint(): both read every keyset and
+        # the mint info, so whichever runs first serves the other from the DB.
+        if metadata_fresh:
+            if bolt11_operation is not None:
+                await wallet.load_mint_info(reload=False)
+        else:
+            await run_mint_operation(
+                wallet.load_mint_keysets,
+                op_name="discover_mint_keysets",
+                mint_url=mint_url,
+                retry_on_rate_limit=False,
+            )
             await run_mint_operation(
                 lambda: wallet.load_mint_info(reload=True),
                 op_name="discover_mint_info",
                 mint_url=mint_url,
                 retry_on_rate_limit=False,
             )
+            _mint_metadata_last_load[mint_url] = time.monotonic()
 
     keysets = await get_cashu_keysets(mint_url=wallet.url, db=wallet.db)
     units: list[str] = []
@@ -1552,10 +1573,69 @@ def _balance_error(
     return detail
 
 
+def _balance_rate_limit_error(mint_url: str, unit: str) -> BalanceDetail | None:
+    backoff = _balance_rate_limits.get(mint_url)
+    if backoff is None:
+        return None
+    remaining = backoff[0] - time.monotonic()
+    if remaining <= 0:
+        _balance_rate_limits.pop(mint_url, None)
+        return None
+    return _balance_error(
+        mint_url,
+        unit,
+        backoff[1],
+        error_code="rate_limited",
+        retry_after_seconds=remaining,
+    )
+
+
+def invalidate_balance_cache() -> None:
+    global _balance_cache, _balance_cache_generation
+    _balance_cache = None
+    # A scan already in flight may predate the wallet change; drop its result.
+    _balance_cache_generation += 1
+
+
+async def get_cached_balances(
+    *, force_refresh: bool = False
+) -> tuple[list[BalanceDetail], int, int, int]:
+    """Return mint balances, sharing one scan across dashboard tabs and loops.
+
+    Every scan sends ``/v1/checkstate`` for all proofs of every mint, so polling
+    clients and background checks reuse a recent result. A forced refresh still
+    reuses a scan younger than ``_BALANCE_FORCED_REFRESH_MIN_SECONDS``.
+    """
+    global _balance_cache
+    async with _balance_cache_lock:
+        cached = _balance_cache
+        if cached is not None:
+            age = time.monotonic() - cached[0]
+            max_age = (
+                _BALANCE_FORCED_REFRESH_MIN_SECONDS
+                if force_refresh
+                else _BALANCE_CACHE_SECONDS
+            )
+            if age < max_age:
+                return cached[1]
+        generation = _balance_cache_generation
+        result = await fetch_all_balances()
+        if generation == _balance_cache_generation:
+            _balance_cache = (time.monotonic(), result)
+        return result
+
+
 async def fetch_all_balances(
     units: list[str] | None = None,
 ) -> tuple[list[BalanceDetail], int, int, int]:
     """Fetch balances for all trusted mints without holding DB connections during I/O."""
+    async with passive_mint_reads():
+        return await _fetch_all_balances(units)
+
+
+async def _fetch_all_balances(
+    units: list[str] | None,
+) -> tuple[list[BalanceDetail], int, int, int]:
     mint_urls = _mints_to_inspect()
 
     mint_units: dict[str, list[str]] = {}
@@ -1564,6 +1644,11 @@ async def fetch_all_balances(
         mint_units = {mint_url: units for mint_url in mint_urls}
     else:
         for mint_url in mint_urls:
+            backoff = _balance_rate_limit_error(mint_url, settings.primary_mint_unit)
+            if backoff is not None:
+                discovery_errors.append(backoff)
+                mint_units[mint_url] = []
+                continue
             try:
                 mint_units[mint_url] = await _get_supported_mint_units(mint_url)
             except Exception as error:
@@ -1584,6 +1669,11 @@ async def fetch_all_balances(
                     _BALANCE_FETCH_RETRY_SECONDS,
                     mint_cooldown_remaining(mint_url),
                 )
+                if rate_limited:
+                    _balance_rate_limits[mint_url] = (
+                        time.monotonic() + retry_delay,
+                        str(error),
+                    )
                 discovery_errors.append(
                     _balance_error(
                         mint_url,
@@ -1637,6 +1727,10 @@ async def fetch_all_balances(
                     retry_after_seconds=failure[0] - now,
                 )
 
+            backoff = _balance_rate_limit_error(mint_url, unit)
+            if backoff is not None:
+                return backoff
+
             cooldown = mint_cooldown_remaining(mint_url)
             if cooldown > 0:
                 error_code = mint_cooldown_reason(mint_url) or "cooldown"
@@ -1670,11 +1764,7 @@ async def fetch_all_balances(
                     if connection_failure
                     else "mint_error"
                 )
-                if rate_limited:
-                    MintRateGuard.get(mint_url).apply_rate_limit_cooldown(
-                        _BALANCE_FETCH_RETRY_SECONDS
-                    )
-                elif connection_failure:
+                if connection_failure:
                     MintRateGuard.get(mint_url).apply_cooldown(
                         _BALANCE_FETCH_RETRY_SECONDS, reason=error_code
                     )
@@ -1682,6 +1772,13 @@ async def fetch_all_balances(
                     _BALANCE_FETCH_RETRY_SECONDS,
                     mint_cooldown_remaining(mint_url),
                 )
+                if rate_limited:
+                    # Back off only this dashboard read for the whole mint;
+                    # the shared cooldown would also stall payments.
+                    _balance_rate_limits[mint_url] = (
+                        time.monotonic() + retry_delay,
+                        str(error),
+                    )
                 _balance_fetch_failures[key] = (
                     time.monotonic() + retry_delay,
                     str(error),
@@ -1695,7 +1792,7 @@ async def fetch_all_balances(
                         "error": str(error),
                         "connection_failure": connection_failure,
                         "rate_limited": rate_limited,
-                        "mint_cooldown_applied": connection_failure or rate_limited,
+                        "mint_cooldown_applied": connection_failure,
                         "retry_seconds": round(retry_delay, 2),
                     },
                 )

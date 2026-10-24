@@ -3,7 +3,7 @@
 Covers:
 - pay_for_request stamping reserved_at on charged keys
 - release_stale_reservations sweeper semantics
-- reset_all_reserved_balances clearing reserved_at
+- the startup release sparing reservations with a live lease
 - refund endpoint self-healing stale/legacy reservations
 - proxy reverting the reservation when the client disconnects (CancelledError)
 """
@@ -27,8 +27,9 @@ from routstr.core.db import (
     ApiKey,
     ReservationRelease,
     release_stale_reservations,
-    reset_all_reserved_balances,
 )
+from routstr.core.main import release_leaked_reservations_on_startup
+from routstr.core.settings import settings
 
 from .proxy_test_utils import mock_request_stream, patch_proxy_session
 
@@ -263,23 +264,55 @@ async def test_release_stale_reservations_skips_null_reserved_at(
 
 
 @pytest.mark.asyncio
-async def test_reset_all_reserved_balances_clears_reserved_at(
-    session: AsyncSession,
+async def test_startup_release_keeps_live_lease_and_releases_expired(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Another process sharing the database holds a reservation whose lease it
+    # keeps renewing; a crashed process left one whose lease has expired. Both
+    # are on the same key.
+    monkeypatch.setattr(settings, "reset_reserved_balance_on_startup", True)
+    key = ApiKey(hashed_key="sharedkey", balance=10_000)
+    session.add(key)
+    await session.commit()
+    live = await pay_for_request(key, 1_000, session)
+    leaked = await pay_for_request(key, 2_500, session)
+    leaked_row = await session.get(ReservationRelease, leaked.release_id)
+    assert leaked_row is not None
+    leaked_row.created_at = (
+        int(time.time()) - settings.stale_reservation_timeout_seconds - 1
+    )
+    session.add(leaked_row)
+    await session.commit()
+
+    await release_leaked_reservations_on_startup(session, settings)
+
+    live_row = await session.get(ReservationRelease, live.release_id)
+    await session.refresh(leaked_row)
+    assert live_row is not None and live_row.status == "active"
+    assert leaked_row.status == "released"
+    await session.refresh(key)
+    assert key.reserved_balance == 1_000
+    assert key.balance == 10_000
+
+
+@pytest.mark.asyncio
+async def test_startup_release_can_be_disabled(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "reset_reserved_balance_on_startup", False)
     key = ApiKey(
-        hashed_key="resetkey",
+        hashed_key="keepkey",
         balance=5_000,
         reserved_balance=1_000,
-        reserved_at=int(time.time()),
+        reserved_at=int(time.time()) - 10_000,
     )
     session.add(key)
     await session.commit()
 
-    await reset_all_reserved_balances(session)
+    await release_leaked_reservations_on_startup(session, settings)
 
     await session.refresh(key)
-    assert key.reserved_balance == 0
-    assert key.reserved_at is None
+    assert key.reserved_balance == 1_000
 
 
 # ---------------------------------------------------------------------------
@@ -519,3 +552,51 @@ async def test_expired_reservation_cannot_renew_or_claim_charge(
     await session.commit()
     assert not await renew_reservation(snapshot, session)
     assert not await _claim_reservation_for_charge(snapshot, session)
+
+
+@pytest.mark.asyncio
+async def test_local_count_tokens_releases_reservation(
+    session: AsyncSession,
+) -> None:
+    from routstr.payment.models import Architecture, Model, Pricing
+    from routstr.upstream.generic import GenericUpstreamProvider
+
+    key = ApiKey(hashed_key="counttokens", balance=10_000)
+    session.add(key)
+    await session.commit()
+    snapshot = await pay_for_request(key, 1_000, session)
+    model = Model(
+        id="gpt-4o",
+        name="gpt-4o",
+        created=0,
+        description="",
+        context_length=128_000,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="cl100k_base",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.000003, completion=0.000015),
+    )
+    body = b'{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+
+    response = await GenericUpstreamProvider(base_url="http://x").forward_request(
+        MagicMock(),
+        "v1/messages/count_tokens",
+        {},
+        body,
+        key,
+        1_000,
+        session,
+        model,
+        snapshot,
+    )
+
+    assert response.status_code == 200
+    await session.refresh(key)
+    assert key.reserved_balance == 0
+    assert key.total_requests == 0
+    release = await session.get(ReservationRelease, snapshot.release_id)
+    assert release is not None and release.status == "released"

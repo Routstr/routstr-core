@@ -10,6 +10,7 @@ from routstr.mint import (
     MintRateGuard,
     MintRateLimitedError,
     fail_fast_mint_operations,
+    passive_mint_reads,
     run_mint_operation,
 )
 from routstr.wallet import Wallet
@@ -196,3 +197,95 @@ async def test_guard_concurrency_change_preserves_cooldown_state() -> None:
     assert rebuilt.cooldown_remaining() > 0
     assert rebuilt._cooldown_reason == "rate_limited"
     assert rebuilt._consecutive_rate_limits == 3
+
+
+def _rate_limited_error() -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://mint:3338/v1/checkstate")
+    response = httpx.Response(429, request=request)
+    return httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_outside_passive_scope_opens_shared_cooldown() -> None:
+    mint = "http://passive-control:3338"
+    MintRateGuard._guards.pop(mint, None)
+    operation = AsyncMock(side_effect=_rate_limited_error())
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await run_mint_operation(operation, mint_url=mint, retry_on_rate_limit=False)
+
+    assert MintRateGuard.get(mint).cooldown_remaining() > 0
+    MintRateGuard._guards.pop(mint, None)
+
+
+@pytest.mark.asyncio
+async def test_passive_read_rate_limit_leaves_shared_cooldown_untouched() -> None:
+    mint = "http://passive:3338"
+    MintRateGuard._guards.pop(mint, None)
+    operation = AsyncMock(side_effect=_rate_limited_error())
+
+    with pytest.raises(httpx.HTTPStatusError):
+        async with passive_mint_reads():
+            await run_mint_operation(operation, mint_url=mint)
+
+    guard = MintRateGuard.get(mint)
+    operation.assert_awaited_once()
+    assert guard.cooldown_remaining() == 0
+    assert guard._consecutive_rate_limits == 0
+    MintRateGuard._guards.pop(mint, None)
+
+
+@pytest.mark.asyncio
+async def test_passive_probe_rate_limit_does_not_escalate_backoff() -> None:
+    mint = "http://passive-probe:3338"
+    MintRateGuard._guards.pop(mint, None)
+    guard = MintRateGuard.get(mint)
+    guard.apply_rate_limit_cooldown(0)
+    guard._cooldown_until = 0.0
+    operation = AsyncMock(side_effect=_rate_limited_error())
+
+    with pytest.raises(httpx.HTTPStatusError):
+        async with passive_mint_reads():
+            await run_mint_operation(operation, mint_url=mint)
+
+    operation.assert_awaited_once()
+    assert guard.cooldown_remaining() == 0
+    assert guard._consecutive_rate_limits == 1
+    assert guard._needs_probe is True
+    MintRateGuard._guards.pop(mint, None)
+
+
+@pytest.mark.asyncio
+async def test_passive_reads_fail_fast_during_shared_cooldown() -> None:
+    mint = "http://passive-cooldown:3338"
+    MintRateGuard._guards.pop(mint, None)
+    MintRateGuard.get(mint).apply_cooldown(3600, reason="rate_limited")
+    operation = AsyncMock()
+
+    with pytest.raises(MintCooldownError):
+        async with passive_mint_reads():
+            await run_mint_operation(operation, mint_url=mint)
+
+    operation.assert_not_awaited()
+    MintRateGuard._guards.pop(mint, None)
+
+
+@pytest.mark.asyncio
+async def test_passive_reads_are_spaced_per_mint() -> None:
+    mint = "http://passive-spacing:3338"
+    MintRateGuard._guards.pop(mint, None)
+    operation = AsyncMock(return_value="ok")
+
+    with (
+        patch("routstr.mint._PASSIVE_REQUEST_SPACING_SECONDS", 0.05),
+        patch("routstr.mint.asyncio.sleep", AsyncMock()) as sleep,
+    ):
+        async with passive_mint_reads():
+            await run_mint_operation(operation, mint_url=mint)
+            await run_mint_operation(operation, mint_url=mint)
+
+    assert operation.await_count == 2
+    sleep.assert_awaited_once()
+    assert sleep.await_args is not None
+    assert 0 < sleep.await_args.args[0] <= 0.05
+    MintRateGuard._guards.pop(mint, None)

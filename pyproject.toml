@@ -20,7 +20,7 @@ dependencies = [
     "websockets>=12.0",
     "nostr-sdk>=0.45.1,<0.46",
     "mdurl==0.1.2",
-    "pillow>=10",
+    "pillow>=13.0.0",
     "openai>=1.98.0",
     "litellm>=1.101.2,<1.102",
     "backoff>=2.2",  # litellm's native Anthropic-messages streaming (e.g. deepseek/) imports litellm.proxy, which needs it
@@ -116,6 +116,7 @@ override-dependencies = [
 # Transitive deps whose dependents allow the patched version but don't require
 # it. Constraints raise the floor without bypassing any upstream pin.
 constraint-dependencies = [
+    "certifi>=2026.10.19",
     "anyio>=4.14.2",
     "pyjwt>=2.15.0",
     "urllib3>=2.8.0",

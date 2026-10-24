@@ -487,11 +487,9 @@ async def test_restarted_worker_keeps_its_siblings_reservations(
     The global reset released every active reservation, so a worker respawning
     mid-traffic left its siblings' in-flight requests unable to claim theirs.
     """
-    from routstr.core.db import (
-        ApiKey,
-        ReservationRelease,
-        reset_reservations_on_startup,
-    )
+    from routstr.core.db import ApiKey, ReservationRelease
+    from routstr.core.main import release_leaked_reservations_on_startup
+    from routstr.core.settings import settings
 
     now = int(time.time())
     await _new_key(pg_session, "busy", balance=10_000, reserved_balance=3_000)
@@ -508,7 +506,15 @@ async def test_restarted_worker_keeps_its_siblings_reservations(
         )
     await pg_session.commit()
 
-    await reset_reservations_on_startup(pg_session, stale_after_seconds=60)
+    await release_leaked_reservations_on_startup(
+        pg_session,
+        settings.copy(
+            update={
+                "reset_reserved_balance_on_startup": True,
+                "stale_reservation_timeout_seconds": 60,
+            }
+        ),
+    )
 
     statuses = {
         r.id: r.status
@@ -518,19 +524,6 @@ async def test_restarted_worker_keeps_its_siblings_reservations(
     pg_session.expire_all()
     key = await pg_session.get(ApiKey, "busy")
     assert key is not None and key.reserved_balance == 1_000
-
-
-@pytest.mark.asyncio
-async def test_reset_all_reserved_balances(pg_session: AsyncSession) -> None:
-    from routstr.core.db import ApiKey, reset_all_reserved_balances
-
-    await _new_key(pg_session, "r1", balance=5_000, reserved_balance=500)
-    await reset_all_reserved_balances(pg_session)
-
-    key = await pg_session.get(ApiKey, "r1")
-    assert key is not None
-    assert key.reserved_balance == 0
-    assert key.reserved_at is None
 
 
 # --------------------------------------------------------------------------

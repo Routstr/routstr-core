@@ -30,7 +30,7 @@ export default function BalancesPage() {
 
         <div className='grid gap-6'>
           <DetailedWalletBalance
-            refreshInterval={30000}
+            refreshInterval={120_000}
             displayUnit={displayUnit}
             usdPerSat={usdPerSat}
           />
