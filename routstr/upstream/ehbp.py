@@ -1567,6 +1567,7 @@ async def forward_ehbp_x_cashu_request(
                         refund_amount, unit, mint, request_id
                     )
                 except BaseException:
+                    # No revenue: the error handler below refunds the full amount.
                     mark_terminal_outcome_unknown(
                         terminal_outcome, "ehbp_x_cashu_refund_commit_ambiguous"
                     )

@@ -239,7 +239,10 @@ async def test_cancelled_refund_marks_the_outcome_unknown() -> None:
             new=AsyncMock(side_effect=asyncio.CancelledError()),
         ),
         patch("routstr.upstream.base.mark_terminal_outcome_unknown", mark_loss),
-        patch("routstr.upstream.terminal_outcome_tracking.record_terminal_outcome", record_outcome),
+        patch(
+            "routstr.upstream.terminal_outcome_tracking.record_terminal_outcome",
+            record_outcome,
+        ),
     ):
         with pytest.raises(asyncio.CancelledError):
             await provider.handle_x_cashu_responses_completion(
@@ -251,5 +254,42 @@ async def test_cancelled_refund_marks_the_outcome_unknown() -> None:
             )
 
     mark_loss.assert_called_once()
-    assert mark_loss.call_args.args[1] == "X-Cashu Responses stream settlement cancelled"
+    assert (
+        mark_loss.call_args.args[1] == "X-Cashu Responses stream settlement cancelled"
+    )
+    # The 6000 msat refund may have landed, so only the 4000 msat charge counts.
+    assert mark_loss.call_args.kwargs["revenue_msats"] == 4000
     record_outcome.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failed_settlement_records_only_what_the_fallback_keeps() -> None:
+    provider = _make_provider()
+    mark_unknown = MagicMock()
+    send_refund = AsyncMock(return_value="cashuArefund")
+    with (
+        patch.object(
+            provider,
+            "get_x_cashu_cost",
+            new=AsyncMock(side_effect=RuntimeError("pricing unavailable")),
+        ),
+        patch.object(provider, "send_refund", new=send_refund),
+        patch("routstr.upstream.base.mark_terminal_outcome_unknown", mark_unknown),
+    ):
+        response = await provider.handle_x_cashu_responses_completion(
+            response=_sse_response(_canonical_chunks()),
+            amount=10_000,
+            unit="msat",
+            max_cost_for_model=9_000,
+            request_id="failed-settlement",
+        )
+    assert response.status_code == 200
+
+    # The fallback refunds down to the model's maximum, so the node keeps that.
+    assert send_refund.await_args is not None
+    assert send_refund.await_args.args[0] == 1_000
+    mark_unknown.assert_called_once()
+    assert (
+        mark_unknown.call_args.args[1] == "X-Cashu Responses stream settlement failed"
+    )
+    assert mark_unknown.call_args.kwargs["revenue_msats"] == 9_000
