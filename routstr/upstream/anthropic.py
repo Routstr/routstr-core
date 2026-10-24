@@ -10,6 +10,13 @@ from .base import BaseUpstreamProvider
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
 
+# Effort levels Anthropic's native Messages API accepts in
+# ``output_config.effort``. Everything else (``none``, ``minimal``, unknown
+# strings, non-strings) is rejected with a 400 rather than forwarded.
+ANTHROPIC_SUPPORTED_EFFORTS: frozenset[str] = frozenset(
+    {"low", "medium", "high", "xhigh", "max"}
+)
+
 
 class AnthropicUpstreamProvider(BaseUpstreamProvider):
     """Upstream provider specifically configured for Anthropic API."""
@@ -131,8 +138,26 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
         return headers
 
     def _apply_reasoning_effort(self, data: dict, model_obj: Model) -> bool:
+        # Anthropic accepts effort spelled three ways: OpenAI-compatible
+        # ``reasoning_effort``, Anthropic ``reasoning.effort``, and the newer
+        # native ``output_config.effort``. Normalize all of them onto
+        # ``output_config.effort`` and validate them identically, so a client
+        # cannot smuggle an illegal level in through the native spelling.
         # Anthropic defaults are independent of OpenRouter's mandatory metadata.
-        if "reasoning_effort" not in data and "reasoning" not in data:
+        config = data.get("output_config")
+        if config is None:
+            config = {}
+        elif not isinstance(config, dict):
+            raise UpstreamError(
+                "Anthropic output_config must be an object", status_code=400
+            )
+        native_effort = config.get("effort")
+
+        if (
+            "reasoning_effort" not in data
+            and "reasoning" not in data
+            and native_effort is None
+        ):
             return False
 
         reasoning = data.get("reasoning")
@@ -144,30 +169,21 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
                 status_code=400,
             )
         efforts: list[str] = []
-        for value in (data.get("reasoning_effort"), reasoning.get("effort")):
+        for value in (
+            data.get("reasoning_effort"),
+            reasoning.get("effort"),
+            native_effort,
+        ):
             if value is None:
                 continue
-            if not isinstance(value, str) or value not in {
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-            }:
+            if not isinstance(value, str) or value not in ANTHROPIC_SUPPORTED_EFFORTS:
                 raise UpstreamError("Unsupported Anthropic effort", status_code=400)
             efforts.append(value)
 
         if efforts:
-            config = data.get("output_config", {})
-            if not isinstance(config, dict):
-                raise UpstreamError(
-                    "Anthropic output_config must be an object", status_code=400
-                )
-            native_effort = config.get("effort")
-            if any(value != efforts[0] for value in efforts) or (
-                native_effort is not None and native_effort != efforts[0]
-            ):
+            if any(value != efforts[0] for value in efforts):
                 raise UpstreamError("Conflicting Anthropic effort", status_code=400)
+            # Preserve sibling keys (``format``, future extensions).
             data["output_config"] = {**config, "effort": efforts[0]}
 
         data.pop("reasoning_effort", None)

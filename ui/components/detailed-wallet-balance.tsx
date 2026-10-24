@@ -36,7 +36,7 @@ import type { DisplayUnit } from '@/lib/types/units';
 import { convertToMsat, formatFromMsat } from '@/lib/currency';
 
 export function DetailedWalletBalance({
-  refreshInterval = 10000,
+  refreshInterval = 120_000,
   displayUnit,
   usdPerSat,
 }: {
@@ -54,6 +54,15 @@ export function DetailedWalletBalance({
     },
     refetchInterval: refreshInterval,
   });
+
+  // Polls reuse the node's cached scan; only an explicit click forces a new
+  // proof-state check against every mint.
+  const forceRefresh = () =>
+    queryClient.fetchQuery({
+      queryKey: ['detailed-wallet-balance'],
+      queryFn: () => WalletService.getDetailedBalances(true),
+      staleTime: 0,
+    });
 
   const formatAmount = (msatAmount: number): string =>
     formatFromMsat(msatAmount, displayUnit, usdPerSat);
@@ -139,7 +148,11 @@ export function DetailedWalletBalance({
               <Button
                 variant='default'
                 size='sm'
-                onClick={() => setWithdrawModalOpen(true)}
+                onClick={() => {
+                  setWithdrawModalOpen(true);
+                  // A stale balance here decides how much money moves.
+                  void forceRefresh().catch(() => undefined);
+                }}
                 disabled={isLoading || !data || data.length === 0}
                 className='flex-1 sm:flex-none'
               >
@@ -149,7 +162,7 @@ export function DetailedWalletBalance({
               <Button
                 variant='ghost'
                 size='icon'
-                onClick={() => refetch()}
+                onClick={() => void forceRefresh().catch(() => undefined)}
                 disabled={isLoading || isFetching}
               >
                 <RefreshCw

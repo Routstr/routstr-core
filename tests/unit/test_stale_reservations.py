@@ -519,3 +519,51 @@ async def test_expired_reservation_cannot_renew_or_claim_charge(
     await session.commit()
     assert not await renew_reservation(snapshot, session)
     assert not await _claim_reservation_for_charge(snapshot, session)
+
+
+@pytest.mark.asyncio
+async def test_local_count_tokens_releases_reservation(
+    session: AsyncSession,
+) -> None:
+    from routstr.payment.models import Architecture, Model, Pricing
+    from routstr.upstream.generic import GenericUpstreamProvider
+
+    key = ApiKey(hashed_key="counttokens", balance=10_000)
+    session.add(key)
+    await session.commit()
+    snapshot = await pay_for_request(key, 1_000, session)
+    model = Model(
+        id="gpt-4o",
+        name="gpt-4o",
+        created=0,
+        description="",
+        context_length=128_000,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="cl100k_base",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.000003, completion=0.000015),
+    )
+    body = b'{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+
+    response = await GenericUpstreamProvider(base_url="http://x").forward_request(
+        MagicMock(),
+        "v1/messages/count_tokens",
+        {},
+        body,
+        key,
+        1_000,
+        session,
+        model,
+        snapshot,
+    )
+
+    assert response.status_code == 200
+    await session.refresh(key)
+    assert key.reserved_balance == 0
+    assert key.total_requests == 0
+    release = await session.get(ReservationRelease, snapshot.release_id)
+    assert release is not None and release.status == "released"
