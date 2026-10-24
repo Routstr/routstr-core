@@ -6,6 +6,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import date
 from enum import Enum
 from typing import AsyncGenerator
 
@@ -14,8 +15,11 @@ from alembic.config import Config
 from alembic.util.exc import CommandError
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     Column,
+    Date,
     Index,
+    LargeBinary,
     UniqueConstraint,
     case,
     delete,
@@ -901,6 +905,241 @@ class ReservationRelease(SQLModel, table=True):  # type: ignore
     created_at: int = Field(
         default_factory=lambda: int(time.time()), sa_type=UnixTimestamp
     )
+
+
+class TerminalOutcome(SQLModel, table=True):  # type: ignore
+    """One settled request. Ledger times are UTC epoch milliseconds, and
+    terminal_day is the UTC day of terminal_at_ms, kept for indexed day reads."""
+
+    __tablename__ = "terminal_outcomes"
+    __table_args__ = (
+        Index(
+            "ix_terminal_outcomes_terminal_day_terminal_at_ms",
+            "terminal_day",
+            "terminal_at_ms",
+        ),
+        CheckConstraint(
+            "terminal_at_ms >= 0 AND input_tokens >= 0 "
+            "AND output_tokens >= 0 AND cache_read_input_tokens >= 0 "
+            "AND cache_creation_input_tokens >= 0 AND revenue_msats >= 0",
+            name="ck_terminal_outcomes_nonnegative",
+        ),
+        CheckConstraint(
+            "input_source IN ('reported', 'estimated', 'missing') "
+            "AND output_source IN ('reported', 'estimated', 'missing') "
+            "AND cache_read_source IN ('reported', 'estimated', 'missing') "
+            "AND cache_creation_source IN ('reported', 'estimated', 'missing')",
+            name="ck_terminal_outcomes_sources",
+        ),
+    )
+
+    outcome_id: str = Field(primary_key=True)
+    terminal_at_ms: int = Field(sa_type=BigInteger)
+    terminal_day: date = Field(sa_type=Date)
+    model_identifier: str | None = Field(default=None, nullable=True)
+    served_model_identifier: str | None = Field(default=None, nullable=True)
+    pricing_source: str | None = Field(default=None, nullable=True)
+    input_source: str = Field(default="missing")
+    output_source: str = Field(default="missing")
+    cache_read_source: str = Field(default="missing")
+    cache_creation_source: str = Field(default="missing")
+    input_tokens: int = Field(sa_type=BigInteger)
+    output_tokens: int = Field(sa_type=BigInteger)
+    cache_read_input_tokens: int = Field(sa_type=BigInteger)
+    cache_creation_input_tokens: int = Field(sa_type=BigInteger)
+    revenue_msats: int = Field(sa_type=BigInteger)
+
+
+class TerminalOutcomeEpoch(SQLModel, table=True):  # type: ignore
+    __tablename__ = "terminal_outcome_epochs"
+    __table_args__ = (
+        UniqueConstraint("current_slot", name="uq_terminal_outcome_epochs_current"),
+        CheckConstraint(
+            "epoch >= 0",
+            name="ck_terminal_outcome_epochs_nonnegative",
+        ),
+        CheckConstraint(
+            "current_slot IS NULL OR current_slot = 1",
+            name="ck_terminal_outcome_epochs_current_slot",
+        ),
+        CheckConstraint(
+            "(current_slot = 1 AND coverage_end_day IS NULL) OR "
+            "(current_slot IS NULL AND coverage_end_day IS NOT NULL)",
+            name="ck_terminal_outcome_epochs_state",
+        ),
+    )
+
+    epoch: int = Field(primary_key=True, sa_type=BigInteger)
+    coverage_start_day: date = Field(sa_type=Date)
+    coverage_end_day: date | None = Field(default=None, nullable=True, sa_type=Date)
+    current_slot: int | None = Field(default=None, nullable=True)
+
+
+class TerminalOutcomeWriterRun(SQLModel, table=True):  # type: ignore
+    __tablename__ = "terminal_outcome_writer_runs"
+    __table_args__ = (
+        Index(
+            "ix_terminal_outcome_writer_runs_status_heartbeat",
+            "status",
+            "heartbeat_at_ms",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'degraded', 'clean', 'lost', 'recovered')",
+            name="ck_terminal_outcome_writer_runs_status",
+        ),
+        CheckConstraint(
+            "started_at_ms >= 0 AND heartbeat_at_ms >= 0 "
+            "AND (closed_at_ms IS NULL OR closed_at_ms >= 0)",
+            name="ck_terminal_outcome_writer_runs_nonnegative",
+        ),
+        CheckConstraint(
+            "(status IN ('active', 'degraded') AND closed_at_ms IS NULL) OR "
+            "(status IN ('clean', 'lost', 'recovered') "
+            "AND closed_at_ms IS NOT NULL)",
+            name="ck_terminal_outcome_writer_runs_state",
+        ),
+        CheckConstraint(
+            "status NOT IN ('lost', 'recovered') OR loss_day IS NOT NULL",
+            name="ck_terminal_outcome_writer_runs_lost_day",
+        ),
+    )
+
+    run_id: str = Field(primary_key=True)
+    status: str
+    started_at_ms: int = Field(sa_type=BigInteger)
+    heartbeat_at_ms: int = Field(sa_type=BigInteger)
+    flushed_through_ms: int | None = Field(
+        default=None, nullable=True, sa_type=BigInteger
+    )
+    closed_at_ms: int | None = Field(default=None, nullable=True, sa_type=BigInteger)
+    loss_day: date | None = Field(default=None, nullable=True, sa_type=Date)
+
+
+class AnalyticsV2Outbox(SQLModel, table=True):  # type: ignore
+    __tablename__ = "analytics_v2_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "pubkey",
+            "d_tag",
+            "semantic_slot",
+            name="uq_analytics_v2_outbox_semantic_slot",
+        ),
+        Index(
+            "ix_analytics_v2_outbox_pending",
+            "status",
+            "delivery_generation",
+            "next_attempt_at_ms",
+        ),
+        Index(
+            "ix_analytics_v2_outbox_coordinate",
+            "pubkey",
+            "d_tag",
+            "epoch",
+            "created_at",
+        ),
+        CheckConstraint(
+            "kind = 38422",
+            name="ck_analytics_v2_outbox_kind",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'delivered', 'superseded', 'cancelled')",
+            name="ck_analytics_v2_outbox_status",
+        ),
+        CheckConstraint(
+            "epoch >= 0 AND delivery_generation >= 0 AND created_at >= 0 "
+            "AND stored_at_ms >= 0 AND next_attempt_at_ms >= 0 "
+            "AND attempt_count >= 0 "
+            "AND (first_send_attempt_at_ms IS NULL "
+            "OR first_send_attempt_at_ms >= 0) "
+            "AND (delivered_at_ms IS NULL OR delivered_at_ms >= 0)",
+            name="ck_analytics_v2_outbox_nonnegative",
+        ),
+        CheckConstraint(
+            "length(frame) > 0",
+            name="ck_analytics_v2_outbox_frame_nonempty",
+        ),
+        CheckConstraint(
+            "length(semantic_slot) > 0",
+            name="ck_analytics_v2_outbox_semantic_slot_nonempty",
+        ),
+        CheckConstraint(
+            "(status = 'delivered' AND delivered_at_ms IS NOT NULL) OR "
+            "(status != 'delivered' AND delivered_at_ms IS NULL)",
+            name="ck_analytics_v2_outbox_delivery_state",
+        ),
+    )
+
+    event_id: str = Field(primary_key=True)
+    pubkey: str
+    d_tag: str
+    kind: int
+    week: date = Field(sa_type=Date)
+    epoch: int = Field(sa_type=BigInteger)
+    through_day: date = Field(sa_type=Date)
+    semantic_slot: str
+    delivery_generation: int = Field(sa_type=BigInteger)
+    frame: bytes = Field(sa_type=LargeBinary)
+    finalized: bool
+    corrected: bool
+    status: str = Field(default="pending")
+    created_at: int = Field(sa_type=BigInteger)
+    stored_at_ms: int = Field(sa_type=BigInteger)
+    next_attempt_at_ms: int = Field(sa_type=BigInteger)
+    attempt_count: int = Field(default=0, sa_type=BigInteger)
+    first_send_attempt_at_ms: int | None = Field(
+        default=None, nullable=True, sa_type=BigInteger
+    )
+    delivered_at_ms: int | None = Field(default=None, nullable=True, sa_type=BigInteger)
+
+
+class AnalyticsV2RelayReceipt(SQLModel, table=True):  # type: ignore
+    __tablename__ = "analytics_v2_relay_receipts"
+    __table_args__ = (
+        CheckConstraint(
+            "accepted_at_ms >= 0 AND read_back_at_ms >= 0",
+            name="ck_analytics_v2_relay_receipts_nonnegative",
+        ),
+    )
+
+    event_id: str = Field(primary_key=True, foreign_key="analytics_v2_outbox.event_id")
+    relay_url: str = Field(primary_key=True)
+    accepted_at_ms: int = Field(sa_type=BigInteger)
+    read_back_at_ms: int = Field(sa_type=BigInteger)
+
+
+class AnalyticsV2DeliveryState(SQLModel, table=True):  # type: ignore
+    __tablename__ = "analytics_v2_delivery_state"
+    __table_args__ = (
+        CheckConstraint(
+            "id = 1",
+            name="ck_analytics_v2_delivery_state_singleton",
+        ),
+        CheckConstraint(
+            "generation >= 0 AND updated_at_ms >= 0 "
+            "AND (active_epoch_floor IS NULL OR active_epoch_floor >= 0)",
+            name="ck_analytics_v2_delivery_state_nonnegative",
+        ),
+        CheckConstraint(
+            "(sharing_enabled AND active_epoch_floor IS NOT NULL) OR "
+            "(NOT sharing_enabled AND active_epoch_floor IS NULL)",
+            name="ck_analytics_v2_delivery_state_epoch_floor",
+        ),
+        CheckConstraint(
+            "(identity_pubkey IS NULL AND provider_d IS NULL) OR "
+            "(identity_pubkey IS NOT NULL AND provider_d IS NOT NULL)",
+            name="ck_analytics_v2_delivery_state_identity_pair",
+        ),
+    )
+
+    id: int = Field(default=1, primary_key=True)
+    sharing_enabled: bool = Field(default=False)
+    generation: int = Field(default=0, sa_type=BigInteger)
+    active_epoch_floor: int | None = Field(
+        default=None, nullable=True, sa_type=BigInteger
+    )
+    identity_pubkey: str | None = Field(default=None, nullable=True)
+    provider_d: str | None = Field(default=None, nullable=True)
+    updated_at_ms: int = Field(sa_type=BigInteger)
 
 
 class RoutstrFee(SQLModel, table=True):  # type: ignore

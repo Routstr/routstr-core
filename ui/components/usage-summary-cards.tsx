@@ -18,12 +18,19 @@ import { useCurrencyStore } from '@/lib/stores/currency';
 import { useQuery } from '@tanstack/react-query';
 import { fetchBtcUsdPrice, btcToSatsRate } from '@/lib/exchange-rate';
 import { formatFromMsat } from '@/lib/currency';
+import { formatCost } from '@/lib/services/cost-validation';
 
 interface UsageSummaryCardsProps {
   summary: UsageSummary;
+  ledgerMode?: boolean;
+  diagnosticsAvailable?: boolean;
 }
 
-export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
+export function UsageSummaryCards({
+  summary,
+  ledgerMode = false,
+  diagnosticsAvailable = true,
+}: UsageSummaryCardsProps) {
   const { displayUnit } = useCurrencyStore();
   const { data: btcUsdPrice } = useQuery({
     queryKey: ['btc-usd-price'],
@@ -33,16 +40,33 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
   });
   const usdPerSat = btcUsdPrice ? btcToSatsRate(btcUsdPrice) : null;
 
-  const formatAmount = (msat: number) =>
-    formatFromMsat(msat, displayUnit, usdPerSat);
+  const formatAmount = (msat: number) => {
+    if (displayUnit === 'sat') {
+      if (msat > 0 && msat < 1) return '<0.001 sats';
+      return `${(msat / 1000).toLocaleString(undefined, { maximumFractionDigits: 3 })} sats`;
+    }
+    if (displayUnit === 'usd' && usdPerSat !== null) {
+      return msat === 0 ? '$0.00' : formatCost((msat / 1000) * usdPerSat);
+    }
+    return formatFromMsat(msat, displayUnit, usdPerSat);
+  };
   const totalTokens = Number(summary.total_tokens ?? 0);
-  const avgTotalTokensPerCompletion = Number(
-    summary.avg_total_tokens_per_completion ?? 0
-  );
+  const avgTotalTokensPerCompletion = ledgerMode
+    ? summary.avg_measured_tokens_per_completion
+    : Number(summary.avg_total_tokens_per_completion ?? 0);
+  const averageTokensValue =
+    summary.successful_chat_completions === 0
+      ? 'No requests'
+      : avgTotalTokensPerCompletion == null
+        ? 'Not reported'
+        : avgTotalTokensPerCompletion.toLocaleString(undefined, {
+            maximumFractionDigits: 1,
+          });
 
   const cards = [
     {
-      title: 'Total Requests',
+      title: ledgerMode ? 'Logged Requests' : 'Total Requests',
+      diagnostic: true,
       value: summary.total_requests.toLocaleString(),
       icon: Activity,
       iconClassName: 'text-blue-600 dark:text-blue-300',
@@ -61,9 +85,10 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
     },
     {
       title: 'Avg Tokens/Completion',
-      value: avgTotalTokensPerCompletion.toLocaleString(undefined, {
-        maximumFractionDigits: 1,
-      }),
+      description: ledgerMode
+        ? 'Average for completions with provider-reported input and output tokens.'
+        : undefined,
+      value: averageTokensValue,
       icon: Activity,
       iconClassName: 'text-indigo-600 dark:text-indigo-300',
     },
@@ -75,42 +100,48 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
     },
     {
       title: 'Operational Net',
+      hidden: ledgerMode,
       value: formatAmount(summary.net_revenue_msats),
       icon: DollarSign,
       iconClassName: 'text-lime-600 dark:text-lime-300',
     },
     {
       title: 'Reverted Holds',
+      diagnostic: true,
       value: formatAmount(summary.refunds_msats),
       icon: TrendingDown,
       iconClassName: 'text-rose-600 dark:text-rose-300',
     },
     {
-      title: 'Avg Revenue/Request',
+      title: ledgerMode ? 'Avg Revenue/Completion' : 'Avg Revenue/Request',
       value: formatAmount(summary.avg_revenue_per_request_msats),
       icon: CreditCard,
       iconClassName: 'text-violet-600 dark:text-violet-300',
     },
     {
-      title: 'Success Rate',
+      title: ledgerMode ? 'Logged Success Rate' : 'Success Rate',
+      diagnostic: true,
       value: `${summary.success_rate.toFixed(1)}%`,
       icon: TrendingUp,
       iconClassName: 'text-teal-600 dark:text-teal-300',
     },
     {
       title: 'Refund Rate',
+      diagnostic: true,
       value: `${summary.refund_rate.toFixed(1)}%`,
       icon: XCircle,
       iconClassName: 'text-fuchsia-600 dark:text-fuchsia-300',
     },
     {
       title: 'Failed Requests',
+      diagnostic: true,
       value: summary.failed_requests.toLocaleString(),
       icon: XCircle,
       iconClassName: 'text-red-600 dark:text-red-300',
     },
     {
       title: 'Errors',
+      diagnostic: true,
       value: summary.total_errors.toLocaleString(),
       icon: AlertTriangle,
       iconClassName: 'text-orange-600 dark:text-orange-300',
@@ -123,18 +154,24 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
     },
     {
       title: 'Upstream Errors',
+      diagnostic: true,
       value: summary.upstream_errors.toLocaleString(),
       icon: AlertTriangle,
       iconClassName: 'text-pink-600 dark:text-pink-300',
     },
-  ];
+  ].filter(
+    (card) => !card.hidden && (!card.diagnostic || diagnosticsAvailable)
+  );
 
   return (
     <div className='grid grid-cols-1 gap-2.5 px-1 min-[380px]:grid-cols-2 sm:gap-4 sm:px-0 xl:grid-cols-4'>
       {cards.map((card) => (
         <Card key={card.title} size='sm'>
           <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-1'>
-            <CardTitle className='text-muted-foreground text-[11px] font-medium sm:text-sm'>
+            <CardTitle
+              className='text-muted-foreground text-[11px] font-medium sm:text-sm'
+              title={card.description}
+            >
               {card.title}
             </CardTitle>
             <span className='inline-flex size-6 items-center justify-center sm:size-7'>
