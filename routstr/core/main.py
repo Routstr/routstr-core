@@ -57,6 +57,7 @@ from .middleware import LoggingMiddleware
 from .not_found import _NOT_FOUND_HTML, not_found_catch_all  # noqa: F401
 from .settings import Settings, SettingsService, bootstrap_secrets
 from .settings import settings as global_settings
+from .sqlite_import import import_sqlite_on_startup
 from .version import __version__
 
 # Initialize logging first
@@ -111,6 +112,10 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # Apply litellm-wide settings (drop_params, chat-completions URL,
         # debug logging) before any upstream provider dispatches a request.
         configure_litellm()
+
+        # One-time copy of SQLITE_IMPORT_PATH into an empty PostgreSQL database.
+        # Raises when it cannot complete: the node must not start without it.
+        await import_sqlite_on_startup()
 
         # Run database migrations on startup
         run_migrations()

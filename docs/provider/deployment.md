@@ -188,6 +188,30 @@ service, the node port is bound to `127.0.0.1`, `ENABLE_ANALYTICS_SHARING` is
 off on first boot, and `AUTO_GENERATE_NSEC=true` creates the identity on first boot —
 nothing is published until a public `HTTP_URL` (or onion endpoint) is set.
 
+### PostgreSQL (Optional)
+
+Both stacks use SQLite (`keys.db`) unless you add `compose.postgres.yml`, which
+starts a **postgres** service (PostgreSQL 16, data in the `postgres-data`
+volume, not published to the host) and points the node at it:
+
+```bash
+# .env — URL-safe, it becomes part of DATABASE_URL
+POSTGRES_PASSWORD=$(openssl rand -hex 32)
+
+docker compose -f compose.yml -f compose.postgres.yml up -d
+# or: docker compose -f compose.node.yml -f compose.postgres.yml up -d
+```
+
+Pass the same `-f` files to every later `docker compose` command (`logs`,
+`exec`, `restart`, `down`).
+
+On the first boot an existing `keys.db` is copied into the empty database, then
+renamed to `keys.db.imported-<timestamp>`; later boots skip the import. The copy
+is all-or-nothing: if it fails the node does not start and PostgreSQL holds none
+of the rows. Keep `ROUTSTR_SECRET_KEY` (or `routstr_secret.key`) unchanged, and
+keep `.wallet/` — the Cashu wallet stays on local SQLite. Details in
+[Configuration](configuration.md#postgresql-and-multiple-workers).
+
 ---
 
 ## Pre-Configuration (Optional)
@@ -278,7 +302,8 @@ so everything Routstr persists stays in the directory you cloned:
 
 - **Back up with all writers stopped** (`docker compose stop`, or
   `docker compose -f compose.node.yml stop`), or take a consistent backup of an
-  external database. Include `keys.db` with any `-wal`/`-shm` sidecars,
+  external database (`pg_dump` for the `postgres` service). Include `keys.db`
+  with any `-wal`/`-shm` sidecars,
   `routstr_secret.key` (or your secret-manager key), `.wallet/`, `.env`, the
   Compose file(s) you use, and the node's Nostr identity.
 - **Keep the database and its encryption key together** in an encrypted,

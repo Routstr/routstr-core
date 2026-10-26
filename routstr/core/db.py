@@ -1019,6 +1019,20 @@ class UpstreamModelSnapshot(SQLModel, table=True):  # type: ignore
     fetched_at: int = Field(sa_type=UnixTimestamp)
 
 
+class DatabaseImport(SQLModel, table=True):  # type: ignore
+    """A SQLite database copied in at startup from ``SQLITE_IMPORT_PATH``.
+
+    Written in the same transaction as the copied rows; its presence is what
+    makes every later startup with the same setting a no-op.
+    """
+
+    __tablename__ = "database_imports"
+    source_fingerprint: str = Field(primary_key=True)
+    source_path: str = Field()
+    source_revision: str | None = Field(default=None)
+    imported_at: int = Field(sa_type=UnixTimestamp)
+
+
 async def accumulate_routstr_fee(session: AsyncSession, amount_msats: int) -> None:
     if session.get_bind().dialect.name == "postgresql":
         # Every billed request increments this one row, so its commits are
