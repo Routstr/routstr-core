@@ -1,6 +1,7 @@
 import asyncio
 import json
 import random
+import re
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,6 +28,75 @@ class Architecture(BaseModel):
     instruct_type: str | None
 
 
+# The rates a long-context tier can replace; every other rate stays at base.
+TIER_RATE_FIELDS = ("prompt", "completion", "input_cache_read", "input_cache_write")
+
+# Rate keys OpenRouter puts in an override besides ``TIER_RATE_FIELDS``. Any
+# other key is a condition (``utc_days``/``utc_start``/...) this model does not
+# evaluate, so an override carrying one is dropped rather than applied always.
+_OVERRIDE_EXTRA_RATE_KEYS = frozenset(
+    {
+        "request",
+        "image",
+        "image_output",
+        "web_search",
+        "internal_reasoning",
+        "input_cache_write_1h",
+        "audio",
+        "audio_output",
+        "input_audio_cache",
+        "discount",
+    }
+)
+
+
+class PricingTier(BaseModel):
+    """Rates that replace the base ones once a prompt exceeds ``min_prompt_tokens``.
+
+    One long-context entry of OpenRouter's ``pricing.overrides`` (Anthropic and
+    Gemini charge more past 100k/200k prompt tokens). A rate the tier omits
+    keeps the base rate. The threshold is exclusive, as providers word it
+    ("above 200k") and litellm keys it (``*_above_200k_tokens``).
+    """
+
+    min_prompt_tokens: int
+    prompt: float | None = None
+    completion: float | None = None
+    input_cache_read: float | None = None
+    input_cache_write: float | None = None
+
+    class Config:
+        extra = "ignore"
+
+
+def parse_pricing_tiers(value: object) -> list[PricingTier]:
+    """Keep the long-context overrides, sorted by threshold.
+
+    A malformed or condition-bearing entry is dropped, never raised: one bad
+    override must not make the whole model unparseable and empty its route.
+    """
+    if not isinstance(value, list):
+        return []
+    tiers: list[PricingTier] = []
+    for entry in value:
+        if isinstance(entry, PricingTier):
+            tiers.append(entry)
+            continue
+        if not isinstance(entry, dict):
+            continue
+        conditions = set(entry) - {"min_prompt_tokens"}
+        conditions -= set(TIER_RATE_FIELDS) | _OVERRIDE_EXTRA_RATE_KEYS
+        if conditions:
+            continue
+        try:
+            tier = PricingTier.parse_obj(entry)
+        except Exception:
+            continue
+        if tier.min_prompt_tokens > 0:
+            tiers.append(tier)
+    return sorted(tiers, key=lambda tier: tier.min_prompt_tokens)
+
+
 class Pricing(BaseModel):
     prompt: float
     completion: float
@@ -43,6 +113,72 @@ class Pricing(BaseModel):
     max_prompt_cost: float = 0.0  # in sats not msats
     max_completion_cost: float = 0.0  # in sats not msats
     max_cost: float = 0.0  # in sats not msats
+    # Long-context tiers, in the same unit as the base rates.
+    overrides: list[PricingTier] = []
+
+    @validator("overrides", pre=True)
+    def _coerce_overrides(cls, value: object) -> list[PricingTier]:
+        return parse_pricing_tiers(value)
+
+    def dict(self, **kwargs: object) -> dict:
+        # Untiered pricing omits the field so the catalog stays additive.
+        return _drop_empty_overrides(super().dict(**kwargs))  # type: ignore[arg-type]
+
+    def scaled(self, factor: float) -> "Pricing":
+        """Every rate, tiers included, multiplied by ``factor`` (fee, sats rate)."""
+        data = self.dict()
+        tiers = data.pop("overrides", [])
+        scaled: dict = {key: float(rate) * factor for key, rate in data.items()}
+        scaled["overrides"] = [
+            {
+                key: rate * factor
+                if key in TIER_RATE_FIELDS and rate is not None
+                else rate
+                for key, rate in tier.items()
+            }
+            for tier in tiers
+        ]
+        return Pricing.parse_obj(scaled)
+
+    def for_prompt_tokens(self, prompt_tokens: int) -> "Pricing":
+        """The rates a prompt of ``prompt_tokens`` (cache tokens included) bills at."""
+        tier = None
+        for candidate in self.overrides:
+            if prompt_tokens > candidate.min_prompt_tokens:
+                tier = candidate
+        if tier is None:
+            return self
+        return self.copy(
+            update={
+                field: getattr(tier, field)
+                for field in TIER_RATE_FIELDS
+                if getattr(tier, field) is not None
+            }
+        )
+
+    def peak(self) -> "Pricing":
+        """Each tierable rate at its highest across tiers, for reservations."""
+        if not self.overrides:
+            return self
+        return self.copy(
+            update={
+                field: max(
+                    [getattr(self, field)]
+                    + [
+                        getattr(tier, field)
+                        for tier in self.overrides
+                        if getattr(tier, field) is not None
+                    ]
+                )
+                for field in TIER_RATE_FIELDS
+            }
+        )
+
+
+def _drop_empty_overrides(pricing: dict) -> dict:
+    if not pricing.get("overrides"):
+        pricing.pop("overrides", None)
+    return pricing
 
 
 # The rates ``Pricing`` declares without a default, derived from the model so the
@@ -62,6 +198,11 @@ def has_usable_pricing(pricing: Pricing) -> bool:
     """
     return all(
         is_usable_rate(getattr(pricing, field)) for field in BILLABLE_PRICING_FIELDS
+    ) and all(
+        is_usable_rate(getattr(tier, field))
+        for tier in pricing.overrides
+        for field in TIER_RATE_FIELDS
+        if getattr(tier, field) is not None
     )
 
 
@@ -149,6 +290,9 @@ class Model(BaseModel):
         # Non-reasoning models omit the field entirely so the catalog stays
         # additive: existing clients never see a new null key.
         data = super().dict(**kwargs)  # type: ignore[arg-type]
+        for key in ("pricing", "sats_pricing"):
+            if isinstance(data.get(key), dict):
+                _drop_empty_overrides(data[key])
         reasoning = data.get("reasoning")
         if not reasoning:
             data.pop("reasoning", None)
@@ -193,6 +337,34 @@ def litellm_cost_entry(model_id: str) -> dict | None:
         if isinstance(key, str) and key.lower() in lowered and isinstance(info, dict):
             return info
     return None
+
+
+# litellm's long-context keys, e.g. ``input_cost_per_token_above_200k_tokens``.
+# Suffixed variants (``..._tokens_batches``, ``..._above_1hr_...``) belong to
+# other service tiers and are deliberately not matched.
+_LITELLM_TIER_KEYS = {
+    "input_cost_per_token": "prompt",
+    "output_cost_per_token": "completion",
+    "cache_read_input_token_cost": "input_cache_read",
+    "cache_creation_input_token_cost": "input_cache_write",
+}
+_LITELLM_TIER_RE = re.compile(
+    r"^(" + "|".join(_LITELLM_TIER_KEYS) + r")_above_(\d+)k_tokens$"
+)
+
+
+def litellm_pricing_tiers(info: dict) -> list[PricingTier]:
+    """Long-context tiers from a litellm cost entry, in USD per token."""
+    by_threshold: dict[int, dict] = {}
+    for key, rate in info.items():
+        match = _LITELLM_TIER_RE.match(key) if isinstance(key, str) else None
+        coerced = coerce_rate(rate) if match else None
+        if match is None or coerced is None:
+            continue
+        threshold = int(match.group(2)) * 1000
+        tier = by_threshold.setdefault(threshold, {"min_prompt_tokens": threshold})
+        tier[_LITELLM_TIER_KEYS[match.group(1)]] = coerced
+    return parse_pricing_tiers(list(by_threshold.values()))
 
 
 def backfill_cache_pricing(model_id: str, pricing: Pricing) -> Pricing:
@@ -406,9 +578,7 @@ def _build_model_from_row(
         parsed_pricing = backfill_cache_pricing(pricing_model_id, parsed_pricing)
 
     if apply_provider_fee:
-        parsed_pricing = Pricing.parse_obj(
-            {k: float(v) * provider_fee for k, v in parsed_pricing.dict().items()}
-        )
+        parsed_pricing = parsed_pricing.scaled(provider_fee)
     model = Model(
         id=row.id,
         name=row.name,
@@ -549,8 +719,10 @@ def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
     min_req_msat = max(1, int(getattr(settings, "min_request_msat", 1)))
     min_req_usd = float(min_req_msat) / 1_000_000.0
 
-    prompt_price = model.pricing.prompt
-    completion_price = model.pricing.completion
+    # A full context window crosses every long-context threshold.
+    peak = model.pricing.peak()
+    prompt_price = peak.prompt
+    completion_price = peak.completion
 
     if model.top_provider and (
         model.top_provider.context_length or model.top_provider.max_completion_tokens
@@ -611,9 +783,7 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
         min_req_msat = max(1, int(getattr(settings, "min_request_msat", 1)))
         min_req_sats = float(min_req_msat) / 1000.0
 
-        sats = Pricing.parse_obj(
-            {k: v / sats_to_usd for k, v in model.pricing.dict().items()}
-        )
+        sats = model.pricing.scaled(1 / sats_to_usd)
 
         if sats.request <= 0.0:
             sats.request = min_req_sats

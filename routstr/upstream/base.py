@@ -53,7 +53,6 @@ from ..payment.helpers import create_error_response
 from ..payment.image_pricing import produces_images, settle_image_sats
 from ..payment.models import (
     Model,
-    Pricing,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
     allows_cache_pricing_backfill,
@@ -6147,9 +6146,7 @@ class BaseUpstreamProvider:
             if allows_cache_pricing_backfill(self.provider_type)
             else model.pricing
         )
-        adjusted_pricing = Pricing.parse_obj(
-            {k: v * self.provider_fee for k, v in base_pricing.dict().items()}
-        )
+        adjusted_pricing = base_pricing.scaled(self.provider_fee)
 
         temp_model = model.copy(
             update={"pricing": adjusted_pricing, "sats_pricing": None}
@@ -6169,9 +6166,7 @@ class BaseUpstreamProvider:
         The token max-cost formula reads a per-image rate as a per-input-image
         surcharge, reserving a hundred generations for one image.
         """
-        adjusted = Pricing.parse_obj(
-            {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
-        )
+        adjusted = model.pricing.scaled(self.provider_fee)
         adjusted.max_prompt_cost = adjusted.image
         adjusted.max_completion_cost = adjusted.image_output * IMAGES_PER_RESERVATION
         adjusted.max_cost = adjusted.max_prompt_cost + adjusted.max_completion_cost
