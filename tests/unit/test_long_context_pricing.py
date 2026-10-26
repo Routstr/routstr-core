@@ -23,6 +23,7 @@ from routstr.payment.models import (
     Architecture,
     Model,
     Pricing,
+    PricingTier,
     TopProvider,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
@@ -119,8 +120,8 @@ def test_highest_matching_tier_wins() -> None:
         prompt=1.0,
         completion=1.0,
         overrides=[
-            {"min_prompt_tokens": 200000, "prompt": 3.0},
-            {"min_prompt_tokens": 100000, "prompt": 2.0},
+            PricingTier(min_prompt_tokens=200000, prompt=3.0),
+            PricingTier(min_prompt_tokens=100000, prompt=2.0),
         ],
     )
 
@@ -152,7 +153,7 @@ def test_unusable_tier_rate_disqualifies_pricing() -> None:
     pricing = Pricing(
         prompt=1e-7,
         completion=5e-7,
-        overrides=[{"min_prompt_tokens": 100000, "prompt": float("nan")}],
+        overrides=[PricingTier(min_prompt_tokens=100000, prompt=float("nan"))],
     )
 
     assert not has_usable_pricing(pricing)
