@@ -854,7 +854,7 @@ def _price_in_sats(
         usd = Pricing.parse_obj(pricing)
         if allows_cache_pricing_backfill(provider_type):
             usd = backfill_cache_pricing(model_id, usd)
-        usd = Pricing.parse_obj({k: v * provider_fee for k, v in usd.dict().items()})
+        usd = usd.scaled(provider_fee)
         priced = Model(
             id=model_id,
             name=model.get("name") or model_id,
@@ -933,9 +933,7 @@ def apply_model_path_pricing(
             pricing = backfill_cache_pricing(
                 model.forwarded_model_id or row.model_id, pricing
             )
-        pricing = Pricing.parse_obj(
-            {key: float(value) * provider_fee for key, value in pricing.dict().items()}
-        )
+        pricing = pricing.scaled(provider_fee)
         update: dict[str, Any] = {"pricing": pricing, "sats_pricing": None}
         context_length = metadata.get("context_length")
         max_completion_tokens = metadata.get("max_completion_tokens")

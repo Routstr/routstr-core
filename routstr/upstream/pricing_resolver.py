@@ -16,8 +16,12 @@ it into the base provider unchanged.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from ..payment.rates import coerce_rate
+
+if TYPE_CHECKING:
+    from ..payment.models import PricingTier
 
 
 @dataclass
@@ -42,6 +46,8 @@ class ResolvedPricing:
     tokenizer: str = "unknown"
     instruct_type: str | None = None
     is_moderated: bool | None = None
+    # Long-context tiers, USD per token.
+    overrides: list[PricingTier] = field(default_factory=list)
 
 
 def estimate_context_length(model_id: str) -> int:
@@ -79,7 +85,7 @@ def _as_int(value: object) -> int | None:
 def _from_litellm(model_id: str) -> ResolvedPricing | None:
     # Lazy import so the resolver shares the exact lookup semantics used by
     # cache-rate backfill without importing the models module at load time.
-    from ..payment.models import litellm_cost_entry
+    from ..payment.models import litellm_cost_entry, litellm_pricing_tiers
 
     info = litellm_cost_entry(model_id)
     if info is None:
@@ -114,6 +120,7 @@ def _from_litellm(model_id: str) -> ResolvedPricing | None:
         input_cache_read=float(info.get("cache_read_input_token_cost") or 0.0),
         input_cache_write=float(info.get("cache_creation_input_token_cost") or 0.0),
         input_modalities=input_modalities,
+        overrides=litellm_pricing_tiers(info),
     )
 
 
@@ -148,6 +155,8 @@ def _match_openrouter(model_id: str, feed: list[dict]) -> dict | None:
 
 
 def _from_openrouter(model_id: str, feed: list[dict]) -> ResolvedPricing | None:
+    from ..payment.models import parse_pricing_tiers
+
     entry = _match_openrouter(model_id, feed)
     if entry is None:
         return None
@@ -177,6 +186,7 @@ def _from_openrouter(model_id: str, feed: list[dict]) -> ResolvedPricing | None:
         tokenizer=architecture.get("tokenizer") or "unknown",
         instruct_type=architecture.get("instruct_type"),
         is_moderated=top_provider.get("is_moderated"),
+        overrides=parse_pricing_tiers(pricing.get("overrides")),
     )
 
 

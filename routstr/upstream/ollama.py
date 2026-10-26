@@ -224,11 +224,9 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
         Returns:
             Model with provider fee applied to pricing and max costs calculated
         """
-        from ..payment.models import Pricing, _calculate_usd_max_costs
+        from ..payment.models import _calculate_usd_max_costs
 
-        adjusted_pricing = Pricing.parse_obj(
-            {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
-        )
+        adjusted_pricing = model.pricing.scaled(self.provider_fee)
 
         temp_model = model.copy(
             update={"pricing": adjusted_pricing, "sats_pricing": None}
