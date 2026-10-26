@@ -1,10 +1,11 @@
 import hashlib
+import time
 from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlmodel import col, select
+from sqlmodel import col, select, update
 
 from . import refund
 from .auth import (
@@ -22,6 +23,7 @@ from .core.logging import get_logger
 from .core.settings import settings
 from .foreign_mint_swap import swap_in_and_credit
 from .lightning import lightning_router
+from .payment import x_cashu_settlement
 from .wallet import (
     classify_redemption_error,
     credit_balance,
@@ -286,6 +288,65 @@ class RefundRequest(BaseModel):
     lightning_address: str | None = None
 
 
+def _raise_unsettled_x_cashu_refund(in_tx: CashuTransaction) -> NoReturn:
+    """Answer an X-Cashu refund claim for a payment with no stored refund."""
+    state = in_tx.settlement
+    if state == x_cashu_settlement.CHARGED:
+        # token_already_spent tells clients to drop the original token.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "message": "The payment was charged in full; no refund is owed.",
+                    "type": "token_already_spent",
+                    "code": "payment_fully_charged",
+                },
+                "request_id": in_tx.request_id,
+            },
+        )
+    age = int(time.time()) - (in_tx.settlement_at or in_tx.created_at)
+    # A pending payment is refunded by recovery once its request is abandoned.
+    stale = state != x_cashu_settlement.PENDING and (
+        age > x_cashu_settlement.abandoned_after_seconds()
+    )
+    if state is None and stale:
+        # Paid before settlement was tracked: the outcome is unknown.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "message": "No refund was recorded for this payment; contact "
+                    "the operator with this request_id if one is owed.",
+                    "type": "refund_unavailable",
+                    "code": "refund_not_recorded",
+                },
+                "request_id": in_tx.request_id,
+            },
+        )
+    if state == x_cashu_settlement.FAILED or stale:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "message": "The refund for this payment could not be completed; "
+                    "contact the operator with this request_id.",
+                    "type": "refund_failed",
+                    "code": "refund_unresolved",
+                },
+                "request_id": in_tx.request_id,
+            },
+        )
+    logger.debug(
+        "refund_wallet_endpoint: refund pending",
+        extra={"request_id": in_tx.request_id, "settlement": state},
+    )
+    raise HTTPException(
+        status_code=425,
+        detail="Refund is pending; retry shortly.",
+        headers={"Retry-After": "2"},
+    )
+
+
 @router.post("/refund", response_model=None)
 async def refund_wallet_endpoint(
     refund_request: RefundRequest | None = None,
@@ -317,26 +378,31 @@ async def refund_wallet_endpoint(
         )
         out_tx = out_tx_result.first()
         if out_tx is None:
-            # The "in" row exists with a request_id, but the "out" (refund)
-            # row hasn't been written yet — the upstream request is still in
-            # flight and the refund will be minted once it completes. Tell the
-            # client to retry instead of 404ing permanently (race condition
-            # where /v1/wallet/refund is polled before the refund exists).
-            logger.debug(
-                "refund_wallet_endpoint: refund pending (in row exists, out row not yet created)",
-                extra={"request_id": in_tx.request_id},
+            _raise_unsettled_x_cashu_refund(in_tx)
+        if out_tx.swept:
+            raise HTTPException(status_code=410, detail="Refund has been swept")
+
+        # Collect only a token the refund sweeper has not claimed, or the
+        # client could receive a token the node is spending.
+        collected = await session.exec(  # type: ignore[call-overload]
+            update(CashuTransaction)
+            .where(
+                col(CashuTransaction.id) == out_tx.id,
+                col(CashuTransaction.swept) == False,  # noqa: E712
+                col(CashuTransaction.sweep_started_at).is_(None),
             )
+            .values(collected=True)
+        )
+        await session.commit()
+        if not collected.rowcount:
+            await session.refresh(out_tx)
+            if out_tx.swept:
+                raise HTTPException(status_code=410, detail="Refund has been swept")
             raise HTTPException(
                 status_code=425,
                 detail="Refund is pending; retry shortly.",
                 headers={"Retry-After": "2"},
             )
-        if out_tx.swept:
-            raise HTTPException(status_code=410, detail="Refund has been swept")
-
-        out_tx.collected = True
-        session.add(out_tx)
-        await session.commit()
         body: dict[str, str] = {"token": out_tx.token}
         if out_tx.unit == "sat":
             body["sats"] = str(out_tx.amount)

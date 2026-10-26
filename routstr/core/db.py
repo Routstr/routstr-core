@@ -536,6 +536,9 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
 
 class CashuTransaction(SQLModel, table=True):  # type: ignore
     __tablename__ = "cashu_transactions"
+    __table_args__ = (
+        Index("ix_cashu_transactions_settlement", "settlement", "settlement_at"),
+    )
 
     id: str = Field(
         primary_key=True,
@@ -567,6 +570,15 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
         foreign_key="api_keys.hashed_key",
         index=True,
         description="Associated API key hash for wallet history",
+    )
+    settlement: str | None = Field(
+        default=None,
+        description="X-Cashu payment state on the in row: pending, refunding, "
+        "refunded, charged or failed; null for rows written before tracking",
+    )
+    settlement_at: int | None = Field(
+        default=None,
+        description="Unix timestamp of the last settlement state change",
     )
 
 
@@ -687,9 +699,11 @@ async def store_cashu_transaction(
     api_key_hashed_key: str | None = None,
     transaction_id: str | None = None,
     log_failure: bool = True,
+    settlement: str | None = None,
 ) -> bool:
     try:
         async with create_session() as session:
+            created_at = created_at or int(time.time())
             tx = CashuTransaction(
                 id=transaction_id or uuid.uuid4().hex,
                 token=token,
@@ -699,9 +713,11 @@ async def store_cashu_transaction(
                 type=typ,
                 request_id=request_id,
                 collected=collected,
-                created_at=created_at or int(time.time()),
+                created_at=created_at,
                 source=source,
                 api_key_hashed_key=api_key_hashed_key,
+                settlement=settlement,
+                settlement_at=created_at if settlement is not None else None,
             )
             session.add(tx)
             await session.commit()
@@ -733,6 +749,7 @@ async def store_cashu_transaction_with_retry(
     source: str = "x-cashu",
     api_key_hashed_key: str | None = None,
     max_attempts: int = 3,
+    settlement: str | None = None,
 ) -> bool:
     """Retry a critical Cashu transaction write with bounded backoff."""
     transaction_id = hashlib.sha256(f"{typ}\0{token}".encode()).hexdigest()
@@ -752,6 +769,7 @@ async def store_cashu_transaction_with_retry(
                 api_key_hashed_key=api_key_hashed_key,
                 transaction_id=transaction_id,
                 log_failure=False,
+                settlement=settlement,
             )
         except IntegrityError as error:
             try:

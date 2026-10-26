@@ -42,6 +42,7 @@ from ..core.error_scope import (
 )
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
+from ..payment import x_cashu_settlement
 from ..payment.cost_calculation import (
     CostData,
     CostDataError,
@@ -125,11 +126,20 @@ class _XCashuRefundError(Exception):
         self.token = token
 
 
+class _XCashuRefundUnavailable(Exception):
+    """Another settlement of this payment already owns its refund."""
+
+
 class _XCashuRefund:
     def __init__(self, provider: BaseUpstreamProvider) -> None:
         self.provider = provider
         self.token: str | None = None
         self.error: Exception | None = None
+        self._minting: asyncio.Future[str] | None = None
+
+    @property
+    def attempted(self) -> bool:
+        return self._minting is not None
 
     async def send(
         self,
@@ -138,11 +148,23 @@ class _XCashuRefund:
         mint: str | None,
         request_id: str | None = None,
     ) -> str:
-        if self.error is not None:
-            raise self.error
-        if self.token is not None:
-            return self.token
+        if self._minting is None:
+            # Cancellation must not interrupt a mint half way through.
+            self._minting = x_cashu_settlement.run_to_completion(
+                self._mint(amount, unit, mint, request_id)
+            )
+        return await asyncio.shield(self._minting)
+
+    async def _mint(
+        self, amount: int, unit: str, mint: str | None, request_id: str | None
+    ) -> str:
+        claimed = False
         try:
+            claimed = await x_cashu_settlement.claim_refund(request_id)
+            if not claimed:
+                raise _XCashuRefundUnavailable(
+                    "The payment was already settled by another refund"
+                )
             self.token = await self.provider.send_refund(
                 amount, unit, mint, request_id=request_id
             )
@@ -161,8 +183,32 @@ class _XCashuRefund:
                     "error_type": type(error).__name__,
                 },
             )
+            if claimed:
+                await x_cashu_settlement.finish_refund(request_id, refunded=False)
             raise
+        await x_cashu_settlement.finish_refund(request_id, refunded=True)
         return self.token
+
+    async def settle(self, request_id: str | None) -> None:
+        """Record how a request that returned normally left its payment."""
+        if not self.attempted:
+            await x_cashu_settlement.mark_charged(request_id)
+
+    async def settle_cancelled(
+        self, amount: int, unit: str, mint: str | None, request_id: str | None
+    ) -> None:
+        """Refund a cancelled request in full: no response reached the client.
+
+        Every X-Cashu path settles before the response starts. A refund that
+        already started is awaited instead of minting a second one.
+        """
+        try:
+            await self.send(amount, unit, mint, request_id=request_id)
+        except asyncio.CancelledError:
+            # Cancelled again; the mint continues and shutdown drains it.
+            pass
+        except Exception:
+            pass
 
     async def error_response(
         self,
@@ -4842,18 +4888,13 @@ class BaseUpstreamProvider:
                         "response_model": response_json.get("model", "unknown"),
                     },
                 )
-                return Response(
-                    content=json.dumps(
-                        {
-                            "error": {
-                                "message": "Error forwarding request to upstream",
-                                "type": "upstream_error",
-                                "code": response.status_code,
-                            }
-                        }
-                    ),
-                    status_code=response.status_code,
-                    media_type="application/json",
+                # Nothing billable was measured, so the payment is refunded.
+                return await _refund.error_response(
+                    ValueError("cost calculation failed"),
+                    amount,
+                    unit,
+                    mint,
+                    request_id,
                 )
 
             response_headers = _decoded_response_headers(response.headers)
@@ -5315,6 +5356,7 @@ class BaseUpstreamProvider:
                 typ="in",
                 request_id=request_id,
                 collected=True,
+                settlement=x_cashu_settlement.PENDING if request_id else None,
             )
 
             logger.info(
@@ -5322,7 +5364,7 @@ class BaseUpstreamProvider:
                 extra={"amount": amount, "unit": unit, "path": path, "mint": mint},
             )
 
-            return await self.forward_x_cashu_responses_request(
+            result = await self.forward_x_cashu_responses_request(
                 request,
                 path,
                 headers,
@@ -5334,6 +5376,14 @@ class BaseUpstreamProvider:
                 request_body=request_body,
                 _refund=_refund,
             )
+            await _refund.settle(request_id)
+            return result
+        except asyncio.CancelledError:
+            if redeemed:
+                await _refund.settle_cancelled(
+                    amount, unit, mint, getattr(request.state, "request_id", None)
+                )
+            raise
         except Exception as e:
             error_message = str(e)
             logger.error(
@@ -5898,18 +5948,13 @@ class BaseUpstreamProvider:
                         "response_model": response_json.get("model", "unknown"),
                     },
                 )
-                return Response(
-                    content=json.dumps(
-                        {
-                            "error": {
-                                "message": "Error forwarding Responses API request to upstream",
-                                "type": "upstream_error",
-                                "code": response.status_code,
-                            }
-                        }
-                    ),
-                    status_code=response.status_code,
-                    media_type="application/json",
+                # Nothing billable was measured, so the payment is refunded.
+                return await _refund.error_response(
+                    ValueError("cost calculation failed"),
+                    amount,
+                    unit,
+                    mint,
+                    request_id,
                 )
 
             response_headers = _decoded_response_headers(response.headers)
@@ -6066,6 +6111,7 @@ class BaseUpstreamProvider:
                 typ="in",
                 request_id=request_id,
                 collected=True,
+                settlement=x_cashu_settlement.PENDING if request_id else None,
             )
 
             logger.info(
@@ -6073,7 +6119,7 @@ class BaseUpstreamProvider:
                 extra={"amount": amount, "unit": unit, "path": path, "mint": mint},
             )
 
-            return await self.forward_x_cashu_request(
+            result = await self.forward_x_cashu_request(
                 request,
                 path,
                 headers,
@@ -6085,6 +6131,14 @@ class BaseUpstreamProvider:
                 request_body=request_body,
                 _refund=_refund,
             )
+            await _refund.settle(request_id)
+            return result
+        except asyncio.CancelledError:
+            if redeemed:
+                await _refund.settle_cancelled(
+                    amount, unit, mint, getattr(request.state, "request_id", None)
+                )
+            raise
         except Exception as e:
             error_message = str(e)
             logger.error(

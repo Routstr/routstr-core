@@ -242,7 +242,9 @@ async def test_created_refund_survives_storage_failure(api: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_forwarding_cancellation_propagates(api: str) -> None:
+async def test_forwarding_cancellation_refunds_in_full_and_propagates(
+    api: str,
+) -> None:
     provider = BaseUpstreamProvider(base_url="http://upstream", api_key="test")
     client = MagicMock()
     client.aclose = AsyncMock()
@@ -254,11 +256,14 @@ async def test_forwarding_cancellation_propagates(api: str) -> None:
         ),
         patch("routstr.upstream.base.store_cashu_transaction", AsyncMock()),
         patch("routstr.upstream.base.build_x_cashu_client", return_value=client),
-        patch.object(provider, "send_refund", AsyncMock()) as refund,
+        patch.object(
+            provider, "send_refund", AsyncMock(return_value="cashuB")
+        ) as refund,
     ):
         with pytest.raises(asyncio.CancelledError):
             await paid_request(provider, api)
-    refund.assert_not_awaited()
+    # Nothing reached the client, so the whole payment comes back.
+    refund.assert_awaited_once_with(20, "sat", "mint", request_id="refund-request")
     client.aclose.assert_awaited_once()
 
 
