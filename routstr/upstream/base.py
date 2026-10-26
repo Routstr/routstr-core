@@ -3784,7 +3784,7 @@ class BaseUpstreamProvider:
                 completion_path is not None
                 or path.endswith("embeddings")
                 or path.endswith("messages")
-                or path.endswith("messages/count_tokens")
+                or path.rstrip("/").endswith("messages/count_tokens")
                 or path.endswith("systemone")
                 or path.endswith("decisions")
             ):
@@ -3829,7 +3829,7 @@ class BaseUpstreamProvider:
                         finally:
                             await response_handoff.close()
 
-                if path.endswith("messages/count_tokens"):
+                if path.rstrip("/").endswith("messages/count_tokens"):
                     if response.status_code == 200:
                         try:
                             content = await response.aread()

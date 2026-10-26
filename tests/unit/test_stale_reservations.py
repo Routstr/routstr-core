@@ -570,8 +570,12 @@ async def test_local_count_tokens_releases_reservation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path", ["v1/messages/count_tokens", "v1/messages/count_tokens/"]
+)
 async def test_native_count_tokens_is_free_and_releases_reservation(
     session: AsyncSession,
+    path: str,
 ) -> None:
     import httpx
 
@@ -600,7 +604,7 @@ async def test_native_count_tokens_is_free_and_releases_reservation(
     body = b'{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"hi"}]}'
     client = httpx.AsyncClient(
         transport=httpx.MockTransport(
-            lambda request: httpx.Response(200, json={"input_tokens": 9})
+            lambda request: httpx.Response(200, content=b'{"input_tokens":9}')
         )
     )
 
@@ -609,7 +613,7 @@ async def test_native_count_tokens_is_free_and_releases_reservation(
     ):
         response = await AnthropicUpstreamProvider(api_key="sk-test").forward_request(
             MagicMock(),
-            "v1/messages/count_tokens",
+            path,
             {},
             body,
             key,
