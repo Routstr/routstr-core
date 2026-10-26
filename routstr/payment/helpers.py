@@ -272,7 +272,9 @@ async def calculate_discounted_max_cost(
 
         if prompt_token_limit is not None:
             max_prompt_allowed_sats = (
-                prompt_token_limit * model_pricing.prompt * tol_factor
+                prompt_token_limit
+                * model_pricing.for_prompt_tokens(prompt_token_limit).prompt
+                * tol_factor
             )
 
     adjusted = max_cost_for_model
@@ -312,9 +314,13 @@ async def calculate_discounted_max_cost(
         prompt_delta_msats=0,
         completion_delta_msats=0,
     )
+    # Past a long-context threshold both rates rise, so the discount is taken
+    # against the tier the estimated prompt lands in.
+    tier_pricing = model_pricing.for_prompt_tokens(prompt_tokens)
+
     if prompt_tokens > 0:
         estimated_prompt_delta_sats = (
-            max_prompt_allowed_sats - prompt_tokens * model_pricing.prompt
+            max_prompt_allowed_sats - prompt_tokens * tier_pricing.prompt
         )
         if estimated_prompt_delta_sats > 0:
             delta = math.floor(estimated_prompt_delta_sats * 1000)
@@ -351,7 +357,7 @@ async def calculate_discounted_max_cost(
     discounts["completion_cap_used"] = max_tokens_int
     if max_tokens_int is not None:
         estimated_completion_delta_sats = (
-            max_completion_allowed_sats - max_tokens_int * model_pricing.completion
+            max_completion_allowed_sats - max_tokens_int * tier_pricing.completion
         )
         if estimated_completion_delta_sats > 0:
             delta = math.floor(estimated_completion_delta_sats * 1000)

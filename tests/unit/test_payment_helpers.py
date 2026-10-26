@@ -132,6 +132,7 @@ async def test_discounted_max_cost_floors_at_min_request_msat() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 100.0
@@ -191,6 +192,7 @@ async def test_discount_counts_legacy_token_id_prompt() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.0
     pricing.max_prompt_cost = 50.0
@@ -288,6 +290,7 @@ async def test_discount_cannot_be_dodged_by_hiding_prompt_in_tools() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.5
     pricing.completion = 0.01
     pricing.max_prompt_cost = 100.0
@@ -369,6 +372,7 @@ async def test_discounted_max_cost_counts_responses_input_images() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 100.0
@@ -538,6 +542,7 @@ async def test_responses_transform_failure_falls_back_to_worst_case() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 100.0
@@ -584,6 +589,7 @@ async def test_discounted_max_cost_body_max_output_tokens_fallback() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 0.0
@@ -611,6 +617,7 @@ async def test_discounted_max_cost_body_max_completion_tokens_fallback() -> None
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 0.0
@@ -643,6 +650,7 @@ async def test_discounted_max_cost_uses_largest_completion_cap() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 0.0
@@ -675,6 +683,7 @@ async def test_discounted_max_cost_invalid_completion_cap_ignored() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 0.0

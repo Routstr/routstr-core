@@ -222,6 +222,8 @@ async def calculate_cost(
     output_tokens = usage.output_tokens
     cache_read_tokens = usage.cache_read_tokens
     cache_creation_tokens = usage.cache_write_tokens
+    # Long-context tiers key on the whole prompt; ``input_tokens`` excludes cache.
+    prompt_tokens = input_tokens + cache_read_tokens + cache_creation_tokens
 
     # Try USD cost first
     usd_cost = _resolve_usd_cost(usage_data, response_data)
@@ -280,7 +282,10 @@ async def calculate_cost(
             if cache_read_tokens > 0 or cache_creation_tokens > 0:
                 try:
                     reported_rates = _get_pricing_rates(
-                        response_data, model_obj, provider_fee
+                        response_data,
+                        model_obj,
+                        provider_fee,
+                        prompt_tokens,
                     )
                     if reported_rates is not None:
                         cache_pricing_rates = reported_rates[:4]
@@ -326,7 +331,11 @@ async def calculate_cost(
     # Fall back to token-based pricing
     try:
         pricing_rates = _get_pricing_rates(
-            response_data, model_obj, provider_fee, usage.pricing_dimensions
+            response_data,
+            model_obj,
+            provider_fee,
+            prompt_tokens,
+            usage.pricing_dimensions,
         )
     except ValueError as e:
         return CostDataError(message=str(e), code="pricing_error")
@@ -480,6 +489,7 @@ def _get_pricing_rates(
     response_data: dict,
     model_obj: "Model | None",
     provider_fee: float | None,
+    prompt_tokens: int = 0,
     pricing_dimensions: Mapping[str, str] | None = None,
 ) -> tuple[float, float, float, float, str] | None:
     """Get configured rates, falling back to LiteLLM's model cost map.
@@ -487,6 +497,7 @@ def _get_pricing_rates(
     The served ``model_obj`` (when the caller has it) is billed directly;
     otherwise the response's model string is resolved through the alias map,
     which yields the best-ranked candidate rather than the serving one.
+    ``prompt_tokens`` (cache included) selects the long-context tier, if any.
 
     ``pricing_dimensions`` (what the response reported it ran as, e.g. fast
     mode) scale every token rate by the model's usage multipliers. Callers
@@ -502,7 +513,7 @@ def _get_pricing_rates(
         return None
 
     from ..proxy import get_model_instance
-    from .models import litellm_cost_entry
+    from .models import Pricing, litellm_cost_entry, litellm_pricing_tiers
 
     response_model = response_data.get("model", "")
     if model_obj is None:
@@ -515,10 +526,11 @@ def _get_pricing_rates(
 
     if model_obj and model_obj.sats_pricing:
         try:
-            mspp = float(model_obj.sats_pricing.prompt)
-            mspc = float(model_obj.sats_pricing.completion)
-            mscr = float(model_obj.sats_pricing.input_cache_read or 0)
-            mscw = float(model_obj.sats_pricing.input_cache_write or 0)
+            sats_pricing = model_obj.sats_pricing.for_prompt_tokens(prompt_tokens)
+            mspp = float(sats_pricing.prompt)
+            mspc = float(sats_pricing.completion)
+            mscr = float(sats_pricing.input_cache_read or 0)
+            mscw = float(sats_pricing.input_cache_write or 0)
 
             mspp_1k = mspp * 1_000_000.0
             mspc_1k = mspc * 1_000_000.0
@@ -547,14 +559,25 @@ def _get_pricing_rates(
         output_usd = _coerce_usd(pricing.get("output_cost_per_token"))
         if input_usd <= 0 or output_usd <= 0:
             raise ValueError(f"Incomplete LiteLLM pricing for model: {pricing_model}")
+        tiered = Pricing(
+            prompt=input_usd,
+            completion=output_usd,
+            input_cache_read=_coerce_usd(pricing.get("cache_read_input_token_cost")),
+            input_cache_write=_coerce_usd(
+                pricing.get("cache_creation_input_token_cost")
+            ),
+            overrides=litellm_pricing_tiers(pricing),
+        ).for_prompt_tokens(prompt_tokens)
+        input_usd = tiered.prompt
+        output_usd = tiered.completion
 
         if provider_fee is None:
             provider_fee = _resolve_provider_fee(response_model)
         usd_per_sat = sats_usd_price()
         mspp_1k = input_usd * provider_fee * 1_000_000.0 / usd_per_sat
         mspc_1k = output_usd * provider_fee * 1_000_000.0 / usd_per_sat
-        cache_read_usd = _coerce_usd(pricing.get("cache_read_input_token_cost"))
-        cache_write_usd = _coerce_usd(pricing.get("cache_creation_input_token_cost"))
+        cache_read_usd = tiered.input_cache_read
+        cache_write_usd = tiered.input_cache_write
         mscr_1k = (
             cache_read_usd * provider_fee * 1_000_000.0 / usd_per_sat
             if cache_read_usd > 0
