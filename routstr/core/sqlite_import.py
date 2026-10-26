@@ -177,17 +177,29 @@ def _upgrade_schema(database_url: str) -> None:
 
 
 def _upgrade_snapshot(snapshot: Path, revision: str | None) -> str | None:
-    """Bring a snapshot at an older known revision to head; return that revision.
+    """Validate the source revision and upgrade an older known snapshot to head.
 
     Copying old rows into a head schema would skip the data migrations in
-    between. Unknown revisions (another branch) and unversioned files are left
-    to the pre-flight, which refuses anything it cannot place.
+    between. Unknown and unversioned files are refused before PostgreSQL is
+    touched because their schema cannot be placed safely in this Alembic graph.
     """
     url = f"sqlite+aiosqlite:///{snapshot}"
     script = ScriptDirectory.from_config(_alembic_config(url))
     head = script.get_current_head()
     known = {rev.revision for rev in script.walk_revisions()}
-    if revision is None or revision not in known or revision == head:
+    if revision is None:
+        raise MigrationError(
+            "the source SQLite database has no Alembic revision. Start a SQLite "
+            "node of this version on the file once so it is stamped and upgraded, "
+            "then retry the import."
+        )
+    if revision not in known:
+        raise MigrationError(
+            f"the source SQLite database has unknown Alembic revision {revision!r}; "
+            "it comes from another or newer Routstr version. Run that version to "
+            "perform the import, or upgrade this node first."
+        )
+    if revision == head:
         return None
     try:
         _upgrade_schema(url)

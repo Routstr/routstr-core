@@ -1176,6 +1176,63 @@ def test_sqlite_data_moves_to_postgres_without_loss(tmp_path: Path) -> None:
         asyncio.run(_reset_schema())
 
 
+@pytest.mark.parametrize(
+    ("revision", "entrypoint", "message"),
+    [
+        ("deadbeef9999", "script", "another or newer Routstr version"),
+        (None, "startup", "(?i)start a SQLite node of this version"),
+    ],
+)
+def test_import_rejects_unknown_or_unversioned_source_before_touching_postgres(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    revision: str | None,
+    entrypoint: str,
+    message: str,
+) -> None:
+    import sqlite3
+
+    from routstr.core.sqlite_import import MigrationError, import_sqlite_on_startup
+
+    source = _sqlite_source(tmp_path / "keys.db")
+    con = sqlite3.connect(source)
+    if revision is None:
+        con.execute("DELETE FROM alembic_version")
+    else:
+        con.execute("UPDATE alembic_version SET version_num = ?", (revision,))
+    con.commit()
+    con.close()
+
+    asyncio.run(_reset_schema())
+    try:
+        if entrypoint == "script":
+            result = _migrate_script("--source", str(source), "--target", POSTGRES_URL)
+            assert result.returncode == 1
+            assert message in result.stderr
+        else:
+            monkeypatch.setenv("SQLITE_IMPORT_PATH", str(source))
+            with pytest.raises(MigrationError, match=message):
+                asyncio.run(import_sqlite_on_startup(POSTGRES_URL))
+
+        async def _tables() -> list[str]:
+            engine = create_async_engine(POSTGRES_URL)
+            try:
+                async with engine.connect() as conn:
+                    rows = await conn.execute(
+                        text(
+                            "SELECT tablename FROM pg_tables "
+                            "WHERE schemaname = 'public' ORDER BY tablename"
+                        )
+                    )
+                    return list(rows.scalars())
+            finally:
+                await engine.dispose()
+
+        assert asyncio.run(_tables()) == []
+    finally:
+        asyncio.run(_reset_schema())
+
+
 def test_migration_refuses_to_drop_data_the_target_cannot_hold(tmp_path: Path) -> None:
     import sqlite3
 
