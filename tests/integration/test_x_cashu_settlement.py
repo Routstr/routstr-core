@@ -17,7 +17,7 @@ import httpx
 import pytest
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
-from sqlmodel import select, update
+from sqlmodel import col, select, update
 
 from routstr.balance import refund_wallet_endpoint
 from routstr.core.db import AsyncSession, CashuTransaction, store_cashu_transaction
@@ -208,7 +208,7 @@ async def _seed(
 async def _age(session: AsyncSession, seconds: int, token: str = PAYMENT) -> None:
     await session.exec(  # type: ignore[call-overload]
         update(CashuTransaction)
-        .where(CashuTransaction.token == token)
+        .where(col(CashuTransaction.token) == token)
         .values(
             created_at=int(time.time()) - seconds,
             settlement_at=int(time.time()) - seconds,
@@ -662,7 +662,7 @@ async def test_refund_claimed_by_the_sweeper_is_not_handed_out(
     )
     await integration_session.exec(  # type: ignore[call-overload]
         update(CashuTransaction)
-        .where(CashuTransaction.token == "cashuBchange")
+        .where(col(CashuTransaction.token) == "cashuBchange")
         .values(sweep_started_at=int(time.time()))
     )
     await integration_session.commit()

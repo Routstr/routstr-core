@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import AsyncIterator
 
 import uvicorn
 from starlette.applications import Starlette
@@ -65,7 +66,7 @@ async def chat(request: Request) -> Response:
         await asyncio.sleep(DELAY)
     if body.get("stream"):
 
-        async def events():  # type: ignore[no-untyped-def]
+        async def events() -> AsyncIterator[str]:
             chunk = {
                 "id": "c1",
                 "object": "chat.completion.chunk",
