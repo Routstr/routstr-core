@@ -2798,11 +2798,20 @@ class BaseUpstreamProvider:
                                                     or 0
                                                 ),
                                             )
-                                            inference_geo = usage.get("inference_geo")
-                                            speed = usage.get("speed")
+                                            inference_geo = inference_geo or usage.get(
+                                                "inference_geo"
+                                            )
+                                            speed = speed or usage.get("speed")
                                             _absorb_usd(usage)
 
                                         if usage := data.get("usage"):
+                                            # Not every stream states these on
+                                            # `message_start`; keep the first
+                                            # value seen on either event.
+                                            inference_geo = inference_geo or usage.get(
+                                                "inference_geo"
+                                            )
+                                            speed = speed or usage.get("speed")
                                             input_tokens = max(
                                                 input_tokens,
                                                 usage.get("input_tokens", 0),
