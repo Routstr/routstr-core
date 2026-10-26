@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from routstr.core.settings import settings
-from routstr.payment.models import Model
+from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream import usage_multiplier_sources
 from routstr.upstream.anthropic import AnthropicUpstreamProvider
 from routstr.upstream.usage_multiplier_sources import (
@@ -143,13 +143,14 @@ def _model(model_id: str) -> Model:
         created=0,
         description="",
         context_length=200000,
-        architecture={
-            "modality": "text->text",
-            "input_modalities": ["text"],
-            "output_modalities": ["text"],
-            "tokenizer": "Claude",
-        },
-        pricing={"prompt": 0.000004, "completion": 0.00002},
+        architecture=Architecture(
+            modality="text->text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="Claude",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.000004, completion=0.00002),
     )
 
 

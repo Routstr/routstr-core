@@ -407,16 +407,14 @@ async def test_reported_cost_is_not_multiplied_again(model_pricing: Mock) -> Non
     """An upstream that reports its own charge (OpenRouter's ``usage.cost``)
     already priced fast mode; the multiplier must not apply on top."""
     model_pricing.usage_multipliers = ANTHROPIC_MULTIPLIERS
-    response = {
-        "model": "anthropic/claude-opus-5.5",
-        "usage": {
-            "prompt_tokens": 300,
-            "completion_tokens": 100,
-            "cost": 0.0024,
-            "speed": "fast",
-        },
+    usage = {
+        "prompt_tokens": 300,
+        "completion_tokens": 100,
+        "cost": 0.0024,
+        "speed": "fast",
     }
-    unmultiplied = dict(response, usage={**response["usage"], "speed": "standard"})
+    response = {"model": "anthropic/claude-opus-5.5", "usage": usage}
+    unmultiplied = {**response, "usage": {**usage, "speed": "standard"}}
 
     fast = await calculate_cost(
         response, max_cost=10**7, model_obj=model_pricing, provider_fee=1.0
