@@ -6421,7 +6421,8 @@ class BaseUpstreamProvider:
             not self._upstream_catalog
             or (
                 self._upstream_catalog_fetched_at is not None
-                and snapshot[1] >= self._upstream_catalog_fetched_at
+                # Whole seconds: on a tie the shared copy is not known to be newer.
+                and snapshot[1] > self._upstream_catalog_fetched_at
             )
         )
         fallback_fetched_at: int | None
