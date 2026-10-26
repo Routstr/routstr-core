@@ -1267,6 +1267,7 @@ async def forward_ehbp_x_cashu_request(
             minting = x_cashu_settlement.run_to_completion(mint_refund(refund_amount))
         return await asyncio.shield(minting)
 
+    x_cashu_settlement.payment_started()
     try:
         amount, unit, mint = await recieve_token(x_cashu_token)
         redeemed = True
@@ -1441,8 +1442,17 @@ async def forward_ehbp_x_cashu_request(
 
             if refund_amount > 0:
                 response_headers["X-Cashu"] = await refund(refund_amount)
-            else:
-                await x_cashu_settlement.mark_charged(request_id)
+            elif not await x_cashu_settlement.mark_charged(request_id):
+                return create_error_response(
+                    "internal_error",
+                    "The payment could not be settled, so the response was "
+                    "withheld. Claim the refund at /v1/balance/refund with the "
+                    "original X-Cashu token.",
+                    503,
+                    request=request,
+                    code="payment_settlement_failed",
+                    error_scope=ERROR_SCOPE_NODE,
+                )
 
             async def _stream_body_xcashu() -> AsyncIterator[bytes]:
                 yield resp.body
@@ -1610,3 +1620,5 @@ async def forward_ehbp_x_cashu_request(
             token=x_cashu_token if not redeemed else None,
             error_scope=None if not redeemed else ERROR_SCOPE_UPSTREAM,
         )
+    finally:
+        x_cashu_settlement.payment_finished()

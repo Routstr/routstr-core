@@ -189,10 +189,14 @@ class _XCashuRefund:
         await x_cashu_settlement.finish_refund(request_id, refunded=True)
         return self.token
 
-    async def settle(self, request_id: str | None) -> None:
-        """Record how a request that returned normally left its payment."""
-        if not self.attempted:
-            await x_cashu_settlement.mark_charged(request_id)
+    async def settle(self, request_id: str | None) -> bool:
+        """Record how a request that returned normally left its payment.
+
+        False means the response must be withheld: its charge is not durable.
+        """
+        if self.attempted:
+            return True
+        return await x_cashu_settlement.mark_charged(request_id)
 
     async def settle_cancelled(
         self, amount: int, unit: str, mint: str | None, request_id: str | None
@@ -318,6 +322,18 @@ class _XCashuRefund:
             headers=headers,
             media_type=media_type,
         )
+
+
+def _x_cashu_unsettled_response(request: Request) -> Response:
+    return create_error_response(
+        "internal_error",
+        "The payment could not be settled, so the response was withheld. "
+        "Claim the refund at /v1/balance/refund with the original X-Cashu token.",
+        503,
+        request=request,
+        code="payment_settlement_failed",
+        error_scope=ERROR_SCOPE_NODE,
+    )
 
 
 CostMetadata = CostData | MaxCostData | dict[str, Any]
@@ -5333,6 +5349,7 @@ class BaseUpstreamProvider:
 
         _refund = _XCashuRefund(self)
         redeemed = False
+        x_cashu_settlement.payment_started()
         try:
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
@@ -5376,7 +5393,8 @@ class BaseUpstreamProvider:
                 request_body=request_body,
                 _refund=_refund,
             )
-            await _refund.settle(request_id)
+            if not await _refund.settle(request_id):
+                return _x_cashu_unsettled_response(request)
             return result
         except asyncio.CancelledError:
             if redeemed:
@@ -5424,6 +5442,8 @@ class BaseUpstreamProvider:
                 token=echo_token,
                 code=error_code,
             )
+        finally:
+            x_cashu_settlement.payment_finished()
 
     async def forward_x_cashu_responses_request(
         self,
@@ -6088,6 +6108,7 @@ class BaseUpstreamProvider:
 
         _refund = _XCashuRefund(self)
         redeemed = False
+        x_cashu_settlement.payment_started()
         try:
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
@@ -6131,7 +6152,8 @@ class BaseUpstreamProvider:
                 request_body=request_body,
                 _refund=_refund,
             )
-            await _refund.settle(request_id)
+            if not await _refund.settle(request_id):
+                return _x_cashu_unsettled_response(request)
             return result
         except asyncio.CancelledError:
             if redeemed:
@@ -6180,6 +6202,8 @@ class BaseUpstreamProvider:
                 token=echo_token,
                 code=error_code,
             )
+        finally:
+            x_cashu_settlement.payment_finished()
 
     def _apply_provider_fee_to_model(self, model: Model) -> Model:
         """Apply provider fee to model's USD pricing and calculate max costs.

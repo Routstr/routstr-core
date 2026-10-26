@@ -29,7 +29,12 @@ from ..core.db import (
     store_cashu_transaction_with_retry,
 )
 from ..core.settings import settings
-from ..wallet import send_token, token_mint_url
+from ..wallet import (
+    recieve_token,
+    send_token,
+    token_mint_url,
+    wallet_operation_guard,
+)
 
 logger = get_logger(__name__)
 
@@ -47,6 +52,9 @@ RECOVERY_MARGIN_SECONDS = 60
 T = TypeVar("T")
 
 _settling: set[asyncio.Future[object]] = set()
+# Requests holding a redeemed payment. Uvicorn cancels them at shutdown and
+# starts lifespan shutdown without waiting for their refund handlers to run.
+_paying: set[asyncio.Future[object]] = set()
 
 
 def abandoned_after_seconds() -> float:
@@ -107,24 +115,36 @@ async def finish_refund(request_id: str | None, refunded: bool) -> None:
         )
 
 
-async def mark_charged(request_id: str | None) -> None:
-    """Record that the payment was kept in full, so recovery never refunds it."""
+async def mark_charged(request_id: str | None) -> bool:
+    """Record that the payment was kept in full, so recovery never refunds it.
+
+    False means the charge is not durable, or recovery already took over the
+    payment, so the response must not be delivered.
+    """
     if request_id is None:
-        return
+        return True
     for attempt in range(3):
         try:
-            await _transition(request_id, (PENDING,), CHARGED)
-            return
+            if await _transition(request_id, (PENDING,), CHARGED):
+                return True
+            if not await _is_tracked(request_id):
+                return True
+            logger.error(
+                "X-Cashu payment was settled elsewhere before it was charged",
+                extra={"request_id": request_id},
+            )
+            return False
         except Exception:
             if attempt == 2:
                 logger.critical(
-                    "Failed to record charged X-Cashu payment; recovery will "
-                    "refund it after the request lifetime",
+                    "Failed to record charged X-Cashu payment; withholding the "
+                    "response, recovery will refund it",
                     extra={"request_id": request_id},
                     exc_info=True,
                 )
-                return
+                return False
             await asyncio.sleep(0.25 * 2**attempt)
+    return False
 
 
 def run_to_completion(work: Awaitable[T]) -> asyncio.Future[T]:
@@ -140,16 +160,36 @@ def run_to_completion(work: Awaitable[T]) -> asyncio.Future[T]:
     return task
 
 
+def payment_started() -> None:
+    if (task := asyncio.current_task()) is not None:
+        _paying.add(task)  # type: ignore[arg-type]
+
+
+def payment_finished() -> None:
+    if (task := asyncio.current_task()) is not None:
+        _paying.discard(task)  # type: ignore[arg-type]
+
+
 async def drain_settlements(timeout: float) -> None:
-    if not _settling:
-        return
-    pending = set(_settling)
-    logger.info("Waiting for X-Cashu settlements", extra={"count": len(pending)})
-    _, unfinished = await asyncio.wait(pending, timeout=timeout)
-    if unfinished:
-        logger.error(
-            "X-Cashu settlements still running at shutdown; recovery resolves them",
-            extra={"count": len(unfinished)},
+    """Let paid requests and their refunds settle before the loop stops."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    logged = False
+    while pending := {task for task in _paying | _settling if not task.done()}:
+        if not logged:
+            logger.info(
+                "Waiting for X-Cashu settlements", extra={"count": len(pending)}
+            )
+            logged = True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.error(
+                "X-Cashu settlements still running at shutdown; recovery resolves them",
+                extra={"count": len(pending)},
+            )
+            return
+        await asyncio.wait(
+            pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
         )
 
 
@@ -185,13 +225,7 @@ async def _refund_abandoned(payment: CashuTransaction) -> bool:
             request_id=request_id,
         )
     except Exception:
-        logger.critical(
-            "Refund token for abandoned X-Cashu payment was minted but not "
-            "stored; manual reconciliation required",
-            extra={"request_id": request_id, "amount": payment.amount},
-            exc_info=True,
-        )
-        await finish_refund(request_id, refunded=False)
+        await _reclaim_unstored_refund(payment, token)
         return False
     await finish_refund(request_id, refunded=True)
     logger.warning(
@@ -204,6 +238,38 @@ async def _refund_abandoned(payment: CashuTransaction) -> bool:
         },
     )
     return True
+
+
+async def _reclaim_unstored_refund(payment: CashuTransaction, token: str) -> None:
+    """Take back a refund token that never left this process and retry later."""
+    request_id = payment.request_id
+    try:
+        async with wallet_operation_guard():
+            await recieve_token(token)
+    except Exception:
+        logger.critical(
+            "Refund token for abandoned X-Cashu payment was minted but neither "
+            "stored nor reclaimed; manual reconciliation required",
+            extra={"request_id": request_id, "amount": payment.amount},
+            exc_info=True,
+        )
+        await finish_refund(request_id, refunded=False)
+        return
+    logger.error(
+        "Could not store the refund for an abandoned X-Cashu payment; "
+        "reclaimed the token and will retry",
+        extra={"request_id": request_id, "amount": payment.amount},
+    )
+    try:
+        assert request_id is not None
+        await _transition(request_id, (REFUNDING,), PENDING)
+    except Exception:
+        logger.critical(
+            "Reclaimed an unstored X-Cashu refund but could not reopen the "
+            "payment; manual reconciliation required",
+            extra={"request_id": request_id, "amount": payment.amount},
+            exc_info=True,
+        )
 
 
 async def _close_stale_refund(payment: CashuTransaction) -> None:
@@ -250,7 +316,10 @@ async def recover_abandoned_payments() -> int:
     for payment in payments:
         try:
             if payment.settlement == PENDING:
-                refunded += await _refund_abandoned(payment)
+                # Shutdown must not interrupt a mint half way through.
+                refunded += await asyncio.shield(
+                    run_to_completion(_refund_abandoned(payment))
+                )
             else:
                 await _close_stale_refund(payment)
         except Exception:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -96,13 +96,16 @@ def _request(api: str, request_id: str = "req-876") -> Request:
     return request
 
 
-def _client(response: httpx.Response | BaseException) -> MagicMock:
+Upstream = httpx.Response | BaseException | Callable[..., Awaitable[Any]]
+
+
+def _client(response: Upstream) -> MagicMock:
     client = MagicMock()
     client.aclose = AsyncMock()
-    if isinstance(response, BaseException):
-        client.send = AsyncMock(side_effect=response)
-    else:
+    if isinstance(response, httpx.Response):
         client.send = AsyncMock(return_value=response)
+    else:
+        client.send = AsyncMock(side_effect=response)
     return client
 
 
@@ -115,7 +118,7 @@ def _completion() -> httpx.Response:
 
 async def _pay(
     api: str,
-    upstream: httpx.Response | BaseException,
+    upstream: Upstream,
     cost_sats: int | None = 5,
     request_id: str = "req-876",
 ) -> Any:
@@ -401,6 +404,115 @@ async def test_live_refund_loses_to_recovery_without_minting(
     assert await _refunds(integration_session) == [AMOUNT]
 
 
+async def test_full_charge_is_withheld_when_recovery_already_refunded(
+    wallet: FakeWallet, integration_session: AsyncSession, api: str
+) -> None:
+    async def recovered_first(*_: Any, **__: Any) -> Any:
+        await _age(integration_session, STALE, token=PAYMENT)
+        assert await xs.recover_abandoned_payments() == 1
+        return _completion()
+
+    response = await _pay(api, recovered_first, cost_sats=AMOUNT)
+
+    # The client already has its money back, so it must not get the answer too.
+    assert response.status_code == 503
+    assert json.loads(bytes(response.body))["error"]["code"] == (
+        "payment_settlement_failed"
+    )
+    assert wallet.mints == [AMOUNT]
+    assert (await _claim(integration_session))["sats"] == str(AMOUNT)
+
+
+async def test_full_charge_is_withheld_when_it_cannot_be_recorded(
+    wallet: FakeWallet, integration_session: AsyncSession, api: str
+) -> None:
+    real_transition = xs._transition
+
+    async def charge_fails(request_id: str, from_states: Any, to: str) -> bool:
+        if to == xs.CHARGED:
+            raise RuntimeError("database unavailable")
+        return await real_transition(request_id, from_states, to)
+
+    with patch.object(xs, "_transition", charge_fails):
+        response = await _pay(api, _completion(), cost_sats=AMOUNT)
+
+    assert response.status_code == 503
+    assert (await _payment(integration_session)).settlement == xs.PENDING
+
+    # Nothing was delivered, so recovery refunds it once.
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 1
+    assert await xs.recover_abandoned_payments() == 0
+    assert wallet.mints == [AMOUNT]
+
+
+async def test_shutdown_does_not_interrupt_a_recovery_mint(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    await _seed(integration_session, settlement=xs.PENDING, age=STALE)
+    wallet.gate = asyncio.Event()
+    recovery = asyncio.create_task(xs.recover_abandoned_payments())
+    await asyncio.wait_for(wallet.started.wait(), 5)
+
+    # Lifespan shutdown cancels the periodic task, then drains settlements.
+    recovery.cancel()
+    drain = asyncio.create_task(xs.drain_settlements(timeout=5))
+    await asyncio.sleep(0.05)
+    wallet.gate.set()
+    await drain
+
+    assert wallet.mints == [AMOUNT]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+    assert await _refunds(integration_session) == [AMOUNT]
+
+
+async def test_unstored_recovery_refund_is_reclaimed_and_retried(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    await _seed(integration_session, settlement=xs.PENDING, age=STALE)
+    reclaim = AsyncMock(return_value=(AMOUNT, "sat", MINT))
+    with (
+        patch.object(
+            xs,
+            "store_cashu_transaction_with_retry",
+            AsyncMock(side_effect=RuntimeError("database unavailable")),
+        ),
+        patch.object(xs, "recieve_token", reclaim),
+    ):
+        assert await xs.recover_abandoned_payments() == 0
+
+    reclaim.assert_awaited_once_with(f"cashuBrefund1x{AMOUNT}")
+    assert (await _payment(integration_session)).settlement == xs.PENDING
+    assert await _refunds(integration_session) == []
+
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 1
+    assert await _refunds(integration_session) == [AMOUNT]
+    assert (await _claim(integration_session))["token"] == f"cashuBrefund2x{AMOUNT}"
+
+
+async def test_unstored_refund_that_cannot_be_reclaimed_is_terminal(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    await _seed(integration_session, settlement=xs.PENDING, age=STALE)
+    with (
+        patch.object(
+            xs,
+            "store_cashu_transaction_with_retry",
+            AsyncMock(side_effect=RuntimeError("database unavailable")),
+        ),
+        patch.object(
+            xs, "recieve_token", AsyncMock(side_effect=RuntimeError("mint down"))
+        ),
+    ):
+        assert await xs.recover_abandoned_payments() == 0
+
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 0
+    assert wallet.mints == [AMOUNT]
+
+
 async def test_failed_recovery_mint_is_terminal(
     wallet: FakeWallet, integration_session: AsyncSession
 ) -> None:
@@ -522,6 +634,34 @@ async def _payment_out(session: AsyncSession) -> CashuTransaction:
 # --- shutdown -----------------------------------------------------------------
 
 
+async def test_shutdown_drain_waits_for_cancelled_paid_requests(
+    wallet: FakeWallet, integration_session: AsyncSession, api: str
+) -> None:
+    async def hang(*_: Any, **__: Any) -> Any:
+        await asyncio.sleep(3600)
+
+    task = asyncio.create_task(_pay(api, hang))
+    while (await _payment_or_none(integration_session)) is None:
+        await asyncio.sleep(0.01)
+
+    # Uvicorn cancels the request and runs lifespan shutdown straight away,
+    # before the request's refund handler has had a chance to run.
+    task.cancel()
+    await xs.drain_settlements(timeout=5)
+
+    assert task.done()
+    assert wallet.mints == [AMOUNT]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+
+
+async def _payment_or_none(session: AsyncSession) -> CashuTransaction | None:
+    session.expire_all()
+    result = await session.exec(
+        select(CashuTransaction).where(CashuTransaction.type == "in")
+    )
+    return result.first()
+
+
 async def test_shutdown_drain_waits_for_started_refunds() -> None:
     finished = asyncio.Event()
 
@@ -616,6 +756,18 @@ async def test_ehbp_change_is_refunded(
     assert response.headers["X-Cashu"] == "cashuBrefund1x15"
     assert (await _payment(integration_session)).settlement == xs.REFUNDED
     assert (await _claim(integration_session))["sats"] == "15"
+
+
+async def test_ehbp_full_charge_is_withheld_when_it_cannot_be_recorded(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    with patch.object(xs, "mark_charged", AsyncMock(return_value=False)):
+        response = await _ehbp_pay(
+            AsyncMock(return_value=_ehbp_ok()), cost_msats=AMOUNT * 1000
+        )
+
+    assert response.status_code == 503
+    assert b"ciphertext" not in bytes(response.body)
 
 
 async def test_ehbp_cancellation_refunds_in_full(
