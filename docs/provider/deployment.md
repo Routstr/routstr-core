@@ -195,15 +195,15 @@ starts a **postgres** service (PostgreSQL 16, data in the `postgres-data`
 volume, not published to the host) and points the node at it:
 
 ```bash
-# .env — URL-safe, it becomes part of DATABASE_URL
-POSTGRES_PASSWORD=$(openssl rand -hex 32)
+# Generate this once; the URL-safe value becomes part of DATABASE_URL.
+echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> .env
 
 docker compose -f compose.yml -f compose.postgres.yml up -d
 # or: docker compose -f compose.node.yml -f compose.postgres.yml up -d
 ```
 
-Pass the same `-f` files to every later `docker compose` command (`logs`,
-`exec`, `restart`, `down`).
+Keep the same password across restarts, and pass the same `-f` files to every
+later `docker compose` command (`logs`, `exec`, `restart`, `down`).
 
 On the first boot an existing `keys.db` is copied into the empty database, then
 renamed to `keys.db.imported-<timestamp>`; later boots skip the import. The copy
