@@ -554,6 +554,7 @@ class BaseUpstreamProvider:
     # Last non-empty catalog this worker obtained, before DB overrides and fees.
     # Only ever rebound, never mutated, so the class-level default is safe.
     _upstream_catalog: list[Model] = []
+    _upstream_catalog_fetched_at: int | None = None
     _upstream_catalog_config_hash: str | None = None
 
     def __init__(self, base_url: str, api_key: str, provider_fee: float = 1.01):
@@ -6384,6 +6385,7 @@ class BaseUpstreamProvider:
 
         if self._upstream_catalog_config_hash != config_hash:
             self._upstream_catalog = []
+            self._upstream_catalog_fetched_at = None
             self._restore_catalog_state([])
             self._upstream_catalog_config_hash = config_hash
 
@@ -6396,6 +6398,7 @@ class BaseUpstreamProvider:
         ):
             self._restore_catalog_state(snapshot[0])
             self._upstream_catalog = snapshot[0]
+            self._upstream_catalog_fetched_at = snapshot[1]
             return snapshot[0]
 
         try:
@@ -6408,22 +6411,38 @@ class BaseUpstreamProvider:
             )
             fetched = []
         if fetched:
+            fetched_at = int(time.time())
             await save_snapshot(provider_id, config_hash, fetched)
             self._upstream_catalog = fetched
+            self._upstream_catalog_fetched_at = fetched_at
             return fetched
 
-        fallback = snapshot[0] if snapshot is not None else self._upstream_catalog
+        use_shared = snapshot is not None and (
+            not self._upstream_catalog
+            or (
+                self._upstream_catalog_fetched_at is not None
+                and snapshot[1] >= self._upstream_catalog_fetched_at
+            )
+        )
+        fallback_fetched_at: int | None
+        if use_shared:
+            assert snapshot is not None
+            fallback, fallback_fetched_at = snapshot
+        else:
+            fallback = self._upstream_catalog
+            fallback_fetched_at = self._upstream_catalog_fetched_at
         if fallback:
             logger.warning(
                 "Model fetch returned nothing, keeping last good catalog",
                 extra={
                     "provider": self.provider_type or self.base_url,
                     "models": len(fallback),
-                    "source": "shared" if snapshot is not None else "local",
+                    "source": "shared" if use_shared else "local",
                 },
             )
             self._restore_catalog_state(fallback)
             self._upstream_catalog = fallback
+            self._upstream_catalog_fetched_at = fallback_fetched_at
         return fallback
 
     def get_cached_models(self) -> list[Model]:
