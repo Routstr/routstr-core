@@ -15,6 +15,9 @@ def _untracked_x_cashu_settlement(monkeypatch: pytest.MonkeyPatch) -> Iterator[N
     async def no_transition(*_: object) -> bool:
         return False
 
+    async def untracked(*_: object) -> None:
+        return None
+
     monkeypatch.setattr(x_cashu_settlement, "_transition", no_transition)
-    monkeypatch.setattr(x_cashu_settlement, "_is_tracked", no_transition)
+    monkeypatch.setattr(x_cashu_settlement, "_settlement_state", untracked)
     yield

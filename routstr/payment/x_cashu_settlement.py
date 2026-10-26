@@ -80,13 +80,25 @@ async def _transition(request_id: str, from_states: Iterable[str], to: str) -> b
         return bool(result.rowcount)
 
 
-async def _is_tracked(request_id: str) -> bool:
+async def _settlement_state(request_id: str) -> str | None:
+    """The payment's state, or None when it is not tracked."""
     async with create_session() as session:
         result = await session.exec(
-            select(CashuTransaction.id).where(
+            select(CashuTransaction.settlement).where(
                 CashuTransaction.type == "in",
                 CashuTransaction.request_id == request_id,
                 col(CashuTransaction.settlement).is_not(None),
+            )
+        )
+        return result.first()
+
+
+async def _has_stored_refund(request_id: str) -> bool:
+    async with create_session() as session:
+        result = await session.exec(
+            select(CashuTransaction.id).where(
+                CashuTransaction.type == "out",
+                CashuTransaction.request_id == request_id,
             )
         )
         return result.first() is not None
@@ -99,7 +111,7 @@ async def claim_refund(request_id: str | None) -> bool:
     if await _transition(request_id, (PENDING,), REFUNDING):
         return True
     # Payments without a tracked in row keep the behaviour from before tracking.
-    return not await _is_tracked(request_id)
+    return await _settlement_state(request_id) is None
 
 
 async def finish_refund(request_id: str | None, refunded: bool) -> None:
@@ -127,7 +139,8 @@ async def mark_charged(request_id: str | None) -> bool:
         try:
             if await _transition(request_id, (PENDING,), CHARGED):
                 return True
-            if not await _is_tracked(request_id):
+            # A retry finds the state an earlier, unacknowledged commit wrote.
+            if await _settlement_state(request_id) in (None, CHARGED):
                 return True
             logger.error(
                 "X-Cashu payment was settled elsewhere before it was charged",
@@ -225,8 +238,20 @@ async def _refund_abandoned(payment: CashuTransaction) -> bool:
             request_id=request_id,
         )
     except Exception:
-        await _reclaim_unstored_refund(payment, token)
-        return False
+        # The write may have committed before failing to acknowledge it.
+        try:
+            stored = await _has_stored_refund(request_id)
+        except Exception:
+            logger.critical(
+                "Could not tell whether the refund for an abandoned X-Cashu "
+                "payment was stored; manual reconciliation required",
+                extra={"request_id": request_id, "amount": payment.amount},
+                exc_info=True,
+            )
+            return False
+        if not stored:
+            await _reclaim_unstored_refund(payment, token)
+            return False
     await finish_refund(request_id, refunded=True)
     logger.warning(
         "Refunded abandoned X-Cashu payment",
@@ -260,29 +285,26 @@ async def _reclaim_unstored_refund(payment: CashuTransaction, token: str) -> Non
         "reclaimed the token and will retry",
         extra={"request_id": request_id, "amount": payment.amount},
     )
-    try:
-        assert request_id is not None
-        await _transition(request_id, (REFUNDING,), PENDING)
-    except Exception:
-        logger.critical(
-            "Reclaimed an unstored X-Cashu refund but could not reopen the "
-            "payment; manual reconciliation required",
-            extra={"request_id": request_id, "amount": payment.amount},
-            exc_info=True,
-        )
+    assert request_id is not None
+    for attempt in range(3):
+        try:
+            if await _transition(request_id, (REFUNDING,), PENDING):
+                return
+            break
+        except Exception:
+            if attempt < 2:
+                await asyncio.sleep(0.25 * 2**attempt)
+    logger.critical(
+        "Reclaimed an unstored X-Cashu refund but could not reopen the payment; "
+        "the funds are in the node wallet, manual reconciliation required",
+        extra={"request_id": request_id, "amount": payment.amount},
+    )
 
 
 async def _close_stale_refund(payment: CashuTransaction) -> None:
     request_id = payment.request_id
     assert request_id is not None
-    async with create_session() as session:
-        result = await session.exec(
-            select(CashuTransaction.id).where(
-                CashuTransaction.type == "out",
-                CashuTransaction.request_id == request_id,
-            )
-        )
-        stored = result.first() is not None
+    stored = await _has_stored_refund(request_id)
     if not await _transition(request_id, (REFUNDING,), REFUNDED if stored else FAILED):
         return
     if not stored:

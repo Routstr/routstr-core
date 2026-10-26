@@ -446,6 +446,28 @@ async def test_full_charge_is_withheld_when_it_cannot_be_recorded(
     assert wallet.mints == [AMOUNT]
 
 
+async def test_unacknowledged_charge_commit_still_delivers(
+    wallet: FakeWallet, integration_session: AsyncSession, api: str
+) -> None:
+    real_transition = xs._transition
+    failed = False
+
+    async def commit_then_fail(request_id: str, from_states: Any, to: str) -> bool:
+        nonlocal failed
+        changed = await real_transition(request_id, from_states, to)
+        if to == xs.CHARGED and not failed:
+            failed = True
+            raise RuntimeError("connection lost after commit")
+        return changed
+
+    with patch.object(xs, "_transition", commit_then_fail):
+        response = await _pay(api, _completion(), cost_sats=AMOUNT)
+
+    # The charge is durable, so the paid response is delivered, not withheld.
+    assert response.status_code == 200
+    assert (await _payment(integration_session)).settlement == xs.CHARGED
+
+
 async def test_shutdown_does_not_interrupt_a_recovery_mint(
     wallet: FakeWallet, integration_session: AsyncSession
 ) -> None:
@@ -489,6 +511,55 @@ async def test_unstored_recovery_refund_is_reclaimed_and_retried(
     assert await xs.recover_abandoned_payments() == 1
     assert await _refunds(integration_session) == [AMOUNT]
     assert (await _claim(integration_session))["token"] == f"cashuBrefund2x{AMOUNT}"
+
+
+async def test_unacknowledged_refund_commit_is_never_reclaimed(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    await _seed(integration_session, settlement=xs.PENDING, age=STALE)
+
+    async def commit_then_fail(**kwargs: Any) -> bool:
+        await store_cashu_transaction(**kwargs)
+        raise RuntimeError("connection lost after commit")
+
+    reclaim = AsyncMock()
+    with (
+        patch.object(xs, "store_cashu_transaction_with_retry", commit_then_fail),
+        patch.object(xs, "recieve_token", reclaim),
+    ):
+        assert await xs.recover_abandoned_payments() == 1
+
+    reclaim.assert_not_awaited()
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+    assert (await _claim(integration_session))["token"] == f"cashuBrefund1x{AMOUNT}"
+
+
+async def test_reclaimed_refund_reopens_despite_a_transient_failure(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    await _seed(integration_session, settlement=xs.PENDING, age=STALE)
+    real_transition = xs._transition
+    failed = False
+
+    async def reopen_fails_once(request_id: str, from_states: Any, to: str) -> bool:
+        nonlocal failed
+        if to == xs.PENDING and not failed:
+            failed = True
+            raise RuntimeError("database unavailable")
+        return await real_transition(request_id, from_states, to)
+
+    with (
+        patch.object(
+            xs,
+            "store_cashu_transaction_with_retry",
+            AsyncMock(side_effect=RuntimeError("database unavailable")),
+        ),
+        patch.object(xs, "recieve_token", AsyncMock()),
+        patch.object(xs, "_transition", reopen_fails_once),
+    ):
+        assert await xs.recover_abandoned_payments() == 0
+
+    assert (await _payment(integration_session)).settlement == xs.PENDING
 
 
 async def test_unstored_refund_that_cannot_be_reclaimed_is_terminal(
