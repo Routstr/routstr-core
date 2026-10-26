@@ -120,10 +120,14 @@ class Pricing(BaseModel):
     def _coerce_overrides(cls, value: object) -> list[PricingTier]:
         return parse_pricing_tiers(value)
 
+    def dict(self, **kwargs: object) -> dict:
+        # Untiered pricing omits the field so the catalog stays additive.
+        return _drop_empty_overrides(super().dict(**kwargs))  # type: ignore[arg-type]
+
     def scaled(self, factor: float) -> "Pricing":
         """Every rate, tiers included, multiplied by ``factor`` (fee, sats rate)."""
         data = self.dict()
-        tiers = data.pop("overrides")
+        tiers = data.pop("overrides", [])
         scaled: dict = {key: float(rate) * factor for key, rate in data.items()}
         scaled["overrides"] = [
             {
@@ -169,6 +173,12 @@ class Pricing(BaseModel):
                 for field in TIER_RATE_FIELDS
             }
         )
+
+
+def _drop_empty_overrides(pricing: dict) -> dict:
+    if not pricing.get("overrides"):
+        pricing.pop("overrides", None)
+    return pricing
 
 
 # The rates ``Pricing`` declares without a default, derived from the model so the
@@ -284,6 +294,9 @@ class Model(BaseModel):
         data = super().dict(**kwargs)  # type: ignore[arg-type]
         if not data.get("usage_multipliers"):
             data.pop("usage_multipliers", None)
+        for key in ("pricing", "sats_pricing"):
+            if isinstance(data.get(key), dict):
+                _drop_empty_overrides(data[key])
         # Non-reasoning models omit the field entirely so the catalog stays
         # additive: existing clients never see a new null key.
         reasoning = data.get("reasoning")
