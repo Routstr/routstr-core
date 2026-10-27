@@ -594,9 +594,21 @@ async def test_measured_average_uses_paired_reported_requests_including_free_and
         source="missing",
     )
     output_only.output_source = "reported"
+    settlement_failed = _row(
+        "settlement-failed",
+        at,
+        revenue=300,
+        input_tokens=0,
+        output_tokens=0,
+        cache_read=0,
+        cache_write=0,
+        source="missing",
+    )
+    settlement_failed.pricing_source = "unknown"
     async with sessions() as session:
         session.add_all(
             [
+                settlement_failed,
                 _row("reported-cache", at),
                 _row(
                     "free",
@@ -638,9 +650,10 @@ async def test_measured_average_uses_paired_reported_requests_including_free_and
     assert summary["measured_token_requests"] == 3
     assert summary["measured_tokens"] == 28
     assert summary["avg_measured_tokens_per_completion"] == pytest.approx(28 / 3)
-    assert summary["successful_chat_completions"] == 6
+    assert summary["successful_chat_completions"] == 7
     assert summary["total_tokens"] == 74
     assert summary["avg_total_tokens_per_completion"] == pytest.approx(74 / 6)
+    assert summary["avg_revenue_per_request_msats"] == pytest.approx(4300 / 7)
     assert summary["total_requests"] == 9
     assert summary["success_rate"] == 42
     assert "measured_tokens" not in result["metrics"]["totals"]
