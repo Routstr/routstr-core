@@ -40,6 +40,7 @@ from routstr.upstream.ehbp import (
 from routstr.upstream.tinfoil import (
     TinfoilUpstreamProvider,
     _canonical_route,
+    _cap_header_would_be_dropped,
     _header_field_values,
     parse_max_output_tokens_header,
 )
@@ -509,6 +510,7 @@ async def _run_ehbp_request(
     base_msats: int,
     model_obj: MagicMock,
     fallback_upstream: Any = None,
+    extra_headers: list[tuple[bytes, bytes]] | None = None,
 ) -> tuple[Any, list[int], list[dict[str, str]]]:
     """Drive ``proxy.proxy`` for a sealed request.
 
@@ -526,6 +528,7 @@ async def _run_ehbp_request(
     ]
     for value in header_values or []:
         raw.append((b"x-tinfoil-max-output-tokens", value.encode()))
+    raw.extend(extra_headers or [])
 
     request = MagicMock()
     request.method = "POST"
@@ -756,6 +759,145 @@ async def test_plaintext_body_discount_is_unchanged() -> None:
     # 61_536 (completion allowance for the 1_000-token cap).
     assert base == 177_152
     assert cost == 4_009
+
+
+# ---------------------------------------------------------------------------
+# Forwarding sanitizer: a Connection nomination must invalidate the quote
+# ---------------------------------------------------------------------------
+
+
+def test_connection_nomination_drops_the_cap(cap_enabled: None) -> None:
+    """``Connection`` naming the cap strips it from the outgoing request.
+
+    ``forward_with_trailer`` removes every header a ``Connection`` field
+    nominates, so quoting against one would size the hold to a cap the enclave
+    never receives — under-reserved output with no bound. The hook must refuse.
+    """
+    provider = TinfoilUpstreamProvider(api_key="upstream-key")
+    headers = Headers(
+        raw=[
+            (b"x-tinfoil-max-output-tokens", b"8"),
+            (b"connection", b"X-Tinfoil-Max-Output-Tokens"),
+        ]
+    )
+    assert _cap_header_would_be_dropped(headers) is True
+    assert provider.enforced_completion_cap(headers, "v1/responses") is None
+
+
+def test_connection_nomination_is_case_insensitive(cap_enabled: None) -> None:
+    provider = TinfoilUpstreamProvider(api_key="upstream-key")
+    headers = Headers(
+        raw=[
+            (b"x-tinfoil-max-output-tokens", b"8"),
+            (b"connection", b"keep-alive, x-tinfoil-max-output-tokens"),
+        ]
+    )
+    assert provider.enforced_completion_cap(headers, "v1/responses") is None
+
+
+def test_unrelated_connection_tokens_keep_the_cap(cap_enabled: None) -> None:
+    """Only a nomination of the cap itself disqualifies the quote."""
+    provider = TinfoilUpstreamProvider(api_key="upstream-key")
+    headers = Headers(
+        raw=[
+            (b"x-tinfoil-max-output-tokens", b"8"),
+            (b"connection", b"keep-alive, x-custom-hop"),
+        ]
+    )
+    assert _cap_header_would_be_dropped(headers) is False
+    assert provider.enforced_completion_cap(headers, "v1/responses") == 8
+
+
+def test_cap_header_without_connection_nomination_survives(cap_enabled: None) -> None:
+    """The plain case still quotes: the real sanitizer keeps the header."""
+    provider = TinfoilUpstreamProvider(api_key="upstream-key")
+    headers = Headers(raw=[(b"x-tinfoil-max-output-tokens", b"8")])
+    assert _cap_header_would_be_dropped(headers) is False
+    assert provider.enforced_completion_cap(headers, "v1/responses") == 8
+
+
+async def test_connection_nominated_cap_keeps_the_full_envelope(
+    cap_enabled: None,
+) -> None:
+    """End-to-end: the refused quote leaves the full reserve in place.
+
+    The forwarding mock captures headers *before* the real sanitizer runs (the
+    sanitizer lives inside ``forward_with_trailer``), so this case is also why a
+    mock-only regression cannot prove the contract: the quote is refused by the
+    provider hook, and the reserve stays at the envelope.
+    """
+    model = _tinfoil_shaped_model()
+    base = _base_msats(model)
+    _, reserved, _ = await _run_ehbp_request(
+        path="v1/responses",
+        header_values=["1000"],
+        base_msats=base,
+        model_obj=model,
+        extra_headers=[(b"connection", b"X-Tinfoil-Max-Output-Tokens")],
+    )
+    assert reserved == [base]
+
+
+# ---------------------------------------------------------------------------
+# Token window: context length only, never a completion-only limit
+# ---------------------------------------------------------------------------
+
+
+async def test_window_ignores_completion_only_top_provider_limit(
+    cap_enabled: None,
+) -> None:
+    """``top_provider.max_completion_tokens`` is the output share, not the window.
+
+    A 100k-context model that also publishes a 10k completion cap must reserve
+    against 100k: using 10k as the window would quote 13_000 msats while a valid
+    30k-token prompt plus the 1k output costs 34_000 msats, far under the 40_000
+    envelope the model actually allows.
+    """
+    top_provider = MagicMock()
+    top_provider.context_length = None
+    top_provider.max_completion_tokens = 10_000
+    model = _tinfoil_shaped_model(top_provider=top_provider)
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0.0),
+        patch.object(settings, "min_request_msat", 1),
+    ):
+        cost = await calculate_discounted_max_cost(
+            _base_msats(model),
+            {},
+            model_obj=model,
+            path="v1/responses",
+            enforced_completion_cap=1_000,
+        )
+
+    # (100_000 - 1_000)*0.001 + 1_000*0.004 = 103 sats, not 13 sats.
+    assert cost == 103_000
+
+
+async def test_window_falls_back_to_top_provider_context_length(
+    cap_enabled: None,
+) -> None:
+    top_provider = MagicMock()
+    top_provider.context_length = 50_000
+    top_provider.max_completion_tokens = 10_000
+    model = _tinfoil_shaped_model(context_length=100_000, top_provider=top_provider)
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0.0),
+        patch.object(settings, "min_request_msat", 1),
+    ):
+        cost = await calculate_discounted_max_cost(
+            _base_msats(model),
+            {},
+            model_obj=model,
+            path="v1/responses",
+            enforced_completion_cap=1_000,
+        )
+
+    # (50_000 - 1_000)*0.001 + 1_000*0.004 = 53 sats.
+    assert cost == 53_000
 
 
 # ---------------------------------------------------------------------------

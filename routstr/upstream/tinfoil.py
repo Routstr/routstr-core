@@ -26,6 +26,7 @@ from .ehbp import (
     ConfidentialInferenceProfile,
     EHBPForwardingTarget,
 )
+from .tinfoil_trailer import _strip_hop_by_hop_headers
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -132,6 +133,39 @@ def _header_field_values(headers: object, name: str) -> list[str]:
         for key, value in items()
         if str(key).lower() == wanted and value is not None
     ]
+
+
+def _cap_header_would_be_dropped(headers: object) -> bool:
+    """True when the forwarding sanitizer would strip the cap header.
+
+    The EHBP request is re-framed onto a new upstream connection, so
+    ``forward_with_trailer`` removes hop-by-hop headers — including every header
+    a ``Connection`` field nominates. If that nomination names the cap header,
+    the enclave never receives it while the node quoted against it, leaving the
+    output unbounded against a smaller hold. Quote nothing in that case.
+
+    The check runs the *real* sanitizer over the request headers rather than
+    reimplementing its rules, so a future change to the forwarding path cannot
+    silently invalidate the quote. Provider-added target headers are merged
+    after this stripping step, so a provider must never re-add this header from
+    its own target set (Tinfoil's adds only usage metrics); if one ever does,
+    this hook has to take the merged headers instead.
+    """
+    cap_name = _TINFOIL_MAX_OUTPUT_TOKENS_HEADER.lower()
+    for value in _header_field_values(headers, "Connection"):
+        for token in value.split(","):
+            if token.strip().lower() == cap_name:
+                return True
+
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        return False
+    outgoing: dict[str, str] = {}
+    for key, value in items():
+        if value is not None:
+            outgoing[str(key)] = str(value)
+    sanitized = _strip_hop_by_hop_headers(outgoing)
+    return not any(str(key).lower() == cap_name for key in sanitized)
 
 
 def parse_max_output_tokens_header(values: Sequence[str]) -> int | None:
@@ -413,6 +447,9 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
         if not EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED:
             return None
         if _canonical_route(path) not in _TINFOIL_MAX_OUTPUT_TOKENS_ROUTES:
+            return None
+        if _cap_header_would_be_dropped(headers):
+            # The quote would describe a header the enclave never sees.
             return None
         return parse_max_output_tokens_header(
             _header_field_values(headers, _TINFOIL_MAX_OUTPUT_TOKENS_HEADER)

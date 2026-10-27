@@ -240,19 +240,19 @@ def _as_token_limit(value: object) -> int | None:
 def _model_token_window(model_obj: Any) -> int | None:
     """The model's context window, read the way ``_calculate_usd_max_costs`` does.
 
-    ``top_provider`` limits win when published; a model that only advertises a
-    completion cap is bounded by that cap, and a bare ``context_length`` is the
-    last resort. ``None`` means the window is unknown, so no cost bound exists.
+    The window is the *total* prompt-plus-output budget, so only context
+    lengths qualify: ``top_provider.context_length`` when published, else the
+    model's own ``context_length``. A ``max_completion_tokens`` limit is the
+    output share of the window, not the window itself — using it as the window
+    would under-reserve a request whose valid input runs far past it (e.g. a
+    100k context with a 10k completion cap). ``None`` means the window is
+    unknown, so no cost bound exists and the full envelope is kept.
     """
     top_provider = getattr(model_obj, "top_provider", None)
     if top_provider is not None:
-        for candidate in (
-            getattr(top_provider, "context_length", None),
-            getattr(top_provider, "max_completion_tokens", None),
-        ):
-            limit = _as_token_limit(candidate)
-            if limit is not None:
-                return limit
+        limit = _as_token_limit(getattr(top_provider, "context_length", None))
+        if limit is not None:
+            return limit
     return _as_token_limit(getattr(model_obj, "context_length", None))
 
 
