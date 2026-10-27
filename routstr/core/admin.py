@@ -38,6 +38,8 @@ from .db import (
     UpstreamProviderRow,
     create_session,
     get_secret,
+    revoke_all_cli_tokens,
+    revoke_cli_token_value,
     set_admin_password,
     set_nsec,
 )
@@ -67,12 +69,18 @@ async def _refresh_provider_model_paths(upstream_provider_id: int) -> None:
     await schedule_model_paths_refresh_for_provider(upstream_provider_id)
 
 
-async def require_admin_api(request: Request) -> None:
+def _bearer_token(request: Request) -> str | None:
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    return auth_header.split(" ", 1)[1]
+
+
+async def require_admin_api(request: Request) -> None:
+    token = _bearer_token(request)
+    if token is None:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
-    token = auth_header.split(" ", 1)[1]
     now_ts = int(datetime.now(timezone.utc).timestamp())
 
     # 1) Short-lived session token (in-memory)
@@ -238,6 +246,10 @@ class SettingsUpdate(RootModel[dict[str, object]]):
 class PasswordUpdate(BaseModel):
     current_password: str
     new_password: str
+    # CLI tokens are independent credentials (node setup mints one before the
+    # operator rotates the bootstrap password), so they survive a password
+    # change unless the caller asks for them to be revoked too.
+    revoke_cli_tokens: bool = False
 
 
 @admin_router.patch("/api/settings", dependencies=[Depends(require_admin_api)])
@@ -290,8 +302,22 @@ async def update_password(request: Request, password_update: PasswordUpdate) -> 
             )
 
         await set_admin_password(session, new_password)
+        revoked_cli_tokens = 0
+        if password_update.revoke_cli_tokens:
+            revoked_cli_tokens = await revoke_all_cli_tokens(session)
 
-    return {"ok": True, "message": "Password updated successfully"}
+    # Sessions were opened with the old password: end all of them except the
+    # caller's, so the dashboard that made the change stays signed in.
+    caller_token = _bearer_token(request)
+    for token in list(admin_sessions):
+        if token != caller_token:
+            del admin_sessions[token]
+
+    return {
+        "ok": True,
+        "message": "Password updated successfully",
+        "revoked_cli_tokens": revoked_cli_tokens,
+    }
 
 
 class NsecUpdate(BaseModel):
@@ -361,11 +387,12 @@ async def admin_login(
 
 @admin_router.post("/api/logout", dependencies=[Depends(require_admin_api)])
 async def admin_logout(request: Request) -> dict[str, object]:
-    auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ", 1)[1]
-        if token in admin_sessions:
-            del admin_sessions[token]
+    # Revoke the presented token from whichever store admitted it: logging out
+    # with a CLI token revokes that token, like DELETE /api/cli-tokens/{id}.
+    token = _bearer_token(request)
+    if token is not None and admin_sessions.pop(token, None) is None:
+        async with create_session() as session:
+            await revoke_cli_token_value(session, token)
 
     return {"ok": True}
 

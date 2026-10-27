@@ -252,6 +252,47 @@ async def test_revoke_cli_token_removes_auth(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_logout_with_cli_token_revokes_it(
+    admin_client: AsyncClient,
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """Logging out with a CLI token revokes that token, not just sessions."""
+    create = await admin_client.post("/admin/api/cli-tokens", json={"name": "logs-out"})
+    token_id = create.json()["id"]
+    cli_token = create.json()["token"]
+
+    integration_client.headers["Authorization"] = f"Bearer {cli_token}"
+    logout = await integration_client.post("/admin/api/logout")
+    assert logout.status_code == 200
+    assert logout.json() == {"ok": True}
+
+    assert await integration_session.get(CliToken, token_id) is None
+    resp = await integration_client.get("/admin/api/cli-tokens")
+    assert resp.status_code == 403
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_logout_with_session_token_keeps_cli_tokens(
+    admin_client: AsyncClient,
+    admin_session_token: str,
+    integration_session: AsyncSession,
+) -> None:
+    create = await admin_client.post(
+        "/admin/api/cli-tokens", json={"name": "survives-logout"}
+    )
+    token_id = create.json()["id"]
+
+    logout = await admin_client.post("/admin/api/logout")
+    assert logout.status_code == 200
+    assert admin_session_token not in admin_sessions
+    assert (await admin_client.get("/admin/api/cli-tokens")).status_code == 403
+    assert await integration_session.get(CliToken, token_id) is not None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_revoke_unknown_cli_token_returns_404(
     admin_client: AsyncClient,
 ) -> None:

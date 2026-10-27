@@ -14,6 +14,11 @@ help, so the password can't be reset by accident:
     python scripts/reset_admin_password.py --regenerate
         Clear the stored hash; the next node startup generates a fresh random
         password and logs it once (with the /admin URL).
+
+Add ``--revoke-cli-tokens`` (alone or with either action) to also revoke every
+CLI token, e.g. when the password was reset because the node may be
+compromised. Dashboard sessions live in the running node's memory, so they end
+when the node restarts (or after at most an hour).
 """
 
 import argparse
@@ -23,7 +28,12 @@ import time
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.core.db import create_session, get_secret, set_admin_password
+from routstr.core.db import (
+    create_session,
+    get_secret,
+    revoke_all_cli_tokens,
+    set_admin_password,
+)
 from routstr.core.vault import MIN_PASSWORD_LENGTH
 
 
@@ -43,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="clear the password so the next startup generates and logs a new one",
     )
+    parser.add_argument(
+        "--revoke-cli-tokens",
+        action="store_true",
+        help="also revoke every CLI token",
+    )
     return parser
 
 
@@ -51,15 +66,20 @@ async def apply_reset(
     *,
     password: str | None = None,
     regenerate: bool = False,
+    revoke_cli_tokens: bool = False,
 ) -> str:
     """Perform the requested reset against ``session``; return a status message."""
+    messages: list[str] = []
     if password is not None:
         if len(password) < MIN_PASSWORD_LENGTH:
             raise ValueError(
                 f"New password must be at least {MIN_PASSWORD_LENGTH} characters"
             )
         await set_admin_password(session, password)
-        return "Admin password updated."
+        messages.append(
+            "Admin password updated. Restart the node to end existing dashboard "
+            "sessions."
+        )
 
     if regenerate:
         secret = await get_secret(session)
@@ -67,18 +87,25 @@ async def apply_reset(
         secret.updated_at = int(time.time())
         session.add(secret)
         await session.commit()
-        return (
+        messages.append(
             "Admin password cleared. The next node startup will generate a new "
             "one and log it once with the /admin URL."
         )
 
-    return ""
+    if revoke_cli_tokens:
+        revoked = await revoke_all_cli_tokens(session)
+        messages.append(f"Revoked {revoked} CLI token(s).")
+
+    return "\n".join(messages)
 
 
-async def _run(password: str | None, regenerate: bool) -> str:
+async def _run(password: str | None, regenerate: bool, revoke_cli_tokens: bool) -> str:
     async with create_session() as session:
         return await apply_reset(
-            session, password=password, regenerate=regenerate
+            session,
+            password=password,
+            regenerate=regenerate,
+            revoke_cli_tokens=revoke_cli_tokens,
         )
 
 
@@ -86,12 +113,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.password is None and not args.regenerate:
+    if args.password is None and not args.regenerate and not args.revoke_cli_tokens:
         parser.print_help()
         return 0
 
     try:
-        message = asyncio.run(_run(args.password, args.regenerate))
+        message = asyncio.run(
+            _run(args.password, args.regenerate, args.revoke_cli_tokens)
+        )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
