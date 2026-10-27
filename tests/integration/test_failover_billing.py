@@ -218,7 +218,8 @@ async def test_failover_serve_billed_at_serving_providers_rate(
     record_outcome.assert_called_once()
     terminal_outcome = record_outcome.call_args.args[0]
     serving_model = dual_provider_maps[1].get_cached_models()[0]
-    assert terminal_outcome.model_identifier == serving_model.id
+    assert terminal_outcome.model_identifier == "dual-model"
+    assert terminal_outcome.served_model_identifier == serving_model.id
     assert record_outcome.call_args.kwargs["revenue_msats"] == 10_000
 
     # The fallback's larger max-cost envelope requires a replacement
