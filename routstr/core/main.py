@@ -350,7 +350,15 @@ app.add_exception_handler(Exception, general_exception_handler)
 
 @app.get("/v1/info")
 async def info() -> dict:
-    return {
+    # Imported here to keep the endpoint's dependency on the provider catalog
+    # lazy: ``info`` is served during startup and must not pull the upstream
+    # registry in while modules are still being wired.
+    from ..upstream.tinfoil import (
+        EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED,
+        EHBP_OUTPUT_TOKEN_RESERVATION_ROUTES,
+    )
+
+    payload: dict[str, object] = {
         "name": global_settings.name,
         "description": global_settings.description,
         "version": __version__,
@@ -359,6 +367,24 @@ async def info() -> dict:
         "http_url": global_settings.http_url,
         "onion_url": global_settings.onion_url,
     }
+    if EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED:
+        # Additive capability advertisement for sealed (EHBP) requests, emitted
+        # only when the discount is actually live. While the upstream cap is
+        # per-choice (see ``tinfoil.EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED``) no
+        # quote exists, so the key is omitted entirely: a client that reads it
+        # would under-fund a reservation this node does not shrink.
+        #
+        # When enabled, ``_routes`` is authoritative for the two booleans — a
+        # client must gate its capped quotes on it, because the flags alone
+        # would invite a chat quote where the node keeps the full envelope.
+        payload["features"] = {
+            "ehbp_output_token_reservation": True,
+            "ehbp_output_token_reservation_total_cap": True,
+            "ehbp_output_token_reservation_routes": sorted(
+                EHBP_OUTPUT_TOKEN_RESERVATION_ROUTES
+            ),
+        }
+    return payload
 
 
 @app.get("/v1/providers")

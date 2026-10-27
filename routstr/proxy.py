@@ -430,6 +430,30 @@ def _route_accepts_model(path: str, model: Model) -> bool:
     return _canonical_api_path(path) == _DECISION_ROUTE
 
 
+def _enforced_completion_cap(
+    is_ehbp: bool,
+    *,
+    candidate_upstream: BaseUpstreamProvider,
+    request: Request,
+    path: str,
+) -> int | None:
+    """The output ceiling this upstream enforces visibly for the request, if any.
+
+    Only sealed (EHBP) requests consult it: their body is ciphertext, so the
+    completion caps a plaintext request carries are unreadable and a ceiling the
+    node can quote against has to come from a header the upstream also reads and
+    enforces. A plaintext request keeps its body-derived discount unchanged, and
+    a provider that publishes no such header keeps the full model envelope.
+
+    Called per candidate so the number is always the one belonging to the
+    upstream about to be tried: a failover target that ignores the header
+    reserves its full envelope instead of inheriting a smaller quote.
+    """
+    if not is_ehbp:
+        return None
+    return candidate_upstream.enforced_completion_cap(request.headers, path)
+
+
 def _parse_extra_allowed_endpoints(raw: str) -> dict[str, frozenset[str]]:
     """Parse operator-configured additions to the endpoint allowlist.
 
@@ -985,7 +1009,13 @@ async def _proxy(
         model=model_id, session=session, model_obj=model_obj
     )
     max_cost_for_model = await calculate_discounted_max_cost(
-        _max_cost_for_model, request_body_dict, model_obj=model_obj, path=path
+        _max_cost_for_model,
+        request_body_dict,
+        model_obj=model_obj,
+        path=path,
+        enforced_completion_cap=_enforced_completion_cap(
+            is_ehbp, candidate_upstream=candidates[0][1], request=request, path=path
+        ),
     )
 
     check_token_balance(headers, request_body_dict, max_cost_for_model)
@@ -1151,7 +1181,11 @@ async def _proxy(
     already_stripped: set[str] = set()
 
     for i, (model_obj, upstream) in enumerate(candidates):
-        if i > 0 and request_body_dict:
+        # Sealed (EHBP) requests take part even though they carry no readable
+        # body: their cap comes from a visible header whose applicability is
+        # provider-specific, so a fallback that ignores it must still be
+        # re-reserved at its own (larger) envelope before it is tried.
+        if i > 0 and (request_body_dict or is_ehbp):
             # The reservation was sized to the previous candidate's envelope;
             # settlement bills the serving candidate, so a pricier fallback
             # must be re-reserved at its own max cost before it is tried. A
@@ -1161,7 +1195,13 @@ async def _proxy(
                 model=model_id, session=session, model_obj=model_obj
             )
             candidate_max = await calculate_discounted_max_cost(
-                candidate_max, request_body_dict, model_obj=model_obj, path=path
+                candidate_max,
+                request_body_dict,
+                model_obj=model_obj,
+                path=path,
+                enforced_completion_cap=_enforced_completion_cap(
+                    is_ehbp, candidate_upstream=upstream, request=request, path=path
+                ),
             )
             if candidate_max > max_cost_for_model:
                 await revert_pay_for_request(

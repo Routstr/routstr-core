@@ -4055,6 +4055,23 @@ class BaseUpstreamProvider:
             f"Provider {self.provider_type} does not support EHBP forwarding"
         )
 
+    def enforced_completion_cap(self, headers: object, path: str) -> int | None:
+        """Return a completion-token ceiling the upstream enforces visibly.
+
+        A sealed (EHBP) request body is ciphertext, so the completion caps a
+        plaintext request carries are unreadable and the reservation falls back
+        to the model's whole envelope. A provider that publishes such a cap in a
+        request header *and* enforces it over the body overrides this method, so
+        the reservation can be trimmed to a ceiling the upstream cannot exceed.
+
+        ``None`` means "no enforced cap is known for this request": the
+        reservation keeps the full envelope. Implementations must be strict —
+        an unverifiable value must yield ``None`` rather than a smaller quote —
+        and must only answer for the routes their upstream applies the header
+        on, because an ignored header can never bound a bill.
+        """
+        return None
+
     async def forward_responses_request(
         self,
         request: Request,
