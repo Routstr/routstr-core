@@ -66,6 +66,7 @@ from ..wallet import (
     recieve_token,
     send_token,
 )
+from .model_paths import exposed_model_id
 from .terminal_outcome_tracking import (
     record_x_cashu_terminal_outcome,
     terminal_outcome_context,
@@ -678,9 +679,7 @@ async def _compute_ehbp_actual_cost(
                 )
                 pricing_model_id = actual_model_obj.id
                 pricing_model_obj = actual_model_obj
-                actual_model_identifier = (
-                    actual_model_obj.canonical_slug or actual_model_obj.id
-                )
+                actual_model_identifier = exposed_model_id(actual_model_obj)
             else:
                 # A different registry/client alias resolved to the same
                 # upstream model; retain the requested model's pricing.
