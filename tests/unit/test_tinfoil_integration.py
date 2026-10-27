@@ -567,7 +567,7 @@ class TestComputeEhbpActualCost:
                 100_000,
             )
             assert result["actual_model"] == "llama3-3-70b"
-            assert result["actual_model_identifier"] == "meta/llama-3.3-70b"
+            assert result["actual_model_identifier"] == "llama3-3-70b"
             assert result["total_msats"] == 60
             # calculate_cost called with the actual model's client-facing ID
             call_args = mock_calc.call_args

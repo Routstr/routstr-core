@@ -13,6 +13,7 @@ from ..core.terminal_outcomes import (
 )
 from ..payment.cost_calculation import CostMetadata, cost_field
 from ..payment.usage import UsageFieldPresence, usage_field_presence
+from .model_paths import exposed_model_id
 
 if TYPE_CHECKING:
     from ..payment.models import Model
@@ -46,9 +47,7 @@ def terminal_outcome_context(
 ) -> TerminalOutcomeContext:
     return TerminalOutcomeContext(
         outcome_id=request_id,
-        model_identifier=(model_obj.canonical_slug or model_obj.id)
-        if model_obj is not None
-        else None,
+        model_identifier=exposed_model_id(model_obj) if model_obj is not None else None,
         served_model_identifier=(model_obj.forwarded_model_id or model_obj.id)
         if model_obj is not None
         else None,
