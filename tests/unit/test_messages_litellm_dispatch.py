@@ -1218,7 +1218,8 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
 
 
 @pytest.mark.asyncio
-async def test_forward_request_routes_messages_via_litellm() -> None:
+@pytest.mark.parametrize("path", ["messages", "messages/"])
+async def test_forward_request_routes_messages_via_litellm(path: str) -> None:
     provider = _make_provider()
     key = _make_key()
     model = _make_model()
@@ -1233,7 +1234,7 @@ async def test_forward_request_routes_messages_via_litellm() -> None:
     ) as mock_helper:
         result = await provider.forward_request(
             request=request,
-            path="messages",
+            path=path,
             headers={},
             request_body=_anthropic_request_body(),
             key=key,
