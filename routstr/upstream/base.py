@@ -2637,6 +2637,7 @@ class BaseUpstreamProvider:
         usage_finalized = False
         last_model_seen: str | None = None
         provider_seen: str | None = None
+        prompt_usage: dict[str, int] | None = None
 
         async def finalize_without_usage() -> bytes | None:
             nonlocal usage_finalized
@@ -2647,10 +2648,16 @@ class BaseUpstreamProvider:
                 if not fresh_key:
                     usage_finalized = True
                     return None
+                billing_data = usage_estimator.response_data(last_model_seen)
+                if prompt_usage:
+                    billing_data["usage"] = {
+                        **prompt_usage,
+                        "output_tokens": billing_data["usage"]["output_tokens"],
+                    }
                 try:
                     cost_data = await adjust_payment_for_tokens(
                         fresh_key,
-                        usage_estimator.response_data(last_model_seen),
+                        billing_data,
                         new_session,
                         max_cost_for_model,
                         model_obj,
@@ -2686,7 +2693,7 @@ class BaseUpstreamProvider:
         async def stream_with_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
-            nonlocal usage_finalized, last_model_seen, provider_seen
+            nonlocal usage_finalized, last_model_seen, provider_seen, prompt_usage
             stored_chunks: list[bytes] = []
             input_tokens: int = 0
             output_tokens: int = 0
@@ -2800,6 +2807,11 @@ class BaseUpstreamProvider:
                                                 ),
                                             )
                                             _absorb_usd(usage)
+                                            prompt_usage = {
+                                                "input_tokens": input_tokens,
+                                                "cache_read_input_tokens": cache_read_input_tokens,
+                                                "cache_creation_input_tokens": cache_creation_input_tokens,
+                                            }
 
                                         if usage := data.get("usage"):
                                             input_tokens = max(
