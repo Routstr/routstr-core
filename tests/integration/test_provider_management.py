@@ -363,6 +363,38 @@ async def test_providers_endpoint_offline_providers(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_provider_health_check_skips_internal_hosts() -> None:
+    """An announced URL on a loopback or private address is never fetched."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from routstr.nostr.discovery import fetch_provider_health
+
+    paths: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            paths.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        health = await fetch_provider_health(
+            f"http://127.0.0.1:{server.server_port}/admin#"
+        )
+    finally:
+        server.shutdown()
+
+    assert health["endpoint"] == "error"
+    assert paths == []
+
+
+@pytest.mark.asyncio
 async def test_providers_endpoint_duplicate_urls(
     integration_client: AsyncClient,
 ) -> None:
