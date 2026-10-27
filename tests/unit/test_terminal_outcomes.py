@@ -32,6 +32,7 @@ from routstr.core.terminal_outcomes import (
     mark_terminal_outcome_unknown,
     record_terminal_outcome,
 )
+from routstr.upstream.terminal_outcome_tracking import terminal_outcome_context
 
 
 @dataclass
@@ -665,6 +666,29 @@ def test_outcome_rows_do_not_carry_the_request_id(
     assert "request-a" not in first.outcome_id
     # A second record of one request still collides instead of double counting.
     assert first.outcome_id == second.outcome_id
+
+
+def test_outcome_keys_a_model_by_its_public_id() -> None:
+    direct = MagicMock(
+        id="claude-haiku-5.5",
+        forwarded_model_id=None,
+        canonical_slug="anthropic/claude-haiku-5.5-20261007",
+    )
+    via_openrouter = MagicMock(
+        id="anthropic/claude-haiku-5.5",
+        forwarded_model_id=None,
+        canonical_slug="anthropic/claude-haiku-5.5",
+    )
+    aliased = MagicMock(
+        id="deepseek-v4-flash", forwarded_model_id="local/fast", canonical_slug=None
+    )
+
+    keys = [
+        terminal_outcome_context("request", model).model_identifier
+        for model in (direct, via_openrouter, aliased)
+    ]
+
+    assert keys == ["claude-haiku-5.5", "claude-haiku-5.5", "local/fast"]
 
 
 def test_cashu_retained_msats_uses_exact_persisted_units(
