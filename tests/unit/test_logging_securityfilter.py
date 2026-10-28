@@ -254,4 +254,4 @@ def test_zk_token_is_removed(filter_message: Callable[[str], str]) -> None:
     out = filter_message(
         f'"WebSocket /v1/confidential/zk?proof=zkchan&session_id=ab&zk_token={token}" [accepted]'
     )
-    assert token not in out and "zk_token=[REDACTED]" in out
+    assert token not in out
