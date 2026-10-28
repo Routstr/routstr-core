@@ -47,7 +47,7 @@ from .exceptions import (
 )
 from .lifecycle import RequestLifecycleMiddleware
 from .logging import get_logger, setup_logging
-from .middleware import LoggingMiddleware
+from .middleware import LoggingMiddleware, NoStoreMiddleware
 from .not_found import _NOT_FOUND_HTML, not_found_catch_all  # noqa: F401
 from .settings import SettingsService, bootstrap_secrets
 from .settings import settings as global_settings
@@ -314,6 +314,8 @@ app.add_middleware(
         "Ehbp-Encapsulated-Key",
     ],
 )
+
+app.add_middleware(NoStoreMiddleware)
 
 # Add logging middleware
 app.add_middleware(LoggingMiddleware)

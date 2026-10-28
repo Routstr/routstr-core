@@ -11,6 +11,7 @@ from .error_scope import (
     UPSTREAM_UNAVAILABLE,
 )
 from .logging import get_logger
+from .middleware import no_store_headers
 
 logger = get_logger(__name__)
 
@@ -254,10 +255,12 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
         exc_info=True,
     )
 
+    # Starlette runs this handler outside the app middleware stack.
     return JSONResponse(
         status_code=500,
         content={
             "detail": "Internal server error, please contact support with the request ID.",
             "request_id": request_id,
         },
+        headers=no_store_headers(request.url.path),
     )

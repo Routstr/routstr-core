@@ -1,7 +1,7 @@
 import hashlib
 from typing import Annotated, NoReturn
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlmodel import col, select
@@ -49,13 +49,6 @@ async def get_key_from_header(
     )
 
 
-def no_store(response: Response) -> None:
-    """Keep a response that carries an API key (or a URL that carries a token)
-    out of browser and proxy caches and out of the Referer of the next page."""
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Referrer-Policy"] = "no-referrer"
-
-
 async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
     info = {
         "api_key": "sk-" + key.hashed_key,
@@ -70,7 +63,7 @@ async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
 
 
 # TODO: remove this endpoint when frontend is updated
-@router.get("/", include_in_schema=False, dependencies=[Depends(no_store)])
+@router.get("/", include_in_schema=False)
 async def account_info(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
@@ -114,7 +107,7 @@ async def _create_balance(
     }
 
 
-@router.post("/create", dependencies=[Depends(no_store)])
+@router.post("/create")
 async def create_balance_from_body(
     payload: BalanceCreateRequest,
     session: AsyncSession = Depends(get_session),
@@ -128,7 +121,7 @@ async def create_balance_from_body(
 
 # The token is in the URL here, where server and proxy logs and browser history
 # keep it; POST /create takes it in the body.
-@router.get("/create", deprecated=True, dependencies=[Depends(no_store)])
+@router.get("/create", deprecated=True)
 async def create_balance(
     initial_balance_token: str,
     validity_date: int | None = None,
@@ -141,7 +134,7 @@ async def create_balance(
     )
 
 
-@router.get("/info", dependencies=[Depends(no_store)])
+@router.get("/info")
 async def wallet_info(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
