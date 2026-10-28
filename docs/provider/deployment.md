@@ -252,8 +252,9 @@ echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> .env
 echo "COMPOSE_FILE=compose.node.yml:compose.postgres.yml" >> .env
 ```
 
-- `POSTGRES_PASSWORD` is set **once**. PostgreSQL stores it when the database is
-  first created; changing it later locks the node out of its own data.
+- `POSTGRES_PASSWORD` is set **once**; keep the same password across restarts.
+  PostgreSQL stores it when the database is first created, so changing it later
+  locks the node out of its own data.
 - `COMPOSE_FILE` makes every `docker compose` command in this directory use both
   files, as long as you don't pass `-f` yourself. From now on run
   `docker compose up -d --build`, `docker compose logs routstr`,
