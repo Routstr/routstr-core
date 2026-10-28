@@ -3661,9 +3661,10 @@ class BaseUpstreamProvider:
         # Classify on the client route: providers may remap it upstream.
         image_generation = is_image_generation_path(path)
         path = self.normalize_request_path(path, model_obj)
+        route = path.rstrip("/")
 
         if (
-            path.endswith("messages/count_tokens")
+            route.endswith("messages/count_tokens")
             and not self.supports_anthropic_messages
         ):
             # Counted locally for free: release the reservation, or it stays
@@ -3675,8 +3676,8 @@ class BaseUpstreamProvider:
             return result
 
         if (
-            path.endswith("messages")
-            and not path.endswith("count_tokens")
+            route.endswith("messages")
+            and not route.endswith("count_tokens")
             and not self.supports_anthropic_messages
         ):
             return await self._forward_messages_via_litellm(
@@ -3796,13 +3797,13 @@ class BaseUpstreamProvider:
 
             if (
                 completion_path is not None
-                or path.endswith("embeddings")
-                or path.endswith("messages")
-                or path.rstrip("/").endswith("messages/count_tokens")
-                or path.endswith("systemone")
-                or path.endswith("decisions")
+                or route.endswith("embeddings")
+                or route.endswith("messages")
+                or route.endswith("messages/count_tokens")
+                or route.endswith("systemone")
+                or route.endswith("decisions")
             ):
-                if path.endswith("messages"):
+                if route.endswith("messages"):
                     client_wants_streaming = False
                     if request_body:
                         try:
@@ -3843,7 +3844,7 @@ class BaseUpstreamProvider:
                         finally:
                             await response_handoff.close()
 
-                if path.rstrip("/").endswith("messages/count_tokens"):
+                if route.endswith("messages/count_tokens"):
                     if response.status_code == 200:
                         try:
                             content = await response.aread()
