@@ -33,6 +33,10 @@ from ..nostr import (
 from ..nostr.discovery import providers_router
 from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
+from ..payment.x_cashu_settlement import (
+    drain_settlements,
+    periodic_x_cashu_recovery,
+)
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..refund import periodic_refund_reconcile
 from ..upstream.auto_topup import periodic_auto_topup
@@ -100,6 +104,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     swap_reconcile_task = None
     routstr_fee_task = None
     invoice_watcher_task = None
+    x_cashu_recovery_task = None
 
     try:
         # cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28.
@@ -186,6 +191,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         swap_reconcile_task = asyncio.create_task(periodic_swap_reconcile())
         routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
         invoice_watcher_task = asyncio.create_task(periodic_invoice_watcher())
+        x_cashu_recovery_task = asyncio.create_task(periodic_x_cashu_recovery())
 
         yield
 
@@ -235,6 +241,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             routstr_fee_task.cancel()
         if invoice_watcher_task is not None:
             invoice_watcher_task.cancel()
+        if x_cashu_recovery_task is not None:
+            x_cashu_recovery_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -272,6 +280,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(routstr_fee_task)
             if invoice_watcher_task is not None:
                 tasks_to_wait.append(invoice_watcher_task)
+            if x_cashu_recovery_task is not None:
+                tasks_to_wait.append(x_cashu_recovery_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)
@@ -282,6 +292,15 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
         finally:
+            try:
+                # Refunds started by cancelled requests outlive their request
+                # task; let them finish while the wallet and database are up.
+                await drain_settlements(global_settings.request_cleanup_timeout_seconds)
+            except Exception as e:
+                logger.error(
+                    "Error draining X-Cashu settlements",
+                    extra={"error": str(e), "error_type": type(e).__name__},
+                )
             try:
                 await close_upstream_http_client()
             except Exception as e:

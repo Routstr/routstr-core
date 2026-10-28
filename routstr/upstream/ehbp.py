@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
@@ -45,6 +46,7 @@ from ..core.exceptions import (
     UpstreamError,
 )
 from ..core.settings import settings
+from ..payment import x_cashu_settlement
 from ..payment.cost_calculation import (
     CostData,
     MaxCostData,
@@ -1236,19 +1238,36 @@ async def forward_ehbp_x_cashu_request(
     # Minting may already have consumed proofs, so a request refunds at most once.
     refund_attempted = False
     refund_token_sent: str | None = None
+    minting: asyncio.Future[str] | None = None
 
-    async def refund(refund_amount: int) -> str:
-        nonlocal refund_attempted, refund_token_sent
-        refund_attempted = True
+    async def mint_refund(refund_amount: int) -> str:
+        nonlocal refund_token_sent
+        claimed = False
         try:
+            claimed = await x_cashu_settlement.claim_refund(request_id)
+            if not claimed:
+                raise RuntimeError("The payment was already settled by another refund")
             refund_token_sent = await send_cashu_refund(
                 refund_amount, unit, mint, request_id
             )
-        except EhbpRefundStorageError as error:
-            refund_token_sent = error.token
+        except Exception as error:
+            if isinstance(error, EhbpRefundStorageError):
+                refund_token_sent = error.token
+            if claimed:
+                await x_cashu_settlement.finish_refund(request_id, refunded=False)
             raise
+        await x_cashu_settlement.finish_refund(request_id, refunded=True)
         return refund_token_sent
 
+    async def refund(refund_amount: int) -> str:
+        nonlocal refund_attempted, minting
+        refund_attempted = True
+        if minting is None:
+            # Cancellation must not interrupt a mint half way through.
+            minting = x_cashu_settlement.run_to_completion(mint_refund(refund_amount))
+        return await asyncio.shield(minting)
+
+    x_cashu_settlement.payment_started()
     try:
         amount, unit, mint = await recieve_token(x_cashu_token)
         redeemed = True
@@ -1260,6 +1279,7 @@ async def forward_ehbp_x_cashu_request(
             typ="in",
             request_id=request_id,
             collected=True,
+            settlement=x_cashu_settlement.PENDING if request_id else None,
         )
 
         headers = upstream.prepare_headers(dict(request.headers))  # type: ignore[attr-defined]
@@ -1422,6 +1442,17 @@ async def forward_ehbp_x_cashu_request(
 
             if refund_amount > 0:
                 response_headers["X-Cashu"] = await refund(refund_amount)
+            elif not await x_cashu_settlement.mark_charged(request_id):
+                return create_error_response(
+                    "internal_error",
+                    "The payment could not be settled, so the response was "
+                    "withheld. Claim the refund at /v1/balance/refund with the "
+                    "original X-Cashu token.",
+                    503,
+                    request=request,
+                    code="payment_settlement_failed",
+                    error_scope=ERROR_SCOPE_NODE,
+                )
 
             async def _stream_body_xcashu() -> AsyncIterator[bytes]:
                 yield resp.body
@@ -1433,6 +1464,16 @@ async def forward_ehbp_x_cashu_request(
             )
         except Exception:
             raise
+
+    except asyncio.CancelledError:
+        # No response reached the client, so refund the whole payment unless a
+        # refund already started.
+        if redeemed and amount > 0:
+            try:
+                await refund(amount)
+            except (asyncio.CancelledError, Exception):
+                pass
+        raise
 
     except EhbpTimeoutError as e:
         logger.warning(
@@ -1579,3 +1620,5 @@ async def forward_ehbp_x_cashu_request(
             token=x_cashu_token if not redeemed else None,
             error_scope=None if not redeemed else ERROR_SCOPE_UPSTREAM,
         )
+    finally:
+        x_cashu_settlement.payment_finished()
