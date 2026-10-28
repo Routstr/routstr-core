@@ -1354,6 +1354,31 @@ def test_startup_imports_sqlite_once_and_restarts_are_no_ops(
         asyncio.run(_reset_schema())
 
 
+def test_import_keeps_a_zero_stats_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A node that ran stats on SQLite holds epoch 0, below the sequence minimum."""
+    import sqlite3
+
+    from routstr.core.sqlite_import import import_sqlite_on_startup
+
+    source = _sqlite_source(tmp_path / "keys.db")
+    con = sqlite3.connect(source)
+    con.execute(
+        "INSERT INTO terminal_outcome_epochs (epoch, coverage_start_day, current_slot)"
+        " VALUES (0, '2026-10-29', 1)"
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setenv("SQLITE_IMPORT_PATH", str(source))
+    asyncio.run(_reset_schema())
+    try:
+        asyncio.run(import_sqlite_on_startup(POSTGRES_URL))
+        assert _imported_state() == (2, 1_000 + HUGE_MSATS, 1)
+    finally:
+        asyncio.run(_reset_schema())
+
+
 def test_concurrent_starters_import_exactly_once(tmp_path: Path) -> None:
     source = _sqlite_source(tmp_path / "keys.db")
     asyncio.run(_reset_schema())

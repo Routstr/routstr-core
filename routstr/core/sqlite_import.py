@@ -463,7 +463,7 @@ async def _reset_sequences(conn: AsyncConnection, target: sa.MetaData) -> list[s
         max_id = await conn.scalar(
             sa.text(f'SELECT max("{pk[0].name}") FROM "{table.name}"')
         )
-        if max_id is None:
+        if max_id is None or max_id < 1:
             await conn.execute(sa.text("SELECT setval(:s, 1, false)"), {"s": sequence})
         else:
             await conn.execute(
