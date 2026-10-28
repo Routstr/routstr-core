@@ -501,34 +501,38 @@ your `POSTGRES_USER`/`POSTGRES_DB` if you changed them.
 **Back up** (the node can keep running):
 
 ```bash
-dump="routstr-$(date +%F-%H%M).sql"
-docker compose exec -T postgres pg_dump -U routstr routstr > "$dump" && ls -l "$dump"
+dump="routstr-$(date +%F-%H%M%S).sql"
+[ ! -e "$dump" ] &&
+docker compose exec -T postgres pg_dump -U routstr routstr > "$dump" &&
+echo "backup OK: $dump" || echo "BACKUP FAILED: don't use $dump"
 ```
 
-Keep the dump together with `.env` (it holds `POSTGRES_PASSWORD`),
-`routstr_secret.key` and `.wallet/`.
+Every backup gets its own file name, so an earlier backup is never overwritten.
+Only a run that prints `backup OK` produced a usable file. Keep the dump
+together with `.env` (it holds `POSTGRES_PASSWORD`), `routstr_secret.key` and
+`.wallet/`.
 
 **Restore** replaces everything in PostgreSQL with the dump, so it is a separate
-step. First set `dump` to your backup file and check it is there and not empty:
+step. Set `dump` to the backup you want, then run the rest as one block:
 
 ```bash
-dump='routstr-2026-10-28-1530.sql'   # replace with your backup's file name
-ls -l "$dump"
-```
+dump='routstr-2026-10-28-153000.sql'   # replace with your backup's file name
 
-Then, with that check passing:
-
-```bash
-cp "$dump" "$dump.keep"              # spare copy before anything is deleted
-docker compose down -v               # deletes the current PostgreSQL data
+test -s "$dump" &&
+cp "$dump" "$dump.keep" &&
+docker compose down -v &&
 docker compose up -d --wait postgres &&
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U routstr -d routstr < "$dump" &&
-docker compose up -d --build
+docker compose up -d --build &&
+echo "restore OK"
 ```
 
-`--wait` holds until PostgreSQL is ready, and the `&&` chain stops at the first
-failure, so the node only starts after a complete restore. If a step fails, the
-node stays stopped: fix the cause and run the last block again. Afterwards,
+Each line runs only if the one before it succeeded. `test -s` stops before
+anything is touched if the file is missing or empty; `down -v` then deletes the
+current PostgreSQL data, `--wait` holds until the new database is ready, and the
+node starts only after the whole dump loaded. If you don't see `restore OK`, the
+node stays stopped: fix the cause and run the block again (the spare copy
+`$dump.keep` is still there). Afterwards,
 repeat [step 4](#4-check-your-data) of the migration to check the data. The
 restored database still records the original import, so the node doesn't
 import `keys.db` again.
