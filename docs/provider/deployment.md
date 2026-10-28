@@ -202,22 +202,46 @@ the new database by itself. Your balances, API keys, providers, settings and
 Nostr identity come across unchanged.
 
 The examples use the private stack (`compose.node.yml`). On the standard stack,
-use `compose.yml` wherever you see `compose.node.yml`.
+use `compose.yml` wherever you see `compose.node.yml`. Plan a few minutes of
+downtime: the node is stopped from step 1 until step 3 finishes.
 
-#### 1. Back up
+#### 1. Before you start
 
-Stop the node and copy everything the node owns somewhere safe:
+**Note what the node looks like now**, so you can compare afterwards: in the
+dashboard, write down the node's npub, the total on **Balances**, and your
+upstream providers. If you have an API key at hand, note its balance too.
+
+**Check where your database is.** Run:
+
+```bash
+grep DATABASE_URL .env
+ls -l keys.db*
+```
+
+If `DATABASE_URL` is not set, or is `sqlite+aiosqlite:///keys.db`, and `ls`
+shows `keys.db`, you are on the default and can continue. If it points
+somewhere else, see [Your database is not `./keys.db`](#postgresql-troubleshooting)
+before going on. Don't start PostgreSQL until the file is found: a node that
+finds no `keys.db` treats itself as a new installation and starts empty.
+
+**Stop the node and back it up.** Everything below leaves these files in
+place, but the backup is your way back if anything surprises you:
 
 ```bash
 docker compose -f compose.node.yml stop
 mkdir -p ../routstr-backup
-cp -a keys.db* routstr_secret.key .wallet .env ../routstr-backup/
+cp -a .env keys.db* ../routstr-backup/
+[ -f routstr_secret.key ] && cp -a routstr_secret.key ../routstr-backup/
+[ -d .wallet ] && cp -a .wallet ../routstr-backup/
+ls -la ../routstr-backup
 ```
 
-`keys.db*` picks up the `-wal`/`-shm` files too. If you set `ROUTSTR_SECRET_KEY`
-in `.env` there is no `routstr_secret.key`; drop it from the command. Nothing
-below deletes these files, but a backup is your way back if anything surprises
-you.
+`keys.db*` also copies the `-wal` and `-shm` files, which are part of the
+database. `routstr_secret.key` is missing if you set `ROUTSTR_SECRET_KEY` in
+`.env` (then `.env` is the copy you need), and `.wallet/` is missing until the
+node has handled ecash; the two guarded lines simply skip what isn't there.
+
+A brand-new node with no `keys.db` has nothing to back up; skip to step 2.
 
 #### 2. Tell Compose to always include PostgreSQL
 
@@ -230,93 +254,141 @@ echo "COMPOSE_FILE=compose.node.yml:compose.postgres.yml" >> .env
 
 - `POSTGRES_PASSWORD` is set **once**. PostgreSQL stores it when the database is
   first created; changing it later locks the node out of its own data.
-- `COMPOSE_FILE` makes every plain `docker compose ...` command in this directory
-  use both files, so `docker compose up -d --build`, `logs`, `restart` and `down`
-  all keep the node on PostgreSQL. Without it you must type both `-f` files on
-  every command, and forgetting them once starts the node on an **empty** SQLite
-  database (see [Troubleshooting](#postgresql-troubleshooting)).
+- `COMPOSE_FILE` makes every `docker compose` command in this directory use both
+  files, as long as you don't pass `-f` yourself. From now on run
+  `docker compose up -d --build`, `docker compose logs routstr`,
+  `docker compose restart routstr` and so on **without `-f`**.
 
-!!! warning "Don't re-run `node_setup.py start` after switching"
-    The guided first-run script always uses `compose.node.yml` on its own, so it
-    would bring the node back up without PostgreSQL. Use `docker compose up -d
-    --build` from now on; `node_setup.py check` is still fine.
+!!! danger "Never pass `-f compose.node.yml` on its own again"
+    An explicit `-f` replaces `COMPOSE_FILE`. `docker compose -f compose.node.yml
+    up -d` starts the node without PostgreSQL, on a new **empty** SQLite
+    database: users see "Key not found" and the node gets a new identity. Your
+    data is still safe in PostgreSQL; see [Troubleshooting](#postgresql-troubleshooting)
+    to recover. The same goes for `node_setup.py start`, which always uses
+    `compose.node.yml` alone: don't re-run it after switching
+    (`node_setup.py check` is fine).
 
 #### 3. Start the node
 
 ```bash
 docker compose up -d --build
-docker compose logs routstr | grep -i -E "imported|import did not run"
+docker compose logs -f routstr
 ```
 
-You should see `SQLite database imported into PostgreSQL`. On a brand-new node
-with no `keys.db` you will see a warning that there was nothing to import
-instead; that is expected.
+The second command follows the log. The import runs while the node starts, so
+give it a moment and wait for one of these lines:
 
-After a successful import, `keys.db` is renamed to
-`keys.db.imported-<timestamp>` (with its `-wal`/`-shm` files). Keep that file:
-it is your SQLite copy from the moment of the switch. Later starts skip the
+- `SQLite database imported into PostgreSQL`: done. Press **Ctrl-C** to stop
+  following the log; the node keeps running.
+- `SQLITE_IMPORT_PATH does not exist, so nothing is imported`: expected on a
+  brand-new node. On a node that had data, stop now
+  (`docker compose stop routstr`) and recheck step 1; don't let it take
+  traffic, or the import will be refused later.
+- `SQLite import did not run; nothing was copied and the node will not start`:
+  the lines above it give the reason. Nothing was half-copied: PostgreSQL keeps
+  none of the rows and `keys.db` is untouched. To get the node back on SQLite
+  while you look into it, follow [Switching back to SQLite](#switching-back-to-sqlite).
+
+After a successful import `keys.db`, `keys.db-wal` and `keys.db-shm` are
+renamed to `keys.db.imported-<date and time>` (plus `-wal`/`-shm`). Keep them:
+they are your SQLite copy from the moment of the switch. Later starts skip the
 import.
-
-If the import fails, nothing is half-copied: PostgreSQL keeps none of the rows,
-`keys.db` is untouched, and the node stays stopped with the reason in the log.
-To run on SQLite again while you look into it, follow
-[Switching back to SQLite](#switching-back-to-sqlite).
 
 #### 4. Check your data
 
-Log in to the dashboard with your usual password and check:
+Log in to the dashboard with your usual password and compare with what you
+noted in step 1:
 
-- **Balances** shows the same totals as before,
-- your upstream providers and settings are all there,
-- the node's npub (dashboard, or `/v1/info`) is the same as before.
+- the node's npub is the same (dashboard, or `/v1/info`),
+- **Balances** shows the same total,
+- your upstream providers and settings are all there.
 
-If you have an API key handy, `curl -s -H "Authorization: Bearer sk-..."
-http://127.0.0.1:8000/v1/balance/info` should return the same balance as before.
+With an API key at hand, check its balance; replace `sk-...` with the key and
+`8000` with your `ROUTSTR_NODE_PORT` if you changed it:
 
-Keep the same `ROUTSTR_SECRET_KEY` (or `routstr_secret.key`) and `.wallet/` from
-now on: the encrypted secrets in PostgreSQL need that key, and the Cashu wallet
-stays on local SQLite in `.wallet/`. Back up PostgreSQL with `pg_dump` (see
+```bash
+curl -s -H "Authorization: Bearer sk-..." http://127.0.0.1:8000/v1/balance/info
+```
+
+If something doesn't match, stop the node (`docker compose stop routstr`)
+before users spend on it, and [switch back](#switching-back-to-sqlite).
+
+From now on, keep the same `ROUTSTR_SECRET_KEY` (or `routstr_secret.key`) and
+`.wallet/`: the encrypted secrets in PostgreSQL need that key, and the Cashu
+wallet stays on local SQLite in `.wallet/`. Your data now lives in the
+`postgres-data` volume; back it up with `pg_dump` (see
 [Backup and Restore](#backup-and-restore)).
 
 #### Switching back to SQLite
 
-The imported file still holds everything up to the switch. Anything written to
+The imported file holds everything up to the switch. Anything written to
 PostgreSQL afterwards (new keys, top-ups, spending) is **not** in it, and there
-is no tool that copies PostgreSQL back into SQLite. Decide within minutes of
-migrating, before users spend on the node, or stay on PostgreSQL and restore
-from a `pg_dump` if something goes wrong.
+is no tool that copies PostgreSQL back into SQLite. Switching back is safe only
+before the node has served users on PostgreSQL. After that, stay on PostgreSQL
+and restore from a `pg_dump` if something goes wrong.
 
 ```bash
-docker compose down                      # stops the node and PostgreSQL; data stays in the volume
-sed -i.bak '/^COMPOSE_FILE=/d' .env      # back to the plain stack
-mv keys.db.imported-<timestamp> keys.db  # and the -wal/-shm files if present
-docker compose -f compose.node.yml up -d --build
+docker compose down                   # stops the node and PostgreSQL; PostgreSQL data stays in its volume
+sed -i.bak '/^COMPOSE_FILE=/d' .env   # back to the plain stack (.env.bak keeps the old file)
 ```
 
-If the import failed, `keys.db` was never renamed and only the first two lines
-are needed.
+If the import **succeeded**, put the SQLite file back. List the archives and
+copy the exact name of the one from this migration into `archive=`:
+
+```bash
+ls -l keys.db.imported-*
+archive='keys.db.imported-20261028T173919Z'   # replace with your file's name
+mkdir -p ../routstr-stray-sqlite
+for f in keys.db keys.db-wal keys.db-shm; do [ -f "$f" ] && mv "$f" ../routstr-stray-sqlite/; done
+mv "$archive" keys.db
+[ -f "$archive-wal" ] && mv "$archive-wal" keys.db-wal
+[ -f "$archive-shm" ] && mv "$archive-shm" keys.db-shm
+```
+
+The `for` line moves any SQLite file a mistaken start created out of the way
+first, so it can't mix with the restored one. If the import **failed**,
+`keys.db` was never renamed; skip this block.
+
+Then start the node on SQLite:
+
+```bash
+docker compose -f compose.node.yml up -d --build
+```
 
 #### PostgreSQL troubleshooting
 
 - **Users get "Key not found", the npub changed, providers are gone.** The node
-  started without `compose.postgres.yml` and created a fresh SQLite `keys.db`.
-  Your data is safe in PostgreSQL. Stop the node, move that new `keys.db*` out
-  of the way (keep it if anyone paid into it), make sure `COMPOSE_FILE` is in
-  `.env`, and start again.
+  started without `compose.postgres.yml` (an explicit `-f compose.node.yml`, or
+  `node_setup.py start`) and created a fresh SQLite `keys.db`. Your data is safe
+  in PostgreSQL. Move the new SQLite files aside, leaving
+  `keys.db.imported-*` alone, and start again without `-f`:
+
+    ```bash
+    docker compose stop routstr
+    mkdir -p ../routstr-stray-sqlite
+    for f in keys.db keys.db-wal keys.db-shm; do [ -f "$f" ] && mv "$f" ../routstr-stray-sqlite/; done
+    grep COMPOSE_FILE .env   # must print COMPOSE_FILE=compose.node.yml:compose.postgres.yml
+    docker compose up -d --build
+    ```
+
+    Then repeat [step 4](#4-check-your-data). If anyone topped up while the
+    wrong node ran, those payments are only in `../routstr-stray-sqlite/`;
+    refund or re-credit them by hand.
 - **"keys.db changed after it was imported into PostgreSQL"**. Same cause, seen
-  from the other side: a SQLite node used `keys.db` after the import. Move the
-  file away as above. Top-ups made while it ran are only in that file; refund or
-  re-credit them by hand.
+  when you start PostgreSQL again: a SQLite node used `keys.db` after the
+  import. Move the files aside with the commands above.
 - **"refusing to merge into it"**. PostgreSQL already holds data that did not
   come from an import, for example after the node once started there with no
-  `keys.db` to import. Set `SQLITE_IMPORT_PATH=` (empty) in `.env` to keep using
-  that database, or, if it holds nothing you need, remove it with
-  `docker compose down -v` (this deletes the `postgres-data` volume) and start
-  again to import `keys.db`.
-- **Your database is not `./keys.db`.** If `DATABASE_URL` in `.env` pointed
-  somewhere else, set `SQLITE_IMPORT_PATH` to that file's path inside the
-  container (the checkout is mounted at `/app`) before step 3. With a wrong path
-  the node logs a warning and starts on an empty database.
+  `keys.db` to import. If that data matters, set `SQLITE_IMPORT_PATH=` (empty)
+  in `.env` to keep using it. If it holds nothing you need,
+  `docker compose down -v` deletes the `postgres-data` volume (**everything in
+  PostgreSQL is gone**), and the next `docker compose up -d --build` imports
+  `keys.db`.
+- **Your database is not `./keys.db`.** If `DATABASE_URL` in `.env` points to
+  another file, back up that file (and its `-wal`/`-shm`) in step 1 instead,
+  and before step 3 add `SQLITE_IMPORT_PATH=` with the file's path *inside the
+  container* to `.env`. The checkout is mounted at `/app`, so
+  `sqlite+aiosqlite:///data/keys.db` becomes `SQLITE_IMPORT_PATH=/app/data/keys.db`.
 
 All import rules are in
 [Configuration](configuration.md#postgresql-and-multiple-workers).
@@ -422,6 +494,23 @@ so everything Routstr persists stays in the directory you cloned:
 - **Never delete volumes or wallet state to fix a login problem.** Reset the
   password instead (below).
 
+On PostgreSQL (`compose.postgres.yml`), back up and restore the database with
+`pg_dump`; use your `POSTGRES_USER`/`POSTGRES_DB` if you changed them:
+
+```bash
+# back up (the node can keep running)
+docker compose exec -T postgres pg_dump -U routstr routstr > routstr-$(date +%F).sql
+
+# restore into an empty database (down -v deletes the current PostgreSQL data)
+docker compose down -v
+docker compose up -d postgres
+docker compose exec -T postgres psql -U routstr -d routstr < routstr-2026-10-28.sql
+docker compose up -d --build
+```
+
+Keep `.env` (with the same `POSTGRES_PASSWORD`), `routstr_secret.key` and
+`.wallet/` with the dump.
+
 ### Admin Password Recovery
 
 Lost the admin password? Clear it from a private terminal and restart the node;
@@ -520,27 +609,45 @@ calling a node production-ready:
 
 ## Updates
 
-Check out the new release and rebuild:
+Check out the new release, then rebuild with the **one** command that matches
+how your node runs:
 
 ```bash
 git fetch --tags
 git checkout v0.4.7   # or the tag you are moving to
-docker compose up -d --build
-# private stack:
-docker compose -f compose.node.yml up -d --build
 ```
+
+- **Standard stack, or any node on PostgreSQL** (`COMPOSE_FILE` set in `.env`, see
+  [PostgreSQL](#postgresql-optional)):
+
+    ```bash
+    docker compose up -d --build
+    ```
+
+- **Private stack on SQLite**:
+
+    ```bash
+    docker compose -f compose.node.yml up -d --build
+    ```
+
+    Never use this one after moving to PostgreSQL: naming only
+    `compose.node.yml` starts the node on an empty SQLite database.
 
 `--build` is required: Compose reuses an existing image for a service unless you
 ask it to rebuild.
 
-On PostgreSQL with `COMPOSE_FILE` in `.env` (see
-[PostgreSQL](#postgresql-optional)), run plain `docker compose up -d --build`
-for either stack. Don't add `-f compose.node.yml` on its own: it overrides
-`COMPOSE_FILE` and starts the node on an empty SQLite database.
-
 !!! warning "Back up first"
-    Copy `keys.db`, `routstr_secret.key` and `.wallet/` before updating, and read
-    the release notes for the version you are moving to.
+    Back up the database your node uses now, and read the release notes for the
+    version you are moving to.
+
+    - **SQLite:** stop the node and copy `keys.db` with its `-wal`/`-shm` files.
+    - **PostgreSQL:** `docker compose exec -T postgres pg_dump -U routstr routstr > routstr-$(date +%F).sql`
+      (use your `POSTGRES_USER`/`POSTGRES_DB` if you changed them). The
+      `keys.db.imported-*` file from the migration does not contain anything
+      written since.
+
+    In both cases also keep `.env`, `routstr_secret.key` (or your
+    `ROUTSTR_SECRET_KEY`) and `.wallet/` if it exists.
 
 Before updating, also record the current tag and image so you can return to them.
 Rolling back across a database migration may need the matching database and
