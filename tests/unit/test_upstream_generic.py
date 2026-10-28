@@ -398,17 +398,28 @@ async def test_litellm_output_cap_not_used_as_context() -> None:
         ]
     }
 
+    # Pinned: litellm refreshes its cost map from the network, and the live
+    # entry for this model has since gained max_input_tokens.
+    cost_entry = {
+        "input_cost_per_token": 3.5e-07,
+        "output_cost_per_token": 1.05e-06,
+        "max_input_tokens": None,
+        "max_tokens": 8192,
+        "max_output_tokens": 8192,
+    }
+
     with _patch_models_endpoint(payload):
         or_feed = AsyncMock(return_value=[])
-        with patch(
-            "routstr.payment.models.async_fetch_openrouter_models", or_feed
-        ):
-            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+        with patch("routstr.payment.models.litellm_cost_entry", lambda _id: cost_entry):
+            with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+                models = await GenericUpstreamProvider(
+                    base_url="http://x"
+                ).fetch_models()
 
     model = _model_by_id(models, "gemini/gemini-gemma-2-9b-it")
     assert model.enabled is True
-    # litellm gives this model max_input_tokens=None, max_tokens=8192 (an output
-    # cap). Context must come from the estimate (4096), never the 8192 cap.
+    # The entry has max_input_tokens=None, max_tokens=8192 (an output cap).
+    # Context must come from the estimate (4096), never the 8192 cap.
     assert model.context_length == 4096
     # The 8192 output cap still lands where it belongs: the completion limit.
     assert model.top_provider is not None
