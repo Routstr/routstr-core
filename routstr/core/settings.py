@@ -26,7 +26,12 @@ class Settings(BaseSettings):
 
         @classmethod
         def parse_env_var(cls, field_name: str, raw_value: str) -> Any:  # type: ignore[override]
-            if field_name in {"cashu_mints", "cors_origins", "relays"}:
+            if field_name in {
+                "cashu_mints",
+                "cors_origins",
+                "relays",
+                "confidential_trusted_proxies",
+            }:
                 v = str(raw_value).strip()
                 if v == "":
                     return []
@@ -61,6 +66,78 @@ class Settings(BaseSettings):
     upstream_allowed_fails: int = Field(default=3, ge=1, env="UPSTREAM_ALLOWED_FAILS")
     upstream_cooldown_seconds: float = Field(
         default=30.0, ge=0, env="UPSTREAM_COOLDOWN_SECONDS"
+    )
+
+    # Confidential-upstream mode: base URL of the cu-sidecar (e.g.
+    # http://127.0.0.1:7443). Empty disables the mode: no offer, no websocket
+    # routes, no /v1/models field. Env-only and read at startup (the routes
+    # are mounted at import), so the admin API cannot half-enable the mode.
+    # The mode keeps per-process state (signed offers, live sessions, the
+    # per-address limit): run the node as a single worker process.
+    confidential_sidecar_url: str = Field(default="", env="CONFIDENTIAL_SIDECAR_URL")
+    # Shared secret the node sends to the sidecar (``Authorization: Bearer``).
+    # The sidecar does not check client credentials itself: whoever reaches it
+    # spends the provider key, so it requires this token unless it listens on
+    # loopback only. Env-only: never persisted, redacted in the admin API.
+    confidential_sidecar_token: str = Field(
+        default="", env="CONFIDENTIAL_SIDECAR_TOKEN"
+    )
+    # Denial-of-service limit: confidential sessions per client address (an
+    # IPv6 address by its /64) that have not been used yet (from the setup's
+    # reservation until the credential record is written). Pre-warmed
+    # sessions count; connections still waiting for their setup are limited
+    # separately. 0 disables the limit.
+    confidential_max_unused_per_ip: int = Field(
+        default=12, env="CONFIDENTIAL_MAX_UNUSED_PER_IP"
+    )
+    # Pricing of confidential sessions (all off by default). A session moves
+    # ~22 MB of 2PC data and costs the node ~0.5 s of CPU before the provider
+    # sees anything. The session fee is added to a completed request and is
+    # the whole charge for a provider refusal (401/402/403/429/503); the
+    # abandon fee (never below the session fee, defaulting to it) is charged
+    # instead for any other 4xx and when a session the sidecar accepted ends
+    # without a request reaching the provider (anti-DoS for armed, pre-warmed
+    # sessions). Any other 5xx is charged the full reservation. The surcharge
+    # raises the per-token rates of the signed offer. All are published in
+    # the signed offer.
+    confidential_session_fee_msat: int = Field(
+        default=0, ge=0, env="CONFIDENTIAL_SESSION_FEE_MSAT"
+    )
+    confidential_abandon_fee_msat: int = Field(
+        default=0, ge=0, env="CONFIDENTIAL_ABANDON_FEE_MSAT"
+    )
+    confidential_rate_surcharge_pct: float = Field(
+        default=0.0, ge=0, env="CONFIDENTIAL_RATE_SURCHARGE_PCT"
+    )
+    # Completion tokens reserved beyond the pinned max_tokens: providers may
+    # bill a few tokens more than the cap, and the charge is capped at the
+    # reservation. Only the hold grows; the charge is still the usage. Usage
+    # beyond the reservation (a provider overshooting by more than this, or
+    # accepting a prompt longer than the model's listed context length) is
+    # not charged to the client: the node pays it. Size this for the provider.
+    confidential_reserve_margin_tokens: int = Field(
+        default=16, ge=0, env="CONFIDENTIAL_RESERVE_MARGIN_TOKENS"
+    )
+    # Peers (reverse proxies) whose client-address header is believed. Any
+    # other peer is identified by its own address. Empty by default: a peer
+    # listed here can name any client address, so list only a proxy that
+    # always sets the header, e.g. "127.0.0.1,::1" for nginx on the same host.
+    # Never list an address that something else also connects from without
+    # overwriting the header (a Tor daemon or another local process forwarding
+    # to the node's loopback port). "self" adds this host's or container's own
+    # addresses, which is where a rootless container port forwarder connects
+    # from: enable it only if a proxy in front of that forwarder always sets
+    # the header.
+    confidential_trusted_proxies: list[str] = Field(
+        default_factory=list,
+        env="CONFIDENTIAL_TRUSTED_PROXIES",
+    )
+    # Header a trusted proxy puts the client address in. For X-Forwarded-For the
+    # rightmost entry over all its lines is used (the one the proxy added;
+    # earlier entries come from the client). Other headers (X-Real-IP,
+    # CF-Connecting-IP) are used as is, from their last line.
+    confidential_client_ip_header: str = Field(
+        default="x-forwarded-for", env="CONFIDENTIAL_CLIENT_IP_HEADER"
     )
 
     # Node info
@@ -324,6 +401,12 @@ ENV_ONLY_FIELDS = frozenset(
         # Boot-time provisioning switch: read before the DB is available and
         # must not be toggled from the persisted settings blob.
         "auto_generate_nsec",
+        # A credential shared with the cu-sidecar: kept out of the settings
+        # blob so it is never stored in plaintext or shadowed by a stale copy.
+        "confidential_sidecar_token",
+        # Decides at import whether the confidential routes are mounted; a
+        # live or persisted value could only disagree with the mounted routes.
+        "confidential_sidecar_url",
     }
 )
 

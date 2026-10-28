@@ -950,6 +950,10 @@ def _start_reservation_heartbeat(snapshot: ReservationSnapshot) -> None:
 
     lifetime = request_lifetime.get()
     deadline = asyncio.get_running_loop().time() + settings.max_request_lifetime_seconds
+    if lifetime is not None:
+        # A request whose owner set a longer lifetime than the HTTP default
+        # (a confidential session) keeps its lease for that whole lifetime.
+        deadline = max(deadline, lifetime.deadline)
 
     async def beat() -> None:
         try:
