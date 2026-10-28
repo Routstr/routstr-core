@@ -14,7 +14,7 @@ from .db import (
     TerminalOutcomeWriterRun,
     create_session,
 )
-from .terminal_outcome_writer import SessionFactory
+from .terminal_outcome_writer import UNKNOWN_PRICING_SOURCE, SessionFactory
 
 _SETTLED_FIELDS = (
     "successful_chat_completions",
@@ -151,6 +151,14 @@ async def get_ledger_usage_dashboard(
         measured &= (sources[dimension] == "reported") | (
             (sources[dimension] == "missing") & (cache_tokens == 0)
         )
+    # Unknown rows keep their revenue but have no token counts.
+    counted = col(TerminalOutcome.pricing_source).is_distinct_from(
+        UNKNOWN_PRICING_SOURCE
+    )
+    observed = [
+        *provenance,
+        func.sum(case((counted, 1), else_=0)).label("token_completions"),
+    ]
     recorded_tokens = (
         col(TerminalOutcome.input_tokens)
         + col(TerminalOutcome.output_tokens)
@@ -229,7 +237,7 @@ async def get_ledger_usage_dashboard(
                         func.sum(case((measured, recorded_tokens), else_=0)).label(
                             "measured_tokens"
                         ),
-                        *provenance,
+                        *observed,
                     ).where(*bounds)
                 )
             )
@@ -336,6 +344,7 @@ async def get_ledger_usage_dashboard(
     }
     summary = result.setdefault("summary", {})
     completed = totals["successful_chat_completions"]
+    token_completions = int(observation["token_completions"] or 0)
     measured_requests = int(observation["measured_token_requests"] or 0)
     measured_tokens = int(observation["measured_tokens"] or 0)
     summary.update(totals)
@@ -347,14 +356,14 @@ async def get_ledger_usage_dashboard(
         # Retained for older API clients; ledger revenue never subtracts hold releases.
         net_revenue_msats=totals["revenue_msats"],
         net_revenue_sats=totals["revenue_msats"] / 1000,
-        avg_input_tokens_per_completion=totals["input_tokens"] / completed
-        if completed
+        avg_input_tokens_per_completion=totals["input_tokens"] / token_completions
+        if token_completions
         else 0,
-        avg_output_tokens_per_completion=totals["output_tokens"] / completed
-        if completed
+        avg_output_tokens_per_completion=totals["output_tokens"] / token_completions
+        if token_completions
         else 0,
-        avg_total_tokens_per_completion=totals["total_tokens"] / completed
-        if completed
+        avg_total_tokens_per_completion=totals["total_tokens"] / token_completions
+        if token_completions
         else 0,
         measured_token_requests=measured_requests,
         measured_tokens=measured_tokens,

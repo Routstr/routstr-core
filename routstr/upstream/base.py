@@ -2784,7 +2784,10 @@ class BaseUpstreamProvider:
                         _coerce_usd(cd.get("output_cost")),
                     )
                 for field in ("total_cost", "cost"):
-                    total_cost = max(total_cost, _coerce_usd(usage_or_root.get(field)))
+                    value = usage_or_root.get(field)
+                    if isinstance(value, dict):
+                        value = value.get("total_usd")
+                    total_cost = max(total_cost, _coerce_usd(value))
 
             try:
                 async for chunk in guarded_chunks:
@@ -3019,7 +3022,6 @@ class BaseUpstreamProvider:
         key: ApiKey,
         session: AsyncSession,
         deducted_max_cost: int,
-        path: str,
         requested_model: str | None = None,
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
@@ -3040,10 +3042,7 @@ class BaseUpstreamProvider:
                 ):
                     response_json["message"]["model"] = requested_model
 
-            if path.endswith("count_tokens") and "usage" not in response_json:
-                input_tokens = response_json.get("input_tokens", 0)
-                response_json["usage"] = {"input_tokens": input_tokens}
-            elif not isinstance(response_json.get("usage"), dict):
+            if not isinstance(response_json.get("usage"), dict):
                 usage_estimator = MissingUsageEstimator(request_body, model_obj)
                 usage_estimator.observe(response_json)
                 response_json["usage"] = usage_estimator.response_data(
@@ -3958,7 +3957,7 @@ class BaseUpstreamProvider:
                 completion_path is not None
                 or path.endswith("embeddings")
                 or path.endswith("messages")
-                or path.endswith("messages/count_tokens")
+                or path.rstrip("/").endswith("messages/count_tokens")
                 or path.endswith("systemone")
                 or path.endswith("decisions")
             ):
@@ -3996,7 +3995,6 @@ class BaseUpstreamProvider:
                                 key,
                                 session,
                                 max_cost_for_model,
-                                path,
                                 requested_model=original_model_id,
                                 model_obj=model_obj,
                                 reservation_snapshot=reservation_snapshot,
@@ -4006,23 +4004,20 @@ class BaseUpstreamProvider:
                         finally:
                             await response_handoff.close()
 
-                if path.endswith("messages/count_tokens"):
+                if path.rstrip("/").endswith("messages/count_tokens"):
                     if response.status_code == 200:
                         try:
-                            return await self.handle_non_streaming_messages_completion(
-                                response,
-                                key,
-                                session,
-                                max_cost_for_model,
-                                path,
-                                requested_model=original_model_id,
-                                model_obj=model_obj,
-                                reservation_snapshot=reservation_snapshot,
-                                request_body=request_body,
-                                terminal_outcome=None,
-                            )
+                            content = await response.aread()
                         finally:
                             await response_handoff.close()
+                        await revert_pay_for_request(
+                            key, session, max_cost_for_model, reservation_snapshot
+                        )
+                        return Response(
+                            content=content,
+                            status_code=200,
+                            media_type="application/json",
+                        )
 
                 if completion_path is not None:
                     client_wants_streaming = False
