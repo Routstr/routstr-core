@@ -20,6 +20,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # An older node re-stamps an unknown head on SQLite and keeps the table.
+    if sa.inspect(op.get_bind()).has_table("admin_sessions"):
+        return
     op.create_table(
         "admin_sessions",
         sa.Column("token_hash", sqlmodel.sql.sqltypes.AutoString(), nullable=False),

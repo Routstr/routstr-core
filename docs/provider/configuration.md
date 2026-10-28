@@ -264,6 +264,7 @@ Use environment variables for:
 | `ROUTSTR_SECRET_KEY` | Master key encrypting node secrets at rest. Auto-generated to a key file if unset | (auto-generated) |
 | `ROUTSTR_SECRET_KEY_FILE` | Path to the generated key file (used when `ROUTSTR_SECRET_KEY` is unset) | `routstr_secret.key` beside the database |
 | `DATABASE_URL`       | Database connection string. SQLite or PostgreSQL, e.g. `postgresql+asyncpg://user:pass@host:5432/routstr` | `sqlite+aiosqlite:///keys.db` |
+| `SQLITE_IMPORT_PATH` | SQLite file copied once into an empty PostgreSQL `DATABASE_URL` at startup (see [below](#postgresql-and-multiple-workers)) | — |
 | `NAME`               | Node display name                 | `ARoutstrNode`                       |
 | `DESCRIPTION`        | Node description                  | `A Routstr Node`                     |
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
@@ -368,6 +369,32 @@ An existing SQLite database moves over with
 It copies into an empty database inside one transaction, verifies every row, and
 refuses to drop data silently; run it with `--dry-run` first. Keep the same
 `ROUTSTR_SECRET_KEY`, or the copied encrypted secrets cannot be read.
+
+The node can run the same copy itself at startup: set
+`SQLITE_IMPORT_PATH=keys.db` next to a PostgreSQL `DATABASE_URL`
+(`compose.postgres.yml` does this, see [Deployment](deployment.md#postgresql-optional)).
+
+- One worker imports while the others wait on an advisory lock. The copy and a
+  row in `database_imports` commit together, so every later start skips it.
+- The target must be empty. A database with data but no import record stops
+  the node instead of being merged into; set `SQLITE_IMPORT_PATH=` (empty) to
+  keep it.
+- The file must be a Routstr database (it has an `api_keys` table); an empty or
+  foreign file is refused rather than recorded as imported.
+- A `keys.db` from an older release is upgraded as a temporary copy first; the
+  file itself is never modified.
+- Afterwards the file (and its `-wal`/`-shm`) is renamed to
+  `keys.db.imported-<timestamp>`, never deleted. When it cannot be renamed
+  (read-only mount) the import record alone prevents a second import; archive
+  the file yourself. If that file changes afterwards (a SQLite node kept using
+  it), the node refuses to start, because those new rows are not in PostgreSQL.
+- Any failure rolls the copy back, logs the cause and stops startup; there is no
+  fallback to SQLite. A missing file with no import record logs a warning and
+  starts on the empty database, as on a fresh install. Check the path before
+  that first start: once the node has written to the database, a later import
+  is refused.
+- `.wallet/` stays on local SQLite and `ROUTSTR_SECRET_KEY` must not change.
+- The setting is ignored when `DATABASE_URL` is not PostgreSQL.
 
 ---
 

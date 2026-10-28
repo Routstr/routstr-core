@@ -37,7 +37,12 @@ from ..nostr.analytics_runtime import (
 from ..nostr.discovery import providers_router
 from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
-from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
+from ..proxy import (
+    initialize_upstreams,
+    proxy_router,
+    refresh_model_maps_periodically,
+    sync_upstreams_periodically,
+)
 from ..refund import periodic_refund_reconcile
 from ..upstream.auto_topup import periodic_auto_topup
 from ..upstream.http_client import close_upstream_http_client
@@ -61,6 +66,7 @@ from .middleware import LoggingMiddleware
 from .not_found import _NOT_FOUND_HTML, not_found_catch_all  # noqa: F401
 from .settings import Settings, SettingsService, bootstrap_secrets
 from .settings import settings as global_settings
+from .sqlite_import import import_sqlite_on_startup
 from .version import __version__
 
 # Initialize logging first
@@ -95,6 +101,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     providers_task = None
     models_refresh_task = None
     model_maps_refresh_task = None
+    upstreams_sync_task = None
     model_paths_refresh_task = None
     stale_reservation_task = None
     dead_key_prune_task = None
@@ -115,6 +122,10 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # Apply litellm-wide settings (drop_params, chat-completions URL,
         # debug logging) before any upstream provider dispatches a request.
         configure_litellm()
+
+        # One-time copy of SQLITE_IMPORT_PATH into an empty PostgreSQL database.
+        # Raises when it cannot complete: the node must not start without it.
+        await import_sqlite_on_startup()
 
         # Run database migrations on startup
         run_migrations()
@@ -187,6 +198,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 refresh_upstreams_models_periodically(get_upstreams)
             )
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
+        upstreams_sync_task = asyncio.create_task(sync_upstreams_periodically())
         # Always started: the loop re-reads the enable flag and interval every
         # iteration, so 0 -> N (or re-enabling) takes effect without a restart.
         from ..upstream.model_paths import refresh_model_paths_periodically
@@ -241,6 +253,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             models_refresh_task.cancel()
         if model_maps_refresh_task is not None:
             model_maps_refresh_task.cancel()
+        if upstreams_sync_task is not None:
+            upstreams_sync_task.cancel()
         if model_paths_refresh_task is not None:
             model_paths_refresh_task.cancel()
         if stale_reservation_task is not None:
@@ -278,6 +292,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(models_refresh_task)
             if model_maps_refresh_task is not None:
                 tasks_to_wait.append(model_maps_refresh_task)
+            if upstreams_sync_task is not None:
+                tasks_to_wait.append(upstreams_sync_task)
             if model_paths_refresh_task is not None:
                 tasks_to_wait.append(model_paths_refresh_task)
             if stale_reservation_task is not None:

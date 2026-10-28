@@ -94,6 +94,65 @@ async def test_failed_fetch_keeps_the_last_good_catalog(
 
 
 @pytest.mark.asyncio
+async def test_failed_fetch_uses_newer_worker_local_catalog(
+    integration_session: AsyncSession,
+    patched_db_engine: None,
+    refresh_interval: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_id = await _provider_row(integration_session)
+    await _worker(provider_id, [_model("old-shared")]).refresh_models_cache()
+
+    snapshot = await integration_session.get(UpstreamModelSnapshot, provider_id)
+    assert snapshot is not None
+    snapshot.fetched_at -= refresh_interval
+    await integration_session.commit()
+
+    worker = _worker(provider_id, [_model("new-local")])
+    monkeypatch.setattr(
+        "routstr.upstream.model_snapshots.save_snapshot", AsyncMock(return_value=None)
+    )
+    models = await worker._shared_upstream_models(provider_id)
+    assert [model.id for model in models] == ["new-local"]
+
+    worker.fetch_models = AsyncMock(return_value=[])
+    models = await worker._shared_upstream_models(provider_id)
+
+    assert [model.id for model in models] == ["new-local"]
+
+
+@pytest.mark.asyncio
+async def test_failed_fetch_keeps_local_catalog_fetched_in_the_snapshots_second(
+    integration_session: AsyncSession,
+    patched_db_engine: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from routstr.core.settings import settings
+
+    monkeypatch.setattr(settings, "models_refresh_interval_seconds", 1)
+    provider_id = await _provider_row(integration_session)
+    await _worker(provider_id, [_model("old-shared")]).refresh_models_cache()
+
+    snapshot = await integration_session.get(UpstreamModelSnapshot, provider_id)
+    assert snapshot is not None
+    snapshot.fetched_at = 2000
+    await integration_session.commit()
+
+    # Stale enough to fetch, yet the local fetch lands in the snapshot's second.
+    monkeypatch.setattr("time.time", lambda: 2000.95)
+    worker = _worker(provider_id, [_model("new-local")])
+    monkeypatch.setattr(
+        "routstr.upstream.model_snapshots.save_snapshot", AsyncMock(return_value=None)
+    )
+    await worker._shared_upstream_models(provider_id)
+
+    worker.fetch_models = AsyncMock(return_value=[])
+    models = await worker._shared_upstream_models(provider_id)
+
+    assert [model.id for model in models] == ["new-local"]
+
+
+@pytest.mark.asyncio
 async def test_worker_whose_fetch_fails_serves_a_siblings_catalog(
     integration_session: AsyncSession, patched_db_engine: None, refresh_interval: int
 ) -> None:

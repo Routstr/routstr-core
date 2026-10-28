@@ -22,6 +22,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # An older node re-stamps an unknown head on SQLite and keeps the table.
+    if sa.inspect(op.get_bind()).has_table("upstream_model_snapshots"):
+        return
     op.create_table(
         "upstream_model_snapshots",
         sa.Column(

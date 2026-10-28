@@ -967,7 +967,9 @@ asyncio.run(init_upstreams())
 
 
 def _spawn_together(
-    code: str, env_overrides: dict[str, str] | None = None
+    code: str,
+    env_overrides: dict[str, str] | None = None,
+    workers: int = BOOTING_WORKERS,
 ) -> list[subprocess.CompletedProcess[str]]:
     """Run ``code`` in several interpreters released together, as uvicorn workers."""
     barrier = Path(tempfile.gettempdir()) / f"routstr-boot-barrier-{uuid.uuid4().hex}"
@@ -985,7 +987,7 @@ def _spawn_together(
             stderr=subprocess.PIPE,
             text=True,
         )
-        for _ in range(BOOTING_WORKERS)
+        for _ in range(workers)
     ]
     time.sleep(2.0)  # long enough for every interpreter to reach the barrier
     barrier.touch()
@@ -1174,6 +1176,63 @@ def test_sqlite_data_moves_to_postgres_without_loss(tmp_path: Path) -> None:
         asyncio.run(_reset_schema())
 
 
+@pytest.mark.parametrize(
+    ("revision", "entrypoint", "message"),
+    [
+        ("deadbeef9999", "script", "another or newer Routstr version"),
+        (None, "startup", "(?i)start a SQLite node of this version"),
+    ],
+)
+def test_import_rejects_unknown_or_unversioned_source_before_touching_postgres(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    revision: str | None,
+    entrypoint: str,
+    message: str,
+) -> None:
+    import sqlite3
+
+    from routstr.core.sqlite_import import MigrationError, import_sqlite_on_startup
+
+    source = _sqlite_source(tmp_path / "keys.db")
+    con = sqlite3.connect(source)
+    if revision is None:
+        con.execute("DELETE FROM alembic_version")
+    else:
+        con.execute("UPDATE alembic_version SET version_num = ?", (revision,))
+    con.commit()
+    con.close()
+
+    asyncio.run(_reset_schema())
+    try:
+        if entrypoint == "script":
+            result = _migrate_script("--source", str(source), "--target", POSTGRES_URL)
+            assert result.returncode == 1
+            assert message in result.stderr
+        else:
+            monkeypatch.setenv("SQLITE_IMPORT_PATH", str(source))
+            with pytest.raises(MigrationError, match=message):
+                asyncio.run(import_sqlite_on_startup(POSTGRES_URL))
+
+        async def _tables() -> list[str]:
+            engine = create_async_engine(POSTGRES_URL)
+            try:
+                async with engine.connect() as conn:
+                    rows = await conn.execute(
+                        text(
+                            "SELECT tablename FROM pg_tables "
+                            "WHERE schemaname = 'public' ORDER BY tablename"
+                        )
+                    )
+                    return list(rows.scalars())
+            finally:
+                await engine.dispose()
+
+        assert asyncio.run(_tables()) == []
+    finally:
+        asyncio.run(_reset_schema())
+
+
 def test_migration_refuses_to_drop_data_the_target_cannot_hold(tmp_path: Path) -> None:
     import sqlite3
 
@@ -1195,5 +1254,187 @@ def test_migration_refuses_to_drop_data_the_target_cannot_hold(tmp_path: Path) -
         )
         assert result.returncode == 1
         assert "api_keys.from_another_branch holds data" in result.stderr
+    finally:
+        asyncio.run(_reset_schema())
+
+
+# --------------------------------------------------------------------------
+# SQLite import at startup (SQLITE_IMPORT_PATH)
+# --------------------------------------------------------------------------
+
+_IMPORT_ON_STARTUP = (
+    """
+import asyncio
+from routstr.core.sqlite_import import import_sqlite_on_startup
+"""
+    + _BARRIER
+    + """
+asyncio.run(import_sqlite_on_startup())
+"""
+)
+
+
+def _sqlite_source(path: Path, revision: str = "head") -> Path:
+    import sqlite3
+
+    _alembic("upgrade", revision, url=f"sqlite+aiosqlite:///{path}")
+    con = sqlite3.connect(path)
+    con.executemany(
+        "INSERT INTO api_keys (hashed_key, balance, reserved_balance, total_spent,"
+        " total_requests) VALUES (?, ?, 0, 0, 0)",
+        [("k1", 1_000), ("k2", HUGE_MSATS)],
+    )
+    con.execute("UPDATE routstr_fees SET accumulated_msats = 19065 WHERE id = 1")
+    con.commit()
+    con.close()
+    return path
+
+
+def _imported_state() -> tuple[int, int, int]:
+    """(api_keys rows, sum of balances, import markers) in PostgreSQL."""
+
+    async def _read() -> tuple[int, int, int]:
+        engine = create_async_engine(POSTGRES_URL)
+        try:
+            async with engine.connect() as conn:
+                keys, balance = (
+                    await conn.execute(
+                        text("SELECT count(*), coalesce(sum(balance), 0) FROM api_keys")
+                    )
+                ).one()
+                markers = (
+                    await conn.execute(text("SELECT count(*) FROM database_imports"))
+                ).scalar_one()
+                return int(keys), int(balance), int(markers)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_read())
+
+
+def _retired(source: Path) -> list[Path]:
+    return [
+        p
+        for p in source.parent.glob(f"{source.name}.imported-*")
+        if not p.name.endswith(("-wal", "-shm"))
+    ]
+
+
+def test_startup_imports_sqlite_once_and_restarts_are_no_ops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    from routstr.core.sqlite_import import import_sqlite_on_startup
+
+    source = _sqlite_source(tmp_path / "keys.db")
+    monkeypatch.setenv("SQLITE_IMPORT_PATH", str(source))
+    asyncio.run(_reset_schema())
+    try:
+        asyncio.run(import_sqlite_on_startup(POSTGRES_URL))
+
+        assert _imported_state() == (2, 1_000 + HUGE_MSATS, 1)
+        head = ScriptDirectory.from_config(
+            Config(str(ROOT / "alembic.ini"))
+        ).get_current_head()
+        assert _current_revision() == head
+        # An old node still configured for the file no longer finds the balances.
+        assert not source.exists()
+        [retired] = _retired(source)
+
+        asyncio.run(import_sqlite_on_startup(POSTGRES_URL))
+        assert _imported_state() == (2, 1_000 + HUGE_MSATS, 1)
+
+        # A read-only mount cannot be renamed: the file stays, the marker decides.
+        shutil.copy(retired, source)
+        asyncio.run(import_sqlite_on_startup(POSTGRES_URL))
+        assert _imported_state() == (2, 1_000 + HUGE_MSATS, 1)
+        assert source.exists()
+    finally:
+        asyncio.run(_reset_schema())
+
+
+def test_concurrent_starters_import_exactly_once(tmp_path: Path) -> None:
+    source = _sqlite_source(tmp_path / "keys.db")
+    asyncio.run(_reset_schema())
+    try:
+        results = _spawn_together(
+            _IMPORT_ON_STARTUP, {"SQLITE_IMPORT_PATH": str(source)}, workers=3
+        )
+        failures = [r.stderr[-800:] for r in results if r.returncode != 0]
+        assert failures == []
+
+        assert _imported_state() == (2, 1_000 + HUGE_MSATS, 1)
+        logs = [r.stdout + r.stderr for r in results]
+        assert (
+            sum("SQLite database imported into PostgreSQL" in log for log in logs) == 1
+        )
+        assert sum("SQLite import already done" in log for log in logs) == 2
+        assert len(_retired(source)) == 1
+    finally:
+        asyncio.run(_reset_schema())
+
+
+def test_failed_import_leaves_postgres_empty_and_stops_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    from routstr.core import sqlite_import
+
+    source = _sqlite_source(tmp_path / "keys.db")
+    con = sqlite3.connect(source)
+    con.execute(
+        "INSERT INTO api_keys (hashed_key, balance, reserved_balance, total_spent,"
+        " total_requests, refund_mint_url) VALUES ('k3', 7, 0, 0, 0, ?)",
+        ("bad\x00url",),
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setenv("SQLITE_IMPORT_PATH", str(source))
+    # One row per batch, so earlier rows really are inserted before the failure.
+    monkeypatch.setattr(sqlite_import, "BATCH_SIZE", 1)
+    asyncio.run(_reset_schema())
+    try:
+        with pytest.raises(sqlite_import.MigrationError, match="NUL byte"):
+            asyncio.run(sqlite_import.import_sqlite_on_startup(POSTGRES_URL))
+
+        assert _imported_state() == (0, 0, 0)
+        assert source.exists() and _retired(source) == []
+
+        # The empty schema the failed attempt left behind accepts a fixed retry.
+        con = sqlite3.connect(source)
+        con.execute(
+            "UPDATE api_keys SET refund_mint_url = NULL WHERE hashed_key = 'k3'"
+        )
+        con.commit()
+        con.close()
+        asyncio.run(sqlite_import.import_sqlite_on_startup(POSTGRES_URL))
+        assert _imported_state() == (3, 1_007 + HUGE_MSATS, 1)
+    finally:
+        asyncio.run(_reset_schema())
+
+
+def test_older_source_is_upgraded_as_a_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    from routstr.core.sqlite_import import import_sqlite_on_startup
+
+    source = _sqlite_source(tmp_path / "keys.db", revision="f38b16f1a3dd")
+    monkeypatch.setenv("SQLITE_IMPORT_PATH", str(source))
+    asyncio.run(_reset_schema())
+    try:
+        asyncio.run(import_sqlite_on_startup(POSTGRES_URL))
+
+        assert _imported_state() == (2, 1_000 + HUGE_MSATS, 1)
+        [retired] = _retired(source)
+        con = sqlite3.connect(retired)
+        try:
+            version = con.execute("SELECT version_num FROM alembic_version").fetchone()
+        finally:
+            con.close()
+        assert version == ("f38b16f1a3dd",)
     finally:
         asyncio.run(_reset_schema())
