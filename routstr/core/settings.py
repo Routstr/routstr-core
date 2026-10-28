@@ -92,12 +92,14 @@ class Settings(BaseSettings):
     )
     # Pricing of confidential sessions (all off by default). A session moves
     # ~22 MB of 2PC data and costs the node ~0.5 s of CPU before the provider
-    # sees anything. The session fee is added to a completed request (and to
-    # a provider refusal, 4xx/503); the abandon fee (never below the session
-    # fee, defaulting to it) is charged instead when a session the sidecar
-    # accepted ends without a request reaching the provider (anti-DoS for
-    # armed, pre-warmed sessions). The surcharge raises the per-token rates
-    # of the signed offer. All are published in the signed offer.
+    # sees anything. The session fee is added to a completed request and is
+    # the whole charge for a provider refusal (401/402/403/429/503); the
+    # abandon fee (never below the session fee, defaulting to it) is charged
+    # instead for any other 4xx and when a session the sidecar accepted ends
+    # without a request reaching the provider (anti-DoS for armed, pre-warmed
+    # sessions). Any other 5xx is charged the full reservation. The surcharge
+    # raises the per-token rates of the signed offer. All are published in
+    # the signed offer.
     confidential_session_fee_msat: int = Field(
         default=0, ge=0, env="CONFIDENTIAL_SESSION_FEE_MSAT"
     )
