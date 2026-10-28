@@ -135,11 +135,9 @@ class _XCashuRefund:
         self.provider = provider
         self.token: str | None = None
         self.error: Exception | None = None
+        self.claimed = False
+        self.served = False
         self._minting: asyncio.Future[str] | None = None
-
-    @property
-    def attempted(self) -> bool:
-        return self._minting is not None
 
     async def send(
         self,
@@ -158,10 +156,9 @@ class _XCashuRefund:
     async def _mint(
         self, amount: int, unit: str, mint: str | None, request_id: str | None
     ) -> str:
-        claimed = False
         try:
-            claimed = await x_cashu_settlement.claim_refund(request_id)
-            if not claimed:
+            self.claimed = await x_cashu_settlement.claim_refund(request_id)
+            if not self.claimed:
                 raise _XCashuRefundUnavailable(
                     "The payment was already settled by another refund"
                 )
@@ -183,7 +180,7 @@ class _XCashuRefund:
                     "error_type": type(error).__name__,
                 },
             )
-            if claimed:
+            if self.claimed:
                 await x_cashu_settlement.finish_refund(request_id, refunded=False)
             raise
         await x_cashu_settlement.finish_refund(request_id, refunded=True)
@@ -194,8 +191,17 @@ class _XCashuRefund:
 
         False means the response must be withheld: its charge is not durable.
         """
-        if self.attempted:
+        if self.claimed:
             return True
+        if isinstance(self.error, _XCashuRefundUnavailable):
+            # Recovery owns the payment and refunds it in full.
+            return False
+        if self._minting is not None and not self.served:
+            # A full refund failed and no answer went out: leave the payment
+            # pending so recovery refunds it in full.
+            return True
+        # No refund was claimed (or the claim itself failed), so the payment
+        # may still be pending and must be charged before it is served.
         return await x_cashu_settlement.mark_charged(request_id)
 
     async def settle_cancelled(
@@ -316,6 +322,7 @@ class _XCashuRefund:
             # The payment covers at least the max cost, so serve what was paid
             # for; withholding it would push clients to pay again.
             headers[X_ROUTSTR_REFUND_ERROR_HEADER] = "refund_failed"
+        self.served = True
         return Response(
             content=content,
             status_code=status_code,

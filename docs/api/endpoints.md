@@ -704,11 +704,11 @@ Returns the change token in the body and in an `X-Cashu` response header. Other 
 | `404` | No request was paid with this token. |
 | `425` | The request is still in flight, or its refund is being minted. Retry after `Retry-After` seconds. |
 | `409` `token_already_spent` / `payment_fully_charged` | The request used the whole payment; no change is owed. Drop the token. |
-| `409` `refund_failed` / `refund_unresolved` | Minting the refund failed. Contact the operator with the `request_id`. |
-| `409` `refund_unavailable` / `refund_not_recorded` | Paid before this node recorded refund outcomes; contact the operator with the `request_id` if change is owed. |
+| `409` `refund_failed` / `refund_unresolved` | Minting the refund failed. Contact the operator with the `payment_request_id` from the body (the paid request's id, not this call's `request_id`). |
+| `409` `refund_unavailable` / `refund_not_recorded` | Paid before this node recorded refund outcomes; contact the operator with the `payment_request_id` from the body if change is owed. |
 | `410` | The change was swept after going unclaimed. |
 
-If the node stops while a paid request is in flight, no response was delivered, so the whole payment is refunded: at once on a graceful shutdown, otherwise once the request lifetime (`MAX_REQUEST_LIFETIME_SECONDS` plus `REQUEST_CLEANUP_TIMEOUT_SECONDS` and a minute) has passed. Until then the endpoint answers `425`.
+If the node stops while a paid request is in flight, no response was delivered, so the whole payment is refunded, less the mint's input fee for redeeming it: at once on a graceful shutdown, otherwise once the request lifetime (`MAX_REQUEST_LIFETIME_SECONDS` plus `REQUEST_CLEANUP_TIMEOUT_SECONDS` and a minute) has passed. Until then the endpoint answers `425`.
 
 ## Provider Discovery
 

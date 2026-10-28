@@ -6,11 +6,18 @@ restarts it on the same database, and claims the refund the way a client does:
 ``POST /v1/balance/refund`` with the original ``X-Cashu`` token. The refund
 token must then redeem at the mint.
 
+A refund returns what the node was credited: the payment less the mint's input
+fee for redeeming it. The assertions account for that fee, so they hold on a
+fee-free mint and on one with input fees.
+
 Needs a Nutshell mint with the FakeWallet backend, for example::
 
     docker run -d -p 3338:3338 -e MINT_BACKEND_BOLT11_SAT=FakeWallet \\
         -e MINT_LISTEN_HOST=0.0.0.0 -e MINT_LISTEN_PORT=3338 \\
         -e MINT_PRIVATE_KEY=e2e cashubtc/nutshell:0.20.0 python -m cashu.mint
+
+The assertions are fee-aware, so they pass whether or not the mint charges
+input fees (``MINT_INPUT_FEE_PPK``).
 
     E2E_MINT_URL=http://127.0.0.1:3338 pytest tests/e2e -m requires_real_mint
 """
@@ -85,16 +92,13 @@ async def mint_token(amount: int) -> str:
         return str(await wallet.serialize_proofs(proofs))
 
 
-async def redeem(token: str) -> int:
+async def _proofs(wallet: Any, token: str) -> Any:
     from cashu.wallet.helpers import deserialize_token_from_string
 
-    with tempfile.TemporaryDirectory() as directory:
-        wallet = await _wallet(directory)
-        proofs = deserialize_token_from_string(token).proofs
-        # v4 tokens carry short keyset ids.
-        await wallet._expand_short_keyset_ids(proofs)
-        await wallet.redeem(proofs)
-        return int(wallet.available_balance.amount)
+    proofs = deserialize_token_from_string(token).proofs
+    # v4 tokens carry short keyset ids.
+    await wallet._expand_short_keyset_ids(proofs)
+    return proofs
 
 
 class Stack:
@@ -126,6 +130,7 @@ class Stack:
         # otherwise be seeded as live upstreams.
         env = {
             "PATH": os.environ["PATH"],
+            "PYTHONPATH": str(ROOT),
             "HOME": str(self.directory),
             "DATABASE_URL": f"sqlite+aiosqlite:///{self.directory}/routstr.db",
             "UPSTREAM_BASE_URL": f"http://127.0.0.1:{self.upstream_port}/v1",
@@ -153,8 +158,18 @@ class Stack:
         if graceful_timeout is not None:
             command += ["--timeout-graceful-shutdown", str(graceful_timeout)]
         log = open(self.directory / f"routstr-{self.starts}.log", "wb")
+        # The node wallet lives in the working directory; a shared one would
+        # carry keysets of an earlier mint into this run. Alembic resolves its
+        # script location against the working directory too.
+        migrations = self.directory / "migrations"
+        if not migrations.exists():
+            migrations.symlink_to(ROOT / "migrations")
         self.routstr = subprocess.Popen(
-            command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT
+            command,
+            cwd=self.directory,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
         )
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
@@ -297,11 +312,19 @@ async def _assert_refunded_in_full(
 ) -> None:
     assert refund.status_code == 200, refund.text
     body = refund.json()
-    assert body["sats"] == str(amount)
     assert refund.headers["X-Cashu"] == body["token"]
-    assert await redeem(body["token"]) == amount
-    with pytest.raises(Exception, match="(?i)spent"):
-        await redeem(token)
+    # One wallet for every check: the mint rate-limits each client.
+    with tempfile.TemporaryDirectory() as directory:
+        wallet = await _wallet(directory)
+        paid = await _proofs(wallet, token)
+        refunded = await _proofs(wallet, body["token"])
+        assert body["sats"] == str(amount - wallet.get_fees_for_proofs(paid))
+        await wallet.redeem(refunded)
+        assert wallet.available_balance.amount == (
+            int(body["sats"]) - wallet.get_fees_for_proofs(refunded)
+        )
+        with pytest.raises(Exception, match="(?i)spent"):
+            await wallet.redeem(paid)
 
 
 async def test_crash_mid_request_refunds_in_full_after_restart(stack: Stack) -> None:

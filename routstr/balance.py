@@ -301,7 +301,7 @@ def _raise_unsettled_x_cashu_refund(in_tx: CashuTransaction) -> NoReturn:
                     "type": "token_already_spent",
                     "code": "payment_fully_charged",
                 },
-                "request_id": in_tx.request_id,
+                "payment_request_id": in_tx.request_id,
             },
         )
     age = int(time.time()) - (in_tx.settlement_at or in_tx.created_at)
@@ -316,11 +316,11 @@ def _raise_unsettled_x_cashu_refund(in_tx: CashuTransaction) -> NoReturn:
             detail={
                 "error": {
                     "message": "No refund was recorded for this payment; contact "
-                    "the operator with this request_id if one is owed.",
+                    "the operator with this payment_request_id if one is owed.",
                     "type": "refund_unavailable",
                     "code": "refund_not_recorded",
                 },
-                "request_id": in_tx.request_id,
+                "payment_request_id": in_tx.request_id,
             },
         )
     if state == x_cashu_settlement.FAILED or stale:
@@ -329,11 +329,11 @@ def _raise_unsettled_x_cashu_refund(in_tx: CashuTransaction) -> NoReturn:
             detail={
                 "error": {
                     "message": "The refund for this payment could not be completed; "
-                    "contact the operator with this request_id.",
+                    "contact the operator with this payment_request_id.",
                     "type": "refund_failed",
                     "code": "refund_unresolved",
                 },
-                "request_id": in_tx.request_id,
+                "payment_request_id": in_tx.request_id,
             },
         )
     logger.debug(

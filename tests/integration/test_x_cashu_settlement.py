@@ -312,11 +312,27 @@ async def test_failed_mint_is_terminal_and_never_retried(
     error = await _claim(integration_session)
     assert error.status_code == 409
     assert error.detail["error"]["code"] == "refund_unresolved"
-    assert error.detail["request_id"] == "req-876"
+    assert error.detail["payment_request_id"] == "req-876"
 
     await _age(integration_session, STALE)
     assert await xs.recover_abandoned_payments() == 0
     assert wallet.mints == [15]
+
+
+async def test_refund_claim_body_names_the_payments_request_id(
+    integration_client: httpx.AsyncClient, integration_session: AsyncSession
+) -> None:
+    await _seed(integration_session, settlement=xs.FAILED, age=10)
+
+    response = await integration_client.post(
+        "/v1/balance/refund", headers={"X-Cashu": PAYMENT}
+    )
+
+    # The handler sets top-level request_id to this call's id, not the payment's.
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"]["code"] == "refund_unresolved"
+    assert body["payment_request_id"] == "req-876"
 
 
 async def test_in_flight_payment_answers_pending(
@@ -391,7 +407,7 @@ async def test_live_refund_loses_to_recovery_without_minting(
         patch("routstr.upstream.base.build_x_cashu_client", return_value=client),
         patch.object(provider, "get_x_cashu_cost", AsyncMock(return_value=cost)),
     ):
-        await handler(
+        response = await handler(
             request,
             PAYMENT,
             request.url.path.lstrip("/"),
@@ -400,8 +416,57 @@ async def test_live_refund_loses_to_recovery_without_minting(
             request_body=b"{}",
         )
 
+    # Recovery refunded the payment in full, so the answer is withheld.
+    assert response.status_code == 503
+    assert json.loads(bytes(response.body))["error"]["code"] == (
+        "payment_settlement_failed"
+    )
     assert wallet.mints == [AMOUNT]
     assert await _refunds(integration_session) == [AMOUNT]
+
+
+def _refund_claims_fail() -> Any:
+    real_transition = xs._transition
+
+    async def claim_fails(request_id: str, from_states: Any, to: str) -> bool:
+        if to == xs.REFUNDING:
+            raise RuntimeError("database unavailable")
+        return await real_transition(request_id, from_states, to)
+
+    return patch.object(xs, "_transition", claim_fails)
+
+
+async def test_failed_refund_claim_charges_instead_of_leaving_payment_pending(
+    wallet: FakeWallet, integration_session: AsyncSession, api: str
+) -> None:
+    with _refund_claims_fail():
+        response = await _pay(api, _completion(), cost_sats=5)
+
+    # The answer is served as paid in full; recovery must never refund it too.
+    assert response.status_code == 200
+    assert response.headers["X-Routstr-Refund-Error"] == "refund_failed"
+    assert wallet.mints == []
+    assert (await _payment(integration_session)).settlement == xs.CHARGED
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 0
+    assert wallet.mints == []
+
+
+async def test_failed_refund_claim_on_upstream_error_leaves_payment_to_recovery(
+    wallet: FakeWallet, integration_session: AsyncSession, api: str
+) -> None:
+    with _refund_claims_fail():
+        response = await _pay(api, httpx.Response(503, json={"error": "down"}))
+
+    # No answer was served, so recovery refunds the payment in full.
+    assert response.status_code == 500
+    assert json.loads(bytes(response.body))["error"]["code"] == "refund_failed"
+    assert wallet.mints == []
+    assert (await _payment(integration_session)).settlement == xs.PENDING
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 1
+    assert wallet.mints == [AMOUNT]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
 
 
 async def test_full_charge_is_withheld_when_recovery_already_refunded(
