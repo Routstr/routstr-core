@@ -205,6 +205,11 @@ class Settings(BaseSettings):
     enable_model_paths_refresh: bool = Field(
         default=True, env="ENABLE_MODEL_PATHS_REFRESH"
     )
+    # Where per-model usage multipliers (fast mode, US-only inference) come
+    # from: "openrouter" or "none".
+    usage_multiplier_source: str = Field(
+        default="openrouter", env="USAGE_MULTIPLIER_SOURCE"
+    )
     # Uncollected refund tokens are swept after ~6 months (180 days).
     # Fixed for now: not configurable via env or the settings DB/admin API
     # (empty env list disables env binding; see FIXED_FIELDS).

@@ -801,6 +801,67 @@ async def test_messages_streaming_bills_cumulative_usage_once() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("event", ["message_start", "message_delta"])
+async def test_messages_streaming_keeps_pricing_dimensions_from_either_event(
+    event: str,
+) -> None:
+    """Fast mode and US inference bill at a multiple, so the stream must keep
+    ``speed``/``inference_geo`` whichever usage event carries them."""
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+    dims = '"speed":"fast","inference_geo":"us"'
+    start_dims = f",{dims}" if event == "message_start" else ""
+    delta_dims = f",{dims}" if event == "message_delta" else ""
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield (
+            'event: message_start\ndata: {"type":"message_start","message":'
+            '{"model":"test","usage":{"input_tokens":4,"output_tokens":1'
+            f"{start_dims}}}}}}}\n\n"
+        ).encode()
+        yield (
+            'event: message_delta\ndata: {"type":"message_delta","delta":{},'
+            f'"usage":{{"output_tokens":9{delta_dims}}}}}\n\n'
+        ).encode()
+        yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+    upstream_response = MagicMock(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = f"messages-dims-{event}"
+    key.balance = 10_000
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    usage: dict = {}
+
+    async def adjust(fresh_key: object, data: dict, *args: object) -> dict:
+        usage.update(data["usage"])
+        return {"total_msats": 0, "total_usd": 0.0}
+
+    with (
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+    ):
+        response = await provider.handle_streaming_messages_completion(
+            response=upstream_response,
+            key=key,
+            max_cost_for_model=500,
+        )
+        async for _ in response.body_iterator:
+            pass
+
+    assert usage["speed"] == "fast"
+    assert usage["inference_geo"] == "us"
+
+
+@pytest.mark.asyncio
 async def test_responses_streaming_duplicate_publishes_zero_settled_cost() -> None:
     provider = BaseUpstreamProvider(
         base_url="https://api.example.com", api_key="test-key"

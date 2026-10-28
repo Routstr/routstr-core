@@ -2693,6 +2693,8 @@ class BaseUpstreamProvider:
             cache_read_input_tokens: int = 0
             cache_creation_input_tokens: int = 0
             server_tool_use: dict = {}
+            inference_geo: str | None = None
+            speed: str | None = None
             total_cost: float = 0.0
             input_cost: float = 0.0
             output_cost: float = 0.0
@@ -2799,9 +2801,20 @@ class BaseUpstreamProvider:
                                                     or 0
                                                 ),
                                             )
+                                            inference_geo = inference_geo or usage.get(
+                                                "inference_geo"
+                                            )
+                                            speed = speed or usage.get("speed")
                                             _absorb_usd(usage)
 
                                         if usage := data.get("usage"):
+                                            # Not every stream states these on
+                                            # `message_start`; keep the first
+                                            # value seen on either event.
+                                            inference_geo = inference_geo or usage.get(
+                                                "inference_geo"
+                                            )
+                                            speed = speed or usage.get("speed")
                                             input_tokens = max(
                                                 input_tokens,
                                                 usage.get("input_tokens", 0),
@@ -2857,6 +2870,10 @@ class BaseUpstreamProvider:
                 }
                 if server_tool_use:
                     usage_data["server_tool_use"] = server_tool_use
+                if inference_geo:
+                    usage_data["inference_geo"] = inference_geo
+                if speed:
+                    usage_data["speed"] = speed
                 messages_dispatch.embed_usd_costs(
                     usage_data,
                     total_cost,
@@ -4626,7 +4643,7 @@ class BaseUpstreamProvider:
                     data_json = json.loads(line[6:])
                     # OpenAI format: usage and model at top level
                     if "usage" in data_json:
-                        usage_data = data_json["usage"]
+                        usage_data = {**(usage_data or {}), **data_json["usage"]}
                         model = data_json.get("model") or model
                     elif "model" in data_json and not model:
                         model = data_json["model"]

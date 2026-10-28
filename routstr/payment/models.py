@@ -124,6 +124,10 @@ class Model(BaseModel):
     forwarded_model_id: str | None = None
     reasoning: Reasoning | None = None
     image_pricing: ImagePricing | None = None
+    # {usage_field: {value: multiplier}} on every token rate; see
+    # ``payment.usage_multipliers``. Kept off ``Pricing``, whose fields are all
+    # scaled by the provider fee.
+    usage_multipliers: dict[str, dict[str, float]] | None = None
 
     class Config:
         extra = "ignore"
@@ -149,6 +153,8 @@ class Model(BaseModel):
         # Non-reasoning models omit the field entirely so the catalog stays
         # additive: existing clients never see a new null key.
         data = super().dict(**kwargs)  # type: ignore[arg-type]
+        if not data.get("usage_multipliers"):
+            data.pop("usage_multipliers", None)
         reasoning = data.get("reasoning")
         if not reasoning:
             data.pop("reasoning", None)

@@ -89,9 +89,7 @@ def test_backfill_case_insensitive_lookup() -> None:
 
     result = backfill_cache_pricing("deepseek-ai/DeepSeek-V4-Flash", pricing)
 
-    expected = litellm.model_cost["deepseek-v4-flash"][
-        "cache_read_input_token_cost"
-    ]
+    expected = litellm.model_cost["deepseek-v4-flash"]["cache_read_input_token_cost"]
     assert result.input_cache_read == expected
     assert result.input_cache_read < pricing.prompt  # sanity: it's a discount
 
@@ -112,9 +110,7 @@ def test_backfill_fills_cache_write_rate() -> None:
 
 def test_backfill_never_overwrites_openrouter_rates() -> None:
     """When OpenRouter provides a cache rate, it is authoritative."""
-    pricing = Pricing(
-        prompt=2.1e-07, completion=7.9e-07, input_cache_read=1.3e-07
-    )
+    pricing = Pricing(prompt=2.1e-07, completion=7.9e-07, input_cache_read=1.3e-07)
 
     result = backfill_cache_pricing("deepseek/deepseek-chat", pricing)
 
@@ -182,9 +178,7 @@ def test_row_to_model_backfills_cache_rate() -> None:
         upstream_provider_id=1,
     )
 
-    with patch(
-        "routstr.payment.models.sats_usd_price", return_value=5.0e-5
-    ):
+    with patch("routstr.payment.models.sats_usd_price", return_value=5.0e-5):
         model = _row_to_model(row, apply_provider_fee=True, provider_fee=1.0)
 
     litellm_read = litellm.model_cost["deepseek-v4-flash"][
@@ -226,9 +220,7 @@ def test_row_to_model_backfills_via_forwarded_model_id() -> None:
         forwarded_model_id="deepseek-v4-flash",
     )
 
-    with patch(
-        "routstr.payment.models.sats_usd_price", return_value=5.0e-5
-    ):
+    with patch("routstr.payment.models.sats_usd_price", return_value=5.0e-5):
         model = _row_to_model(row, apply_provider_fee=True, provider_fee=1.0)
 
     litellm_read = litellm.model_cost["deepseek-v4-flash"][
@@ -261,6 +253,7 @@ def model_pricing(monkeypatch: pytest.MonkeyPatch) -> Mock:
         input_cache_read=0.0001,
         input_cache_write=0.00125,
     )
+    model.usage_multipliers = None
     return model
 
 
@@ -335,6 +328,103 @@ async def test_web_search_requests_billed_at_listed_rate(model_pricing: Mock) ->
     assert isinstance(result, CostData)
     # 300 @ 1 + 100 @ 2 + 2 searches @ 10 sats
     assert result.total_msats == 20500
+
+
+ANTHROPIC_MULTIPLIERS = {"speed": {"fast": 2.0}, "inference_geo": {"us": 1.1}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reported", "expected_msats"),
+    [
+        # 300 @ 1 + 100 @ 2 = 500 at base rates
+        ({}, 500),
+        ({"inference_geo": "us"}, 550),
+        ({"speed": "fast"}, 1000),
+        ({"speed": "fast", "inference_geo": "us"}, 1100),
+        ({"speed": "standard", "inference_geo": "global"}, 500),
+    ],
+)
+async def test_usage_multipliers_scale_token_rates(
+    model_pricing: Mock, reported: dict, expected_msats: int
+) -> None:
+    model_pricing.usage_multipliers = ANTHROPIC_MULTIPLIERS
+    response = {
+        "model": "claude-opus-5.5",
+        "usage": {"input_tokens": 300, "output_tokens": 100, **reported},
+    }
+
+    result = await calculate_cost(response, max_cost=100000, model_obj=model_pricing)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == expected_msats
+
+
+@pytest.mark.asyncio
+async def test_usage_multiplier_scales_cache_rates_but_not_search_fees(
+    model_pricing: Mock,
+) -> None:
+    model_pricing.usage_multipliers = ANTHROPIC_MULTIPLIERS
+    model_pricing.sats_pricing.web_search = 0.01
+    response = {
+        "model": "claude-opus-5.5",
+        "usage": {
+            "input_tokens": 300,
+            "output_tokens": 100,
+            "cache_read_input_tokens": 1000,
+            "cache_creation_input_tokens": 400,
+            "server_tool_use": {"web_search_requests": 1},
+            "speed": "fast",
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=100000, model_obj=model_pricing)
+
+    assert isinstance(result, CostData)
+    # (300 @ 1 + 100 @ 2 + 1000 @ 0.1 + 400 @ 1.25) x 2, plus one search at
+    # its unscaled 10 msats
+    assert result.total_msats == 2200 + 10
+
+
+@pytest.mark.asyncio
+async def test_unknown_variant_bills_base_rate(model_pricing: Mock) -> None:
+    """A model the source never priced fast mode for is billed at base rates
+    (with a warning) rather than guessed at."""
+    model_pricing.usage_multipliers = {"inference_geo": {"us": 1.1}}
+    response = {
+        "model": "claude-sonnet-5.5",
+        "usage": {"input_tokens": 300, "output_tokens": 100, "speed": "fast"},
+    }
+
+    result = await calculate_cost(response, max_cost=100000, model_obj=model_pricing)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == 500
+
+
+@pytest.mark.asyncio
+async def test_reported_cost_is_not_multiplied_again(model_pricing: Mock) -> None:
+    """An upstream that reports its own charge (OpenRouter's ``usage.cost``)
+    already priced fast mode; the multiplier must not apply on top."""
+    model_pricing.usage_multipliers = ANTHROPIC_MULTIPLIERS
+    usage = {
+        "prompt_tokens": 300,
+        "completion_tokens": 100,
+        "cost": 0.0024,
+        "speed": "fast",
+    }
+    response = {"model": "anthropic/claude-opus-5.5", "usage": usage}
+    unmultiplied = {**response, "usage": {**usage, "speed": "standard"}}
+
+    fast = await calculate_cost(
+        response, max_cost=10**7, model_obj=model_pricing, provider_fee=1.0
+    )
+    base = await calculate_cost(
+        unmultiplied, max_cost=10**7, model_obj=model_pricing, provider_fee=1.0
+    )
+
+    assert isinstance(fast, CostData) and isinstance(base, CostData)
+    assert fast.total_msats == base.total_msats > 0
 
 
 @pytest.mark.asyncio
