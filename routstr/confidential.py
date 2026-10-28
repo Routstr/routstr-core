@@ -15,11 +15,14 @@ never ran. Refunds of unused balance are the existing ``/v1/wallet/refund``.
 Optional pricing for the node's own work (all off by default):
 ``CONFIDENTIAL_RATE_SURCHARGE_PCT`` raises the per-token rates of the signed
 offer; ``CONFIDENTIAL_SESSION_FEE_MSAT`` is a flat fee charged on top of the
-usage of a completed request (and for a provider refusal, 4xx/503, which also
-reached the provider); ``CONFIDENTIAL_ABANDON_FEE_MSAT`` (≥ the session fee,
-defaulting to it) is charged instead when a session the sidecar accepted ends
-without a request reaching the provider (an armed, pre-warmed session never
-used, an abort before the body, a client gone): the anti-DoS price of the
+usage of a completed request, and alone for a provider refusal caused by the
+provider's or the node's own state (401/402/403/429/503);
+``CONFIDENTIAL_ABANDON_FEE_MSAT`` (≥ the session fee, defaulting to it) is
+charged instead for any other 4xx (a request the provider rejected) and when a
+session the sidecar accepted ends without a request reaching the provider (an
+armed, pre-warmed session never used, an abort before the body, a client
+gone); any other 5xx (500/502/504 …) is charged the full reservation, since
+the provider may have billed work. The abandon fee is the anti-DoS price of the
 ~22 MB / ~0.5 s CPU the node spends per session. The reservation includes the
 larger of the two. A client accepts both by echoing the signed offer's
 ``session_fee_msat`` and ``abandon_fee_msat`` in its setup; a setup that does
@@ -38,6 +41,10 @@ reserved beyond the pinned cap, because a provider may bill a few more than
 ``max_tokens`` and the charge is capped at the reservation. The margin only
 enlarges the hold (it is in the signed offer, so a client can size its
 balance); the charge is still the usage the provider reported.
+
+Not offered under ``FIXED_PRICING``: a flat per-request price cannot cover
+an opaque request of up to the model's full context, so the offer endpoint
+refuses (and logs why) and setups are refused.
 
 Inert unless ``CONFIDENTIAL_SIDECAR_URL`` is set.
 """
@@ -244,6 +251,31 @@ class OfferRefused(OfferError):
     Unlike an unreachable sidecar, this drops the last good offer at once."""
 
 
+class FixedPricingRefused(OfferError):
+    """``FIXED_PRICING`` is on: confidential mode is not offered."""
+
+
+FIXED_PRICING_REFUSAL = (
+    "confidential mode is not offered under FIXED_PRICING: a flat "
+    "per-request price cannot cover an opaque full-context request"
+)
+_FIXED_PRICING_LOGGED = {"done": False}
+
+
+def refuse_fixed_pricing() -> None:
+    """Raise ``FixedPricingRefused`` (logged once per process) under fixed
+    pricing. The node cannot read the prompt, so its reservation must cover
+    the model's whole context; a flat per-request price would cap the charge
+    of a full-context request at that price."""
+    if not settings.fixed_pricing:
+        _FIXED_PRICING_LOGGED["done"] = False
+        return
+    if not _FIXED_PRICING_LOGGED["done"]:
+        _FIXED_PRICING_LOGGED["done"] = True
+        logger.warning("confidential: %s; no offer is served", FIXED_PRICING_REFUSAL)
+    raise FixedPricingRefused(FIXED_PRICING_REFUSAL)
+
+
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -391,9 +423,31 @@ def produces_text(model: Any) -> bool:
     return "text" in (getattr(arch, "output_modalities", None) or [])
 
 
+def provider_model_id(cand: Candidate) -> str | None:
+    """The model id the plain path sends this candidate's provider: the
+    provider's ``transform_model_name`` of the model's own id. ``None`` if it
+    cannot be determined."""
+    mid = getattr(cand.model, "id", None)
+    if not isinstance(mid, str) or not mid:
+        return None
+    transform = getattr(cand.upstream, "transform_model_name", None)
+    if callable(transform):
+        try:
+            mid = transform(mid)
+        except Exception:
+            return None
+    return mid if isinstance(mid, str) and mid else None
+
+
 def offered_models(side_offer: dict[str, Any]) -> dict[str, Candidate]:
     """Models the node serves confidentially: chat models on the sidecar host,
-    within the allowlist."""
+    within the allowlist, whose public id is the provider's own id.
+
+    The pinned chat suffix sends the offered (public) id to the provider as
+    is, and the node prices under it: a model whose public id differs from
+    the one the provider serves it under (a lower-cased or prefix-stripped
+    id, an operator alias) is not offered, since every request for it would
+    be refused upstream or settled against another spelling."""
     from .proxy import get_unique_models
 
     host = str(side_offer.get("upstream_host", ""))
@@ -403,8 +457,17 @@ def offered_models(side_offer: dict[str, Any]) -> dict[str, Candidate]:
         if not model_allowed(model.id, allowlist) or not produces_text(model):
             continue
         cand = candidate_for(model.id, host)
-        if cand is not None:
-            out[model.id] = cand
+        if cand is None:
+            continue
+        provider_id = provider_model_id(cand)
+        if provider_id != model.id:
+            logger.debug(
+                "confidential: not offering a model whose public id is not "
+                "the provider's",
+                extra={"model": model.id, "provider_model": provider_id},
+            )
+            continue
+        out[model.id] = cand
     return out
 
 
@@ -818,6 +881,7 @@ async def build_offer() -> dict[str, Any]:
     (the ones billed), so a client's rate check needs no change; the session
     fee and the surcharge are listed beside it (only when set).
     """
+    refuse_fixed_pricing()
     side = await cached_sidecar_offer()
     fee, abandon, pct = session_fee_msat(), abandon_fee_msat(), rate_surcharge_pct()
     prices = {
@@ -879,6 +943,8 @@ confidential_router = APIRouter()
 async def confidential_offer() -> dict[str, Any]:
     try:
         return await build_offer()
+    except FixedPricingRefused as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (OfferError, httpx.HTTPError) as exc:
         # The cause stays in the log: it can name the sidecar's address.
         logger.warning("confidential: offer unavailable: %s", exc)
@@ -890,6 +956,7 @@ async def confidential_offer() -> dict[str, Any]:
 async def models_fields() -> dict[str, dict[str, Any]]:
     """The additive ``confidential_upstream`` field for ``/v1/models``, by model id."""
     try:
+        refuse_fixed_pricing()
         side = await cached_sidecar_offer()
     except Exception:
         return {}
@@ -1109,6 +1176,13 @@ def _fee_not_accepted(fee: int, abandon: int) -> BillingError:
     )
 
 
+def _refuse_fixed_pricing_setup() -> None:
+    try:
+        refuse_fixed_pricing()
+    except FixedPricingRefused as exc:
+        raise BillingError(str(exc), 503) from exc
+
+
 async def reserve(
     auth: str,
     model_id: str,
@@ -1124,8 +1198,8 @@ async def reserve(
     before the upstream starts) and the offer's completion margin (a provider
     may bill slightly past the cap), at the frozen rates. Without a known
     context length it is the model's undiscounted maximum cost (no tolerance
-    discount) plus the same margin; fixed-pricing deployments keep
-    their per-request reservation. The larger of the frozen offer's session
+    discount) plus the same margin. Refused under fixed pricing (an older
+    signed offer may still name the model). The larger of the frozen offer's session
     and abandon fees is added on top; the client must have accepted exactly
     those fees. Everything is frozen from the signed offer ``offer_sig`` names;
     an unknown or expired offer is refused (409).
@@ -1134,6 +1208,7 @@ async def reserve(
     from .core.db import create_session
     from .payment.helpers import get_max_cost_for_model
 
+    _refuse_fixed_pricing_setup()
     side = await cached_sidecar_offer()
     cand = offered_models(side).get(model_id)
     if cand is None:
@@ -1154,8 +1229,8 @@ async def reserve(
             key = await validate_bearer_key(auth, session)
         except HTTPException as exc:
             raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
-        limit = None if settings.fixed_pricing else prompt_token_limit(cand.model)
-        if limit is None and not settings.fixed_pricing:
+        limit = prompt_token_limit(cand.model)
+        if limit is None:
             if _has_bad_context_length(cand.model):
                 raise BillingError(
                     f"model {model_id!r} has an invalid context length", 503
@@ -1173,9 +1248,6 @@ async def reserve(
                     undiscounted * (1.0 + pct / 100.0) + margin * rates["out"] / 1000
                 ),
             )
-        elif limit is None:
-            max_cost = await get_max_cost_for_model(model_id, session, cand.model)
-            max_cost = math.ceil(max_cost * (1.0 + pct / 100.0))
         else:
             max_cost = max(
                 settings.min_request_msat,
@@ -1268,6 +1340,7 @@ async def reserve_image(
     from .auth import pay_for_request, validate_bearer_key
     from .core.db import create_session
 
+    _refuse_fixed_pricing_setup()
     side = await cached_sidecar_offer()
     if images_endpoint(side) is None:
         raise BillingError("this node does not serve confidential images")
