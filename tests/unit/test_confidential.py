@@ -48,6 +48,7 @@ def _fresh_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(conf, "_SIGNED_OFFERS", conf.OrderedDict())
     monkeypatch.setattr(conf, "_LAST_OFFER", {"payload": None, "offer": None})
+    monkeypatch.setattr(conf, "_FIXED_PRICING_LOGGED", {"done": False})
     monkeypatch.setattr(cws, "_active_sessions", 0)
     monkeypatch.setattr(cws, "_active_zk", 0)
     monkeypatch.setattr(cws, "_live_sids", {})
@@ -211,10 +212,56 @@ def test_only_chat_models_are_offered(monkeypatch: pytest.MonkeyPatch) -> None:
         SimpleNamespace(id="bare"),
     ]
     monkeypatch.setattr(proxy, "get_unique_models", lambda: models)
-    venice = (object(), _Up("https://api.venice.ai/api/v1"))
-    monkeypatch.setattr(proxy, "get_candidates", lambda mid: [venice])
+    venice = _Up("https://api.venice.ai/api/v1")
+    monkeypatch.setattr(
+        proxy, "get_candidates", lambda mid: [(SimpleNamespace(id=mid), venice)]
+    )
     offered = conf.offered_models({"upstream_host": "api.venice.ai"})
     assert set(offered) == {"chat"}
+
+
+class _PrefixUp(_Up):
+    """A provider whose request bodies carry the model id without a prefix."""
+
+    def transform_model_name(self, model_id: str) -> str:
+        return model_id.removeprefix("vendor/")
+
+
+def test_chat_is_offered_only_under_the_providers_own_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pinned suffix sends the offered id to the provider unchanged, so a
+    model whose public id is not the provider's spelling is not offered."""
+    from types import SimpleNamespace
+
+    import routstr.proxy as proxy
+
+    arch = SimpleNamespace(output_modalities=["text"])
+    public = {
+        # public id: the provider's own row id
+        "same": "same",
+        "glm-5.3": "GLM-5.3",  # lower-cased public id
+        "alias": "real-model",  # operator alias (forwarded id)
+        "vendor/pfx": "vendor/pfx",  # the provider strips the prefix
+        "nameless": None,
+    }
+    models = [SimpleNamespace(id=mid, architecture=arch) for mid in public]
+    monkeypatch.setattr(proxy, "get_unique_models", lambda: models)
+    up = _PrefixUp("https://api.venice.ai/api/v1")
+    monkeypatch.setattr(
+        proxy,
+        "get_candidates",
+        lambda mid: [(SimpleNamespace(id=public[mid]), up)],
+    )
+    offered = conf.offered_models({"upstream_host": "api.venice.ai"})
+    assert set(offered) == {"same"}
+    assert (
+        conf.provider_model_id(conf.Candidate(SimpleNamespace(id="vendor/x"), up))
+        == "x"
+    )
+    # Without a transform hook the model's own id is what the provider gets.
+    plain = conf.Candidate(SimpleNamespace(id="M"), _Up("https://api.venice.ai"))
+    assert conf.provider_model_id(plain) == "M"
 
 
 def test_model_allowlist_semantics() -> None:
@@ -490,13 +537,92 @@ def test_upstream_error_settlement(
     assert receipt["balance_msats"] == (97000 if expected == "release" else 91000)
 
 
-def test_usage_for_another_model_charges_the_reservation(
+@pytest.mark.parametrize(
+    "frame",
+    [
+        # Older sidecars: the top-level model is the provider's spelling.
+        {"model": "Test-Model-2026", "usage": {"model": "Test-Model-2026"}},
+        # Newer sidecars: the pinned model, plus what the provider said.
+        {
+            "model": "test-model",
+            "reported_model": "Test-Model-2026",
+            "usage": {"model": "Test-Model-2026"},
+        },
+    ],
+)
+def test_usage_naming_another_model_settles_at_the_pinned_rates(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    frame: dict[str, Any],
+) -> None:
+    """π_C2S proved the request names the pinned model: a provider that echoes
+    another spelling (an alias, a canonical id) does not cost the client the
+    reservation. The usage is settled at the frozen rates and logged."""
+    ledger = _Ledger(monkeypatch)
+    settled: list[Any] = []
+
+    async def settle(billing: Any, usage: dict[str, Any]) -> dict[str, Any]:
+        ledger.calls.append("settle")
+        settled.append(billing)
+        return {"cost_msats": 12, "balance_msats": 88000}
+
+    monkeypatch.setattr(cws, "settle", settle)
+    seen = _capture_warnings(monkeypatch, cws.logger)
+    usage = {"type": "usage", "sid": SID, **frame}
+    usage["usage"] = {
+        **frame["usage"],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 7},
+    }
+    _, got = _run_session(
+        monkeypatch, [_READY, {"type": "body_released"}, _ATTEST, usage], 4
+    )
+    assert ledger.calls == ["reserve", "settle"]
+    assert settled[0].rates == RATES
+    receipt = got[-1]["receipt"]
+    assert receipt["model"] == "test-model" and receipt["cost_msats"] == 12
+    assert [e["reported_model"] for m, e in seen if "pinned" in m] == [
+        "Test-Model-2026"
+    ]
+
+
+def _capture_warnings(
+    monkeypatch: pytest.MonkeyPatch, logger: Any
+) -> list[tuple[str, Any]]:
+    seen: list[tuple[str, Any]] = []
+
+    def warning(msg: str, *args: Any, extra: Any = None, **kw: Any) -> None:
+        seen.append((msg % args if args else msg, extra))
+
+    monkeypatch.setattr(logger, "warning", warning)
+    return seen
+
+
+async def test_matching_usage_model_settles_without_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def settle(billing: Any, usage: dict[str, Any]) -> dict[str, Any]:
+        return {"cost_msats": 3, "balance_msats": 1}
+
+    monkeypatch.setattr(cws, "settle", settle)
+    seen = _capture_warnings(monkeypatch, cws.logger)
+    out = await cws._apply_settlement(
+        _Billing(), {"model": "test-model", "usage": {}}, "test-model"
+    )
+    assert out == (3, 1) and seen == []
+
+
+def test_oversized_setup_frame_is_refused_before_parsing(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
     ledger = _Ledger(monkeypatch)
-    other = {"type": "usage", "sid": SID, "usage": {"model": "pricier", "usage": {}}}
-    _run_session(monkeypatch, [_READY, {"type": "body_released"}, _ATTEST, other], 4)
-    assert ledger.calls == ["reserve", "charge"]
+    big = {**_SETUP, "auth": "x" * (cws.MAX_SETUP_TEXT + 1)}
+    _, got = _run_session(monkeypatch, [], 1, big)
+    assert got[0]["type"] == "error" and got[0]["status"] == 413
+    assert ledger.calls == []
+    # Multi-byte text is measured in bytes.
+    wide = {**_SETUP, "auth": "\u00e9" * (cws.MAX_SETUP_TEXT // 2 + 1)}
+    _, got = _run_session(monkeypatch, [], 1, wide)
+    assert got[0]["status"] == 413 and ledger.calls == []
 
 
 def test_setup_billing_error_is_reported_with_status(
@@ -1021,6 +1147,88 @@ def test_unreleased_session_keeps_the_setup_phase_limit(
     assert ledger.calls == ["reserve", "release"]
 
 
+class _QueueSidecar:
+    """A sidecar connection whose close lets one in-flight frame through, as
+    the real sidecar flushes ``body_released`` written just before it saw the
+    node's close."""
+
+    def __init__(self, frames: list[dict[str, Any]], on_close: list[dict]) -> None:
+        self.queue: asyncio.Queue[str | None] = asyncio.Queue()
+        for f in frames:
+            self.queue.put_nowait(json.dumps(f))
+        self.on_close = on_close
+        self.closed = False
+
+    async def send(self, data: Any) -> None:
+        pass
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        if not self.closed:
+            self.closed = True
+            await asyncio.sleep(0.05)
+            for f in self.on_close:
+                self.queue.put_nowait(json.dumps(f))
+            self.queue.put_nowait(None)
+
+    def __aiter__(self) -> Any:
+        return self
+
+    async def __anext__(self) -> str:
+        item = await self.queue.get()
+        if item is None:
+            raise StopAsyncIteration
+        return item
+
+
+class _IdleClient:
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    async def receive(self) -> dict[str, Any]:
+        await asyncio.Event().wait()
+        return {}
+
+    async def send_text(self, text: str) -> None:
+        self.sent.append(json.loads(text))
+
+    async def send_bytes(self, data: bytes) -> None:
+        pass
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    "late,expected",
+    [([{"type": "body_released"}], "charge"), ([], "release")],
+)
+async def test_time_limit_hears_the_sidecars_last_frames(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    late: list[dict[str, Any]],
+    expected: str,
+) -> None:
+    """At the time limit the node closes the sidecar session and drains its
+    frames before deciding: a ``body_released`` in flight is honoured (the
+    provider has the request), so the reservation is not released."""
+    ledger = _Ledger(monkeypatch)
+    monkeypatch.setattr(cws, "SESSION_TIMEOUT_S", 0.3)
+    sidecar = _QueueSidecar([_READY], late)
+    state = cws.SessionState()
+
+    async def open_session(ws: Any, sid: str, st: Any) -> Any:
+        st.billing = _Billing()
+        return sidecar
+
+    monkeypatch.setattr(cws, "_open_session", open_session)
+    client = _IdleClient()
+    await cws._run_session(client, "s", state)  # type: ignore[arg-type]
+    assert sidecar.closed
+    assert any(m.get("status") == 408 for m in client.sent)
+    assert state.body_released is bool(late)
+    assert ledger.calls == [expected]
+
+
 async def test_post_release_window_stays_inside_the_lease() -> None:
     from routstr.core.lifecycle import RequestLifetime, request_lifetime
 
@@ -1452,13 +1660,51 @@ async def test_reservation_without_context_uses_the_max_cost(
     assert billing.reserved_msats == 1_100_000  # sats_pricing.max_cost
 
 
-async def test_fixed_pricing_keeps_the_per_request_reservation(
+async def test_fixed_pricing_refuses_confidential_setups(
     monkeypatch: pytest.MonkeyPatch, billing_db: Any
 ) -> None:
+    """A flat per-request price cannot cover an opaque full-context request:
+    an offer signed before fixed pricing was switched on is not honoured."""
+    sig = _current_sig()
     monkeypatch.setattr(settings, "fixed_pricing", True)
     monkeypatch.setattr(settings, "fixed_cost_per_request", 7)
-    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
-    assert billing.reserved_msats == 7000
+    with pytest.raises(conf.BillingError) as exc:
+        await conf.reserve("hk", "ctx-model", 8, sig)
+    assert exc.value.status == 503 and "FIXED_PRICING" in str(exc.value)
+    with pytest.raises(conf.BillingError):
+        await conf.reserve_image("hk", "img", "webp", 1, sig)
+    key = await billing_db.key()
+    assert key.reserved_balance == 0
+
+
+async def test_fixed_pricing_serves_no_offer(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+) -> None:
+    from fastapi import HTTPException
+
+    sidecar_calls: list[int] = []
+
+    async def side() -> dict[str, Any]:
+        sidecar_calls.append(1)
+        return {"upstream_host": "api.venice.ai"}
+
+    monkeypatch.setattr(conf, "cached_sidecar_offer", side)
+    monkeypatch.setattr(conf, "offered_models", lambda s: {"m": object()})
+    monkeypatch.setattr(conf, "price_entry", lambda mid, c: dict(RATES))
+    monkeypatch.setattr(settings, "fixed_pricing", True)
+    seen = _capture_warnings(monkeypatch, conf.logger)
+    for _ in range(2):
+        with pytest.raises(HTTPException) as exc:
+            await conf.confidential_offer()
+        assert exc.value.status_code == 503
+        assert "FIXED_PRICING" in str(exc.value.detail)
+    assert await conf.models_fields() == {}
+    # Logged once, not on every offer or /v1/models request.
+    assert sum("FIXED_PRICING" in m for m, _e in seen) == 1
+    assert sidecar_calls == []
+    monkeypatch.setattr(settings, "fixed_pricing", False)
+    assert set(await conf.models_fields()) == {"m"}
 
 
 async def test_settlement_uses_the_frozen_rates(billing_db: Any) -> None:
@@ -2060,6 +2306,40 @@ def test_rejected_request_charges_the_abandon_fee(
     )
     assert ledger.calls == ["reserve", "charge_fee:5000"]
     assert got[-1]["receipt"]["cost_msats"] == 5000
+
+
+@pytest.mark.parametrize(
+    "response_bytes,expected",
+    [
+        (517, "charge_fee:2000"),  # the provider answered: a refusal
+        (0, "charge_fee:5000"),  # it never answered: as an abandoned session
+        ("517", "charge_fee:5000"),  # malformed: no refusal is assumed
+    ],
+)
+def test_provider_closing_before_the_body_completes(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    response_bytes: Any,
+    expected: str,
+) -> None:
+    """A provider that refuses from the head alone and closes before the
+    final body record is released: the client cannot disclose the error
+    head, so the node charges the session fee rather than the abandon fee."""
+    ledger = _fee_ledger(monkeypatch)
+    early = {"type": "upstream_closed_early", "response_bytes": response_bytes}
+    err = {"type": "error", "reason": "upstream closed the connection"}
+    _, got = _run_session(monkeypatch, [_READY, early, err], 2, _FEE_SETUP)
+    # The signal is the node's: the client sees only the sidecar's error.
+    assert [m["type"] for m in got] == ["ready", "error"]
+    assert ledger.calls == ["reserve", expected]
+
+
+async def test_early_close_after_release_still_charges_the_reservation() -> None:
+    st = cws.SessionState()
+    st.body_released = True
+    early = json.dumps({"type": "upstream_closed_early", "response_bytes": 9})
+    assert await cws._on_sidecar_text(early, None, st) is None  # type: ignore[arg-type]
+    assert st.upstream_refused is False
 
 
 def test_error_status_classes() -> None:

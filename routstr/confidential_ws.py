@@ -109,6 +109,14 @@ SETUP_TIMEOUT_S = 10.0
 SESSION_TIMEOUT_S = 600.0
 POST_RELEASE_TIMEOUT_S = 600.0
 MAX_BODY_LEN = 8 << 20
+# The setup frame is parsed before any credential is checked: anything larger
+# than a setup with a large Cashu token is refused unparsed. (uvicorn's
+# ``--ws-max-size`` bounds what reaches the node at all.)
+MAX_SETUP_TEXT = 256 << 10
+# How long a session cut off at its time limit waits, after closing the
+# sidecar connection, for the sidecar's last frames (a ``body_released`` or
+# a usage already on its way), so the final charge sees its real state.
+SIDECAR_DRAIN_S = 5.0
 # Time after the session limit for the final settlement or abort to finish.
 # The reservation's lease covers both phases plus this, whatever
 # MAX_REQUEST_LIFETIME_SECONDS is: a lease that lapsed mid-session would let
@@ -269,6 +277,10 @@ class SessionState:
         # The sidecar accepted the setup (``ready``): from here on the node is
         # doing the session's 2PC work and an abandoned session keeps its fee.
         self.engaged = False
+        # The sidecar reported that the provider closed the connection after
+        # answering, before the final body record was released (a refusal
+        # from the head alone): the session fee is charged, not the abandon fee.
+        self.upstream_refused = False
         # Set once the reservation is charged or released; ``lock`` makes
         # settlement and abort handling finalize it exactly once.
         self.finalized = False
@@ -641,6 +653,12 @@ async def _run_session(
                 extra={"sid": _short(state.sid)},
             )
             await _send_error(websocket, 408, "session time limit reached")
+            # End the sidecar session, then hear its last frames: a π_C2S that
+            # completed just now may already have released the body, and a
+            # finalization that missed its ``body_released`` would release a
+            # reservation the provider is working on.
+            client_pump.cancel()
+            await _drain_sidecar(upstream, sidecar_pump, SIDECAR_DRAIN_S)
         else:
             # If the client left, the sidecar session is closing: let its pump
             # drain frames already in flight (body_released, usage) so the
@@ -654,6 +672,15 @@ async def _run_session(
         await _finalize(state)
         await _close(upstream, 1000)
         await _close(websocket, 1000)
+
+
+async def _drain_sidecar(upstream: Any, sidecar_pump: Any, timeout: float) -> None:
+    """Close the sidecar connection and let ``sidecar_pump`` forward the frames
+    the sidecar sent before its close, for at most ``timeout`` seconds."""
+    closing = asyncio.ensure_future(_close(upstream, 1000))
+    await asyncio.wait({sidecar_pump}, timeout=timeout)
+    if not closing.done():
+        closing.cancel()
 
 
 async def _open_session(
@@ -687,8 +714,11 @@ async def _open_session(
         state.awaiting_setup = False
         if message["type"] == "websocket.disconnect":
             return None
+        text = message.get("text") or ""
+        if len(text) > MAX_SETUP_TEXT or len(text.encode("utf-8")) > MAX_SETUP_TEXT:
+            raise SetupError(413, f"setup frame larger than {MAX_SETUP_TEXT} bytes")
         try:
-            msg = json.loads(message.get("text") or "")
+            msg = json.loads(text)
         except json.JSONDecodeError:
             msg = None
         try:
@@ -842,6 +872,22 @@ async def _on_sidecar_text(
         # in use and no longer counts against the unused limit.
         _mark_used(state)
         return frame
+    if kind == "upstream_closed_early":
+        # The provider closed before the final body record was released. With
+        # response bytes it answered first (a refusal from the head alone,
+        # which the client cannot disclose); with none it never answered.
+        # Node-facing only: not forwarded.
+        n = msg.get("response_bytes")
+        if _is_int(n) and n > 0 and not state.body_released:
+            state.upstream_refused = True
+        logger.info(
+            "confidential ws: provider closed before the request was complete",
+            extra={
+                "sid": _short(state.sid),
+                "response_bytes": n if _is_int(n) else None,
+            },
+        )
+        return None
     if kind == "body_released":
         state.body_released = True
         if state.released_at is None:
@@ -893,12 +939,18 @@ async def _release_keeping_fee(billing: Billing, name: str) -> tuple[int, int | 
 
 
 async def _apply_settlement(
-    billing: Billing, usage: dict[str, Any], model: Any = None
+    billing: Billing,
+    usage: dict[str, Any],
+    model: Any = None,
+    reported_model: Any = None,
 ) -> tuple[int, int | None]:
     """Finalize the reservation for a disclosed usage event: (cost, balance).
 
     ``model`` is the usage frame's top-level model (a flat image settlement
-    carries it there rather than in ``usage``)."""
+    carries it there rather than in ``usage``); ``reported_model`` is the
+    model the provider's usage event named when it differs from the pinned
+    one (sent by newer sidecars; older ones put the provider's spelling in
+    ``model``)."""
     images = getattr(billing, "kind", "chat") == "images"
     if usage.get("flat") is True:
         reported = usage.get("model", model)
@@ -920,11 +972,23 @@ async def _apply_settlement(
             return await _release_keeping_fee(billing, "abandon_fee_msat")
         # 500/502/504 …: work may have been billed upstream.
         return billing.reserved_msats, await charge_reservation(billing)
-    if images or usage.get("model") != billing.model_id:
+    if images:
         # Image sessions settle flat or on an error head, never on token
-        # usage; and the pinned suffix fixes a chat session's model. Anything
-        # else is a protocol breach.
+        # usage: anything else is a protocol breach.
         return billing.reserved_msats, await charge_reservation(billing)
+    # π_C2S proved the request names the pinned model, so a usage event that
+    # spells it differently (an alias, a canonical id, a case change) is
+    # still that request: it is settled at the pinned model's frozen rates.
+    reported = reported_model if reported_model is not None else usage.get("model")
+    if reported != billing.model_id:
+        logger.warning(
+            "confidential ws: provider reported another model than the pinned "
+            "one; settling at the pinned model's rates",
+            extra={
+                "model": billing.model_id,
+                "reported_model": str(reported)[:200],
+            },
+        )
     settled = await settle(billing, usage)
     return int(settled["cost_msats"]), settled["balance_msats"]
 
@@ -934,7 +998,10 @@ SETTLE_RETRY_DELAYS = (0.2, 1.0, 3.0)
 
 
 async def _apply_settlement_retrying(
-    billing: Billing, usage: dict[str, Any], model: Any = None
+    billing: Billing,
+    usage: dict[str, Any],
+    model: Any = None,
+    reported_model: Any = None,
 ) -> tuple[int, int | None]:
     """``_apply_settlement``, retried on a failure of the node's own (a busy or
     dropped database). The usage is already verified, so a retry repeats only
@@ -943,7 +1010,7 @@ async def _apply_settlement_retrying(
     the caller's fallback finds nothing left to finalize)."""
     for delay in SETTLE_RETRY_DELAYS:
         try:
-            return await _apply_settlement(billing, usage, model)
+            return await _apply_settlement(billing, usage, model, reported_model)
         except Exception:
             logger.warning(
                 "confidential ws: settlement failed, retrying",
@@ -951,7 +1018,7 @@ async def _apply_settlement_retrying(
                 extra={"model": billing.model_id, "retry_in_s": delay},
             )
             await asyncio.sleep(delay)
-    return await _apply_settlement(billing, usage, model)
+    return await _apply_settlement(billing, usage, model, reported_model)
 
 
 async def _settle(
@@ -977,7 +1044,7 @@ async def _settle(
             return
         try:
             cost, balance = await _apply_settlement_retrying(
-                billing, usage, msg.get("model")
+                billing, usage, msg.get("model"), msg.get("reported_model")
             )
         except Exception:
             logger.exception(
@@ -1075,6 +1142,12 @@ async def _finalize_unsettled(state: SessionState) -> str | None:
             # The upstream got the complete request but no usage was settled.
             await charge_reservation(billing)
             outcome = "charged_reservation"
+        elif state.upstream_refused:
+            # The provider answered from the head alone and closed (a refusal
+            # of the node's key or account, a rate limit): the session fee,
+            # as for a disclosed refusal, never the abandon fee.
+            cost, _ = await _release_keeping_fee(billing, "session_fee_msat")
+            outcome = f"charged_session_fee:{cost}" if cost else "released"
         elif state.engaged and _fee(billing, "abandon_fee_msat") > 0:
             # π_C2S never verified, so the upstream never received a complete
             # request, but the sidecar ran the session (armed and never used,
