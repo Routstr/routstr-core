@@ -364,6 +364,10 @@ DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/routstr
 - Pool sizing is per worker: `DATABASE_POOL_SIZE` and `DATABASE_MAX_OVERFLOW`
   (defaults 10 and 20) are multiplied by the worker count on the server side.
 
+On Docker Compose, follow the step-by-step guide in
+[Deployment](deployment.md#postgresql-optional): back up, switch, verify, and
+how to switch back. The rest of this section is the reference behind it.
+
 An existing SQLite database moves over with
 `uv run python scripts/migrate_sqlite_to_postgres.py --source keys.db --target <url>`.
 It copies into an empty database inside one transaction, verifies every row, and
