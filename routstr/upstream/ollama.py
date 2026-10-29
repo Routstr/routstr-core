@@ -7,7 +7,6 @@ import httpx
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
-    from ..core.db import UpstreamProviderRow
     from ..payment.models import Model
 
 from ..core.logging import get_logger
@@ -40,16 +39,6 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             base_url=base_url,
             api_key=api_key,
             provider_fee=provider_fee,
-        )
-
-    @classmethod
-    def _build_from_row(
-        cls, provider_row: "UpstreamProviderRow"
-    ) -> "OllamaUpstreamProvider":
-        return cls(
-            base_url=provider_row.base_url,
-            api_key=provider_row.api_key,
-            provider_fee=provider_row.provider_fee,
         )
 
     @classmethod
@@ -195,25 +184,6 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
                 f"Failed to refresh models cache for {self.base_url}",
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
-
-    def get_cached_models(self) -> list[Model]:
-        """Get cached models for this provider.
-
-        Returns:
-            List of cached Model objects
-        """
-        return self._models_cache
-
-    def get_cached_model_by_id(self, model_id: str) -> Model | None:
-        """Get a specific cached model by ID.
-
-        Args:
-            model_id: Model identifier
-
-        Returns:
-            Model object or None if not found
-        """
-        return self._models_by_id.get(model_id)
 
     def _apply_provider_fee_to_model(self, model: Model) -> Model:
         """Apply provider fee to model's USD pricing and calculate max costs.
