@@ -4637,7 +4637,10 @@ class BaseUpstreamProvider:
                     data_json = json.loads(line[6:])
                     # OpenAI format: usage and model at top level
                     if "usage" in data_json:
-                        usage_data = {**(usage_data or {}), **data_json["usage"]}
+                        usage_data = {
+                            **(usage_data or {}),
+                            **(data_json["usage"] or {}),
+                        }
                         model = data_json.get("model") or model
                     elif "model" in data_json and not model:
                         model = data_json["model"]

@@ -191,6 +191,35 @@ async def test_streaming_includes_cost_sats_in_usage_chunk() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streaming_null_usage_chunks_are_skipped() -> None:
+    provider = _make_provider()
+    get_cost = AsyncMock(return_value=_make_cost_data(total_msats=200))
+    send_refund = AsyncMock(return_value="cashuA_refund_token")
+    content_str = "\n".join([
+        'data: {"id":"c","model":"gpt-4o","choices":[{"delta":{"content":"hi"}}],"usage":null}',
+        'data: {"id":"c","model":"gpt-4o","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}',
+        "data: [DONE]",
+    ])
+
+    with (
+        patch.object(provider, "get_x_cashu_cost", new=get_cost),
+        patch.object(provider, "send_refund", new=send_refund),
+    ):
+        response = await provider.handle_x_cashu_streaming_response(
+            content_str=content_str,
+            response=_make_httpx_response(),
+            amount=10000,
+            unit="msat",
+            max_cost_for_model=10000,
+            mint=None,
+        )
+        await _collect_streaming(response)
+
+    assert get_cost.await_args.args[0]["usage"]["prompt_tokens"] == 10
+    assert send_refund.await_args.args[0] == 9800
+
+
+@pytest.mark.asyncio
 async def test_streaming_non_usage_chunks_unmodified() -> None:
     provider = _make_provider()
     cost_data = _make_cost_data(total_msats=2000)
