@@ -1,3 +1,4 @@
+import math
 import os
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
@@ -209,6 +210,39 @@ async def test_discount_counts_legacy_token_id_prompt() -> None:
         cost = await calculate_discounted_max_cost(50_000, body, model_obj)
 
     assert cost == 50_000
+
+
+async def test_discounted_max_cost_scales_with_fast_mode_and_us_inference() -> None:
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.002
+    pricing.max_prompt_cost = 50.0
+    pricing.max_completion_cost = 40.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    body = {"model": "test-model", "prompt": list(range(10_000)), "max_tokens": 20_000}
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        base = await calculate_discounted_max_cost(90_000, body, model_obj)
+        fast = await calculate_discounted_max_cost(
+            90_000, {**body, "speed": "fast"}, model_obj
+        )
+        fast_us = await calculate_discounted_max_cost(
+            90_000, {**body, "speed": "fast", "inference_geo": "us"}, model_obj
+        )
+
+    # The extra request fields add a few prompt tokens, hence >= rather than ==.
+    assert fast >= 2 * base
+    assert fast_us >= math.ceil(fast * 1.1)
 
 
 async def test_discount_cannot_be_dodged_by_hiding_prompt_in_tools() -> None:
