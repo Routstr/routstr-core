@@ -263,7 +263,8 @@ Use environment variables for:
 | `ADMIN_PASSWORD`     | Legacy seed for the dashboard password (otherwise generated + logged on first start) | (auto-generated) |
 | `ROUTSTR_SECRET_KEY` | Master key encrypting node secrets at rest. Auto-generated to a key file if unset | (auto-generated) |
 | `ROUTSTR_SECRET_KEY_FILE` | Path to the generated key file (used when `ROUTSTR_SECRET_KEY` is unset) | `routstr_secret.key` beside the database |
-| `DATABASE_URL`       | Database connection string        | `sqlite+aiosqlite:///keys.db`        |
+| `DATABASE_URL`       | Database connection string. SQLite or PostgreSQL, e.g. `postgresql+asyncpg://user:pass@host:5432/routstr` | `sqlite+aiosqlite:///keys.db` |
+| `SQLITE_IMPORT_PATH` | SQLite file copied once into an empty PostgreSQL `DATABASE_URL` at startup (see [below](#postgresql-and-multiple-workers)) | — |
 | `NAME`               | Node display name                 | `ARoutstrNode`                       |
 | `DESCRIPTION`        | Node description                  | `A Routstr Node`                     |
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
@@ -331,6 +332,69 @@ in your backups. If it is lost or changed, previously encrypted secrets can't be
 decrypted and must be re-entered — there is no rotation. To keep the key off the
 data volume, set `ROUTSTR_SECRET_KEY` explicitly (an env value always takes
 precedence over the file). See also [Deployment](deployment.md).
+
+**On PostgreSQL, set the key explicitly.** There is no local database file to sit
+beside, so the generated key lands in the working directory. If that directory
+isn't persisted, the key is gone on the next start and a node with a stored nsec
+refuses to boot with `ROUTSTR_SECRET_KEY is not set`. Set `ROUTSTR_SECRET_KEY`, or
+point `ROUTSTR_SECRET_KEY_FILE` at a persistent path.
+
+### PostgreSQL and Multiple Workers
+
+SQLite serves a single process. To run several uvicorn workers (`--workers N`) or
+replicas behind one load balancer, point them all at one PostgreSQL database:
+
+```bash
+DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/routstr
+```
+
+- Every worker runs the schema migrations on startup; on PostgreSQL they queue on
+  an advisory lock, so an empty database can be brought up by all workers at once.
+- `RESET_RESERVED_BALANCE_ON_STARTUP` (default `true`) releases reservations a
+  previous process left behind. Only reservations whose lease has expired are
+  released, so a respawned worker never touches the requests its siblings are
+  billing.
+- Each provider's model catalog is stored in the database after a successful
+  fetch. Workers reuse a recent copy instead of fetching it again, and a worker
+  whose fetch fails or is rate limited serves the last good catalog rather than
+  answering "model not found". A worker that still has no models retries after
+  30 seconds, backing off up to `MODELS_REFRESH_INTERVAL_SECONDS`.
+- Dashboard logins are stored in the database, so a session issued by one worker
+  is valid on all of them.
+- Pool sizing is per worker: `DATABASE_POOL_SIZE` and `DATABASE_MAX_OVERFLOW`
+  (defaults 10 and 20) are multiplied by the worker count on the server side.
+
+An existing SQLite database moves over with
+`uv run python scripts/migrate_sqlite_to_postgres.py --source keys.db --target <url>`.
+It copies into an empty database inside one transaction, verifies every row, and
+refuses to drop data silently; run it with `--dry-run` first. Keep the same
+`ROUTSTR_SECRET_KEY`, or the copied encrypted secrets cannot be read.
+
+The node can run the same copy itself at startup: set
+`SQLITE_IMPORT_PATH=keys.db` next to a PostgreSQL `DATABASE_URL`
+(`compose.postgres.yml` does this, see [Deployment](deployment.md#postgresql-optional)).
+
+- One worker imports while the others wait on an advisory lock. The copy and a
+  row in `database_imports` commit together, so every later start skips it.
+- The target must be empty. A database with data but no import record stops
+  the node instead of being merged into; set `SQLITE_IMPORT_PATH=` (empty) to
+  keep it.
+- The file must be a Routstr database (it has an `api_keys` table); an empty or
+  foreign file is refused rather than recorded as imported.
+- A `keys.db` from an older release is upgraded as a temporary copy first; the
+  file itself is never modified.
+- Afterwards the file (and its `-wal`/`-shm`) is renamed to
+  `keys.db.imported-<timestamp>`, never deleted. When it cannot be renamed
+  (read-only mount) the import record alone prevents a second import; archive
+  the file yourself. If that file changes afterwards (a SQLite node kept using
+  it), the node refuses to start, because those new rows are not in PostgreSQL.
+- Any failure rolls the copy back, logs the cause and stops startup; there is no
+  fallback to SQLite. A missing file with no import record logs a warning and
+  starts on the empty database, as on a fresh install. Check the path before
+  that first start: once the node has written to the database, a later import
+  is refused.
+- `.wallet/` stays on local SQLite and `ROUTSTR_SECRET_KEY` must not change.
+- The setting is ignored when `DATABASE_URL` is not PostgreSQL.
 
 ---
 

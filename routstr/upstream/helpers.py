@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
     from ..core.settings import Settings
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from ..core import get_logger
@@ -134,6 +135,14 @@ async def get_all_models_with_overrides(
     return list(all_models.values())
 
 
+EMPTY_CATALOG_RETRY_SECONDS = 30
+
+
+def _serves_no_models(upstream: BaseUpstreamProvider) -> bool:
+    get_cached = getattr(upstream, "get_cached_models", None)
+    return callable(get_cached) and not get_cached()
+
+
 async def refresh_upstreams_models_periodically(
     upstreams_provider: (
         Callable[[], list[BaseUpstreamProvider]] | list[BaseUpstreamProvider]
@@ -161,6 +170,7 @@ async def refresh_upstreams_models_periodically(
             return upstreams_provider()
         return upstreams_provider
 
+    empty_streak = 0
     while True:
         try:
             for upstream in _resolve_upstreams():
@@ -190,9 +200,18 @@ async def refresh_upstreams_models_periodically(
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
 
+        delay = float(interval)
+        if any(_serves_no_models(u) for u in _resolve_upstreams()):
+            # A worker whose first fetch failed would otherwise answer "model not
+            # found" for a whole interval while its siblings serve the catalog.
+            # Back off so a provider that is down everywhere is not hammered.
+            delay = min(delay, EMPTY_CATALOG_RETRY_SECONDS * 2**empty_streak)
+            empty_streak += 1
+        else:
+            empty_streak = 0
         try:
-            jitter = max(0.0, float(interval) * 0.1)
-            await asyncio.sleep(interval + random.uniform(0, jitter))
+            jitter = max(0.0, delay * 0.1)
+            await asyncio.sleep(delay + random.uniform(0, jitter))
         except asyncio.CancelledError:
             break
 
@@ -210,8 +229,14 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
         existing_providers = result.all()
 
         if not existing_providers:
-            await _seed_providers_from_settings(session, settings)
-            await session.commit()
+            try:
+                await _seed_providers_from_settings(session, settings)
+                await session.commit()
+            except IntegrityError:
+                # Workers booting together all see an empty table and seed the
+                # same providers; the unique constraint lets exactly one win,
+                # and the rest load its rows below.
+                await session.rollback()
             result = await session.exec(select(UpstreamProviderRow))
             existing_providers = result.all()
             if existing_providers:

@@ -177,6 +177,14 @@ def test_database_pool_defaults_provide_concurrency_headroom() -> None:
     assert s.database_pool_hold_warn_seconds == 10.0
 
 
+def test_postgres_deployment_persists_generated_password() -> None:
+    deployment = Path(__file__).parents[2] / "docs/provider/deployment.md"
+    text = deployment.read_text()
+
+    assert 'echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> .env' in text
+    assert "same password across restarts" in text
+
+
 def test_env_only_settings_are_documented() -> None:
     env_example = Path(__file__).parents[2] / ".env.example"
     documented = {
