@@ -1182,6 +1182,118 @@ async def test_client_disconnect_midstream_estimates_usage_and_stops_heartbeat()
 
 
 @pytest.mark.asyncio
+async def test_messages_client_disconnect_bills_prompt_usage_from_message_start() -> (
+    None
+):
+    """A client abort bills the prompt usage message_start already reported.
+
+    Anthropic sends uncached input, cache writes and cache reads before any
+    text. Pricing the whole prompt as plain input would charge cache reads at
+    the full input rate.
+    """
+    engine = await _engine()
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key", provider_fee=1.0
+    )
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        key = ApiKey(hashed_key="messages-disconnect-key", balance=1_000_000)
+        session.add(key)
+        await session.commit()
+        await pay_for_request(key, 500_000, session)
+        snapshot = await get_reservation_snapshot(key, session)
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield (
+            b'data: {"type":"message_start","message":{"model":"claude-test",'
+            b'"usage":{"input_tokens":3,"cache_creation_input_tokens":500,'
+            b'"cache_read_input_tokens":99497,"output_tokens":1}}}\n\n'
+        )
+        yield (
+            b'data: {"type":"content_block_delta","index":0,'
+            b'"delta":{"type":"text_delta","text":"Sure"}}\n\n'
+        )
+        yield b'data: {"type":"message_stop"}\n\n'
+
+    upstream_response = MagicMock(
+        status_code=200, headers={"content-type": "text/event-stream"}
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    pricing = Pricing(
+        prompt=0.003,
+        completion=0.015,
+        input_cache_read=0.0003,
+        input_cache_write=0.00375,
+    )
+    model = Model(
+        id="claude-test",
+        name="claude-test",
+        created=0,
+        description="",
+        context_length=200_000,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="claude",
+            instruct_type=None,
+        ),
+        pricing=pricing,
+        sats_pricing=pricing,
+    )
+    request_body = json.dumps(
+        {"model": model.id, "messages": [{"role": "user", "content": "x"}]}
+    ).encode()
+
+    try:
+        with (
+            patch(
+                "routstr.upstream.base.create_session",
+                side_effect=lambda: AsyncSession(engine, expire_on_commit=False),
+            ),
+            patch(
+                "routstr.upstream.base.adjust_payment_for_tokens",
+                auth_module.adjust_payment_for_tokens,
+            ),
+            patch(
+                "routstr.upstream.count_tokens._count_with_litellm",
+                return_value=100_000,
+            ),
+            patch(
+                "routstr.upstream.count_tokens._count_text_with_litellm",
+                return_value=2,
+            ),
+            patch(
+                "routstr.payment.cost_calculation.sats_usd_price",
+                return_value=5.0e-5,
+            ),
+        ):
+            response = await provider.handle_streaming_messages_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500_000,
+                model_obj=model,
+                reservation_snapshot=snapshot,
+                request_body=request_body,
+            )
+            iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
+            await iterator.__anext__()
+            await iterator.__anext__()
+            await iterator.aclose()
+    finally:
+        await auth_module._stop_reservation_heartbeat(snapshot.release_id)
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        final_key = await session.get(ApiKey, "messages-disconnect-key")
+
+    assert final_key is not None
+    assert final_key.reserved_balance == 0
+    # 3*3 + 500*3.75 + 99497*0.3 + 2*15 = 31763.1, not 100000*3 + 2*15.
+    assert final_key.total_spent == 31_764
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_messages_streaming_bills_upstream_routstr_node_charge() -> None:
     provider = BaseUpstreamProvider(
         base_url="https://api.example.com", api_key="test-key"
