@@ -219,7 +219,11 @@ def routing(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return max_costs.get(getattr(model_obj, "id", ""), 100)
 
     async def discounted(
-        cost: int, body: object, model_obj: object = None, path: str = ""
+        cost: int,
+        body: object,
+        model_obj: object = None,
+        path: str = "",
+        **kwargs: Any,
     ) -> int:
         return cost
 
