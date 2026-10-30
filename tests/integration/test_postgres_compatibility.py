@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -78,9 +79,13 @@ def _alembic(*args: str, url: str = POSTGRES_URL) -> subprocess.CompletedProcess
 
 def _current_revision() -> str:
     """The stamped revision, isolated from the app's startup logging on stdout."""
-    lines = [line.strip() for line in _alembic("current").stdout.splitlines()]
-    revisions = [line for line in lines if line and " " not in line.rstrip(" (head)")]
-    return revisions[-1].split()[0] if revisions else ""
+    # A revision line is the id plus optional markers, e.g. "abc123 (head) (mergepoint)".
+    revisions = [
+        line.split()[0]
+        for line in _alembic("current").stdout.splitlines()
+        if re.fullmatch(r"[0-9a-f]{12}( \(\w+\))*", line.strip())
+    ]
+    return revisions[-1] if revisions else ""
 
 
 async def _reset_schema() -> None:
@@ -213,6 +218,8 @@ def test_no_column_that_holds_money_or_time_is_int4(migrated_postgres: str) -> N
     narrow = set(asyncio.run(widths()))
     # Surrogate keys, foreign keys and a bounded model attribute.
     allowed = {
+        "analytics_v2_delivery_state.id",
+        "analytics_v2_outbox.kind",
         "model_paths.id",
         "model_paths.upstream_provider_id",
         "models.context_length",
@@ -220,6 +227,7 @@ def test_no_column_that_holds_money_or_time_is_int4(migrated_postgres: str) -> N
         "routstr_fees.id",
         "secrets.id",
         "settings.id",
+        "terminal_outcome_epochs.current_slot",
         "upstream_providers.id",
         "upstream_model_snapshots.upstream_provider_id",
     }
