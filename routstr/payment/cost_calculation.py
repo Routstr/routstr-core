@@ -270,6 +270,11 @@ async def calculate_cost(
         cache_creation_rate = input_rate
     else:
         input_rate, output_rate, cache_read_rate, cache_creation_rate = pricing_rates
+        modifier = (1.1 if usage.us_inference else 1) * (2 if usage.fast_mode else 1)
+        if modifier != 1:
+            input_rate, output_rate, cache_read_rate, cache_creation_rate = (
+                rate * modifier for rate in pricing_rates
+            )
 
     # Truthiness is not the question: `NaN` and a negative rate are both truthy
     # and sailed past this gate into the token math, while a rate of zero is a
