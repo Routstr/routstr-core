@@ -215,7 +215,9 @@ async def test_streaming_null_usage_chunks_are_skipped() -> None:
         )
         await _collect_streaming(response)
 
+    assert get_cost.await_args is not None
     assert get_cost.await_args.args[0]["usage"]["prompt_tokens"] == 10
+    assert send_refund.await_args is not None
     assert send_refund.await_args.args[0] == 9800
 
 
