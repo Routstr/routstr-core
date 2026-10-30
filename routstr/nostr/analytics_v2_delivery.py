@@ -17,7 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 import aiohttp
 import websockets
 from aiohttp.abc import AbstractResolver
-from sqlalchemy import and_, func
+from sqlalchemy import func
 from sqlalchemy import select as sa_select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlmodel import col, or_, select, update
@@ -847,35 +847,10 @@ class AnalyticsV2Producer:
             cutoff = today_utc - timedelta(days=PUBLIC_HISTORY_DAYS)
             first_week = cutoff - timedelta(days=cutoff.weekday())
             start = max(min(epoch.coverage_start_day for epoch in epochs), first_week)
-            sources = (
-                col(TerminalOutcome.input_source),
-                col(TerminalOutcome.output_source),
-                col(TerminalOutcome.cache_read_source),
-                col(TerminalOutcome.cache_creation_source),
-            )
-            measured = and_(
-                sources[0] == "reported",
-                sources[1] == "reported",
-                or_(
-                    sources[2] == "reported",
-                    and_(
-                        sources[2] == "missing",
-                        col(TerminalOutcome.cache_read_input_tokens) == 0,
-                    ),
-                ),
-                or_(
-                    sources[3] == "reported",
-                    and_(
-                        sources[3] == "missing",
-                        col(TerminalOutcome.cache_creation_input_tokens) == 0,
-                    ),
-                ),
-            )
             totals = await session.execute(
                 sa_select(
                     col(TerminalOutcome.terminal_day),
                     col(TerminalOutcome.model_identifier),
-                    *sources,
                     func.count(col(TerminalOutcome.outcome_id)),
                     func.sum(TerminalOutcome.input_tokens),
                     func.sum(TerminalOutcome.output_tokens),
@@ -888,9 +863,6 @@ class AnalyticsV2Producer:
                 .group_by(
                     col(TerminalOutcome.terminal_day),
                     col(TerminalOutcome.model_identifier),
-                    *sources,
-                    # Missing positive cache counts cannot contaminate eligible rows.
-                    measured,
                 )
             )
             rows = tuple(
@@ -903,13 +875,9 @@ class AnalyticsV2Producer:
                     cache_read_input_tokens=int(cache_read_tokens),
                     cache_creation_input_tokens=int(cache_creation_tokens),
                     revenue_msats=int(revenue),
-                    input_source=input_source,
-                    output_source=output_source,
-                    cache_read_source=cache_read_source,
-                    cache_creation_source=cache_creation_source,
                     completed_requests=count,
                 )
-                for day, model, input_source, output_source, cache_read_source, cache_creation_source, count, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, revenue in totals.all()
+                for day, model, count, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, revenue in totals.all()
             )
         return epochs, rows
 

@@ -24,6 +24,17 @@ MAX_SAFE_INTEGER = (1 << 53) - 1
 
 COLUMNS = (
     "completed_requests",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "revenue_msats",
+)
+
+# Pre-release 20-column layout. Frames a node already signed with it are read
+# back as their six-column projection, so its outbox history stays usable.
+LEGACY_COLUMNS = (
+    "completed_requests",
     "input_observed_requests",
     "output_observed_requests",
     "cache_read_observed_requests",
@@ -44,6 +55,7 @@ COLUMNS = (
     "measured_token_requests",
     "measured_tokens",
 )
+_LEGACY_PROJECTION = tuple(LEGACY_COLUMNS.index(name) for name in COLUMNS)
 
 MetricVector = tuple[int, ...]
 ZERO_VECTOR: MetricVector = (0,) * len(COLUMNS)
@@ -71,10 +83,6 @@ class LedgerOutcome:
     cache_read_input_tokens: int
     cache_creation_input_tokens: int
     revenue_msats: int
-    input_source: str
-    output_source: str
-    cache_read_source: str
-    cache_creation_source: str
     completed_requests: int = 1
 
 
@@ -399,7 +407,9 @@ def prior_version_from_frame(frame: bytes) -> PriorVersion:
         raise AnalyticsV2Error("Analytics content is not canonical")
     if payload.get("schema") != ANALYTICS_SCHEMA:
         raise AnalyticsV2Error("Invalid analytics schema")
-    if payload.get("columns") != list(COLUMNS):
+    if payload.get("columns") == list(LEGACY_COLUMNS):
+        payload = _project_legacy_payload(payload)
+    elif payload.get("columns") != list(COLUMNS):
         raise AnalyticsV2Error("Invalid analytics columns")
 
     week = _parse_wire_date(payload.get("week"), "week")
@@ -482,6 +492,30 @@ def _base_payload(
     if corrected:
         payload["corrected"] = True
     return payload
+
+
+def _project_legacy_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    def project(values: object) -> object:
+        if not isinstance(values, list) or len(values) != len(LEGACY_COLUMNS):
+            raise AnalyticsV2Error(
+                f"Metric vectors must contain exactly {len(LEGACY_COLUMNS)} integers"
+            )
+        return [values[index] for index in _LEGACY_PROJECTION]
+
+    days = payload.get("days")
+    daily_models = payload.get("daily_models")
+    if not isinstance(days, dict) or not isinstance(daily_models, dict):
+        raise AnalyticsV2Error("days and daily_models must be objects")
+    if not all(isinstance(models, dict) for models in daily_models.values()):
+        raise AnalyticsV2Error("Invalid daily model row")
+    return {
+        **payload,
+        "days": {day: project(values) for day, values in days.items()},
+        "daily_models": {
+            day: {name: project(values) for name, values in models.items()}
+            for day, models in daily_models.items()
+        },
+    }
 
 
 def _canonical_json(value: object) -> bytes:
@@ -789,44 +823,19 @@ def _wire_daily_models(
 
 
 def _outcome_vector(outcome: LedgerOutcome) -> MetricVector:
-    sources = (
-        outcome.input_source,
-        outcome.output_source,
-        outcome.cache_read_source,
-        outcome.cache_creation_source,
-    )
-    tokens = (
+    return (
+        outcome.completed_requests,
         outcome.input_tokens,
         outcome.output_tokens,
         outcome.cache_read_input_tokens,
         outcome.cache_creation_input_tokens,
-    )
-    measured = sources[:2] == ("reported", "reported") and all(
-        source == "reported" or (source == "missing" and value == 0)
-        for source, value in zip(sources[2:], tokens[2:])
-    )
-    return (
-        outcome.completed_requests,
-        *(outcome.completed_requests * int(source == "reported") for source in sources),
-        *tokens,
         outcome.revenue_msats,
-        *(
-            outcome.completed_requests * int(source == "estimated")
-            for source in sources
-        ),
-        *(outcome.completed_requests * int(source == "missing") for source in sources),
-        outcome.completed_requests if measured else 0,
-        sum(tokens) if measured else 0,
     )
 
 
 def _validate_outcome(outcome: LedgerOutcome) -> None:
     _validate_date(outcome.terminal_day, "terminal_day")
     _validate_positive_int(outcome.completed_requests, "completed_requests")
-    for name in ("input", "output", "cache_read", "cache_creation"):
-        source = getattr(outcome, f"{name}_source")
-        if source not in ("reported", "estimated", "missing"):
-            raise AnalyticsV2Error("Invalid usage provenance")
     for name in (
         "input_tokens",
         "output_tokens",
@@ -844,13 +853,6 @@ def _validate_vector(values: MetricVector) -> None:
         )
     for index, value in enumerate(values):
         _validate_nonnegative_int(value, COLUMNS[index])
-    for index in range(4):
-        if values[1 + index] + values[10 + index] + values[14 + index] != values[0]:
-            raise AnalyticsV2Error("Usage provenance must partition completed requests")
-    if values[18] > min(values[1], values[2]):
-        raise AnalyticsV2Error("Measured requests require reported input and output")
-    if values[19] > sum(values[5:9]) or (values[18] == 0 and values[19] != 0):
-        raise AnalyticsV2Error("Measured tokens must belong to measured requests")
 
 
 def _sum_vectors(vectors: Iterable[MetricVector]) -> MetricVector:

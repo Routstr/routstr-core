@@ -13,6 +13,7 @@ from nostr_sdk import Event, EventBuilder, Keys, Kind, Tag, Timestamp
 from routstr.nostr.analytics_v2 import (
     COLUMNS,
     DEFAULT_MAX_FRAME_BYTES,
+    LEGACY_COLUMNS,
     MAX_SAFE_INTEGER,
     AnalyticsV2Error,
     DayAggregate,
@@ -40,10 +41,6 @@ def _outcome(
             cache_read_input_tokens=0,
             cache_creation_input_tokens=0,
             revenue_msats=25,
-            input_source="reported",
-            output_source="estimated",
-            cache_read_source="missing",
-            cache_creation_source="missing",
         ),
         **changes,
     )
@@ -103,12 +100,6 @@ def _assert_partitions(payload: dict[str, Any]) -> None:
             sum(row[column] for row in models.values())
             for column in range(len(COLUMNS))
         ] == values
-        for row in [values, *models.values()]:
-            for side in range(4):
-                assert row[1 + side] + row[10 + side] + row[14 + side] == row[0]
-            assert row[18] <= min(row[1], row[2])
-            assert row[19] <= sum(row[5:9])
-            assert row[18] != 0 or row[19] == 0
 
 
 def test_partial_week_has_daily_models_and_zero_days() -> None:
@@ -125,108 +116,38 @@ def test_partial_week_has_daily_models_and_zero_days() -> None:
     assert payload["through"] == "2026-09-17"
     assert payload["days"]["2026-09-14"][0] == 2
     assert payload["days"]["2026-09-15"] == [0] * len(COLUMNS)
-    assert payload["daily_models"]["2026-09-14"]["model/free"][9] == 0
+    assert payload["daily_models"]["2026-09-14"]["model/free"][5] == 0
     assert payload["daily_models"]["2026-09-16"]["_other"][0] == 1
     assert "today/not-published" not in encoded.content.decode()
     _assert_partitions(payload)
     assert prior_version_from_frame(encoded.frame) == encoded.as_prior_version()
 
 
-def test_reported_estimated_and_missing_usage_stay_separate() -> None:
-    payload = _payload(_encode(_aggregate([_outcome()])))
-    row = payload["days"][WEEK.isoformat()]
-    assert row == [1, 1, 0, 0, 0, 10, 4, 0, 0, 25, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0]
-    _assert_partitions(payload)
-
-
-def test_measured_cohort_cannot_be_inferred_from_separate_source_counts() -> None:
-    measured = _outcome(output_source="reported", output_tokens=20)
-    missing = _outcome(
-        input_source="missing",
-        input_tokens=0,
-        output_source="missing",
-        output_tokens=0,
-    )
-    together = _aggregate([measured, missing]).days[0].values
-    separate = (
-        _aggregate(
-            [
-                replace(
-                    measured,
-                    output_source="missing",
-                    output_tokens=0,
-                ),
-                replace(
-                    missing,
-                    output_source="reported",
-                    output_tokens=20,
-                ),
-            ]
+def test_day_rows_carry_only_billed_request_token_and_revenue_totals() -> None:
+    payload = _payload(
+        _encode(
+            _aggregate(
+                [
+                    _outcome(),
+                    _outcome(
+                        cache_read_input_tokens=6,
+                        cache_creation_input_tokens=4,
+                        completed_requests=2,
+                    ),
+                ]
+            )
         )
-        .days[0]
-        .values
     )
-    assert together[:18] == separate[:18]
-    assert together[18:] == (1, 30)
-    assert separate[18:] == (0, 0)
-
-
-@pytest.mark.parametrize(
-    ("changes", "cohort"),
-    [
-        ({}, (1, 30)),
-        ({"input_tokens": 0, "output_tokens": 0, "revenue_msats": 0}, (1, 0)),
-        ({"input_source": "estimated"}, (0, 0)),
-        ({"output_source": "estimated"}, (0, 0)),
-        ({"input_source": "missing"}, (0, 0)),
-        ({"output_source": "missing"}, (0, 0)),
-        ({"cache_read_source": "reported", "cache_read_input_tokens": 6}, (1, 36)),
-        (
-            {"cache_creation_source": "reported", "cache_creation_input_tokens": 4},
-            (1, 34),
-        ),
-        ({"cache_read_source": "estimated"}, (0, 0)),
-        ({"cache_creation_source": "estimated"}, (0, 0)),
-        ({"cache_read_input_tokens": 6}, (0, 0)),
-        ({"cache_creation_input_tokens": 4}, (0, 0)),
-        ({"completed_requests": 3, "input_tokens": 30, "output_tokens": 60}, (3, 90)),
-    ],
-)
-def test_measured_cohort_uses_matching_request_and_token_totals(
-    changes: dict[str, Any], cohort: tuple[int, int]
-) -> None:
-    measured = _outcome(output_source="reported", output_tokens=20)
-    payload = _payload(_encode(_aggregate([replace(measured, **changes)])))
-    assert payload["days"][WEEK.isoformat()][18:] == list(cohort)
+    assert payload["columns"] == [
+        "completed_requests",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "revenue_msats",
+    ]
+    assert payload["days"][WEEK.isoformat()] == [3, 20, 8, 6, 4, 50]
     _assert_partitions(payload)
-
-
-@pytest.mark.parametrize("source", ["reported", "estimated", "missing"])
-def test_each_usage_source_lands_in_its_own_counters(source: str) -> None:
-    changes: dict[str, Any] = {
-        f"{name}_source": source
-        for name in ("input", "output", "cache_read", "cache_creation")
-    }
-    row = (
-        _aggregate(
-            [
-                _outcome(
-                    cache_read_input_tokens=6, cache_creation_input_tokens=4, **changes
-                )
-            ]
-        )
-        .days[0]
-        .values
-    )
-    if source == "reported":
-        assert row[1:5] == (1,) * 4
-        assert row[18:] == (1, 24)
-    elif source == "estimated":
-        assert row[10:14] == (1,) * 4
-        assert row[18:] == (0, 0)
-    else:
-        assert row[14:18] == (1,) * 4
-        assert row[18:] == (0, 0)
 
 
 def test_epoch_start_and_end_exclude_partial_and_unknown_days() -> None:
@@ -339,10 +260,7 @@ def test_utf8_size_folding_preserves_every_day_and_metric() -> None:
             _outcome(
                 WEEK + timedelta(days=index % 4),
                 "模型/" + str(index) + "/" + "x" * 120,
-                output_source="reported" if index % 3 else "estimated",
-                cache_read_source="reported",
                 cache_read_input_tokens=6,
-                cache_creation_source="reported",
                 cache_creation_input_tokens=4,
             )
             for index in range(120)
@@ -357,7 +275,7 @@ def test_utf8_size_folding_preserves_every_day_and_metric() -> None:
         row["_other"][0] > 0 for row in _payload(folded)["daily_models"].values()
     )
     assert any(
-        row["_other"][18] > 0 and row["_other"][19] > 0
+        row["_other"][3] > 0 and row["_other"][4] > 0
         for row in _payload(folded)["daily_models"].values()
     )
     assert _payload(folded)["days"] == _payload(full)["days"]
@@ -407,7 +325,7 @@ def test_sdk_signature_and_exact_canonical_frame_round_trip() -> None:
         "missing_day",
         "missing_models",
         "nonpartition",
-        "provenance",
+        "vector_length",
         "unsafe_integer",
         "bool",
         "wrong_epoch",
@@ -415,7 +333,7 @@ def test_sdk_signature_and_exact_canonical_frame_round_trip() -> None:
     ],
 )
 def test_signed_invalid_payloads_are_rejected(change: str) -> None:
-    encoded = _encode(_aggregate([_outcome(output_source="reported")]))
+    encoded = _encode(_aggregate([_outcome()]))
     payload = _payload(encoded)
     day = WEEK.isoformat()
     if change == "missing_day":
@@ -423,18 +341,18 @@ def test_signed_invalid_payloads_are_rejected(change: str) -> None:
     elif change == "missing_models":
         del payload["daily_models"][day]
     elif change == "nonpartition":
-        payload["daily_models"][day]["_other"][9] = 1
-    elif change == "provenance":
-        payload["days"][day][10] = 1
+        payload["daily_models"][day]["_other"][5] = 1
+    elif change == "vector_length":
+        payload["days"][day].append(0)
     elif change == "unsafe_integer":
-        payload["days"][day][9] = MAX_SAFE_INTEGER + 1
+        payload["days"][day][5] = MAX_SAFE_INTEGER + 1
     elif change == "bool":
-        payload["days"][day][9] = False
+        payload["days"][day][5] = False
     elif change == "draft_columns":
-        payload["columns"] = payload["columns"][:18]
-        payload["days"] = {day: values[:18] for day, values in payload["days"].items()}
+        payload["columns"] = payload["columns"][:4]
+        payload["days"] = {day: values[:4] for day, values in payload["days"].items()}
         payload["daily_models"] = {
-            day: {model: values[:18] for model, values in models.items()}
+            day: {model: values[:4] for model, values in models.items()}
             for day, models in payload["daily_models"].items()
         }
     else:
@@ -443,31 +361,46 @@ def test_signed_invalid_payloads_are_rejected(change: str) -> None:
         prior_version_from_frame(_resign(encoded, payload))
 
 
-@pytest.mark.parametrize(
-    ("column", "value", "message"),
-    [
-        (18, 2, "Measured requests"),
-        (19, 15, "Measured tokens"),
-        (18, 0, "Measured tokens"),
-    ],
-)
-def test_signed_invalid_measured_cohorts_are_rejected_even_when_models_partition(
-    column: int, value: int, message: str
-) -> None:
-    encoded = _encode(_aggregate([_outcome(output_source="reported")]))
+def _legacy_vector(values: list[int]) -> list[int]:
+    count, input_tokens, output_tokens, cache_read, cache_creation, revenue = values
+    return [
+        count,
+        *([0] * 4),
+        input_tokens,
+        output_tokens,
+        cache_read,
+        cache_creation,
+        revenue,
+        *([count] * 4),
+        *([0] * 4),
+        0,
+        0,
+    ]
+
+
+def test_legacy_twenty_column_frames_read_back_as_six_columns() -> None:
+    encoded = _encode(_aggregate([_outcome(), _outcome(model=None)]))
     payload = _payload(encoded)
-    day = WEEK.isoformat()
-    payload["days"][day][column] = value
-    payload["daily_models"][day]["model/a"][column] = value
-    with pytest.raises(AnalyticsV2Error, match=message):
+    payload["columns"] = list(LEGACY_COLUMNS)
+    payload["days"] = {
+        day: _legacy_vector(values) for day, values in payload["days"].items()
+    }
+    payload["daily_models"] = {
+        day: {model: _legacy_vector(values) for model, values in models.items()}
+        for day, models in payload["daily_models"].items()
+    }
+    parsed = prior_version_from_frame(_resign(encoded, payload))
+    assert parsed.days == encoded.days
+    assert parsed.daily_models == encoded.daily_models
+
+    payload["days"][WEEK.isoformat()] = payload["days"][WEEK.isoformat()][:6]
+    with pytest.raises(AnalyticsV2Error, match="20 integers"):
         prior_version_from_frame(_resign(encoded, payload))
 
 
 def test_aggregate_rejects_unsafe_values_and_invalid_model_partition() -> None:
     with pytest.raises(AnalyticsV2Error):
         _aggregate([_outcome(revenue_msats=MAX_SAFE_INTEGER + 1)])
-    with pytest.raises(AnalyticsV2Error):
-        _aggregate([_outcome(input_source="guessed")])
     aggregate = _aggregate([_outcome()])
     broken = replace(
         aggregate, days=(DayAggregate(WEEK, (0,) * len(COLUMNS)), *aggregate.days[1:])

@@ -524,7 +524,7 @@ async def test_model_only_correction_keeps_totals_and_updates_daily_partition(
 
 
 @pytest.mark.asyncio
-async def test_database_groups_requests_without_losing_usage_provenance(
+async def test_database_groups_requests_by_day_and_model_whatever_their_usage_source(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await _activate(session_factory)
@@ -546,151 +546,14 @@ async def test_database_groups_requests_without_losing_usage_provenance(
         provider_d="provider",
     )
     _, grouped = await producer._load_eligible_epochs(0, WEEK + timedelta(days=1))
-    assert len(grouped) == 3
-    assert sum(row.completed_requests for row in grouped) == 42
+    assert len(grouped) == 1
+    assert grouped[0].completed_requests == 42
     assert await producer.produce_once(now=datetime(2026, 9, 1, 0, 1, tzinfo=UTC)) == 1
     async with session_factory() as session:
         stored = (await session.exec(select(AnalyticsV2Outbox))).one()
     payload = json.loads(json.loads(stored.frame)[1]["content"])
-    values = payload["days"][WEEK.isoformat()]
-    assert values[0] == 42
-    assert values[1] == 40
-    assert values[5] == sum(range(1, 41)) + 5
-    assert values[9] == sum(range(1, 41)) + 5
-    assert values[10] == 1
-    assert values[14] == 1
-    assert values[18:] == [40, 2 * sum(range(1, 41))]
-
-
-@pytest.mark.asyncio
-async def test_database_grouping_keeps_measured_cache_cohort_separate(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _activate(session_factory)
-    rows = [_outcome("plain-a", WEEK, tokens=10), _outcome("plain-b", WEEK, tokens=20)]
-    rows.append(_outcome("measured-zero", WEEK, tokens=0))
-    cached = _outcome("cached", WEEK, tokens=30)
-    cached.cache_read_source = cached.cache_creation_source = "reported"
-    cached.cache_read_input_tokens = 8
-    cached.cache_creation_input_tokens = 2
-    rows.append(cached)
-    for side in ("cache_read", "cache_creation"):
-        missing_cache = _outcome(side, WEEK, tokens=100)
-        setattr(missing_cache, f"{side}_input_tokens", 5)
-        rows.append(missing_cache)
-    estimated = _outcome("estimated", WEEK, tokens=40)
-    estimated.input_source = "estimated"
-    rows.append(estimated)
-    input_only = _outcome("input-only", WEEK, tokens=50)
-    input_only.output_source = "missing"
-    input_only.output_tokens = 0
-    rows.append(input_only)
-    output_only = _outcome("output-only", WEEK, tokens=60)
-    output_only.input_source = "missing"
-    output_only.input_tokens = 0
-    rows.append(output_only)
-    async with session_factory() as session:
-        session.add_all(rows)
-        await session.commit()
-    producer = AnalyticsV2Producer(
-        session_factory,
-        private_key_hex=PRIVATE_KEY,
-        public_key_hex=PUBLIC_KEY,
-        provider_d="provider",
-    )
-    _, grouped = await producer._load_eligible_epochs(0, WEEK + timedelta(days=1))
-    assert len(grouped) == 6
-    assert sum(row.completed_requests for row in grouped) == 9
-    assert await producer.produce_once(now=datetime(2026, 9, 1, 0, 1, tzinfo=UTC)) == 1
-    async with session_factory() as session:
-        stored = (await session.exec(select(AnalyticsV2Outbox))).one()
-    payload = json.loads(json.loads(stored.frame)[1]["content"])
-    values = payload["days"][WEEK.isoformat()]
-    assert values[0] == 9
-    assert values[18:] == [4, 130]
-    assert payload["daily_models"][WEEK.isoformat()]["model/served"] == values
-
-
-@pytest.mark.asyncio
-async def test_database_report_keeps_each_usage_source_apart(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _activate(session_factory)
-    async with session_factory() as session:
-        for source in ("reported", "estimated", "missing"):
-            row = _outcome(source, WEEK, tokens=10)
-            row.model_identifier = source
-            row.cache_read_input_tokens = 6
-            row.cache_creation_input_tokens = 4
-            for name in ("input", "output", "cache_read", "cache_creation"):
-                setattr(row, f"{name}_source", source)
-            session.add(row)
-        await session.commit()
-    producer = AnalyticsV2Producer(
-        session_factory,
-        private_key_hex=PRIVATE_KEY,
-        public_key_hex=PUBLIC_KEY,
-        provider_d="provider",
-    )
-    assert await producer.produce_once(now=datetime(2026, 9, 1, 0, 1, tzinfo=UTC)) == 1
-    async with session_factory() as session:
-        stored = (await session.exec(select(AnalyticsV2Outbox))).one()
-    payload = json.loads(json.loads(stored.frame)[1]["content"])
-    models = payload["daily_models"][WEEK.isoformat()]
-    assert models["reported"][1:5] == [1] * 4
-    assert models["reported"][18:] == [1, 30]
-    assert models["estimated"][10:14] == [1] * 4
-    assert models["estimated"][18:] == [0, 0]
-    assert models["missing"][14:18] == [1] * 4
-    assert models["missing"][18:] == [0, 0]
-    assert payload["days"][WEEK.isoformat()][18:] == [1, 30]
-
-
-@pytest.mark.asyncio
-async def test_measured_cohort_change_corrects_an_otherwise_identical_report(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _activate(session_factory)
-    measured = _outcome("measured", WEEK, tokens=10)
-    missing = _outcome("missing", WEEK, tokens=0)
-    missing.input_source = missing.output_source = "missing"
-    async with session_factory() as session:
-        session.add_all([measured, missing])
-        await session.commit()
-    producer = AnalyticsV2Producer(
-        session_factory,
-        private_key_hex=PRIVATE_KEY,
-        public_key_hex=PUBLIC_KEY,
-        provider_d="provider",
-    )
-    now = datetime(2026, 9, 1, 0, 1, tzinfo=UTC)
-    assert await producer.produce_once(now=now) == 1
-    async with session_factory() as session:
-        original = (await session.exec(select(AnalyticsV2Outbox))).one()
-        original.first_send_attempt_at_ms = 3
-        input_only = await session.get(TerminalOutcome, "measured")
-        output_only = await session.get(TerminalOutcome, "missing")
-        assert input_only is not None and output_only is not None
-        input_only.output_source = "missing"
-        input_only.output_tokens = 0
-        output_only.output_source = "reported"
-        output_only.output_tokens = 10
-        await session.commit()
-    assert await producer.produce_once(now=now) == 1
-    assert await producer.produce_once(now=now) == 0
-    async with session_factory() as session:
-        versions = (
-            await session.exec(
-                select(AnalyticsV2Outbox).order_by(col(AnalyticsV2Outbox.created_at))
-            )
-        ).all()
-    before, after = [
-        json.loads(json.loads(row.frame)[1]["content"]) for row in versions
-    ]
-    assert before["days"][WEEK.isoformat()][:18] == after["days"][WEEK.isoformat()][:18]
-    assert before["days"][WEEK.isoformat()][18:] == [1, 20]
-    assert after["days"][WEEK.isoformat()][18:] == [0, 0]
-    assert after["corrects"] == versions[0].event_id
+    total = sum(range(1, 41)) + 5
+    assert payload["days"][WEEK.isoformat()] == [42, total, total, 0, 0, total]
 
 
 @pytest.mark.asyncio
@@ -724,8 +587,8 @@ async def test_history_limit_preserves_the_oldest_whole_week(
     assert rows[0].week == monday
     payload = json.loads(json.loads(rows[0].frame)[1]["content"])
     assert payload["coverage_start"] == monday.isoformat()
-    assert payload["days"][monday.isoformat()][9] == 9
-    assert payload["days"][cutoff.isoformat()][9] == 3
+    assert payload["days"][monday.isoformat()][5] == 9
+    assert payload["days"][cutoff.isoformat()][5] == 3
 
 
 @pytest.mark.asyncio
@@ -850,7 +713,7 @@ async def test_midnight_publication_waits_for_every_writer_to_drain(
         ).one()
     payload = json.loads(json.loads(latest.frame)[1]["content"])
     assert payload["through"] == (WEEK + timedelta(days=1)).isoformat()
-    assert payload["days"][(WEEK + timedelta(days=1)).isoformat()][9] == 50
+    assert payload["days"][(WEEK + timedelta(days=1)).isoformat()][5] == 50
 
 
 @pytest.mark.asyncio

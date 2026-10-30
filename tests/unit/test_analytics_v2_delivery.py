@@ -799,10 +799,6 @@ async def test_open_versions_coalesce_but_finalized_versions_are_retained(
     late = LedgerOutcome(
         terminal_day=WEEK,
         model_identifier="model/a",
-        input_source="reported",
-        output_source="reported",
-        cache_read_source="missing",
-        cache_creation_source="missing",
         input_tokens=1,
         output_tokens=1,
         cache_read_input_tokens=0,
