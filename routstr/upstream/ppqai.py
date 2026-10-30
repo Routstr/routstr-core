@@ -175,9 +175,6 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
             "can_show_balance": True,
         }
 
-    def transform_model_name(self, model_id: str) -> str:
-        return model_id
-
     def get_ehbp_forwarding_target(
         self, path: str, model_obj: Model
     ) -> EHBPForwardingTarget:
