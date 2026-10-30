@@ -55,7 +55,17 @@ def _render(element: Any, dialect: Any) -> str:
 
 # Tables created after the widening migration, whose own migration already
 # declares BIGINT; there is nothing for the ALTER list to widen.
-BORN_WIDE_TABLES = {"admin_sessions", "database_imports", "upstream_model_snapshots"}
+BORN_WIDE_TABLES = {
+    "admin_sessions",
+    "analytics_v2_delivery_state",
+    "analytics_v2_outbox",
+    "analytics_v2_relay_receipts",
+    "database_imports",
+    "terminal_outcome_epochs",
+    "terminal_outcome_writer_runs",
+    "terminal_outcomes",
+    "upstream_model_snapshots",
+}
 
 
 def test_migration_and_models_widen_the_same_columns() -> None:
@@ -155,12 +165,15 @@ def test_timestamp_columns_survive_2038_on_postgresql(
 # Surrogate keys, foreign keys and bounded magnitudes. Every other integer
 # column is money, a counter or a clock and must be BIGINT.
 NARROW_INTEGER_COLUMNS = {
+    ("analytics_v2_delivery_state", "id"),
+    ("analytics_v2_outbox", "kind"),
     ("model_paths", "id"),
     ("model_paths", "upstream_provider_id"),
     ("models", "upstream_provider_id"),
     ("models", "context_length"),
     ("routstr_fees", "id"),
     ("secrets", "id"),
+    ("terminal_outcome_epochs", "current_slot"),
     ("upstream_providers", "id"),
     ("upstream_model_snapshots", "upstream_provider_id"),
 }
