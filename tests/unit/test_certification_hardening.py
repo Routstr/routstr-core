@@ -201,6 +201,9 @@ class TestNonFinitePricing:
             self.input_cache_read = kwargs.get("input_cache_read", 0.0)
             self.input_cache_write = kwargs.get("input_cache_write", 0.0)
 
+        def for_prompt_tokens(self, prompt_tokens: int) -> Any:
+            return self
+
     class _Usage:
         input_tokens = 10
         output_tokens = 5

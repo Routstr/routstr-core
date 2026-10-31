@@ -256,6 +256,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                                 internal_reasoning=0.0,
                                 input_cache_read=resolved.input_cache_read,
                                 input_cache_write=resolved.input_cache_write,
+                                overrides=resolved.overrides,
                             ),
                             sats_pricing=None,
                             per_request_limits=None,

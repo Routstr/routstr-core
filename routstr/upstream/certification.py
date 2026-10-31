@@ -660,7 +660,10 @@ def _expected_token_msats(sats_pricing: Any, usage: Any) -> tuple[int, int, int]
     Returns ``(total_msats, input_msats, output_msats)``. Raises ``ValueError``
     on a non-finite rate, which would otherwise crash ``math.ceil`` downstream.
     """
-    rates = _token_rates(sats_pricing)
+    prompt_tokens = (
+        usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+    )
+    rates = _token_rates(sats_pricing.for_prompt_tokens(prompt_tokens))
     if not all(math.isfinite(rate) for rate in rates):
         raise ValueError(f"non-finite pricing rate in {rates!r}")
     input_rate, output_rate, cache_read_rate, cache_write_rate = rates
