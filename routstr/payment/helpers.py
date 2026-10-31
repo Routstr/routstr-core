@@ -314,6 +314,11 @@ async def calculate_discounted_max_cost(
         if estimated_completion_delta_sats > 0:
             adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
 
+    if body.get("speed") == "fast":
+        adjusted *= 2
+    if body.get("inference_geo") == "us":
+        adjusted = math.ceil(adjusted * 1.1)
+
     logger.debug(
         "Discounted max cost computed",
         extra={
