@@ -7,7 +7,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from enum import Enum
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from alembic import command
 from alembic.config import Config
@@ -586,6 +586,8 @@ REFUND_OPEN_STATUSES = ("pending", "ambiguous")
 
 # Debited from the key but neither paid out nor restored, so still owed.
 REFUND_UNRESOLVED_STATUSES = ("pending", "ambiguous", "stuck")
+# X-Cashu payments that may still be refunded in full.
+X_CASHU_UNSETTLED_STATES = ("pending", "refunding")
 
 _REFUND_OPEN_PREDICATE = "status IN ('pending', 'ambiguous')"
 
@@ -1158,11 +1160,29 @@ async def list_unsettled_lightning_payouts(
     return list(result.all())
 
 
+def _unsettled_x_cashu_msats(*filters: Any) -> Any:
+    """Redeemed X-Cashu payments recovery may still refund in full, in msats."""
+    amount_msats = case(
+        (col(CashuTransaction.unit) == "msat", col(CashuTransaction.amount)),
+        else_=col(CashuTransaction.amount) * 1000,
+    )
+    return (
+        select(func.coalesce(func.sum(amount_msats), 0))
+        .where(
+            col(CashuTransaction.type) == "in",
+            col(CashuTransaction.settlement).in_(X_CASHU_UNSETTLED_STATES),
+            *filters,
+        )
+        .scalar_subquery()
+    )
+
+
 async def total_user_liability(db_session: AsyncSession) -> int:
     """Return all outstanding user funds in millisatoshis.
 
-    Key balances and unresolved refunds are summed in one statement so a
-    claim opened between two reads cannot be missed by both.
+    Key balances, unresolved refunds and unsettled X-Cashu payments are summed
+    in one statement so a claim opened between two reads cannot be missed by
+    both.
     """
     key_balances = select(func.coalesce(func.sum(ApiKey.balance), 0)).scalar_subquery()
     unresolved_refunds = (
@@ -1170,7 +1190,9 @@ async def total_user_liability(db_session: AsyncSession) -> int:
         .where(col(Refund.status).in_(REFUND_UNRESOLVED_STATUSES))
         .scalar_subquery()
     )
-    result = await db_session.exec(select(key_balances + unresolved_refunds))
+    result = await db_session.exec(
+        select(key_balances + unresolved_refunds + _unsettled_x_cashu_msats())
+    )
     return int(result.one() or 0)
 
 
@@ -1198,7 +1220,16 @@ async def user_liability_for_mint_and_unit(
         )
         .scalar_subquery()
     )
-    result = await db_session.exec(select(key_balances + unresolved_refunds))
+    result = await db_session.exec(
+        select(
+            key_balances
+            + unresolved_refunds
+            + _unsettled_x_cashu_msats(
+                col(CashuTransaction.mint_url) == mint_url,
+                col(CashuTransaction.unit) == unit,
+            )
+        )
+    )
     return int(result.one() or 0)
 
 

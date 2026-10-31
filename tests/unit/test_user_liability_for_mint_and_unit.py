@@ -8,7 +8,13 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.core.db import ApiKey, Refund, user_liability_for_mint_and_unit
+from routstr.core.db import (
+    ApiKey,
+    CashuTransaction,
+    Refund,
+    total_user_liability,
+    user_liability_for_mint_and_unit,
+)
 
 MINT = "http://m1"
 
@@ -129,3 +135,63 @@ async def test_unknown_mint_has_no_liability(session: AsyncSession) -> None:
     await _add_refund(session, "a", 300, "pending")
 
     assert await user_liability_for_mint_and_unit(session, "http://missing", "sat") == 0
+
+
+async def _add_x_cashu_payment(
+    session: AsyncSession,
+    request_id: str,
+    amount: int,
+    settlement: str | None,
+    unit: str = "sat",
+    mint_url: str = MINT,
+) -> None:
+    session.add(
+        CashuTransaction(
+            token=f"cashuA{request_id}",
+            amount=amount,
+            unit=unit,
+            mint_url=mint_url,
+            type="in",
+            request_id=request_id,
+            collected=True,
+            settlement=settlement,
+        )
+    )
+    await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settlement", ["pending", "refunding"])
+async def test_counts_unsettled_x_cashu_payments(
+    session: AsyncSession, settlement: str
+) -> None:
+    # A payment left unsettled by a restart is refunded in full by recovery,
+    # so the payout must not treat its proofs as owner surplus.
+    await _add_key(session, "a", 1000)
+    await _add_x_cashu_payment(session, "r1", 60, settlement)
+    await _add_x_cashu_payment(session, "r2", 5000, settlement, unit="msat")
+
+    assert await user_liability_for_mint_and_unit(session, MINT, "sat") == 61_000
+    assert await user_liability_for_mint_and_unit(session, MINT, "msat") == 5000
+    assert await total_user_liability(session) == 66_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settlement", ["charged", "refunded", "failed", None])
+async def test_excludes_settled_x_cashu_payments(
+    session: AsyncSession, settlement: str | None
+) -> None:
+    await _add_x_cashu_payment(session, "r1", 60, settlement)
+
+    assert await user_liability_for_mint_and_unit(session, MINT, "sat") == 0
+    assert await total_user_liability(session) == 0
+
+
+@pytest.mark.asyncio
+async def test_unsettled_x_cashu_payments_on_other_mints_are_excluded(
+    session: AsyncSession,
+) -> None:
+    await _add_x_cashu_payment(session, "r1", 60, "pending", mint_url="http://m2")
+
+    assert await user_liability_for_mint_and_unit(session, MINT, "sat") == 0
+    assert await total_user_liability(session) == 60_000
