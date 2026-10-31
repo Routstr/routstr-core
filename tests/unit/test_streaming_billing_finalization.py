@@ -1182,9 +1182,27 @@ async def test_client_disconnect_midstream_estimates_usage_and_stops_heartbeat()
 
 
 @pytest.mark.asyncio
-async def test_messages_client_disconnect_bills_prompt_usage_from_message_start() -> (
-    None
-):
+@pytest.mark.parametrize(
+    ("start_usage", "expected_spent"),
+    [
+        # 3*3 + 500*3.75 + 99497*0.3 + 2*15 = 31763.1, not 100000*3 + 2*15.
+        (
+            b'{"input_tokens":3,"cache_creation_input_tokens":500,'
+            b'"cache_read_input_tokens":99497,"output_tokens":1}',
+            31_764,
+        ),
+        # litellm-adapted streams open with zeroed usage: keep the estimate.
+        (
+            b'{"input_tokens":0,"cache_creation_input_tokens":0,'
+            b'"cache_read_input_tokens":0,"output_tokens":0}',
+            300_030,
+        ),
+    ],
+    ids=["anthropic", "zeroed"],
+)
+async def test_messages_client_disconnect_bills_prompt_usage_from_message_start(
+    start_usage: bytes, expected_spent: int
+) -> None:
     """A client abort bills the prompt usage message_start already reported.
 
     Anthropic sends uncached input, cache writes and cache reads before any
@@ -1206,8 +1224,7 @@ async def test_messages_client_disconnect_bills_prompt_usage_from_message_start(
     async def aiter_bytes() -> AsyncGenerator[bytes, None]:
         yield (
             b'data: {"type":"message_start","message":{"model":"claude-test",'
-            b'"usage":{"input_tokens":3,"cache_creation_input_tokens":500,'
-            b'"cache_read_input_tokens":99497,"output_tokens":1}}}\n\n'
+            b'"usage":' + start_usage + b"}}\n\n"
         )
         yield (
             b'data: {"type":"content_block_delta","index":0,'
@@ -1288,8 +1305,7 @@ async def test_messages_client_disconnect_bills_prompt_usage_from_message_start(
 
     assert final_key is not None
     assert final_key.reserved_balance == 0
-    # 3*3 + 500*3.75 + 99497*0.3 + 2*15 = 31763.1, not 100000*3 + 2*15.
-    assert final_key.total_spent == 31_764
+    assert final_key.total_spent == expected_spent
     await engine.dispose()
 
 

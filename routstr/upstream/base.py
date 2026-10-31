@@ -2807,11 +2807,18 @@ class BaseUpstreamProvider:
                                                 ),
                                             )
                                             _absorb_usd(usage)
-                                            prompt_usage = {
-                                                "input_tokens": input_tokens,
-                                                "cache_read_input_tokens": cache_read_input_tokens,
-                                                "cache_creation_input_tokens": cache_creation_input_tokens,
-                                            }
+                                            # litellm-adapted streams open with
+                                            # zeroed usage; keep the estimate then.
+                                            if (
+                                                input_tokens
+                                                or cache_read_input_tokens
+                                                or cache_creation_input_tokens
+                                            ):
+                                                prompt_usage = {
+                                                    "input_tokens": input_tokens,
+                                                    "cache_read_input_tokens": cache_read_input_tokens,
+                                                    "cache_creation_input_tokens": cache_creation_input_tokens,
+                                                }
 
                                         if usage := data.get("usage"):
                                             input_tokens = max(
