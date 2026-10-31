@@ -245,6 +245,42 @@ async def test_discounted_max_cost_scales_with_fast_mode_and_us_inference() -> N
     assert fast_us >= math.ceil(fast * 1.1)
 
 
+async def test_discounted_max_cost_follows_model_multipliers_above_floor() -> None:
+    """A sourced multiplier above the published 2x scales the hold with it, so
+    the reservation still covers what settlement will charge."""
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.002
+    pricing.max_prompt_cost = 50.0
+    pricing.max_completion_cost = 40.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+    model_obj.usage_multipliers = {"speed": {"fast": 3.0}}
+
+    body = {
+        "model": "test-model",
+        "prompt": list(range(10_000)),
+        "max_tokens": 20_000,
+        "speed": "fast",
+    }
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        sourced = await calculate_discounted_max_cost(90_000, body, model_obj)
+        model_obj.usage_multipliers = None
+        floor = await calculate_discounted_max_cost(90_000, body, model_obj)
+
+    assert floor % 2 == 0
+    assert sourced == floor // 2 * 3
+
+
 async def test_discount_cannot_be_dodged_by_hiding_prompt_in_tools() -> None:
     """A large prompt moved from messages into tool schemas must reserve the
     same cost — otherwise a caller undercharges by hiding weight from the

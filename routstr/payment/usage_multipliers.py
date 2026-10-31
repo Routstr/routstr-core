@@ -6,7 +6,8 @@ ran, and report which one in ``usage``: Anthropic's fast mode
 (``usage.inference_geo == "us"``). The multipliers are model data, not code:
 each model carries ``{usage_field: {value: multiplier}}``, filled at discovery
 by a :class:`UsageMultiplierSource`, and billing multiplies every token rate by
-the product of the entries the response matches.
+the product of the entries the response matches. Anthropic's published prices
+are a floor a source can only raise, never lower.
 
 Request fees (``request``, ``web_search``) are not token rates and stay as is.
 """
@@ -31,6 +32,14 @@ PRICING_DIMENSIONS = ("speed", "inference_geo")
 BASELINE_VALUES = {
     "speed": {"standard"},
     "inference_geo": {"global", "not_available"},
+}
+
+# Anthropic's published prices: fast mode 2x, US-only inference 1.1x. The node
+# is charged at least this whenever the response reports the variant, so a
+# missing, failed or lower lookup must not bill below it.
+PUBLISHED_MULTIPLIERS: UsageMultipliers = {
+    "speed": {"fast": 2.0},
+    "inference_geo": {"us": 1.1},
 }
 
 
@@ -59,21 +68,38 @@ def usage_multiplier(
     multipliers: UsageMultipliers | None,
     dimensions: Mapping[str, str],
     model_id: str = "",
+    *,
+    warn: bool = True,
 ) -> float:
-    """Product of the model's multipliers matching the reported dimensions."""
+    """Product of the multipliers matching the reported dimensions.
+
+    Each is the larger of the published floor and the model's own value.
+    ``warn=False`` silences the unknown-variant warning for callers reading
+    client-supplied values (the reservation) rather than upstream usage.
+    """
+    if not isinstance(multipliers, dict):
+        multipliers = {}
     factor = 1.0
     for field, value in dimensions.items():
         if value in BASELINE_VALUES.get(field, ()):
             continue
-        rate = (multipliers or {}).get(field, {}).get(value)
-        if rate is None:
-            # The upstream says the request ran on a priced variant the model
-            # has no multiplier for: the source has not seen it yet, so this
-            # bills at the base rate. Loud, because it under-bills.
-            logger.warning(
-                "No usage multiplier for reported pricing dimension; billing base rate",
-                extra={"model": model_id, "field": field, "value": value},
+        known = [
+            rate
+            for rate in (
+                PUBLISHED_MULTIPLIERS.get(field, {}).get(value),
+                multipliers.get(field, {}).get(value),
             )
+            if rate is not None
+        ]
+        if not known:
+            # The upstream says the request ran on a priced variant with no
+            # published or sourced multiplier, so this bills at the base
+            # rate. Loud, because it may under-bill.
+            if warn:
+                logger.warning(
+                    "No usage multiplier for reported pricing dimension; billing base rate",
+                    extra={"model": model_id, "field": field, "value": value},
+                )
             continue
-        factor *= rate
+        factor *= max(known)
     return factor

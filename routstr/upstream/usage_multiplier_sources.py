@@ -43,27 +43,20 @@ def _ratio(priced: dict[str, float], base: dict[str, float]) -> float | None:
     return round((low + high) / 2, 3)
 
 
-def _agreed(ratios: list[float]) -> float | None:
-    """The shared value of several ratios, or ``None`` if they disagree."""
-    if not ratios or max(ratios) - min(ratios) > RATIO_TOLERANCE * min(ratios):
-        return None
-    return round(sum(ratios) / len(ratios), 3)
-
-
 def derive_multipliers(endpoints: list[dict], provider_tag: str) -> UsageMultipliers:
     """Read multipliers off OpenRouter's per-endpoint prices for one model.
 
     OpenRouter lists every priced variant of a model as its own endpoint:
-    ``anthropic/fast`` is Anthropic's fast mode, ``azure/us`` or
-    ``amazon-bedrock/us-east-1`` a US-pinned deployment. Each variant's price
-    divided by its unpinned sibling's is the multiplier.
+    ``anthropic/fast`` is Anthropic's fast mode, ``anthropic/us`` would be its
+    US-pinned deployment. Each variant's price divided by its unpinned
+    sibling's is the multiplier.
 
     - ``speed.fast`` comes only from ``<provider_tag>/fast``: fast mode is the
       upstream's own feature, and its absence means the model does not have it.
-    - ``inference_geo.us`` comes from the provider's own ``/us`` endpoint when
-      OpenRouter lists one. Anthropic's first-party API has none there, so the
-      US-pinned deployments of other hosts stand in, but only when every one
-      of them agrees on the same ratio.
+    - ``inference_geo.us`` comes only from the provider's own ``/us``
+      endpoint. Other hosts' US deployments carry their own premiums, not the
+      provider's, so they are not used; without one the published floor
+      applies (see ``payment.usage_multipliers``).
     """
     prices: dict[str, dict[str, float]] = {}
     for endpoint in endpoints:
@@ -76,22 +69,13 @@ def derive_multipliers(endpoints: list[dict], provider_tag: str) -> UsageMultipl
 
     multipliers: UsageMultipliers = {}
 
-    base = prices.get(provider_tag)
+    base = prices.get(provider_tag) or prices.get(f"{provider_tag}/global")
     fast = prices.get(f"{provider_tag}/fast")
     if base and fast and (rate := _ratio(fast, base)) is not None:
         multipliers["speed"] = {"fast": rate}
 
-    own: list[float] = []
-    others: list[float] = []
-    for tag, priced in prices.items():
-        family, _, region = tag.partition("/")
-        if region != "us" and not region.startswith("us-"):
-            continue
-        reference = prices.get(family) or prices.get(f"{family}/global")
-        if reference is None or (rate := _ratio(priced, reference)) is None:
-            continue
-        (own if family == provider_tag else others).append(rate)
-    if (rate := _agreed(own) or _agreed(others)) is not None:
+    us = prices.get(f"{provider_tag}/us")
+    if base and us and (rate := _ratio(us, base)) is not None:
         multipliers["inference_geo"] = {"us": rate}
 
     return multipliers

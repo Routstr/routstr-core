@@ -31,10 +31,11 @@ OPUS_5_5_ENDPOINTS = [
 ]
 
 
-def test_derives_fast_and_us_from_openrouter_endpoints() -> None:
+def test_derives_fast_from_openrouter_endpoints() -> None:
+    """Anthropic has no ``/us`` endpoint on OpenRouter, so only fast mode is
+    sourced; US-only inference falls back to the published floor."""
     assert derive_multipliers(OPUS_5_5_ENDPOINTS, "anthropic") == {
         "speed": {"fast": 2.0},
-        "inference_geo": {"us": 1.1},
     }
 
 
@@ -44,7 +45,7 @@ def test_no_fast_endpoint_means_no_fast_multiplier() -> None:
     assert "speed" not in derive_multipliers(endpoints, "anthropic")
 
 
-def test_own_us_endpoint_wins_over_other_hosts() -> None:
+def test_own_us_endpoint_sets_us_multiplier() -> None:
     endpoints = [
         *OPUS_5_5_ENDPOINTS,
         _endpoint("anthropic/us", "0.0000048", "0.000024"),
@@ -53,13 +54,17 @@ def test_own_us_endpoint_wins_over_other_hosts() -> None:
     assert derive_multipliers(endpoints, "anthropic")["inference_geo"] == {"us": 1.2}
 
 
-def test_disagreeing_hosts_yield_no_us_multiplier() -> None:
+def test_other_hosts_us_endpoints_are_ignored() -> None:
+    """Bedrock, Vertex and Azure price their own US premium; moving together to
+    1.2 must not bill Anthropic's US-only requests at 1.2."""
     endpoints = [
         _endpoint("anthropic", "0.000004", "0.00002"),
         _endpoint("azure", "0.000004", "0.00002"),
-        _endpoint("azure/us", "0.0000044", "0.000022"),
+        _endpoint("azure/us", "0.0000048", "0.000024"),
         _endpoint("google-vertex/global", "0.000004", "0.00002"),
-        _endpoint("google-vertex/us", "0.000006", "0.00003"),
+        _endpoint("google-vertex/us", "0.0000048", "0.000024"),
+        _endpoint("amazon-bedrock", "0.000004", "0.00002"),
+        _endpoint("amazon-bedrock/us-east-1", "0.0000048", "0.000024"),
     ]
 
     assert "inference_geo" not in derive_multipliers(endpoints, "anthropic")
@@ -110,12 +115,7 @@ async def test_source_omits_failed_models_and_caches_answers(
     source = OpenRouterEndpointsSource("anthropic", clock=lambda: now[0])
 
     first = await source.fetch(["anthropic/claude-opus-5.5", "anthropic/claude-gone"])
-    assert first == {
-        "anthropic/claude-opus-5.5": {
-            "speed": {"fast": 2.0},
-            "inference_geo": {"us": 1.1},
-        }
-    }
+    assert first == {"anthropic/claude-opus-5.5": {"speed": {"fast": 2.0}}}
 
     calls = len(transport.calls)
     await source.fetch(["anthropic/claude-opus-5.5"])
@@ -168,10 +168,7 @@ async def test_anthropic_keeps_last_known_multipliers_when_lookup_fails(
     fresh = [_model("claude-opus-5.5"), _model("claude-gone")]
     await provider._attach_usage_multipliers(fresh)
 
-    assert fresh[0].usage_multipliers == {
-        "speed": {"fast": 2.0},
-        "inference_geo": {"us": 1.1},
-    }
+    assert fresh[0].usage_multipliers == {"speed": {"fast": 2.0}}
     assert fresh[1].usage_multipliers == {"speed": {"fast": 2.0}}
 
 

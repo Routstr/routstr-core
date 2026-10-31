@@ -387,13 +387,50 @@ async def test_usage_multiplier_scales_cache_rates_but_not_search_fees(
 
 
 @pytest.mark.asyncio
-async def test_unknown_variant_bills_base_rate(model_pricing: Mock) -> None:
-    """A model the source never priced fast mode for is billed at base rates
-    (with a warning) rather than guessed at."""
-    model_pricing.usage_multipliers = {"inference_geo": {"us": 1.1}}
+@pytest.mark.parametrize(
+    ("multipliers", "reported", "expected_msats"),
+    [
+        # No sourced value (source off, lookup failed, not listed yet): the
+        # published 2x / 1.1x still apply.
+        (None, {"speed": "fast"}, 1000),
+        (None, {"inference_geo": "us"}, 550),
+        ({"inference_geo": {"us": 1.1}}, {"speed": "fast"}, 1000),
+        # A source below the floor cannot lower it.
+        (
+            {"speed": {"fast": 1.5}, "inference_geo": {"us": 1.0}},
+            {"speed": "fast", "inference_geo": "us"},
+            1100,
+        ),
+        # A source above the floor raises it.
+        ({"speed": {"fast": 3.0}}, {"speed": "fast"}, 1500),
+    ],
+)
+async def test_published_multipliers_are_a_floor(
+    model_pricing: Mock,
+    multipliers: dict | None,
+    reported: dict,
+    expected_msats: int,
+) -> None:
+    model_pricing.usage_multipliers = multipliers
     response = {
-        "model": "claude-sonnet-5.5",
-        "usage": {"input_tokens": 300, "output_tokens": 100, "speed": "fast"},
+        "model": "claude-opus-5.5",
+        "usage": {"input_tokens": 300, "output_tokens": 100, **reported},
+    }
+
+    result = await calculate_cost(response, max_cost=100000, model_obj=model_pricing)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == expected_msats
+
+
+@pytest.mark.asyncio
+async def test_unknown_variant_bills_base_rate(model_pricing: Mock) -> None:
+    """A variant with neither a published nor a sourced multiplier is billed at
+    base rates (with a warning) rather than guessed at."""
+    model_pricing.usage_multipliers = ANTHROPIC_MULTIPLIERS
+    response = {
+        "model": "claude-opus-5.5",
+        "usage": {"input_tokens": 300, "output_tokens": 100, "speed": "turbo"},
     }
 
     result = await calculate_cost(response, max_cost=100000, model_obj=model_pricing)
