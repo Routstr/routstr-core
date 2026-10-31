@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 from typing import cast
 from unittest.mock import AsyncMock
 
@@ -60,9 +61,7 @@ async def test_refresh_loop_picks_up_providers_added_after_startup(
         _noop_pricing_refresh,
     )
 
-    task = asyncio.create_task(
-        refresh_upstreams_models_periodically(lambda: live_list)
-    )
+    task = asyncio.create_task(refresh_upstreams_models_periodically(lambda: live_list))
 
     try:
         # Wait for the first iteration to refresh the initial upstream.
@@ -115,3 +114,64 @@ async def test_refresh_loop_disabled_when_interval_non_positive(
         timeout=1.0,
     )
     upstream.refresh_models_cache.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def _loop_delays(
+    monkeypatch: pytest.MonkeyPatch, cached: list[list[str]]
+) -> list[float]:
+    """Run the loop once per entry of ``cached`` and record each requested sleep."""
+    from routstr.core.settings import settings as global_settings
+    from routstr.upstream import helpers
+
+    monkeypatch.setattr(
+        global_settings, "models_refresh_interval_seconds", 360, raising=False
+    )
+    monkeypatch.setattr(random, "uniform", lambda a, b: 0.0)
+
+    async def _noop_pricing_refresh() -> None:
+        return None
+
+    monkeypatch.setattr(
+        "routstr.payment.models._update_sats_pricing_once", _noop_pricing_refresh
+    )
+
+    upstream = _FakeUpstream("flaky")
+    states = iter(cached)
+    current: list[str] = []
+
+    async def _refresh() -> None:
+        nonlocal current
+        current = next(states)
+
+    upstream.refresh_models_cache = AsyncMock(side_effect=_refresh)
+    upstream.get_cached_models = lambda: current  # type: ignore[attr-defined]
+
+    delays: list[float] = []
+
+    async def _sleep(seconds: float) -> None:
+        delays.append(seconds)
+        if len(delays) == len(cached):
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    await helpers.refresh_upstreams_models_periodically(
+        lambda: [cast(BaseUpstreamProvider, upstream)]
+    )
+    return delays
+
+
+@pytest.mark.asyncio
+async def test_worker_without_models_retries_soon_and_backs_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty worker must not wait the full interval to recover its catalog."""
+    delays = await _loop_delays(monkeypatch, [[], [], [], ["m"], []])
+    assert delays == [30, 60, 120, 360, 30]
+
+
+@pytest.mark.asyncio
+async def test_worker_with_models_waits_the_full_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays = await _loop_delays(monkeypatch, [["m"], ["m"]])
+    assert delays == [360, 360]

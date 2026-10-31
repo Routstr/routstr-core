@@ -728,7 +728,12 @@ async def test_non_streaming_dispatches_via_litellm_and_returns_anthropic_respon
 
 
 @pytest.mark.asyncio
-async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
+@pytest.mark.parametrize(
+    "input_tokens,output_tokens,estimated", [(5, 7, False), (0, 0, True)]
+)
+async def test_streaming_emits_sse_and_reconciles_cost_at_end(
+    input_tokens: int, output_tokens: int, estimated: bool
+) -> None:
     provider = _make_provider()
     key = _make_key()
     model = _make_model()
@@ -744,7 +749,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
                 "role": "assistant",
                 "model": "openai/gpt-4o-mini",
                 "content": [],
-                "usage": {"input_tokens": 5, "output_tokens": 0},
+                "usage": {"input_tokens": input_tokens, "output_tokens": 0},
             },
         }
         yield {
@@ -761,7 +766,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
         yield {
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 7},
+            "usage": {"output_tokens": output_tokens},
         }
         yield {"type": "message_stop"}
 
@@ -783,10 +788,13 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
         model_obj: Any = None,
         provider_fee: Any = None,
         reservation_snapshot: Any = None,
+        terminal_outcome: Any = None,
+        usage_presence: Any = None,
     ) -> dict:
         captured_cost_call["combined_data"] = combined_data
         captured_cost_call["max_cost"] = max_cost
         captured_cost_call["reservation_snapshot"] = reservation_snapshot
+        captured_cost_call["usage_presence"] = usage_presence
         return fake_cost
 
     fake_session = MagicMock()
@@ -812,6 +820,11 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
         patch(
             "routstr.upstream.base.create_session",
             new=lambda: FakeSessionCtx(),
+        ),
+        patch("routstr.upstream.count_tokens._count_with_litellm", return_value=0),
+        patch(
+            "routstr.upstream.count_tokens._count_text_with_litellm",
+            return_value=0,
         ),
     ):
         result = await provider._forward_messages_via_litellm(
@@ -840,10 +853,13 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
     assert "event: cost" in joined
 
     combined = captured_cost_call["combined_data"]
-    assert combined["usage"]["input_tokens"] == 5
-    assert combined["usage"]["output_tokens"] == 7
+    assert combined["usage"]["input_tokens"] == input_tokens
+    assert combined["usage"]["output_tokens"] == output_tokens
+    assert combined["usage"].get("estimated", False) is estimated
     assert combined["model"] == "openai/gpt-4o-mini"
     assert captured_cost_call["reservation_snapshot"] is reservation
+    assert captured_cost_call["usage_presence"].input_source == "reported"
+    assert captured_cost_call["usage_presence"].output_source == "reported"
 
 
 @pytest.mark.asyncio
@@ -887,9 +903,12 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
         model_obj: Any = None,
         provider_fee: Any = None,
         reservation_snapshot: Any = None,
+        terminal_outcome: Any = None,
+        usage_presence: Any = None,
     ) -> dict:
         captured["combined_data"] = combined_data
         captured["reservation_snapshot"] = reservation_snapshot
+        captured["usage_presence"] = usage_presence
         return fake_cost
 
     fake_session = MagicMock()
@@ -947,6 +966,8 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
     assert combined["usage"]["output_tokens"] == 4
     assert combined["model"] == "openai/gpt-4o-mini"
     assert captured["reservation_snapshot"] is reservation
+    assert captured["usage_presence"].input_source == "reported"
+    assert captured["usage_presence"].output_source == "reported"
 
 
 # ---------------------------------------------------------------------------
@@ -1169,7 +1190,7 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
             provider,
             "get_x_cashu_cost",
             new=AsyncMock(return_value=cost),
-        ),
+        ) as mock_get_cost,
         patch.object(
             provider,
             "send_refund",
@@ -1194,6 +1215,11 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
     refund_call = mock_refund.await_args
     assert refund_call is not None
     assert refund_call.args[0] == 3_500
+    get_cost_call = mock_get_cost.await_args
+    assert get_cost_call is not None
+    usage_presence = get_cost_call.args[3]
+    assert usage_presence.input_source == "reported"
+    assert usage_presence.output_source == "reported"
 
     emitted: list[bytes] = []
     async for chunk in result.body_iterator:

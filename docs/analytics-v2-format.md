@@ -1,0 +1,60 @@
+# Completed-day analytics reports
+
+Public sharing follows the node's existing analytics setting. Reports contain aggregate usage for completed UTC days. They do not contain prompts, customer identifiers, request identifiers, served upstream model identifiers, or private pricing diagnostics.
+
+A public-sharing activation begins coverage on the next full UTC day. Toggle days and collection-loss days are excluded. Private terminal records remain stored when public sharing is disabled. An omitted day means unavailable coverage; an included all-zero day means the collector covered the day and recorded no completed requests.
+
+## Operator controls and upgrades
+
+The existing "Share analytics to Nostr" switch controls public reports through `ENABLE_ANALYTICS_SHARING`. Its existing default remains `true`; an explicitly saved `false` remains off after upgrading or restarting. There is no separate format opt-in.
+
+Local collection starts automatically for the private dashboard and continues when public sharing is off. An upgraded node uses completed-day reports whenever its existing sharing setting is on. New coverage begins with the next full UTC day, so private history from before activation is not published. The runtime no longer starts the legacy publisher; consumers can still read legacy reports already on relays.
+
+A provider's signing identity must remain stable, and an identity change creates a new publication transition. Turning sharing off stops pending delivery but cannot retract reports already published.
+
+## Signed event
+
+- Nostr kind: `38422`.
+- Content schema: `routstr.analytics.v2`.
+- Provider coordinate: `38421:<signer pubkey>:<provider d>`. The provider d is 1 to 64 characters without control or surrogate characters.
+- Provider hash: the first 16 lowercase hexadecimal characters of SHA256 of the provider coordinate's UTF-8 bytes.
+- `d` tag: `routstr.analytics.v2:<provider hash>:week:<Monday YYYY-MM-DD>:epoch:<epoch>`.
+- `a` tag: the provider coordinate.
+- `w` tag: the Monday date.
+
+The epoch distinguishes disjoint collection periods. Epochs can share a calendar week, but their covered dates must not overlap: the producer refuses to sign an epoch's days on or before the last day any earlier epoch covers. A week is only the storage and transport grouping. Every reported day has its own totals and model partition, including elapsed days in the current week.
+
+Consumers verify the Nostr signature, provider coordinate, content, and date bounds before accepting a report. For each full signed coordinate, the greatest `created_at` wins, with the lexicographically lower event ID breaking ties. Corrections replace that coordinate's earlier values, not add to them. Conflicting overlapping epochs for one provider and day are unavailable coverage.
+
+## Content
+
+`week` is the Monday date. `epoch` is a nonnegative integer no greater than JavaScript's maximum safe integer, so it reads back exactly from both the `d` tag and the content. `coverage_start` and `through` are inclusive dates within that week. `complete` means that the week or collection period is closed; it does not mean that every provider in the network reported. `corrected: true` identifies a corrected version, and `corrects` points to the immediately prior published version being corrected. An ordinary version can extend `through`, or keep it and set `complete` when the collection period closes, but cannot alter earlier daily values or model partitions.
+
+`days` maps every date in the covered range to an integer vector. `daily_models` maps the same dates to objects mapping canonical model identifiers to vectors. Every day includes `_other`, and its named models plus `_other` sum exactly to the day's entire vector. Small-volume and free models can be named. When the signed frame would exceed its size limit, the smaller model rows are folded into `_other` without changing any daily total. Unknown models also contribute to `_other`.
+
+The `columns` array defines these positions, in order:
+
+| Position | Column | Meaning |
+| --- | --- | --- |
+| 0 | `completed_requests` | Billed requests, including zero-charge completions, interrupted streams, image requests, and requests whose settlement outcome is unknown |
+| 1 | `input_tokens` | Billed input tokens, excluding cache tokens |
+| 2 | `output_tokens` | Billed output tokens |
+| 3 | `cache_read_input_tokens` | Billed cache-read tokens |
+| 4 | `cache_creation_input_tokens` | Billed cache-creation tokens |
+| 5 | `revenue_msats` | Gross settled node revenue in millisatoshis |
+
+Token counts are the ones billing used: the upstream's reported usage where it sent one, otherwise the node's estimate. Every integer is nonnegative and no greater than JavaScript's maximum safe integer. Days and daily model rows must each satisfy these rules independently.
+
+The report does not support a tokens-per-request average. `completed_requests` includes image and unknown-outcome requests, which carry no tokens, so dividing token totals by it understates usage per request. Per-request usage provenance stays in the node's private ledger and dashboard and is not published.
+
+This unpublished format has exactly these 6 columns. Earlier 18- and 20-column drafts are not accepted published formats. A node reads its own earlier 20-column signed versions back as these 6 columns, so it can correct them after upgrading. Existing legacy public report formats remain separate inputs for consumers.
+
+## Delivery and history
+
+The producer waits until every active collector has drained its queue past the reported UTC midnight. It commits the complete signed event bytes before any network send. Retries reuse those bytes across process restarts. A relay receipt requires both an affirmative `OK` for that event and readback of the complete identical signed event. A false `OK`, an acknowledgement for another ID, a forged readback with the right ID, or a missing readback does not mark delivery successful.
+
+The operator's configured public WSS relays are the delivery targets. The producer chooses a frame size that fits the advertised limits of the required relay quorum. Missing relay information uses the 96 KiB default. A newly discovered smaller limit can produce a corrected version with more models folded into `_other`; persisted bytes are never edited. Once a correction is stored, the report it corrects is retired from sending and its bytes are kept. Delivery requires receipts from two distinct configured relay URLs, or from the single URL when only one is configured. This proves storage redundancy across URLs, not independent relay ownership. No external manifest must exist before publication can work. Disabling sharing cancels pending sends and fences older delivery generations. Disabling cannot retract data already published publicly.
+
+The producer queries daily model groups in the database for the latest 365 completed days, expanding to the oldest week's Monday so it never truncates a weekly report. It keeps the signed history already stored. This release does not automatically delete private records or signed reports; retention remains a separate operator/product policy decision.
+
+The shared signed example is `tests/fixtures/analytics-v2/daily-models-signed.json`. It includes a paid model with both cache components, a free model, an unknown model, and actual zero-use days. Its three completions contain 190 recorded tokens and 3,250 msat of revenue.

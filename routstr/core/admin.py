@@ -1,15 +1,17 @@
+import hashlib
 import json
 import re
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, RootModel, field_validator
 from pydantic.v1 import ValidationError as PydanticValidationError
-from sqlmodel import select
+from sqlalchemy import delete
+from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..payment.models import (
@@ -29,6 +31,7 @@ from ..wallet import (
 )
 from . import vault
 from .db import (
+    AdminSession,
     ApiKey,
     CashuTransaction,
     CliToken,
@@ -45,6 +48,7 @@ from .db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
 from .exceptions import json_compliant
+from .ledger_analytics import get_ledger_usage_dashboard
 from .log_manager import log_manager
 from .logging import get_logger
 from .provider_slugs import allocate_unique_provider_slug
@@ -54,8 +58,17 @@ logger = get_logger(__name__)
 
 admin_router = APIRouter(prefix="/admin", include_in_schema=False)
 
+# Live sessions are rows in the shared ``admin_sessions`` table so that every
+# worker honours a login and a logout. This dict is a seam for tests only: a
+# per-process cache would keep accepting a token after another worker revoked it.
 admin_sessions: dict[str, int] = {}
 ADMIN_SESSION_DURATION = 3600
+
+
+def _session_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 # Usage analytics remain queryable up to 12 months.
 MAX_USAGE_ANALYTICS_HOURS = 365 * 24
 
@@ -75,13 +88,18 @@ async def require_admin_api(request: Request) -> None:
     token = auth_header.split(" ", 1)[1]
     now_ts = int(datetime.now(timezone.utc).timestamp())
 
-    # 1) Short-lived session token (in-memory)
+    # 1) Short-lived session token seeded by tests
     expiry = admin_sessions.get(token)
     if expiry and expiry > now_ts:
         return
 
-    # 2) Long-lived CLI token (DB-backed)
     async with create_session() as session:
+        # 2) Short-lived dashboard session (DB-backed, shared by all workers)
+        stored = await session.get(AdminSession, _session_token_hash(token))
+        if stored and stored.expires_at > now_ts:
+            return
+
+        # 3) Long-lived CLI token (DB-backed)
         result = await session.exec(select(CliToken).where(CliToken.token == token))
         cli_token = result.first()
         if cli_token and (
@@ -109,8 +127,8 @@ async def get_temporary_balances_api(
     if search:
         pattern = f"%{search}%"
         filters.append(
-            col(ApiKey.hashed_key).like(pattern)
-            | col(ApiKey.refund_address).like(pattern)
+            col(ApiKey.hashed_key).ilike(pattern)
+            | col(ApiKey.refund_address).ilike(pattern)
         )
 
     async with create_session() as session:
@@ -175,12 +193,15 @@ async def get_temporary_balances_api(
             for key in api_keys
         ],
         "total": total,
+        # PostgreSQL SUM() over BIGINT returns NUMERIC, which asyncpg hands back
+        # as Decimal and JSON-serializes as a string. Coerce so both backends
+        # return ints.
         "totals": {
-            "total_balance": total_balance,
-            "total_reserved_balance": total_reserved_balance,
-            "total_available_balance": total_available_balance,
-            "total_spent": total_spent,
-            "total_requests": total_requests,
+            "total_balance": int(total_balance),
+            "total_reserved_balance": int(total_reserved_balance),
+            "total_available_balance": int(total_available_balance),
+            "total_spent": int(total_spent),
+            "total_requests": int(total_requests),
         },
     }
 
@@ -346,13 +367,19 @@ async def admin_login(
     expiry_timestamp = (
         int(datetime.now(timezone.utc).timestamp()) + ADMIN_SESSION_DURATION
     )
-    admin_sessions[token] = expiry_timestamp
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    async with create_session() as session:
+        session.add(
+            AdminSession(
+                token_hash=_session_token_hash(token), expires_at=expiry_timestamp
+            )
+        )
+        await session.exec(  # type: ignore[call-overload]
+            delete(AdminSession).where(col(AdminSession.expires_at) <= now_ts)
+        )
+        await session.commit()
 
-    expired_tokens = [
-        t
-        for t, exp in admin_sessions.items()
-        if exp <= int(datetime.now(timezone.utc).timestamp())
-    ]
+    expired_tokens = [t for t, exp in admin_sessions.items() if exp <= now_ts]
     for t in expired_tokens:
         del admin_sessions[t]
 
@@ -364,8 +391,14 @@ async def admin_logout(request: Request) -> dict[str, object]:
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1]
-        if token in admin_sessions:
-            del admin_sessions[token]
+        admin_sessions.pop(token, None)
+        async with create_session() as session:
+            await session.exec(  # type: ignore[call-overload]
+                delete(AdminSession).where(
+                    col(AdminSession.token_hash) == _session_token_hash(token)
+                )
+            )
+            await session.commit()
 
     return {"ok": True}
 
@@ -2153,6 +2186,42 @@ async def get_openrouter_presets() -> list[dict[str, object]]:
     return models_data
 
 
+async def _usage_dashboard(
+    interval: int,
+    hours: int,
+    error_limit: int = 100,
+    model_limit: int = 20,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+) -> dict:
+    if (start_at is None) != (end_at is None):
+        raise HTTPException(400, "Provide both start_at and end_at")
+    if start_at is not None and end_at is not None:
+        if start_at.tzinfo is None or end_at.tzinfo is None:
+            raise HTTPException(400, "Stats dates must include a timezone")
+        now = datetime.now(timezone.utc)
+        tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(
+            days=1
+        )
+        if end_at > tomorrow or start_at >= min(end_at, now):
+            raise HTTPException(400, "Choose a non-empty stats period through today")
+        if end_at - start_at > timedelta(hours=MAX_USAGE_ANALYTICS_HOURS):
+            raise HTTPException(400, "Stats periods cannot exceed 365 days")
+        end_at = min(end_at, now)
+    dashboard = log_manager.get_usage_dashboard(
+        interval=interval, hours=hours, error_limit=error_limit, model_limit=model_limit
+    )
+    return await get_ledger_usage_dashboard(
+        dashboard,
+        interval=interval,
+        hours=hours,
+        model_limit=model_limit,
+        session_factory=create_session,
+        start_at=start_at,
+        end_at=end_at,
+    )
+
+
 @admin_router.get("/api/usage/metrics", dependencies=[Depends(require_admin_api)])
 async def get_usage_metrics(
     request: Request,
@@ -2167,7 +2236,7 @@ async def get_usage_metrics(
     ),
 ) -> dict:
     """Get usage metrics aggregated by time interval."""
-    return log_manager.get_usage_metrics(interval=interval, hours=hours)
+    return (await _usage_dashboard(interval, hours))["metrics"]
 
 
 @admin_router.get("/api/usage/dashboard", dependencies=[Depends(require_admin_api)])
@@ -2188,16 +2257,20 @@ async def get_usage_dashboard(
     model_limit: int = Query(
         default=20, ge=1, le=100, description="Maximum number of models to return"
     ),
+    start_at: datetime | None = Query(default=None),
+    end_at: datetime | None = Query(default=None),
 ) -> dict:
     """
     Get all dashboard analytics in one request.
     This runs one combined aggregation pass and avoids repeated scans.
     """
-    return log_manager.get_usage_dashboard(
+    return await _usage_dashboard(
         interval=interval,
         hours=hours,
         error_limit=error_limit,
         model_limit=model_limit,
+        start_at=start_at,
+        end_at=end_at,
     )
 
 
@@ -2212,7 +2285,7 @@ async def get_usage_summary(
     ),
 ) -> dict:
     """Get summary statistics for the specified time period."""
-    return log_manager.get_usage_summary(hours=hours)
+    return (await _usage_dashboard(15, hours))["summary"]
 
 
 @admin_router.get("/api/usage/error-details", dependencies=[Depends(require_admin_api)])
@@ -2250,7 +2323,7 @@ async def get_revenue_by_model(
     """
     Get revenue breakdown by model.
     """
-    return log_manager.get_revenue_by_model(hours=hours, limit=limit)
+    return (await _usage_dashboard(15, hours, model_limit=limit))["revenue_by_model"]
 
 
 @admin_router.get("/api/logs", dependencies=[Depends(require_admin_api)])
@@ -2572,10 +2645,10 @@ async def get_transactions_api(
         if search:
             search_pattern = f"%{search}%"
             base = base.where(
-                (col(CashuTransaction.id).like(search_pattern))
-                | (col(CashuTransaction.token).like(search_pattern))
-                | (col(CashuTransaction.request_id).like(search_pattern))
-                | (col(CashuTransaction.api_key_hashed_key).like(search_pattern))
+                (col(CashuTransaction.id).ilike(search_pattern))
+                | (col(CashuTransaction.token).ilike(search_pattern))
+                | (col(CashuTransaction.request_id).ilike(search_pattern))
+                | (col(CashuTransaction.api_key_hashed_key).ilike(search_pattern))
             )
 
         count_result = await session.exec(
@@ -2625,10 +2698,10 @@ async def get_lightning_invoices_api(
         if search:
             pattern = f"%{search}%"
             base = base.where(
-                (col(LightningInvoice.id).like(pattern))
-                | (col(LightningInvoice.bolt11).like(pattern))
-                | (col(LightningInvoice.payment_hash).like(pattern))
-                | (col(LightningInvoice.api_key_hash).like(pattern))
+                (col(LightningInvoice.id).ilike(pattern))
+                | (col(LightningInvoice.bolt11).ilike(pattern))
+                | (col(LightningInvoice.payment_hash).ilike(pattern))
+                | (col(LightningInvoice.api_key_hash).ilike(pattern))
             )
 
         count_result = await session.exec(
