@@ -122,12 +122,14 @@ async def get_all_models_with_overrides(
             )
             if model_key is not None and model_key in overrides_by_key:
                 override_row, provider_fee = overrides_by_key[model_key]
-                all_models[(model.id.lower(), provider_key)] = _row_to_model(
+                overridden = _row_to_model(
                     override_row,
                     apply_provider_fee=True,
                     provider_fee=provider_fee,
                     provider_type=upstream.provider_type,
                 )
+                overridden.usage_multipliers = model.usage_multipliers
+                all_models[(model.id.lower(), provider_key)] = overridden
             elif model.enabled:
                 all_models[(model.id.lower(), provider_key)] = model
 

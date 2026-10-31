@@ -106,7 +106,9 @@ async def test_runtime_overrides_do_not_reintroduce_generic_cache_prices(
         provider_type=provider_type,
         base_url="https://example.invalid",
         get_cached_models=MagicMock(
-            return_value=[SimpleNamespace(id=row.id, enabled=True)]
+            return_value=[
+                SimpleNamespace(id=row.id, enabled=True, usage_multipliers=None)
+            ]
         ),
     )
     with (

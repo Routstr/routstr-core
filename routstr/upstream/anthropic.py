@@ -6,6 +6,7 @@ import httpx
 from ..core.exceptions import UpstreamError
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
+from .usage_multiplier_sources import get_usage_multiplier_source
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -238,4 +239,21 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
             model.alias_ids = [native_id]
             models.append(model)
         self._native_model_names = mappings
+        await self._attach_usage_multipliers(models)
         return models
+
+    async def _attach_usage_multipliers(self, models: list[Model]) -> None:
+        """Fill fast-mode / US-inference multipliers from the configured source.
+
+        A model the source has no answer for this round keeps the value it was
+        last cached with, so a failed lookup cannot drop it to the base rate.
+        """
+        source = get_usage_multiplier_source("anthropic")
+        if source is None:
+            return
+        fetched = await source.fetch(f"anthropic/{model.id}" for model in models)
+        previous = {model.id: model.usage_multipliers for model in self._models_cache}
+        for model in models:
+            model.usage_multipliers = fetched.get(
+                f"anthropic/{model.id}", previous.get(model.id)
+            )

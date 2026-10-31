@@ -39,6 +39,7 @@ from .responses_input import (
     input_image_part_to_image_url,
     responses_input_to_messages,
 )
+from .usage_multipliers import pricing_dimensions, usage_multiplier
 
 logger = get_logger(__name__)
 
@@ -313,6 +314,17 @@ async def calculate_discounted_max_cost(
         )
         if estimated_completion_delta_sats > 0:
             adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
+
+    # Settlement scales every token rate when the response reports fast mode
+    # or US-only inference, so the hold scales by the same factor up front.
+    multiplier = usage_multiplier(
+        getattr(model_obj, "usage_multipliers", None),
+        pricing_dimensions(body),
+        model,
+        warn=False,
+    )
+    if multiplier != 1.0:
+        adjusted = math.ceil(adjusted * multiplier)
 
     logger.debug(
         "Discounted max cost computed",
