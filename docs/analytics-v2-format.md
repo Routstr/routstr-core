@@ -16,19 +16,19 @@ A provider's signing identity must remain stable, and an identity change creates
 
 - Nostr kind: `38422`.
 - Content schema: `routstr.analytics.v2`.
-- Provider coordinate: `38421:<signer pubkey>:<provider d>`.
+- Provider coordinate: `38421:<signer pubkey>:<provider d>`. The provider d is 1 to 64 characters without control or surrogate characters.
 - Provider hash: the first 16 lowercase hexadecimal characters of SHA256 of the provider coordinate's UTF-8 bytes.
 - `d` tag: `routstr.analytics.v2:<provider hash>:week:<Monday YYYY-MM-DD>:epoch:<epoch>`.
 - `a` tag: the provider coordinate.
 - `w` tag: the Monday date.
 
-The epoch distinguishes disjoint collection periods. Epochs can share a calendar week, but their covered dates must not overlap. A week is only the storage and transport grouping. Every reported day has its own totals and model partition, including elapsed days in the current week.
+The epoch distinguishes disjoint collection periods. Epochs can share a calendar week, but their covered dates must not overlap: the producer refuses to sign an epoch's days on or before the last day any earlier epoch covers. A week is only the storage and transport grouping. Every reported day has its own totals and model partition, including elapsed days in the current week.
 
 Consumers verify the Nostr signature, provider coordinate, content, and date bounds before accepting a report. For each full signed coordinate, the greatest `created_at` wins, with the lexicographically lower event ID breaking ties. Corrections replace that coordinate's earlier values, not add to them. Conflicting overlapping epochs for one provider and day are unavailable coverage.
 
 ## Content
 
-`week` is the Monday date. `epoch` is a nonnegative integer. `coverage_start` and `through` are inclusive dates within that week. `complete` means that the week or collection period is closed; it does not mean that every provider in the network reported. `corrected: true` identifies a corrected version, and `corrects` points to the immediately prior published version being corrected. An ordinary version can extend `through` but cannot alter earlier daily values or model partitions.
+`week` is the Monday date. `epoch` is a nonnegative integer no greater than JavaScript's maximum safe integer, so it reads back exactly from both the `d` tag and the content. `coverage_start` and `through` are inclusive dates within that week. `complete` means that the week or collection period is closed; it does not mean that every provider in the network reported. `corrected: true` identifies a corrected version, and `corrects` points to the immediately prior published version being corrected. An ordinary version can extend `through`, or keep it and set `complete` when the collection period closes, but cannot alter earlier daily values or model partitions.
 
 `days` maps every date in the covered range to an integer vector. `daily_models` maps the same dates to objects mapping canonical model identifiers to vectors. Every day includes `_other`, and its named models plus `_other` sum exactly to the day's entire vector. Small-volume and free models can be named. When the signed frame would exceed its size limit, the smaller model rows are folded into `_other` without changing any daily total. Unknown models also contribute to `_other`.
 

@@ -18,7 +18,11 @@ from routstr.core.db import (
     TerminalOutcome,
     TerminalOutcomeEpoch,
 )
-from routstr.nostr.analytics_v2 import aggregate_ledger_week, encode_week_event
+from routstr.nostr.analytics_v2 import (
+    AnalyticsV2Error,
+    aggregate_ledger_week,
+    encode_week_event,
+)
 from routstr.nostr.analytics_v2_delivery import (
     AnalyticsV2Delivery,
     AnalyticsV2Producer,
@@ -808,3 +812,32 @@ async def test_epoch_closure_finalizes_existing_last_day_without_new_requests(
         ).all()
     assert rows[-1].finalized
     assert rows[-1].through_day == rows[0].through_day
+    # Closing at the same through is an ordinary version, not a correction.
+    assert not rows[-1].corrected
+    assert "corrects" not in json.loads(json.loads(rows[-1].frame)[1]["content"])
+
+
+@pytest.mark.asyncio
+async def test_producer_refuses_to_sign_an_epoch_that_overlaps_an_earlier_one(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _activate(session_factory)
+    async with session_factory() as session:
+        old_epoch = await session.get(TerminalOutcomeEpoch, 0)
+        assert old_epoch is not None
+        old_epoch.coverage_end_day = WEEK + timedelta(days=3)
+        old_epoch.current_slot = None
+        session.add(
+            TerminalOutcomeEpoch(
+                epoch=1, coverage_start_day=WEEK + timedelta(days=2), current_slot=1
+            )
+        )
+        await session.commit()
+    producer = AnalyticsV2Producer(
+        session_factory,
+        private_key_hex=PRIVATE_KEY,
+        public_key_hex=PUBLIC_KEY,
+        provider_d="provider",
+    )
+    with pytest.raises(AnalyticsV2Error, match="overlaps an earlier epoch"):
+        await producer.produce_once(now=datetime(2026, 9, 6, 0, 1, tzinfo=UTC))

@@ -409,7 +409,7 @@ def test_aggregate_rejects_unsafe_values_and_invalid_model_partition() -> None:
         _encode(broken)
 
 
-@pytest.mark.parametrize("provider_d", ["", "x" * 65, "node\nname"])
+@pytest.mark.parametrize("provider_d", ["", "x" * 65, "node\nname", "node\ud800"])
 def test_provider_identifier_contract(provider_d: str) -> None:
     with pytest.raises(AnalyticsV2Error):
         build_analytics_address(
@@ -460,3 +460,62 @@ def test_size_folding_an_ordinary_extension_marks_changed_model_detail_as_correc
     )
     assert _payload(extended)["corrects"] == first.event_id
     _assert_partitions(_payload(extended))
+
+
+def test_epoch_above_the_javascript_safe_integer_is_rejected() -> None:
+    with pytest.raises(AnalyticsV2Error, match="epoch"):
+        _aggregate([_outcome()], epoch=MAX_SAFE_INTEGER + 1)
+    with pytest.raises(AnalyticsV2Error, match="epoch"):
+        build_analytics_address(
+            Keys.parse(PRIVATE_KEY).public_key().to_hex(),
+            "provider",
+            WEEK,
+            MAX_SAFE_INTEGER + 1,
+        )
+    assert _aggregate([_outcome()], epoch=MAX_SAFE_INTEGER).epoch == MAX_SAFE_INTEGER
+
+
+def test_closing_an_epoch_at_the_same_through_is_an_ordinary_version() -> None:
+    open_week = _encode(_aggregate([_outcome()], today_utc=WEEK + timedelta(days=3)))
+    closed = _encode(
+        _aggregate(
+            [_outcome()],
+            epoch_coverage_end=WEEK + timedelta(days=2),
+            today_utc=WEEK + timedelta(days=4),
+            prior_version=open_week.as_prior_version(),
+        ),
+        created_at=open_week.created_at + 1,
+    )
+    payload = _payload(closed)
+    assert payload["complete"] is True
+    assert payload["through"] == open_week.through.isoformat()
+    assert "corrected" not in payload and "corrects" not in payload
+
+    unchanged = _aggregate(
+        [_outcome()],
+        today_utc=WEEK + timedelta(days=3),
+        prior_version=open_week.as_prior_version(),
+    )
+    with pytest.raises(AnalyticsV2Error, match="advance through or close"):
+        _encode(unchanged, created_at=open_week.created_at + 1)
+
+
+def test_epoch_coverage_must_start_after_every_earlier_epoch() -> None:
+    with pytest.raises(AnalyticsV2Error, match="overlaps an earlier epoch"):
+        _encode(
+            _aggregate(
+                [_outcome()],
+                epoch=2,
+                epoch_coverage_start=WEEK + timedelta(days=1),
+                earlier_epochs_through=WEEK + timedelta(days=1),
+            )
+        )
+    later = _encode(
+        _aggregate(
+            [_outcome(WEEK + timedelta(days=2))],
+            epoch=2,
+            epoch_coverage_start=WEEK + timedelta(days=2),
+            earlier_epochs_through=WEEK + timedelta(days=1),
+        )
+    )
+    assert min(_payload(later)["days"]) == (WEEK + timedelta(days=2)).isoformat()

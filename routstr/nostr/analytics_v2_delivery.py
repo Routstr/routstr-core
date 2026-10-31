@@ -753,6 +753,7 @@ class AnalyticsV2Producer:
             latest, created_at_floors, rows_by_id = await self._load_version_state(
                 state.active_epoch_floor, state.generation
             )
+            earlier_through = await self._earlier_epochs_through()
             produced = 0
             yesterday = completed_day_limit - timedelta(days=1)
             # Each week aggregates only its own rows instead of rescanning all.
@@ -781,6 +782,7 @@ class AnalyticsV2Producer:
                         prior_row=prior_row,
                         rows_by_id=rows_by_id,
                         max_frame_bytes=frame_limit,
+                        earlier_epochs_through=earlier_through.get(epoch.epoch),
                     )
                     if aggregate is None:
                         continue
@@ -808,6 +810,22 @@ class AnalyticsV2Producer:
                     )
                     produced += int(enqueue_result.inserted)
             return produced
+
+    async def _earlier_epochs_through(self) -> dict[int, date | None]:
+        """Per epoch, the last day any earlier epoch covers. An earlier epoch
+        still open counts as covering every day, so nothing after it signs."""
+        async with self._session_factory() as session:
+            result = await session.exec(
+                select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
+            )
+            epochs = result.all()
+        through: dict[int, date | None] = {}
+        latest: date | None = None
+        for epoch in epochs:
+            through[epoch.epoch] = latest
+            end = epoch.coverage_end_day or date.max
+            latest = end if latest is None else max(latest, end)
+        return through
 
     async def _completed_day_limit(self, today_utc: date) -> date:
         async with self._session_factory() as session:
@@ -921,6 +939,7 @@ class AnalyticsV2Producer:
         prior_row: AnalyticsV2Outbox | None,
         rows_by_id: dict[str, AnalyticsV2Outbox],
         max_frame_bytes: int,
+        earlier_epochs_through: date | None = None,
     ) -> WeeklyAggregate | None:
         fresh = aggregate_ledger_week(
             outcomes,
@@ -929,6 +948,7 @@ class AnalyticsV2Producer:
             epoch_coverage_end=epoch.coverage_end_day,
             week=week,
             today_utc=today_utc,
+            earlier_epochs_through=earlier_epochs_through,
         )
         if fresh is None or prior_row is None:
             return fresh
@@ -961,9 +981,11 @@ class AnalyticsV2Producer:
             prior_version=prior,
             correction=(
                 _published_days_changed(fresh, prior)
-                or fresh.through == prior.through
+                # Closing the period at the same through is an ordinary version.
+                or (fresh.through == prior.through and fresh.complete == prior.complete)
                 or len(published_row.frame) > max_frame_bytes
             ),
+            earlier_epochs_through=earlier_epochs_through,
         )
 
 
@@ -1606,7 +1628,9 @@ def _semantic_slot(event: EncodedAnalyticsEvent) -> str:
     corrects = payload.get("corrects")
     if isinstance(corrects, str):
         return f"correction:{corrects}"
-    return f"ordinary:{event.epoch}:{event.through.isoformat()}"
+    # Closing a period can keep its through, so it needs a slot of its own.
+    closed = ":closed" if event.complete else ""
+    return f"ordinary:{event.epoch}:{event.through.isoformat()}{closed}"
 
 
 def _published_days_changed(current: WeeklyAggregate, prior: PriorVersion) -> bool:

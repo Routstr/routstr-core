@@ -131,6 +131,8 @@ class WeeklyAggregate:
     daily_models: tuple[DailyModelAggregate, ...]
     prior_version: PriorVersion | None = None
     correction: bool = False
+    # Last day covered by any earlier epoch for this provider; epochs must not overlap.
+    earlier_epochs_through: date | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +226,7 @@ def aggregate_ledger_week(
     today_utc: date,
     prior_version: PriorVersion | None = None,
     correction: bool = False,
+    earlier_epochs_through: date | None = None,
 ) -> WeeklyAggregate | None:
     """Aggregate the covered part of one week, capped at yesterday in UTC."""
     _validate_epoch(epoch)
@@ -285,6 +288,7 @@ def aggregate_ledger_week(
         daily_models=model_rows,
         prior_version=prior_version,
         correction=correction,
+        earlier_epochs_through=earlier_epochs_through,
     )
 
 
@@ -684,33 +688,26 @@ def _validate_successor(
         raise AnalyticsV2Error("Prior version belongs to a different week")
     if created_at <= prior.created_at:
         raise AnalyticsV2Error("created_at must strictly increase")
-    if aggregate.epoch < prior.epoch:
-        raise AnalyticsV2Error("epoch must not decrease")
 
-    current_days = {row.day: row.values for row in aggregate.days}
+    # The d tag embeds the epoch, so the prior is always from this epoch.
+    if aggregate.coverage_start != prior.coverage_start:
+        raise AnalyticsV2Error("coverage_start changed within an epoch")
+    if aggregate.through < prior.through:
+        raise AnalyticsV2Error("through must not decrease")
+    if prior.complete and not aggregate.complete:
+        raise AnalyticsV2Error("complete must not revert")
+    if aggregate.correction:
+        return True, prior.event_id
+    if prior.complete:
+        raise AnalyticsV2Error("A closed week can only be corrected")
+    if aggregate.through == prior.through and not aggregate.complete:
+        raise AnalyticsV2Error("An ordinary version must advance through or close")
     prior_days = {row.day: row.values for row in prior.days}
-    if aggregate.epoch == prior.epoch:
-        if aggregate.coverage_start != prior.coverage_start:
-            raise AnalyticsV2Error("coverage_start changed within an epoch")
-        if aggregate.through < prior.through:
-            raise AnalyticsV2Error("through must not decrease")
-        if prior.complete and not aggregate.complete:
-            raise AnalyticsV2Error("complete must not revert")
-        if aggregate.correction:
-            return True, prior.event_id
-        if prior.complete:
-            raise AnalyticsV2Error("A closed week can only be corrected")
-        if aggregate.through == prior.through:
-            raise AnalyticsV2Error("An ordinary version must advance through")
-        if any(
-            current_days.get(day) != values for day, values in prior_days.items()
-        ) or daily_models_changed(aggregate, prior):
-            raise AnalyticsV2Error("An ordinary version changed a published row")
-    else:
-        if aggregate.correction:
-            raise AnalyticsV2Error("A correction cannot change epoch")
-        if current_days.keys() & prior_days.keys():
-            raise AnalyticsV2Error("A new epoch must not copy prior rows")
+    current_days = {row.day: row.values for row in aggregate.days}
+    if any(
+        current_days.get(day) != values for day, values in prior_days.items()
+    ) or daily_models_changed(aggregate, prior):
+        raise AnalyticsV2Error("An ordinary version changed a published row")
 
     return prior.corrected, None
 
@@ -726,6 +723,10 @@ def _validate_aggregate(aggregate: WeeklyAggregate) -> None:
     )
     if not isinstance(aggregate.correction, bool):
         raise AnalyticsV2Error("correction must be a boolean")
+    if aggregate.earlier_epochs_through is not None:
+        _validate_date(aggregate.earlier_epochs_through, "earlier_epochs_through")
+        if aggregate.coverage_start <= aggregate.earlier_epochs_through:
+            raise AnalyticsV2Error("Epoch coverage overlaps an earlier epoch")
     if tuple(row.day for row in aggregate.daily_models) != tuple(
         row.day for row in aggregate.days
     ):
@@ -894,8 +895,10 @@ def _validate_public_key(value: str) -> None:
 def _validate_provider_d(value: str) -> None:
     if not isinstance(value, str) or not 1 <= len(value) <= 64:
         raise AnalyticsV2Error("provider_d must contain 1 to 64 characters")
-    if any(unicodedata.category(character) == "Cc" for character in value):
-        raise AnalyticsV2Error("provider_d must not contain control characters")
+    if any(unicodedata.category(character) in ("Cc", "Cs") for character in value):
+        raise AnalyticsV2Error(
+            "provider_d must not contain control or surrogate characters"
+        )
 
 
 def _validate_week(value: date) -> None:
@@ -905,7 +908,8 @@ def _validate_week(value: date) -> None:
 
 
 def _validate_epoch(value: int) -> None:
-    _validate_nonnegative_int(value, "epoch", maximum=None)
+    # The epoch is in the d tag and the JSON content; past 2^53 a JS reader can't match them.
+    _validate_nonnegative_int(value, "epoch")
 
 
 def _validate_date(value: object, name: str) -> None:
