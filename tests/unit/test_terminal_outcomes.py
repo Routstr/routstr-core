@@ -518,13 +518,16 @@ async def test_worker_that_starts_collecting_late_preserves_recorded_days(
                 select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
             )
         ).all()
-        loss_days = (
-            await session.exec(
-                select(TerminalOutcomeWriterRun.loss_day)
-                .where(col(TerminalOutcomeWriterRun.status) == "recovered")
-                .where(col(TerminalOutcomeWriterRun.loss_day).is_not(None))
-            )
-        ).all()
+        loss_days = [
+            run.loss_day
+            for run in (
+                await session.exec(
+                    select(TerminalOutcomeWriterRun)
+                    .where(col(TerminalOutcomeWriterRun.status) == "recovered")
+                    .where(col(TerminalOutcomeWriterRun.loss_day).is_not(None))
+                )
+            ).all()
+        ]
     assert [(row.coverage_start_day, row.coverage_end_day) for row in epochs] == [
         (day - timedelta(days=1), None),
     ]

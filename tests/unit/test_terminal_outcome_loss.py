@@ -5,9 +5,11 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -77,7 +79,7 @@ async def test_replay_keeps_marker_until_commit_and_is_idempotent_after_unlink_f
     journal.record(date(2026, 9, 1), 1000)
 
     @asynccontextmanager
-    async def offline():
+    async def offline() -> AsyncIterator[AsyncSession]:
         raise ConnectionError("database unavailable")
         yield
 
@@ -89,7 +91,7 @@ async def test_replay_keeps_marker_until_commit_and_is_idempotent_after_unlink_f
     )
     unlink = Path.unlink
 
-    def fail_unlink(path: Path, *args, **kwargs):
+    def fail_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
         if path.suffix == ".json":
             raise OSError("synthetic crash after commit")
         return unlink(path, *args, **kwargs)
@@ -130,7 +132,7 @@ def test_journal_failure_is_not_silently_acknowledged(
 
     writer = TerminalOutcomeWriter(loss_directory=tmp_path)
 
-    def broken(*args):
+    def broken(*args: object) -> None:
         raise OSError("disk unavailable")
 
     monkeypatch.setattr(writer._loss_journal, "record", broken)

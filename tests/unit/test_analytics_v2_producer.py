@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -277,7 +278,7 @@ async def test_nightly_restarts_publish_every_recorded_day(
                 frames.append(bytes(row.frame))
                 await session.commit()
         # Reference resolution: shuffled and duplicate deliveries replace, not add.
-        winners = {}
+        winners: dict[str, dict[str, Any]] = {}
         for frame in [*reversed(frames), *frames]:
             event = json.loads(frame)[1]
             assert Event.from_json(json.dumps(event)).verify()
@@ -323,7 +324,9 @@ async def test_stale_producer_cannot_replace_newer_totals(
     original = first._load_eligible_epochs
     now = datetime(2026, 9, 7, tzinfo=UTC)
 
-    async def stale_snapshot(floor: int, today: date):
+    async def stale_snapshot(
+        floor: int, today: date
+    ) -> tuple[tuple[TerminalOutcomeEpoch, ...], tuple[Any, ...]]:
         result = await original(floor, today)
         async with session_factory() as session:
             session.add(_outcome("newer", WEEK, tokens=5))
@@ -373,7 +376,9 @@ async def test_publication_snapshot_fences_send_and_opt_out(
         await session.commit()
     original = producer._load_eligible_epochs
 
-    async def advance_after_snapshot(floor: int, today: date):
+    async def advance_after_snapshot(
+        floor: int, today: date
+    ) -> tuple[tuple[TerminalOutcomeEpoch, ...], tuple[Any, ...]]:
         result = await original(floor, today)
         if interleaving == "send-first":
             assert await delivery._begin_attempt(prior.event_id, 3) is not None

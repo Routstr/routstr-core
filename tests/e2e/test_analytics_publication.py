@@ -501,7 +501,7 @@ async def _exercise(url: str, work: Path) -> dict[str, Any]:
                     )
                     assert after_rejection == {row.outcome_id for row in stored}
 
-                async def endpoint(target: str) -> delivery.ResolvedRelayEndpoint:
+                async def endpoint(relay_url: str) -> delivery.ResolvedRelayEndpoint:
                     return delivery.ResolvedRelayEndpoint(
                         "127.0.0.1", relay_port, "analytics-relay.example.com"
                     )
@@ -518,7 +518,7 @@ async def _exercise(url: str, work: Path) -> dict[str, Any]:
                 # Local-only DNS and CA injection; real send/OK/exact-readback remains intact.
                 old_resolver = delivery.resolve_public_relay_endpoint
                 delivery.resolve_public_relay_endpoint = endpoint
-                delivery.websockets.connect = connect
+                setattr(delivery.websockets, "connect", connect)
                 try:
                     producer = delivery.AnalyticsV2Producer(
                         sessions,
@@ -594,7 +594,7 @@ async def _exercise(url: str, work: Path) -> dict[str, Any]:
                     }
                 finally:
                     delivery.resolve_public_relay_endpoint = old_resolver
-                    delivery.websockets.connect = real_connect
+                    setattr(delivery.websockets, "connect", real_connect)
     finally:
         release.set()
         for process in processes:
