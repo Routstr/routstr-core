@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from nostr_sdk import Keys
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -841,3 +842,169 @@ async def test_producer_refuses_to_sign_an_epoch_that_overlaps_an_earlier_one(
     )
     with pytest.raises(AnalyticsV2Error, match="overlaps an earlier epoch"):
         await producer.produce_once(now=datetime(2026, 9, 6, 0, 1, tzinfo=UTC))
+
+
+def _stored(
+    event_id: str,
+    *,
+    d_tag: str,
+    epoch: int,
+    created_at: int,
+    generation: int,
+    attempted: bool = False,
+    status: str = "superseded",
+) -> AnalyticsV2Outbox:
+    return AnalyticsV2Outbox(
+        event_id=event_id,
+        pubkey=PUBLIC_KEY,
+        d_tag=d_tag,
+        kind=38422,
+        week=WEEK,
+        epoch=epoch,
+        through_day=WEEK,
+        semantic_slot=f"ordinary:{epoch}:{created_at}",
+        delivery_generation=generation,
+        frame=b'["EVENT",{"content":"' + event_id.encode() + b'"}]',
+        finalized=False,
+        corrected=False,
+        status=status,
+        created_at=created_at,
+        stored_at_ms=created_at,
+        next_attempt_at_ms=created_at,
+        attempt_count=1 if attempted else 0,
+        first_send_attempt_at_ms=created_at if attempted else None,
+        delivered_at_ms=created_at if status == "delivered" else None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_version_state_matches_a_full_history_scan_without_reading_it(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Long history: same newest-version and predecessor answer, fewer rows read.
+
+    A node keeps every signed version forever, so this loads the state the way
+    the producer reads it after years of publication and compares it with the
+    row-by-row scan it replaces.
+    """
+    import routstr.nostr.analytics_v2_delivery as delivery_module
+
+    await _activate(session_factory)
+    async with session_factory() as session:
+        # Two d_tags, one of them with a long correction history.
+        for index in range(120):
+            session.add(
+                _stored(
+                    f"long-{index:03d}",
+                    d_tag="long",
+                    epoch=0,
+                    created_at=1000 + index,
+                    generation=0,
+                    attempted=index % 3 == 0,
+                )
+            )
+        session.add(
+            _stored(
+                "short-0",
+                d_tag="short",
+                epoch=0,
+                created_at=500,
+                generation=0,
+            )
+        )
+        session.add(
+            _stored(
+                "short-1",
+                d_tag="short",
+                epoch=0,
+                created_at=2100,
+                generation=0,
+                attempted=True,
+                status="delivered",
+            )
+        )
+        # Other epochs and a foreign generation are not part of this lane.
+        session.add(
+            _stored(
+                "later-epoch",
+                d_tag="long",
+                epoch=1,
+                created_at=3000,
+                generation=0,
+            )
+        )
+        session.add(
+            _stored(
+                "other-generation",
+                d_tag="long",
+                epoch=0,
+                created_at=4000,
+                generation=1,
+            )
+        )
+        await session.commit()
+
+    producer = AnalyticsV2Producer(
+        session_factory,
+        private_key_hex=PRIVATE_KEY,
+        public_key_hex=PUBLIC_KEY,
+        provider_d="provider",
+    )
+
+    latest, floors, attempted = await producer._load_version_state(0, 0)
+
+    # The scan this replaced, reproduced over the whole table.
+    async with session_factory() as session:
+        rows = (
+            await session.exec(
+                select(AnalyticsV2Outbox)
+                .where(col(AnalyticsV2Outbox.pubkey) == PUBLIC_KEY)
+                .order_by(
+                    col(AnalyticsV2Outbox.created_at).desc(),
+                    col(AnalyticsV2Outbox.event_id),
+                )
+            )
+        ).all()
+    expected_latest: dict[tuple[int, str], AnalyticsV2Outbox] = {}
+    expected_floors: dict[str, int] = {}
+    expected_rows: dict[str, AnalyticsV2Outbox] = {}
+    for row in rows:
+        expected_floors.setdefault(row.d_tag, row.created_at)
+        expected_rows[row.event_id] = row
+        if row.epoch >= 0 and row.delivery_generation == 0:
+            expected_latest.setdefault((row.epoch, row.d_tag), row)
+
+    assert set(latest) == set(expected_latest)
+    for slot, row in latest.items():
+        assert row.event_id == expected_latest[slot].event_id
+    assert floors == expected_floors
+    # The floor spans every generation of a coordinate, not just this lane.
+    assert floors == {"long": 4000, "short": 2100}
+    for slot, row in latest.items():
+        assert delivery_module._latest_attempted_predecessor(
+            row, attempted.values()
+        ) == delivery_module._latest_attempted_predecessor(row, expected_rows.values())
+    # At most one row per slot survives, not one per version ever signed.
+    assert len(attempted) <= len(expected_latest)
+    assert len(latest) + len(attempted) < len(rows) // 10
+
+    # And the table is never read row by row: every statement that touches it
+    # is bounded by a group-by or a subselect of the newest row per slot.
+    statements: list[str] = []
+
+    def record(conn: object, cursor: object, statement: str, *args: object) -> None:
+        statements.append(statement)
+
+    engine = session_factory.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        await producer._load_version_state(0, 0)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    scans = [
+        statement for statement in statements if "FROM analytics_v2_outbox" in statement
+    ]
+    assert scans
+    assert all(
+        "GROUP BY" in statement or "IN (SELECT" in statement for statement in scans
+    ), scans

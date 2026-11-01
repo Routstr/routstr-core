@@ -750,7 +750,7 @@ class AnalyticsV2Producer:
             )
             if not epochs:
                 return 0
-            latest, created_at_floors, rows_by_id = await self._load_version_state(
+            latest, created_at_floors, attempted_by_id = await self._load_version_state(
                 state.active_epoch_floor, state.generation
             )
             earlier_through = await self._earlier_epochs_through()
@@ -780,7 +780,7 @@ class AnalyticsV2Producer:
                         week=week,
                         today_utc=completed_day_limit,
                         prior_row=prior_row,
-                        rows_by_id=rows_by_id,
+                        attempted_by_id=attempted_by_id,
                         max_frame_bytes=frame_limit,
                         earlier_epochs_through=earlier_through.get(epoch.epoch),
                     )
@@ -906,28 +906,53 @@ class AnalyticsV2Producer:
         dict[str, int],
         dict[str, AnalyticsV2Outbox],
     ]:
+        """Load the newest version per slot and one attempted ancestor per slot.
+
+        The outbox is append-only and never pruned, so reading every stored
+        frame here made each pass cost grow with all history ever published.
+        The callers only ever read the newest row of a slot, one attempted
+        ancestor of it, and the timestamp floor of its coordinate, so each of
+        those is now selected in SQL and the rest stays on disk.
+        """
         async with self._session_factory() as session:
-            result = await session.exec(
-                select(AnalyticsV2Outbox)
+            floor_result = await session.execute(
+                sa_select(
+                    col(AnalyticsV2Outbox.d_tag),
+                    func.max(col(AnalyticsV2Outbox.created_at)),
+                )
                 .where(col(AnalyticsV2Outbox.pubkey) == self._public_key_hex)
-                .order_by(
-                    col(AnalyticsV2Outbox.created_at).desc(),
-                    col(AnalyticsV2Outbox.event_id),
+                .group_by(col(AnalyticsV2Outbox.d_tag))
+            )
+            created_at_floors = {
+                d_tag: int(created_at) for d_tag, created_at in floor_result.all()
+            }
+            newest = await session.exec(
+                select(AnalyticsV2Outbox).where(
+                    col(AnalyticsV2Outbox.event_id).in_(
+                        _newest_slot_event_ids(
+                            self._public_key_hex,
+                            active_epoch_floor,
+                            generation,
+                            attempted_only=False,
+                        )
+                    )
                 )
             )
-            rows = result.all()
-        latest: dict[tuple[int, str], AnalyticsV2Outbox] = {}
-        created_at_floors: dict[str, int] = {}
-        rows_by_id: dict[str, AnalyticsV2Outbox] = {}
-        for row in rows:
-            created_at_floors.setdefault(row.d_tag, row.created_at)
-            rows_by_id[row.event_id] = row
-            if (
-                row.epoch >= active_epoch_floor
-                and row.delivery_generation == generation
-            ):
-                latest.setdefault((row.epoch, row.d_tag), row)
-        return latest, created_at_floors, rows_by_id
+            latest = {(row.epoch, row.d_tag): row for row in newest.all()}
+            attempted = await session.exec(
+                select(AnalyticsV2Outbox).where(
+                    col(AnalyticsV2Outbox.event_id).in_(
+                        _newest_slot_event_ids(
+                            self._public_key_hex,
+                            active_epoch_floor,
+                            generation,
+                            attempted_only=True,
+                        )
+                    )
+                )
+            )
+            attempted_by_id = {row.event_id: row for row in attempted.all()}
+        return latest, created_at_floors, attempted_by_id
 
     def _next_aggregate(
         self,
@@ -937,7 +962,7 @@ class AnalyticsV2Producer:
         week: date,
         today_utc: date,
         prior_row: AnalyticsV2Outbox | None,
-        rows_by_id: dict[str, AnalyticsV2Outbox],
+        attempted_by_id: dict[str, AnalyticsV2Outbox],
         max_frame_bytes: int,
         earlier_epochs_through: date | None = None,
     ) -> WeeklyAggregate | None:
@@ -966,7 +991,7 @@ class AnalyticsV2Producer:
         published_row = (
             prior_row
             if prior_row.first_send_attempt_at_ms is not None
-            else _latest_attempted_predecessor(prior_row, rows_by_id.values())
+            else _latest_attempted_predecessor(prior_row, attempted_by_id.values())
         )
         if published_row is None:
             return fresh
@@ -1641,6 +1666,48 @@ def _published_days_changed(current: WeeklyAggregate, prior: PriorVersion) -> bo
         or any(current_days.get(row.day) != row.values for row in prior.days)
         or daily_models_changed(current, prior)
     )
+
+
+def _newest_slot_event_ids(
+    pubkey: str,
+    active_epoch_floor: int,
+    generation: int,
+    *,
+    attempted_only: bool,
+) -> Any:
+    """Event ids of the newest row in each ``(epoch, d_tag)`` slot.
+
+    Rows are ranked by the same key the producer used to pick a version:
+    newest ``created_at`` first, then lowest ``event_id``. ``attempted_only``
+    keeps just the rows that already reached a relay, which is the newest row
+    ``_latest_attempted_predecessor`` would choose.
+    """
+    ranked = (
+        sa_select(
+            col(AnalyticsV2Outbox.event_id).label("event_id"),
+            func.row_number()
+            .over(
+                partition_by=(
+                    col(AnalyticsV2Outbox.epoch),
+                    col(AnalyticsV2Outbox.d_tag),
+                ),
+                order_by=(
+                    col(AnalyticsV2Outbox.created_at).desc(),
+                    col(AnalyticsV2Outbox.event_id),
+                ),
+            )
+            .label("slot_rank"),
+        )
+        .where(col(AnalyticsV2Outbox.pubkey) == pubkey)
+        .where(col(AnalyticsV2Outbox.epoch) >= active_epoch_floor)
+        .where(col(AnalyticsV2Outbox.delivery_generation) == generation)
+    )
+    if attempted_only:
+        ranked = ranked.where(
+            col(AnalyticsV2Outbox.first_send_attempt_at_ms).is_not(None)
+        )
+    slots = ranked.subquery()
+    return sa_select(slots.c.event_id).where(slots.c.slot_rank == 1)
 
 
 def _latest_attempted_predecessor(
