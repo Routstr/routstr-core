@@ -147,10 +147,9 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             s = await SettingsService.initialize(session)
             await release_leaked_reservations_on_startup(session, s)
 
-        try:
-            await prepare_analytics()
-        except Exception:
-            logger.exception("Stats collection could not start; requests remain available")
+        # Collection must precede serving, including when public sharing is
+        # off. Otherwise an old clean run could hide requests served uncollected.
+        await prepare_analytics()
 
         # Apply app metadata from settings
         try:
@@ -329,7 +328,9 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                     "Error closing upstream HTTP connection pools",
                     extra={"error": str(e), "error_type": type(e).__name__},
                 )
-        await shutdown_analytics()
+        # ASGI lifespan shutdown follows request draining. Background tasks
+        # have also stopped; only now may collection close its clean run.
+        await shutdown_analytics(serving_stopped=True)
 
 
 class _ImmutableStaticFiles(StaticFiles):

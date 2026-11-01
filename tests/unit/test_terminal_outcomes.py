@@ -709,7 +709,7 @@ def test_cashu_retained_msats_uses_exact_persisted_units(
     assert losses == ["invalid Cashu retained value"]
 
 
-async def test_clean_stop_then_downtime_excludes_unattended_days(
+async def test_clean_stop_then_long_downtime_preserves_coverage(
     ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
@@ -728,8 +728,8 @@ async def test_clean_stop_then_downtime_excludes_unattended_days(
             )
         ).all()
     assert epochs[0].coverage_start_day == day + timedelta(days=1)
-    assert epochs[0].coverage_end_day == day + timedelta(days=2)
-    assert epochs[1].coverage_start_day == day + timedelta(days=7)
+    assert len(epochs) == 1
+    assert epochs[0].coverage_end_day is None
     assert await writer.stop(timeout=1)
 
 
@@ -753,17 +753,21 @@ async def test_clean_restart_the_same_day_keeps_coverage(
     assert await writer.stop(timeout=1)
 
 
-async def test_short_clean_restart_across_midnight_keeps_coverage(
+@pytest.mark.parametrize("downtime_minutes", [3, 90, 60 * 24 * 28])
+async def test_clean_restart_across_midnight_keeps_coverage(
     ledger: tuple[AsyncEngine, SessionFactory],
+    downtime_minutes: int,
 ) -> None:
     _, sessions = ledger
     day = date(2026, 9, 1)
     clock = MutableClock(_timestamp(day))
     writer = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
     assert await writer.start()
-    clock.value = _timestamp(day + timedelta(days=4), hour=0) - 2 * 60 * 1000
+    clock.value = _timestamp(day + timedelta(days=3), hour=23)
+    if downtime_minutes == 3:
+        clock.value += 58 * 60 * 1000
     assert await writer.stop(timeout=1)
-    clock.value += 3 * 60 * 1000
+    clock.value += downtime_minutes * 60 * 1000
     assert await writer.start()
     async with sessions() as session:
         epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
@@ -886,8 +890,10 @@ async def test_writer_failure_does_not_fail_settlement_and_marks_gap(
     assert await writer.stop(timeout=1)
 
 
+@pytest.mark.parametrize("downtime_ms", [2000, 60 * 1000, 3 * 24 * 60 * 60 * 1000])
 async def test_unclean_restart_preserves_days_before_last_durable_flush(
     ledger: tuple[AsyncEngine, SessionFactory],
+    downtime_ms: int,
 ) -> None:
     _, sessions = ledger
     first_day = date(2026, 9, 1)
@@ -907,7 +913,13 @@ async def test_unclean_restart_preserves_days_before_last_durable_flush(
     with pytest.raises(asyncio.CancelledError):
         await writer._task
     assert not await writer.stop(timeout=1)
-    clock.value += 2000
+    clock.value += downtime_ms
+    writer = TerminalOutcomeWriter(
+        session_factory=sessions,
+        clock=clock,
+        heartbeat_seconds=0.05,
+        lease_timeout_seconds=1,
+    )
     assert await writer.start()
     async with sessions() as session:
         epochs = (
@@ -917,7 +929,9 @@ async def test_unclean_restart_preserves_days_before_last_durable_flush(
         ).all()
     try:
         assert epochs[0].coverage_end_day == last_day - timedelta(days=1)
-        assert epochs[1].coverage_start_day == last_day + timedelta(days=1)
+        assert epochs[1].coverage_start_day == datetime.fromtimestamp(
+            clock.value / 1000, UTC
+        ).date() + timedelta(days=1)
     finally:
         assert await writer.stop(timeout=1)
 
@@ -956,7 +970,7 @@ async def test_sharing_disabled_startup_resumes_private_coverage_after_gap(
     coordinator = runtime.AnalyticsCoordinator()
     await coordinator.prepare_startup()
     assert stopped_writer.running
-    await coordinator.close()
+    await coordinator.close(serving_stopped=True)
     assert not (await runtime.get_analytics_v2_delivery_state(sessions)).sharing_enabled
     async with sessions() as session:
         epochs = (
@@ -964,16 +978,10 @@ async def test_sharing_disabled_startup_resumes_private_coverage_after_gap(
                 select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
             )
         ).all()
-    assert all(epoch.current_slot is None for epoch in epochs[:-1])
-    assert epochs[0].coverage_end_day == day + timedelta(days=1)
-    assert all(
-        epoch.coverage_end_day is not None
-        and epoch.coverage_start_day > epoch.coverage_end_day
-        for epoch in epochs[1:-1]
-    )
-    assert epochs[-1].current_slot == 1
-    assert epochs[-1].coverage_start_day == day + timedelta(days=6)
-    assert epochs[-1].coverage_end_day is None
+    assert [
+        (epoch.coverage_start_day, epoch.coverage_end_day, epoch.current_slot)
+        for epoch in epochs
+    ] == [(day + timedelta(days=1), None, 1)]
 
 
 @pytest.mark.parametrize("fresh_process", [False, True])
@@ -1013,7 +1021,7 @@ async def test_failed_writer_start_cannot_backfill_missed_days_as_zero(
 
 
 @pytest.mark.parametrize("failed_startup", [False, True])
-async def test_fresh_restart_does_not_publish_zero_for_unattended_days(
+async def test_fresh_clean_restart_publishes_zero_for_stopped_service_days(
     ledger: tuple[AsyncEngine, SessionFactory],
     failed_startup: bool,
 ) -> None:
@@ -1085,7 +1093,13 @@ async def test_fresh_restart_does_not_publish_zero_for_unattended_days(
             for report in reports
             for day in json.loads(json.loads(report.frame)[1]["content"])["days"]
         }
-        assert reported_days == {"2026-09-02"}
+        assert reported_days == {
+            "2026-09-02",
+            "2026-09-03",
+            "2026-09-04",
+            "2026-09-05",
+            "2026-09-06",
+        }
     finally:
         assert await recovered.stop(timeout=1)
 
@@ -1357,3 +1371,131 @@ async def test_unknown_row_keeps_the_revenue_the_node_retained(
     assert stored.pricing_source == "unknown"
     assert stored.revenue_msats == 4000 and stored.input_tokens == 0
     assert await writer.stop(timeout=1)
+
+
+async def test_repeated_clean_overnight_maintenance_preserves_all_days(
+    ledger: tuple[AsyncEngine, SessionFactory],
+) -> None:
+    _, sessions = ledger
+    first_day = date(2026, 9, 1)
+    clock = MutableClock(_timestamp(first_day))
+    for offset in range(28):
+        writer = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+        assert await writer.start()
+        clock.value = _timestamp(first_day + timedelta(days=offset), hour=23)
+        assert await writer.stop(timeout=1)
+        clock.value += 90 * 60 * 1000
+    async with sessions() as session:
+        epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
+    assert [(epoch.coverage_start_day, epoch.coverage_end_day) for epoch in epochs] == [
+        (first_day + timedelta(days=1), None)
+    ]
+
+
+async def test_live_stalled_worker_is_fenced_only_by_another_collector(
+    ledger: tuple[AsyncEngine, SessionFactory],
+) -> None:
+    _, sessions = ledger
+    first_day = date(2026, 9, 1)
+    clock = MutableClock(_timestamp(first_day))
+    stalled = TerminalOutcomeWriter(
+        session_factory=sessions,
+        clock=clock,
+        lease_timeout_seconds=90,
+        heartbeat_seconds=30,
+    )
+    assert await stalled.start()
+    clock.value = _timestamp(first_day + timedelta(days=2))
+    assert await stalled.flush(timeout=1)
+    run_id = stalled._run_id
+    clock.value += 91_000
+    # Still alive; it does not fence itself despite its old heartbeat.
+    await stalled._claim_stale_runs(clock.value)
+    async with sessions() as session:
+        own = await session.get(TerminalOutcomeWriterRun, run_id)
+        assert own is not None and own.status == "active"
+    observer = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    try:
+        assert await observer.start()
+        assert stalled.running
+        async with sessions() as session:
+            fenced = await session.get(TerminalOutcomeWriterRun, run_id)
+            epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
+        assert fenced is not None and fenced.status == "recovered"
+        assert fenced.loss_reason == "lease_expired"
+        assert epochs[0].coverage_end_day == first_day + timedelta(days=1)
+        assert epochs[1].coverage_start_day == first_day + timedelta(days=3)
+    finally:
+        # A fenced writer must not overwrite the recovered run as clean.
+        assert not await stalled.stop(timeout=1)
+        assert await observer.stop(timeout=1)
+
+
+async def test_older_crashed_worker_is_not_hidden_by_newer_clean_close(
+    ledger: tuple[AsyncEngine, SessionFactory],
+) -> None:
+    _, sessions = ledger
+    day = date(2026, 9, 1)
+    clock = MutableClock(_timestamp(day))
+    older = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    newer = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    assert await older.start()
+    clock.value += 1000
+    assert await newer.start()
+    clock.value = _timestamp(day + timedelta(days=2))
+    assert await older.flush(timeout=1)
+    old_id = older._run_id
+    assert await newer.stop(timeout=1)
+    assert older._task is not None
+    older._task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await older._task
+    assert not await older.stop(timeout=1)
+    clock.value += 120_000
+    restarted = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    try:
+        assert await restarted.start()
+        async with sessions() as session:
+            old_run = await session.get(TerminalOutcomeWriterRun, old_id)
+            epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
+        assert old_run is not None and old_run.status == "recovered"
+        assert old_run.loss_reason == "lease_expired"
+        assert epochs[0].coverage_end_day == day + timedelta(days=1)
+        assert epochs[1].coverage_start_day == day + timedelta(days=3)
+    finally:
+        assert await restarted.stop(timeout=1)
+
+
+async def test_stale_degraded_run_preserves_confirmed_drop_diagnostic(
+    ledger: tuple[AsyncEngine, SessionFactory],
+) -> None:
+    _, sessions = ledger
+    day = date(2026, 9, 1)
+    clock = MutableClock(_timestamp(day))
+    first = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    assert await first.start()
+    run_id = first._run_id
+    await first._mark_degraded(day)
+    async with sessions() as session:
+        run = await session.get(TerminalOutcomeWriterRun, run_id)
+        assert run is not None
+        run.loss_reason = "outcome_dropped"
+        session.add(run)
+        await session.commit()
+    # Simulate process death after recording the drop, before recovery.
+    assert first._task is not None
+    first._task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first._task
+    assert not await first.stop(timeout=1)
+    clock.value += 120_000
+    recovered = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    try:
+        assert await recovered.start()
+        async with sessions() as session:
+            run = await session.get(TerminalOutcomeWriterRun, run_id)
+        assert run is not None and run.status == "recovered"
+        assert run.loss_reason == "outcome_dropped"
+        assert run.loss_day == day
+    finally:
+        assert await recovered.stop(timeout=1)

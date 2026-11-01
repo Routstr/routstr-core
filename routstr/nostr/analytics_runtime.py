@@ -5,6 +5,7 @@ import time
 from datetime import UTC, datetime
 
 from ..core.db import NsecState, Secret, create_session
+from ..core.lifecycle import drain_request_work
 from ..core.logging import get_logger
 from ..core.settings import SettingsService, derive_npub_from_nsec, settings
 from ..core.terminal_outcomes import (
@@ -13,6 +14,7 @@ from ..core.terminal_outcomes import (
     terminal_outcome_writer,
 )
 from ..core.vault import decrypt
+from ..upstream.stream_ownership import drain_stream_finalizers
 from .analytics_v2_delivery import (
     AnalyticsV2Delivery,
     AnalyticsV2DeliveryError,
@@ -68,6 +70,10 @@ class AnalyticsCoordinator:
             not settings.enable_analytics_sharing or not self._writer_started
         ):
             await transition_analytics_v2_sharing(create_session, enabled=False)
+        if not self._writer_started:
+            # A failed collector cannot prove no requests were lost across a
+            # subsequent process exit. Do not serve behind an old clean marker.
+            raise RuntimeError("Terminal outcome collection must start before serving")
 
     async def run(self) -> None:
         try:
@@ -84,7 +90,9 @@ class AnalyticsCoordinator:
                     delay = 10
                 await asyncio.sleep(delay)
         finally:
-            await self.close()
+            # The coordinator owns publication, not collection's lifetime.
+            # Cancellation can happen while requests are still settling.
+            await self._stop_public(disable=False)
 
     async def sync_once(self) -> None:
         if self._closed:
@@ -221,7 +229,8 @@ class AnalyticsCoordinator:
             self._identity = None
             self._relays = ()
 
-    async def close(self) -> None:
+    async def close(self, *, serving_stopped: bool = False) -> None:
+        assert serving_stopped, "Stop serving and drain settlement before collection"
         if self._closed:
             return
         self._closed = True
@@ -229,7 +238,15 @@ class AnalyticsCoordinator:
             await self._stop_public(disable=False)
         finally:
             if self._writer_started:
-                await stop_terminal_outcome_writer()
+                requests_drained = await drain_request_work()
+                settlement_drained = (
+                    await drain_stream_finalizers() and requests_drained
+                )
+                if not settlement_drained:
+                    terminal_outcome_writer.declare_loss(
+                        "stream settlement did not drain before shutdown"
+                    )
+                await stop_terminal_outcome_writer(allow_clean=settlement_drained)
                 self._writer_started = False
 
 
@@ -251,8 +268,10 @@ async def run_analytics() -> None:
     await _get_coordinator().run()
 
 
-async def shutdown_analytics() -> None:
+async def shutdown_analytics(*, serving_stopped: bool = False) -> None:
+    assert serving_stopped, "Analytics shutdown requires drained request settlement"
     global _coordinator
-    coordinator, _coordinator = _coordinator, None
+    coordinator = _coordinator
     if coordinator is not None:
-        await coordinator.close()
+        await coordinator.close(serving_stopped=serving_stopped)
+        _coordinator = None

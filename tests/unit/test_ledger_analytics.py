@@ -809,3 +809,54 @@ async def test_measured_average_uses_exact_historical_bounds(
     assert summary["measured_token_requests"] == 2
     assert summary["measured_tokens"] == 18
     assert summary["avg_measured_tokens_per_completion"] == 9
+
+
+async def test_coverage_diagnostics_distinguish_lease_uncertainty_from_drops(
+    sessions: SessionFactory,
+) -> None:
+    await _seed(sessions)
+    async with sessions() as session:
+        for run_id, reason, day in (
+            ("stalled-worker", "lease_expired", date(2026, 9, 17)),
+            ("full-queue", "outcome_dropped", date(2026, 9, 17)),
+            ("legacy-run", None, date(2026, 9, 17)),
+            ("outside-window", "lease_expired", date(2026, 9, 10)),
+        ):
+            session.add(
+                TerminalOutcomeWriterRun(
+                    run_id=run_id,
+                    status="recovered",
+                    started_at_ms=1,
+                    heartbeat_at_ms=1,
+                    closed_at_ms=2,
+                    loss_day=day,
+                    loss_reason=reason,
+                )
+            )
+        await session.commit()
+    result = await get_ledger_usage_dashboard(
+        _legacy(), interval=60, hours=24, session_factory=sessions, now=NOW
+    )
+    diagnostics = result["ledger_coverage"]["loss_diagnostics"]
+    assert diagnostics == [
+        {
+            "run_id": "full-queue",
+            "day": "2026-09-17",
+            "reason": "outcome_dropped",
+            "continuity": "confirmed_drop",
+        },
+        {
+            "run_id": "legacy-run",
+            "day": "2026-09-17",
+            "reason": "unknown",
+            "continuity": "uncertain",
+        },
+        {
+            "run_id": "stalled-worker",
+            "day": "2026-09-17",
+            "reason": "lease_expired",
+            "continuity": "uncertain",
+        },
+    ]
+    # Diagnostic history does not become an active watermark or extend a gap.
+    assert result["ledger_coverage"]["complete"]

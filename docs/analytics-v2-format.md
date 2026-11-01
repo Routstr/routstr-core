@@ -4,6 +4,14 @@ Public sharing follows the node's existing analytics setting. Reports contain ag
 
 A public-sharing activation begins coverage on the next full UTC day. Toggle days and collection-loss days are excluded. Private terminal records remain stored when public sharing is disabled. An omitted day means unavailable coverage; an included all-zero day means the collector covered the day and recorded no completed requests.
 
+## Coverage and restarts
+
+A clean service shutdown stops serving and drains request settlement before closing the collector. Restarting collection before serving resumes preserves coverage regardless of downtime length, including overnight and multi-day maintenance. There is no same-day or ten-minute cutoff. This records no requests during a stopped service; it does not permit serving requests without collection. Collection initialization must succeed before the worker starts serving, even when public sharing is disabled. If it fails, startup fails rather than serving uncollected requests. Cancelling the publication coordinator does not stop collection. Detached stream settlement is drained before the collector may close cleanly; incomplete settlement retains conservative loss handling.
+
+An unclean process stop can lose in-memory queued outcomes. Recovery conservatively excludes the uncertain days from the last proven collection checkpoint through recovery, then begins coverage on the next full UTC day. A single same-day crash normally excludes that day, not all future days; repeated daily crashes can prevent any full day from becoming publishable. Persisting the queue during in-process recovery does not make it survive process death.
+
+Another collector or a startup can fence a writer whose heartbeat lease expired. Lease expiry means continuity is uncertain, not that an outcome was proven dropped; coverage remains conservatively excluded. The private dashboard's `ledger_coverage.loss_diagnostics` distinguishes `lease_expired` (uncertain continuity) from `outcome_dropped` (a confirmed drop), with historical unknown reasons remaining uncertain. These diagnostics are not a complete historical drop audit: in-process recovery clears its active run's loss marker after rotating coverage; recovered stale-run markers remain stored.
+
 ## Operator controls and upgrades
 
 The existing "Share analytics to Nostr" switch controls public reports through `ENABLE_ANALYTICS_SHARING`. Its existing default remains `true`; an explicitly saved `false` remains off after upgrading or restarting. There is no separate format opt-in.
@@ -41,11 +49,11 @@ The `columns` array defines these positions, in order:
 | 2 | `output_tokens` | Billed output tokens |
 | 3 | `cache_read_input_tokens` | Billed cache-read tokens |
 | 4 | `cache_creation_input_tokens` | Billed cache-creation tokens |
-| 5 | `revenue_msats` | Gross settled node revenue in millisatoshis |
+| 5 | `revenue_msats` | Gross node revenue in millisatoshis; for unknown settlement outcomes, only the ecash known to be retained is included, a lower bound rather than a final settled amount |
 
 Token counts are the ones billing used: the upstream's reported usage where it sent one, otherwise the node's estimate. Every integer is nonnegative and no greater than JavaScript's maximum safe integer. Days and daily model rows must each satisfy these rules independently.
 
-The report does not support a tokens-per-request average. `completed_requests` includes image and unknown-outcome requests, which carry no tokens, so dividing token totals by it understates usage per request. Per-request usage provenance stays in the node's private ledger and dashboard and is not published.
+The report does not support a tokens-per-request average. `completed_requests` includes image and unknown-outcome requests, which carry no tokens, so dividing token totals by it understates usage per request. Per-request usage provenance stays in the node's private ledger and dashboard and is not published. Public reports do not identify which completions have unknown settlement outcomes, so consumers cannot distinguish their lower-bound revenue contributions from final settled amounts.
 
 This unpublished format has exactly these 6 columns. Earlier 18- and 20-column drafts are not accepted published formats. A node reads its own earlier 20-column signed versions back as these 6 columns, so it can correct them after upgrading. Existing legacy public report formats remain separate inputs for consumers.
 

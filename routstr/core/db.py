@@ -1013,6 +1013,8 @@ class TerminalOutcomeWriterRun(SQLModel, table=True):  # type: ignore
     )
     closed_at_ms: int | None = Field(default=None, nullable=True, sa_type=BigInteger)
     loss_day: date | None = Field(default=None, nullable=True, sa_type=Date)
+    # Lease expiry proves missing liveness evidence, not dropped outcomes.
+    loss_reason: str | None = Field(default=None, nullable=True)
 
 
 class AnalyticsV2Outbox(SQLModel, table=True):  # type: ignore

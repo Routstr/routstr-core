@@ -72,7 +72,7 @@ async def node(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
             events=events,
         )
     finally:
-        await coordinator.close()
+        await coordinator.close(serving_stopped=True)
         await writer.stop()
         await engine.dispose()
 
@@ -270,7 +270,7 @@ async def test_saved_identity_reaches_other_workers_without_disabling_sharing(
                     assert settings.nsec == key
                     assert settings.npub == response.json()["npub"]
     finally:
-        await other.close()
+        await other.close(serving_stopped=True)
 
 
 @pytest.mark.asyncio
@@ -280,7 +280,7 @@ async def test_restart_writer_failure_disables_publication_before_serving(
     monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
     await node.coordinator.prepare_startup()
     await node.coordinator.sync_once()
-    await node.coordinator.close()
+    await node.coordinator.close(serving_stopped=True)
     assert (
         await runtime.get_analytics_v2_delivery_state(node.sessions)
     ).sharing_enabled
@@ -290,12 +290,13 @@ async def test_restart_writer_failure_disables_publication_before_serving(
 
     monkeypatch.setattr(runtime, "start_terminal_outcome_writer", failed_start)
     restarted = runtime.AnalyticsCoordinator()
-    await restarted.prepare_startup()
+    with pytest.raises(RuntimeError, match="must start before serving"):
+        await restarted.prepare_startup()
     assert not (
         await runtime.get_analytics_v2_delivery_state(node.sessions)
     ).sharing_enabled
     assert not node.writer.running
-    await restarted.close()
+    await restarted.close(serving_stopped=True)
 
 
 @pytest.mark.asyncio
@@ -369,7 +370,7 @@ async def test_upgrade_preserves_existing_sharing_choice_across_restart(
                 )
             ).one()
         assert epoch.coverage_start_day == datetime.now(UTC).date() + timedelta(days=1)
-    await node.coordinator.close()
+    await node.coordinator.close(serving_stopped=True)
 
     async with node.sessions() as session:
         restored = await SettingsService.initialize(session)
@@ -386,7 +387,7 @@ async def test_upgrade_preserves_existing_sharing_choice_across_restart(
             assert restarted._task is None
             assert node.events == []
     finally:
-        await restarted.close()
+        await restarted.close(serving_stopped=True)
 
 
 @pytest.mark.asyncio
@@ -432,3 +433,205 @@ async def test_missing_provider_identity_warns_once(
     assert [r.levelno for r in records] == [logging.WARNING]
     assert "PROVIDER_ID" in records[0].__dict__["reason"]
     assert node.coordinator._task is None
+
+
+@pytest.mark.asyncio
+async def test_coordinator_cancellation_does_not_stop_collection(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await node.coordinator.prepare_startup()
+    entered = asyncio.Event()
+
+    async def sync_once() -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(node.coordinator, "sync_once", sync_once)
+    task = asyncio.create_task(node.coordinator.run())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert node.writer.running
+    assert not node.coordinator._closed
+    assert node.coordinator._task is None
+    assert await node.writer.flush(timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_collection_shutdown_requires_explicit_drained_serving(node: Any) -> None:
+    await node.coordinator.prepare_startup()
+    with pytest.raises(AssertionError, match="drain settlement"):
+        await node.coordinator.close()
+    assert node.writer.running
+    assert not node.coordinator._closed
+    await node.coordinator.close(serving_stopped=True)
+    assert not node.writer.running
+
+
+@pytest.mark.asyncio
+async def test_worker_shutdown_does_not_stop_other_worker_collection(node: Any) -> None:
+    from routstr.core.db import TerminalOutcomeWriterRun
+
+    first = node.writer
+    second = terminal_outcomes.TerminalOutcomeWriter(session_factory=node.sessions)
+    assert await first.start()
+    first_id = first._run_id
+    assert await second.start()
+    second_id = second._run_id
+    assert await first.stop(timeout=1)
+    assert second.running
+    assert await second.flush(timeout=1)
+    async with node.sessions() as session:
+        first_run = await session.get(TerminalOutcomeWriterRun, first_id)
+        second_run = await session.get(TerminalOutcomeWriterRun, second_id)
+    assert first_run is not None and first_run.status == "clean"
+    assert second_run is not None and second_run.status == "active"
+    assert await second.stop(timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_detached_settlement_before_writer_stop(
+    node: Any,
+) -> None:
+    from routstr.upstream.stream_ownership import PersistentStreamFinalizer
+
+    await node.coordinator.prepare_startup()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def settle() -> None:
+        entered.set()
+        await release.wait()
+        assert node.writer.running
+
+    finalizer = PersistentStreamFinalizer(settle)
+    request = asyncio.create_task(finalizer.run())
+    await entered.wait()
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    closing = asyncio.create_task(node.coordinator.close(serving_stopped=True))
+    await asyncio.sleep(0)
+    assert not closing.done()
+    assert node.writer.running
+    release.set()
+    await closing
+    assert not node.writer.running
+
+
+@pytest.mark.asyncio
+async def test_incomplete_settlement_is_not_closed_as_clean(node: Any) -> None:
+    from routstr.core.db import TerminalOutcomeEpoch
+    from routstr.upstream.stream_ownership import PersistentStreamFinalizer
+
+    await node.coordinator.prepare_startup()
+    original_epoch = node.writer.epoch
+
+    async def fail() -> None:
+        raise RuntimeError("synthetic incomplete settlement")
+
+    PersistentStreamFinalizer(fail)
+    await node.coordinator.close(serving_stopped=True)
+    async with node.sessions() as session:
+        epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
+    assert max(epoch.epoch for epoch in epochs) > original_epoch
+
+
+@pytest.mark.asyncio
+async def test_pending_finalizer_cannot_leave_clean_restart_proof(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from routstr.core.db import TerminalOutcomeWriterRun
+    from routstr.upstream import stream_ownership
+
+    await node.coordinator.prepare_startup()
+    monkeypatch.setattr(
+        stream_ownership.settings, "request_cleanup_timeout_seconds", 0.01
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def stubborn_settlement() -> None:
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    finalizer = stream_ownership.PersistentStreamFinalizer(stubborn_settlement)
+    request = asyncio.create_task(finalizer.run())
+    await entered.wait()
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    try:
+        await asyncio.wait_for(node.coordinator.close(serving_stopped=True), timeout=1)
+        assert finalizer._task is not None and not finalizer._task.done()
+        async with node.sessions() as session:
+            runs = (await session.exec(select(TerminalOutcomeWriterRun))).all()
+        assert runs
+        assert all(run.status != "clean" for run in runs)
+        # A later process must recover the unresolved run conservatively.
+        now = int(time.time() * 1000) + 120_000
+        restarted = terminal_outcomes.TerminalOutcomeWriter(
+            session_factory=node.sessions, clock=lambda: now
+        )
+        try:
+            assert await restarted.start()
+            async with node.sessions() as session:
+                recovered = (await session.exec(select(TerminalOutcomeWriterRun))).all()
+                epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
+            assert any(run.status == "recovered" for run in recovered)
+            assert max(epoch.epoch for epoch in epochs) >= 2
+            assert max(epoch.coverage_start_day for epoch in epochs) == (
+                datetime.fromtimestamp(now / 1000, UTC).date() + timedelta(days=1)
+            )
+        finally:
+            await restarted.stop()
+    finally:
+        release.set()
+        assert finalizer._task is not None
+        await finalizer._task
+
+
+@pytest.mark.asyncio
+async def test_request_cleanup_outliving_asgi_prevents_clean_stop(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from routstr.core import lifecycle
+    from routstr.core.db import TerminalOutcomeWriterRun
+
+    await node.coordinator.prepare_startup()
+    monkeypatch.setattr(lifecycle.settings, "request_cleanup_timeout_seconds", 0.01)
+    release, entered = asyncio.Event(), asyncio.Event()
+
+    async def application(scope: Any, receive: Any, send: Any) -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+
+    async def receive() -> Any:
+        await entered.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Any) -> None:
+        pass
+
+    monkeypatch.setattr(lifecycle.settings, "max_request_lifetime_seconds", 0.01)
+    middleware = lifecycle.RequestLifecycleMiddleware(application)
+    await middleware({"type": "http"}, receive, send)
+    pending = lifecycle._request_work.copy()
+    assert pending and all(not task.done() for task in pending)
+    try:
+        await asyncio.wait_for(node.coordinator.close(serving_stopped=True), timeout=1)
+        async with node.sessions() as session:
+            runs = (await session.exec(select(TerminalOutcomeWriterRun))).all()
+        assert all(run.status != "clean" for run in runs)
+    finally:
+        release.set()
+        await asyncio.gather(*pending)

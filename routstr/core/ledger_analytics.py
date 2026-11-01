@@ -269,6 +269,25 @@ async def get_ledger_usage_dashboard(
             ).all()
         )
 
+        # Recovered runs retain the reason for excluded days even after their
+        # lease no longer affects the live collector watermark.
+        diagnostic_runs = list(
+            (
+                await session.exec(
+                    select(TerminalOutcomeWriterRun)
+                    .where(col(TerminalOutcomeWriterRun.loss_day) >= start.date())
+                    .where(
+                        col(TerminalOutcomeWriterRun.loss_day)
+                        <= (end - timedelta(milliseconds=1)).date()
+                    )
+                    .order_by(
+                        col(TerminalOutcomeWriterRun.loss_day),
+                        col(TerminalOutcomeWriterRun.run_id),
+                    )
+                )
+            ).all()
+        )
+
     # The log manager caches its dictionaries. Keep ledger overlays out of that cache.
     result = deepcopy(legacy_dashboard)
     if not diagnostic_available:
@@ -441,6 +460,17 @@ async def get_ledger_usage_dashboard(
         "to": end.isoformat(),
         "complete": not incomplete_days,
         "incomplete_days": incomplete_days,
+        "loss_diagnostics": [
+            {
+                "run_id": run.run_id,
+                "day": run.loss_day.isoformat() if run.loss_day else None,
+                "reason": run.loss_reason or "unknown",
+                "continuity": "confirmed_drop"
+                if run.loss_reason == "outcome_dropped"
+                else "uncertain",
+            }
+            for run in diagnostic_runs
+        ],
         "includes_current_day": start.date()
         <= clock.date()
         <= (end - timedelta(milliseconds=1)).date(),

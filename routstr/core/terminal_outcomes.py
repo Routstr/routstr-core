@@ -190,5 +190,7 @@ async def start_terminal_outcome_writer() -> bool:
     return await terminal_outcome_writer.start()
 
 
-async def stop_terminal_outcome_writer(*, timeout: float = 5.0) -> bool:
-    return await terminal_outcome_writer.stop(timeout=timeout)
+async def stop_terminal_outcome_writer(
+    *, timeout: float = 5.0, allow_clean: bool = True
+) -> bool:
+    return await terminal_outcome_writer.stop(timeout=timeout, allow_clean=allow_clean)
