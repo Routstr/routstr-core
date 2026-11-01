@@ -139,8 +139,7 @@ class TerminalOutcomeWriter:
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    async def start(self, *, serving: bool = False) -> bool:
-        """``serving`` means this process settled requests while not collecting."""
+    async def start(self) -> bool:
         if self.running:
             return True
         previous_loss_day = self._loss_day
@@ -160,8 +159,6 @@ class TerminalOutcomeWriter:
             if previous_loss_day is not None:
                 await self._rotate_epoch(previous_loss_day)
             await self._recover_unattended_coverage(now)
-            if serving:
-                await self._void_served_coverage(now)
             await self._create_run(now, "active")
         except Exception:
             self._loss_pending = True
@@ -222,8 +219,6 @@ class TerminalOutcomeWriter:
             return False
 
     def submit(self, outcome: _QueuedOutcome) -> bool:
-        if not self._enabled:
-            return False
         if not self._accepting or not self.running or self._queue is None:
             self.declare_loss(
                 "terminal outcome writer unavailable", outcome.terminal_day
@@ -241,13 +236,13 @@ class TerminalOutcomeWriter:
         return True
 
     def declare_loss(self, reason: str, lost_day: date | None = None) -> None:
-        if not self._enabled:
-            return
         day = lost_day or _utc_day_from_ms(self._now_ms())
         first_loss = not self._loss_pending
         self._loss_pending = True
         if self._loss_day is None or day < self._loss_day:
             self._loss_day = day
+        if not self._enabled:
+            return
         self._accepting = False
         if self._idle is not None:
             self._idle.clear()
@@ -596,13 +591,6 @@ class TerminalOutcomeWriter:
                 self._epoch = next_epoch
                 return
         raise RuntimeError("Terminal outcome epoch kept changing")
-
-    async def _void_served_coverage(self, now: int) -> None:
-        async with self._session_factory() as session:
-            current = await _current_epoch(session)
-        # Coverage that already began cannot include what this worker missed.
-        if current is not None and current.coverage_start_day <= _utc_day_from_ms(now):
-            await self._rotate_epoch(current.coverage_start_day)
 
     async def _reconcile(self, queued: _QueuedOutcome) -> _PersistResult:
         try:

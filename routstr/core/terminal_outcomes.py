@@ -186,8 +186,8 @@ def cashu_retained_msats(amount: int, unit: str, refund_amount: int = 0) -> int 
         return None
 
 
-async def start_terminal_outcome_writer(*, serving: bool = False) -> bool:
-    return await terminal_outcome_writer.start(serving=serving)
+async def start_terminal_outcome_writer() -> bool:
+    return await terminal_outcome_writer.start()
 
 
 async def stop_terminal_outcome_writer(*, timeout: float = 5.0) -> bool:

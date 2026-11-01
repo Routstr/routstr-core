@@ -408,32 +408,39 @@ async def test_live_workers_do_not_rotate_and_clean_stop_closes_only_owner(
     assert await second.stop(timeout=1)
 
 
-async def test_worker_that_starts_collecting_late_voids_the_day_it_missed(
+@pytest.mark.parametrize("missed", [False, True])
+async def test_worker_that_starts_collecting_late_voids_only_a_day_it_missed(
     ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+    missed: bool,
 ) -> None:
     _, sessions = ledger
     day = date(2026, 8, 31)
-    first = TerminalOutcomeWriter(
-        session_factory=sessions, clock=MutableClock(_timestamp(day, 23))
-    )
-    # Another worker learns of the opt-in just after midnight, while serving.
+    first_clock = MutableClock(_timestamp(day - timedelta(days=2)))
+    first = TerminalOutcomeWriter(session_factory=sessions, clock=first_clock)
     late = TerminalOutcomeWriter(
         session_factory=sessions,
-        lease_timeout_seconds=7200,
-        clock=MutableClock(_timestamp(day + timedelta(days=1), 0)),
+        clock=MutableClock(_timestamp(day + timedelta(days=1), 1)),
     )
-    assert await first.start(serving=True)
-    assert await late.start(serving=True)
+    assert await first.start()
+    first_clock.value = _timestamp(day + timedelta(days=1), 1)
+    assert await first.flush(timeout=1)
+    # Another worker serves after midnight before its collection starts.
+    if missed:
+        monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", late)
+        _record("missed-request", _timestamp(day + timedelta(days=1), 0))
+    assert await late.start()
     async with sessions() as session:
         epochs = (
             await session.exec(
                 select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
             )
         ).all()
-    assert [(row.coverage_start_day, row.coverage_end_day) for row in epochs] == [
-        (day + timedelta(days=1), day),
-        (day + timedelta(days=2), None),
-    ]
+    assert [(row.coverage_start_day, row.coverage_end_day) for row in epochs] == (
+        [(day - timedelta(days=1), day), (day + timedelta(days=2), None)]
+        if missed
+        else [(day - timedelta(days=1), None)]
+    )
     assert await first.stop(timeout=1)
     assert await late.stop(timeout=1)
 

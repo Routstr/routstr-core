@@ -96,7 +96,7 @@ class AnalyticsCoordinator:
         if not terminal_outcome_writer.running:
             if time.monotonic() < self._retry_at:
                 return
-            self._writer_started = await start_terminal_outcome_writer(serving=True)
+            self._writer_started = await start_terminal_outcome_writer()
             if not self._writer_started:
                 await self._stop_public(disable=state.sharing_enabled)
                 self._retry_at = time.monotonic() + 10
