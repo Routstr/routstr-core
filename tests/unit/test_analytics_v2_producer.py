@@ -4,19 +4,19 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from nostr_sdk import Keys
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, col, select
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import (
     AnalyticsV2Outbox,
     TerminalOutcome,
     TerminalOutcomeEpoch,
+    TerminalOutcomeWriterRun,
 )
 from routstr.nostr.analytics_v2 import (
     AnalyticsV2Error,
@@ -46,14 +46,11 @@ def _at_ms(day: date) -> int:
 
 @pytest_asyncio.fixture
 async def session_factory(
-    tmp_path: Path,
+    analytics_engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'producer.db'}")
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
-    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    yield factory
-    await engine.dispose()
+    yield async_sessionmaker(
+        analytics_engine, class_=AsyncSession, expire_on_commit=False
+    )
 
 
 def _outcome(
@@ -163,6 +160,302 @@ async def test_producer_recovers_each_current_epoch_week_once_and_corrects_sent_
     replacement_payload = json.loads(json.loads(versions[2].frame)[1]["content"])
     assert replacement_payload["corrects"] == versions[0].event_id
     assert replacement_payload["days"][(WEEK + timedelta(days=1)).isoformat()][0] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["active", "degraded", "lost"])
+async def test_stalled_collector_does_not_block_recorded_rows(
+    session_factory: async_sessionmaker[AsyncSession], status: str
+) -> None:
+    await _activate(session_factory)
+    async with session_factory() as session:
+        session.add(
+            TerminalOutcomeWriterRun(
+                run_id="stalled",
+                status=status,
+                started_at_ms=_at_ms(WEEK),
+                heartbeat_at_ms=_at_ms(WEEK),
+                flushed_through_ms=_at_ms(WEEK),
+                loss_day=WEEK if status != "active" else None,
+                closed_at_ms=_at_ms(WEEK) if status == "lost" else None,
+            )
+        )
+        session.add(_outcome("stored", WEEK, tokens=7))
+        await session.commit()
+    producer = AnalyticsV2Producer(
+        session_factory,
+        private_key_hex=PRIVATE_KEY,
+        public_key_hex=PUBLIC_KEY,
+        provider_d="provider",
+    )
+    assert await producer.produce_once(now=datetime(2026, 9, 2, tzinfo=UTC)) == 1
+    async with session_factory() as session:
+        row = (await session.exec(select(AnalyticsV2Outbox))).one()
+    payload = json.loads(json.loads(row.frame)[1]["content"])
+    assert payload["days"][WEEK.isoformat()] == [1, 7, 7, 0, 0, 7]
+
+
+@pytest.mark.asyncio
+async def test_no_rows_does_not_invent_zero_only_history(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _activate(session_factory)
+    producer = AnalyticsV2Producer(
+        session_factory,
+        private_key_hex=PRIVATE_KEY,
+        public_key_hex=PUBLIC_KEY,
+        provider_d="provider",
+    )
+    assert await producer.produce_once(now=datetime(2026, 9, 14, tzinfo=UTC)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clean", [False, True])
+async def test_nightly_restarts_publish_every_recorded_day(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    clean: bool,
+) -> None:
+    from nostr_sdk import Event
+
+    from routstr.core import terminal_outcomes as ledger
+
+    await _activate(session_factory)
+    clock = [_at_ms(WEEK)]
+    writer = ledger.TerminalOutcomeWriter(
+        session_factory=session_factory,
+        clock=lambda: clock[0],
+        retry_seconds=0.001,
+    )
+    monkeypatch.setattr(ledger, "terminal_outcome_writer", writer)
+    producer = AnalyticsV2Producer(
+        session_factory,
+        private_key_hex=PRIVATE_KEY,
+        public_key_hex=PUBLIC_KEY,
+        provider_d="provider",
+    )
+    assert await writer.start()
+    frames = []
+    try:
+        for i in range(7):
+            day = WEEK + timedelta(days=i)
+            clock[0] = _at_ms(day) + 23 * 3600_000
+            ledger.record_terminal_outcome(
+                ledger.TerminalOutcomeContext(f"night-{i}", "model/served"),
+                input_tokens=i + 1,
+                output_tokens=0,
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+                revenue_msats=i + 1,
+                terminal_at_ms=clock[0],
+            )
+            assert await writer.flush()
+            if not clean:
+                assert writer._task is not None
+                writer._task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await writer._task
+            assert await writer.stop(timeout=0.1) is clean
+            # The new review's problematic 23:00 -> 00:30 maintenance pattern.
+            clock[0] += 90 * 60_000
+            assert await writer.start()
+            assert (
+                await producer.produce_once(
+                    now=datetime.fromtimestamp(clock[0] / 1000, UTC)
+                )
+                == 1
+            )
+            async with session_factory() as session:
+                row = (
+                    await session.exec(
+                        select(AnalyticsV2Outbox).where(
+                            col(AnalyticsV2Outbox.status) == "pending"
+                        )
+                    )
+                ).one()
+                row.first_send_attempt_at_ms = clock[0]
+                frames.append(bytes(row.frame))
+                await session.commit()
+        # Reference resolution: shuffled and duplicate deliveries replace, not add.
+        winners = {}
+        for frame in [*reversed(frames), *frames]:
+            event = json.loads(frame)[1]
+            assert Event.from_json(json.dumps(event)).verify()
+            coordinate = next(tag[1] for tag in event["tags"] if tag[0] == "d")
+            prior = winners.get(coordinate)
+            if prior is None or (-event["created_at"], event["id"]) < (
+                -prior["created_at"],
+                prior["id"],
+            ):
+                winners[coordinate] = event
+        assert len(winners) == 1
+        payload = json.loads(next(iter(winners.values()))["content"])
+        assert payload["complete"] is True
+        assert {day: values[0] for day, values in payload["days"].items()} == {
+            (WEEK + timedelta(days=i)).isoformat(): 1 for i in range(7)
+        }
+        assert sum(values[5] for values in payload["days"].values()) == 28
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_stale_producer_cannot_replace_newer_totals(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _activate(session_factory)
+    async with session_factory() as session:
+        session.add(_outcome("first", WEEK))
+        await session.commit()
+    first = AnalyticsV2Producer(
+        session_factory,
+        private_key_hex=PRIVATE_KEY,
+        public_key_hex=PUBLIC_KEY,
+        provider_d="provider",
+    )
+    second = AnalyticsV2Producer(
+        session_factory,
+        private_key_hex=PRIVATE_KEY,
+        public_key_hex=PUBLIC_KEY,
+        provider_d="provider",
+    )
+    original = first._load_eligible_epochs
+    now = datetime(2026, 9, 7, tzinfo=UTC)
+
+    async def stale_snapshot(floor: int, today: date):
+        result = await original(floor, today)
+        async with session_factory() as session:
+            session.add(_outcome("newer", WEEK, tokens=5))
+            await session.commit()
+        assert await second.produce_once(now=now) == 1
+        return result
+
+    monkeypatch.setattr(first, "_load_eligible_epochs", stale_snapshot)
+    assert await first.produce_once(now=now + timedelta(seconds=1)) == 0
+    async with session_factory() as session:
+        row = (await session.exec(select(AnalyticsV2Outbox))).one()
+    payload = json.loads(json.loads(row.frame)[1]["content"])
+    assert payload["days"][WEEK.isoformat()] == [2, 6, 6, 0, 0, 6]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interleaving", ["send-first", "produce-first", "opt-out"])
+async def test_publication_snapshot_fences_send_and_opt_out(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    interleaving: str,
+) -> None:
+    from routstr.nostr.analytics_v2_delivery import (
+        AnalyticsV2Delivery,
+        SharingDisabledError,
+    )
+
+    await _activate(session_factory)
+    async with session_factory() as session:
+        session.add(_outcome("first", WEEK))
+        await session.commit()
+    producer = AnalyticsV2Producer(
+        session_factory,
+        private_key_hex=PRIVATE_KEY,
+        public_key_hex=PUBLIC_KEY,
+        provider_d="provider",
+    )
+    delivery = AnalyticsV2Delivery(
+        session_factory, operator_relays=["wss://relay.example.com"]
+    )
+    now = datetime(2026, 9, 7, tzinfo=UTC)
+    assert await producer.produce_once(now=now) == 1
+    async with session_factory() as session:
+        prior = (await session.exec(select(AnalyticsV2Outbox))).one()
+        prior_bytes = bytes(prior.frame)
+        session.add(_outcome("late", WEEK, tokens=5))
+        await session.commit()
+    original = producer._load_eligible_epochs
+
+    async def advance_after_snapshot(floor: int, today: date):
+        result = await original(floor, today)
+        if interleaving == "send-first":
+            assert await delivery._begin_attempt(prior.event_id, 3) is not None
+        elif interleaving == "opt-out":
+            await transition_analytics_v2_sharing(session_factory, enabled=False)
+        return result
+
+    monkeypatch.setattr(producer, "_load_eligible_epochs", advance_after_snapshot)
+    if interleaving == "opt-out":
+        with pytest.raises(SharingDisabledError):
+            await producer.produce_once(now=now)
+    elif interleaving == "send-first":
+        assert await producer.produce_once(now=now) == 0
+        monkeypatch.setattr(producer, "_load_eligible_epochs", original)
+        assert await producer.produce_once(now=now) == 1
+    else:
+        assert await producer.produce_once(now=now) == 1
+        assert await delivery._begin_attempt(prior.event_id, 3) is None
+    async with session_factory() as session:
+        unchanged = await session.get(AnalyticsV2Outbox, prior.event_id)
+        assert unchanged is not None and bytes(unchanged.frame) == prior_bytes
+        rows = (
+            await session.exec(
+                select(AnalyticsV2Outbox).where(
+                    col(AnalyticsV2Outbox.status) == "pending"
+                )
+            )
+        ).all()
+    if interleaving == "opt-out":
+        assert not rows
+    else:
+        assert len(rows) == 1
+        payload = json.loads(json.loads(rows[0].frame)[1]["content"])
+        assert payload["days"][WEEK.isoformat()][0] == 2
+        assert payload.get("corrects") == (
+            prior.event_id if interleaving == "send-first" else None
+        )
+
+
+@pytest.mark.asyncio
+async def test_forward_extension_of_closed_period_is_a_correction(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _activate(session_factory)
+    async with session_factory() as session:
+        epoch = await session.get(TerminalOutcomeEpoch, 0)
+        assert epoch is not None
+        epoch.coverage_end_day = WEEK
+        epoch.current_slot = None
+        session.add(_outcome("first", WEEK))
+        await session.commit()
+    producer = AnalyticsV2Producer(
+        session_factory,
+        private_key_hex=PRIVATE_KEY,
+        public_key_hex=PUBLIC_KEY,
+        provider_d="provider",
+    )
+    now = datetime(2026, 9, 7, tzinfo=UTC)
+    assert await producer.produce_once(now=now) == 1
+    async with session_factory() as session:
+        prior = (await session.exec(select(AnalyticsV2Outbox))).one()
+        prior.first_send_attempt_at_ms = 3
+        epoch = await session.get(TerminalOutcomeEpoch, 0)
+        assert epoch is not None
+        epoch.coverage_end_day = WEEK + timedelta(days=2)
+        # An eligible historical gap was proven separately; no backward widening.
+        session.add(_outcome("recovered", WEEK + timedelta(days=2)))
+        await session.commit()
+    assert await producer.produce_once(now=now) == 1
+    async with session_factory() as session:
+        row = (
+            await session.exec(
+                select(AnalyticsV2Outbox).where(
+                    col(AnalyticsV2Outbox.status) == "pending"
+                )
+            )
+        ).one()
+    payload = json.loads(json.loads(row.frame)[1]["content"])
+    assert payload["corrects"] == prior.event_id
+    assert payload["complete"] is True
+    assert payload["coverage_start"] == WEEK.isoformat()
+    assert payload["through"] == (WEEK + timedelta(days=2)).isoformat()
 
 
 @pytest.mark.asyncio
@@ -668,7 +961,7 @@ async def test_private_writer_continues_through_public_sharing_toggles(
 
 
 @pytest.mark.asyncio
-async def test_midnight_publication_waits_for_every_writer_to_drain(
+async def test_midnight_publication_corrects_late_rows_without_waiting_for_writer(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     from routstr.core.db import TerminalOutcomeWriterRun
@@ -698,7 +991,8 @@ async def test_midnight_publication_waits_for_every_writer_to_drain(
     async with session_factory() as session:
         prior = (await session.exec(select(AnalyticsV2Outbox))).one()
         payload = json.loads(json.loads(prior.frame)[1]["content"])
-        assert payload["through"] == WEEK.isoformat()
+        assert payload["through"] == (WEEK + timedelta(days=1)).isoformat()
+        prior.first_send_attempt_at_ms = 3
         session.add(
             _outcome("queued-before-midnight", WEEK + timedelta(days=1), tokens=50)
         )
@@ -718,6 +1012,7 @@ async def test_midnight_publication_waits_for_every_writer_to_drain(
     payload = json.loads(json.loads(latest.frame)[1]["content"])
     assert payload["through"] == (WEEK + timedelta(days=1)).isoformat()
     assert payload["days"][(WEEK + timedelta(days=1)).isoformat()][5] == 50
+    assert payload["corrects"] == prior.event_id
 
 
 @pytest.mark.asyncio
@@ -786,6 +1081,9 @@ async def test_epoch_closure_finalizes_existing_last_day_without_new_requests(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await _activate(session_factory)
+    async with session_factory() as session:
+        session.add(_outcome("first", WEEK))
+        await session.commit()
     producer = AnalyticsV2Producer(
         session_factory,
         private_key_hex=PRIVATE_KEY,
@@ -823,6 +1121,7 @@ async def test_producer_refuses_to_sign_an_epoch_that_overlaps_an_earlier_one(
 ) -> None:
     await _activate(session_factory)
     async with session_factory() as session:
+        session.add(_outcome("overlap", WEEK + timedelta(days=2)))
         old_epoch = await session.get(TerminalOutcomeEpoch, 0)
         assert old_epoch is not None
         old_epoch.coverage_end_day = WEEK + timedelta(days=3)

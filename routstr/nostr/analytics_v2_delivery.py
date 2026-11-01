@@ -29,7 +29,6 @@ from ..core.db import (
     AnalyticsV2RelayReceipt,
     TerminalOutcome,
     TerminalOutcomeEpoch,
-    TerminalOutcomeWriterRun,
 )
 from ..core.logging import get_logger
 from .analytics_v2 import (
@@ -576,6 +575,8 @@ async def enqueue_signed_event(
     event: EncodedAnalyticsEvent,
     *,
     stored_at_ms: int | None = None,
+    expected_generation: int | None = None,
+    expected_head: tuple[str, int | None] | None = None,
 ) -> EnqueueResult:
     """Commit exact signed bytes and coalesce older pending open versions."""
     timestamp = _clock_ms() if stored_at_ms is None else stored_at_ms
@@ -585,6 +586,38 @@ async def enqueue_signed_event(
     semantic_slot = _semantic_slot(event)
 
     async with session_factory() as session:
+        if expected_generation is not None:
+            # Serialize producer commits across workers, including an empty outbox.
+            fence = await session.exec(  # type: ignore[call-overload]
+                update(AnalyticsV2DeliveryState)
+                .where(col(AnalyticsV2DeliveryState.id) == 1)
+                .where(col(AnalyticsV2DeliveryState.sharing_enabled).is_(True))
+                .where(col(AnalyticsV2DeliveryState.generation) == expected_generation)
+                .values(generation=expected_generation)
+            )
+            if fence.rowcount != 1:
+                raise SharingDisabledError("Analytics v2 sharing changed meanwhile")
+            head = (
+                await session.exec(
+                    select(AnalyticsV2Outbox)
+                    .where(col(AnalyticsV2Outbox.pubkey) == event.pubkey)
+                    .where(col(AnalyticsV2Outbox.d_tag) == event.d_tag)
+                    .where(
+                        col(AnalyticsV2Outbox.delivery_generation)
+                        == expected_generation
+                    )
+                    .order_by(
+                        col(AnalyticsV2Outbox.created_at).desc(),
+                        col(AnalyticsV2Outbox.event_id),
+                    )
+                    .limit(1)
+                )
+            ).first()
+            actual_head = (
+                None if head is None else (head.event_id, head.first_send_attempt_at_ms)
+            )
+            if actual_head != expected_head:
+                raise OutboxConflictError("Analytics v2 production snapshot is stale")
         state = await _get_or_create_delivery_state(session, timestamp)
         if not state.sharing_enabled:
             raise SharingDisabledError("Analytics v2 sharing is disabled")
@@ -696,7 +729,7 @@ async def enqueue_signed_event(
 
 
 class AnalyticsV2Producer:
-    """Turn the current continuity epoch into durable weekly signed events."""
+    """Publish recorded outcomes within the operator's public epoch lane."""
 
     def __init__(
         self,
@@ -744,15 +777,16 @@ class AnalyticsV2Producer:
 
             if state.active_epoch_floor is None:
                 return 0
-            completed_day_limit = await self._completed_day_limit(instant.date())
+            completed_day_limit = instant.date()
+            # Read the outbox before the ledger; enqueue fences this snapshot.
+            latest, created_at_floors, rows_by_id = await self._load_version_state(
+                state.active_epoch_floor, state.generation
+            )
             epochs, outcomes = await self._load_eligible_epochs(
                 state.active_epoch_floor, completed_day_limit
             )
             if not epochs:
                 return 0
-            latest, created_at_floors, rows_by_id = await self._load_version_state(
-                state.active_epoch_floor, state.generation
-            )
             earlier_through = await self._earlier_epochs_through()
             produced = 0
             yesterday = completed_day_limit - timedelta(days=1)
@@ -774,8 +808,14 @@ class AnalyticsV2Producer:
                         self._public_key_hex, self._provider_d, week, epoch.epoch
                     )
                     prior_row = latest.get((epoch.epoch, address.d_tag))
+                    week_rows = by_week.get(week, ())
+                    if prior_row is None and not any(
+                        epoch.coverage_start_day <= row.terminal_day <= coverage_end
+                        for row in week_rows
+                    ):
+                        continue
                     aggregate = self._next_aggregate(
-                        by_week.get(week, ()),
+                        week_rows,
                         epoch=epoch,
                         week=week,
                         today_utc=completed_day_limit,
@@ -801,9 +841,22 @@ class AnalyticsV2Producer:
                         raise IdentityMismatchError(
                             "Analytics v2 private key does not match the claimed pubkey"
                         )
-                    enqueue_result = await enqueue_signed_event(
-                        self._session_factory, encoded, stored_at_ms=timestamp_ms
-                    )
+                    try:
+                        enqueue_result = await enqueue_signed_event(
+                            self._session_factory,
+                            encoded,
+                            stored_at_ms=timestamp_ms,
+                            expected_generation=state.generation,
+                            expected_head=None
+                            if prior_row is None
+                            else (
+                                prior_row.event_id,
+                                prior_row.first_send_attempt_at_ms,
+                            ),
+                        )
+                    except OutboxConflictError:
+                        # Another producer or sender advanced; reread on the next pass.
+                        continue
                     created_at_floors[address.d_tag] = max(
                         created_at_floors.get(address.d_tag, -1),
                         enqueue_result.created_at,
@@ -826,23 +879,6 @@ class AnalyticsV2Producer:
             end = epoch.coverage_end_day or date.max
             latest = end if latest is None else max(latest, end)
         return through
-
-    async def _completed_day_limit(self, today_utc: date) -> date:
-        async with self._session_factory() as session:
-            result = await session.exec(
-                select(TerminalOutcomeWriterRun).where(
-                    col(TerminalOutcomeWriterRun.status).in_(
-                        ("active", "degraded", "lost")
-                    )
-                )
-            )
-            for run in result.all():
-                checkpoint = run.flushed_through_ms or run.started_at_ms
-                day = _utc_day_from_ms(checkpoint)
-                if run.loss_day is not None:
-                    day = min(day, run.loss_day)
-                today_utc = min(today_utc, day)
-        return today_utc
 
     async def _load_eligible_epochs(
         self, active_epoch_floor: int, today_utc: date
@@ -981,6 +1017,7 @@ class AnalyticsV2Producer:
             prior_version=prior,
             correction=(
                 _published_days_changed(fresh, prior)
+                or prior.complete
                 # Closing the period at the same through is an ordinary version.
                 or (fresh.through == prior.through and fresh.complete == prior.complete)
                 or len(published_row.frame) > max_frame_bytes
@@ -1203,6 +1240,12 @@ class AnalyticsV2Delivery:
         self, event_id: str, timestamp: int
     ) -> _PendingFrame | None:
         async with self._session_factory() as session:
+            # Order first-send marking with producer snapshot checks on both DBs.
+            await session.exec(  # type: ignore[call-overload]
+                update(AnalyticsV2DeliveryState)
+                .where(col(AnalyticsV2DeliveryState.id) == 1)
+                .values(generation=col(AnalyticsV2DeliveryState.generation))
+            )
             state = await _get_or_create_delivery_state(session, timestamp)
             row = await session.get(AnalyticsV2Outbox, event_id)
             if (
@@ -1693,7 +1736,3 @@ def _decode_relay_message(message: str | bytes) -> Any:
 
 def _clock_ms() -> int:
     return time.time_ns() // 1_000_000
-
-
-def _utc_day_from_ms(timestamp: int) -> date:
-    return datetime.fromtimestamp(timestamp / 1000, UTC).date()

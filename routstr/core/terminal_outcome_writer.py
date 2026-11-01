@@ -7,9 +7,10 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import AsyncContextManager
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlmodel import col, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -20,6 +21,7 @@ from .db import (
     create_session,
 )
 from .logging import get_logger
+from .terminal_outcome_loss import LossJournal
 
 logger = get_logger(__name__)
 
@@ -29,9 +31,7 @@ _HEARTBEAT_SECONDS = 15.0
 _LEASE_TIMEOUT_SECONDS = 90.0
 # A lost race means another writer moved on; one that keeps losing is broken.
 _RACE_ATTEMPTS = 10
-_PERSIST_ATTEMPTS = 30
 _RECOVERY_BACKOFF_MAX_SECONDS = 60.0
-_SHORT_RESTART_MS = 10 * 60 * 1000
 UNKNOWN_PRICING_SOURCE = "unknown"
 
 SessionFactory = Callable[[], AsyncContextManager[AsyncSession]]
@@ -60,6 +60,7 @@ class _QueuedOutcome:
 class _PersistResult(Enum):
     STORED = "stored"
     CONFLICT = "conflict"
+    REJECTED = "rejected"
     RETRY = "retry"
 
 
@@ -98,6 +99,7 @@ class TerminalOutcomeWriter:
         heartbeat_seconds: float = _HEARTBEAT_SECONDS,
         lease_timeout_seconds: float = _LEASE_TIMEOUT_SECONDS,
         clock: Clock | None = None,
+        loss_directory: Path | None = None,
     ) -> None:
         if queue_size <= 0:
             raise ValueError("Terminal outcome queue size must be positive")
@@ -106,6 +108,8 @@ class TerminalOutcomeWriter:
         if lease_timeout_seconds <= heartbeat_seconds:
             raise ValueError("Terminal outcome lease must exceed its heartbeat")
         self._session_factory = session_factory
+        self._loss_journal = LossJournal(loss_directory)
+        self._journaled_loss_day: date | None = None
         self._queue_size = queue_size
         self._retry_seconds = retry_seconds
         self._heartbeat_seconds = heartbeat_seconds
@@ -140,6 +144,7 @@ class TerminalOutcomeWriter:
         return self._task is not None and not self._task.done()
 
     async def start(self) -> bool:
+        """Resume collection without changing publication ownership."""
         if self.running:
             return True
         previous_loss_day = self._loss_day
@@ -148,6 +153,7 @@ class TerminalOutcomeWriter:
         self._stopping = False
         self._loss_pending = False
         self._loss_day = None
+        self._journaled_loss_day = None
         self._queue = asyncio.Queue(maxsize=self._queue_size)
         self._idle = asyncio.Event()
         self._idle.set()
@@ -155,11 +161,13 @@ class TerminalOutcomeWriter:
         try:
             now = self._now_ms()
             await self._ensure_epoch(now)
-            await self._recover_stale_runs(now)
+            await self._loss_journal.replay(self._session_factory, now)
             if previous_loss_day is not None:
-                await self._rotate_epoch(previous_loss_day)
-            await self._recover_unattended_coverage(now)
-            await self._create_run(now, "active")
+                await self._create_run(now, "degraded", lost_day=previous_loss_day)
+                await self._activate_run()
+            else:
+                await self._create_run(now, "active")
+            await self._recover_stale_runs(now)
         except Exception:
             self._loss_pending = True
             self._loss_day = previous_loss_day or _utc_day_from_ms(self._now_ms())
@@ -198,6 +206,17 @@ class TerminalOutcomeWriter:
                 pass
         try:
             clean = drained and not self._loss_pending and await self._close_run()
+            if not clean:
+                lost_day = self._loss_day or _utc_day_from_ms(self._now_ms())
+                if self._queue is not None:
+                    while not self._queue.empty():
+                        pending = self._queue.get_nowait()
+                        lost_day = min(lost_day, pending.terminal_day)
+                        self._queue.task_done()
+                self.declare_loss("terminal outcome shutdown did not drain", lost_day)
+                await self._mark_degraded(
+                    self._loss_day or _utc_day_from_ms(self._now_ms())
+                )
         except (TimeoutError, asyncio.CancelledError):
             pass
         except Exception:
@@ -241,16 +260,24 @@ class TerminalOutcomeWriter:
         self._loss_pending = True
         if self._loss_day is None or day < self._loss_day:
             self._loss_day = day
-        if not self._enabled:
-            return
         self._accepting = False
         if self._idle is not None:
             self._idle.clear()
         if self._wake is not None:
             self._wake.set()
+        if self._journaled_loss_day is None or day < self._journaled_loss_day:
+            try:
+                self._loss_journal.record(day, self._now_ms())
+            except Exception:
+                logger.critical(
+                    "Terminal outcome loss evidence could not be journaled",
+                    exc_info=True,
+                )
+                raise
+            self._journaled_loss_day = day
         if first_loss:
             logger.critical(
-                "Terminal outcome continuity lost",
+                "Terminal outcome collection incomplete",
                 extra={"reason": reason, "epoch": self._epoch},
             )
 
@@ -355,7 +382,7 @@ class TerminalOutcomeWriter:
             values["flushed_through_ms"] = now
         touched = await self._update_run(("active", "degraded"), **values)
         if not touched:
-            self.declare_loss("terminal outcome writer lease was lost")
+            self.declare_loss("continuity uncertain after lease expiry")
         return touched
 
     async def _mark_degraded(self, lost_day: date) -> None:
@@ -369,15 +396,12 @@ class TerminalOutcomeWriter:
 
     async def _activate_run(self) -> None:
         now = self._now_ms()
-        updated = await self._update_run(
+        await self._update_run(
             ("degraded",),
-            status="active",
-            heartbeat_at_ms=now,
-            flushed_through_ms=now,
-            loss_day=None,
+            status="recovered",
+            closed_at_ms=now,
         )
-        if not updated:
-            await self._create_run(now, "active")
+        await self._create_run(now, "active")
 
     async def _claim_stale_runs(self, now: int) -> None:
         cutoff = now - self._lease_timeout_ms
@@ -416,181 +440,23 @@ class TerminalOutcomeWriter:
             await session.commit()
         if claimed:
             logger.critical(
-                "Stale terminal outcome writer lease detected",
+                "Terminal outcome continuity uncertain after lease expiry",
                 extra={"stale_runs": claimed},
             )
 
-    async def _stage_rotation(
-        self,
-        session: AsyncSession,
-        current: TerminalOutcomeEpoch,
-        lost_day: date,
-    ) -> int | None:
-        transition = await session.exec(  # type: ignore[call-overload]
-            update(TerminalOutcomeEpoch)
-            .where(col(TerminalOutcomeEpoch.epoch) == current.epoch)
-            .where(col(TerminalOutcomeEpoch.current_slot) == 1)
-            .values(
-                coverage_end_day=lost_day - timedelta(days=1),
-                current_slot=None,
-            )
-        )
-        if transition.rowcount != 1:
-            return None
-        await session.exec(  # type: ignore[call-overload]
-            update(TerminalOutcomeEpoch)
-            .where(col(TerminalOutcomeEpoch.current_slot).is_(None))
-            .where(col(TerminalOutcomeEpoch.coverage_end_day) >= lost_day)
-            .values(
-                coverage_end_day=lost_day - timedelta(days=1),
-            )
-        )
-        next_epoch = current.epoch + 1
-        recovery_day = _utc_day_from_ms(self._now_ms())
-        session.add(
-            TerminalOutcomeEpoch(
-                epoch=next_epoch,
-                coverage_start_day=max(lost_day, recovery_day) + timedelta(days=1),
-                current_slot=1,
-            )
-        )
-        return next_epoch
-
-    async def _rotate_epoch(self, lost_day: date) -> None:
-        for _ in range(_RACE_ATTEMPTS):
-            now = self._now_ms()
-            async with self._session_factory() as session:
-                current = await _current_epoch(session)
-                if current is None:
-                    await self._ensure_epoch(now)
-                    continue
-                next_epoch = await self._stage_rotation(session, current, lost_day)
-                if next_epoch is None:
-                    await session.rollback()
-                    continue
-                try:
-                    await session.commit()
-                except IntegrityError:
-                    await session.rollback()
-                    continue
-                self._epoch = next_epoch
-                return
-        raise RuntimeError("Terminal outcome epoch kept changing")
-
     async def _recover_pending_runs(self) -> None:
-        for _ in range(_RACE_ATTEMPTS):
-            now = self._now_ms()
-            async with self._session_factory() as session:
-                pending = (
-                    await session.exec(
-                        select(TerminalOutcomeWriterRun).where(
-                            col(TerminalOutcomeWriterRun.status) == "lost"
-                        )
-                    )
-                ).all()
-                loss_days = [
-                    run.loss_day for run in pending if run.loss_day is not None
-                ]
-                if not loss_days:
-                    return
-                pending_ids = [run.run_id for run in pending]
-                current = await _current_epoch(session)
-                if current is None:
-                    await self._ensure_epoch(now)
-                    continue
-                claimed = await session.exec(  # type: ignore[call-overload]
-                    update(TerminalOutcomeWriterRun)
-                    .where(col(TerminalOutcomeWriterRun.status) == "lost")
-                    .where(col(TerminalOutcomeWriterRun.run_id).in_(pending_ids))
-                    .values(status="recovered")
-                )
-                if claimed.rowcount == 0:
-                    await session.rollback()
-                    continue
-                next_epoch = await self._stage_rotation(
-                    session, current, min(loss_days)
-                )
-                if next_epoch is None:
-                    await session.rollback()
-                    continue
-                try:
-                    await session.commit()
-                except IntegrityError:
-                    await session.rollback()
-                    continue
-                self._epoch = next_epoch
-                return
-        raise RuntimeError("Terminal outcome epoch kept changing")
+        async with self._session_factory() as session:
+            await session.exec(  # type: ignore[call-overload]
+                update(TerminalOutcomeWriterRun)
+                .where(col(TerminalOutcomeWriterRun.status) == "lost")
+                .values(status="recovered")
+            )
+            await session.commit()
 
     async def _recover_stale_runs(self, now: int) -> None:
         await self._claim_stale_runs(now)
         await self._recover_pending_runs()
-
-    async def _recover_unattended_coverage(self, now: int) -> None:
-        for _ in range(_RACE_ATTEMPTS):
-            async with self._session_factory() as session:
-                current = await _current_epoch(session)
-                if current is None or current.coverage_start_day > _utc_day_from_ms(
-                    now
-                ):
-                    return
-                live = (
-                    await session.exec(
-                        select(TerminalOutcomeWriterRun.run_id)
-                        .where(
-                            col(TerminalOutcomeWriterRun.status).in_(
-                                ("active", "degraded", "lost")
-                            )
-                        )
-                        .limit(1)
-                    )
-                ).first()
-                if live is not None:
-                    return
-                newest = (
-                    await session.exec(
-                        select(TerminalOutcomeWriterRun)
-                        .order_by(col(TerminalOutcomeWriterRun.started_at_ms).desc())
-                        .limit(1)
-                    )
-                ).first()
-                # A restart later the same UTC day, or a short one across midnight,
-                # leaves too little unattended time to drop a whole day from coverage.
-                if (
-                    newest is not None
-                    and newest.status == "clean"
-                    and newest.closed_at_ms is not None
-                    and (
-                        _utc_day_from_ms(newest.closed_at_ms) == _utc_day_from_ms(now)
-                        or now - newest.closed_at_ms <= _SHORT_RESTART_MS
-                    )
-                ):
-                    return
-                last_clean_close = (
-                    await session.exec(
-                        select(TerminalOutcomeWriterRun.closed_at_ms)
-                        .where(col(TerminalOutcomeWriterRun.status) == "clean")
-                        .where(col(TerminalOutcomeWriterRun.closed_at_ms).is_not(None))
-                        .order_by(col(TerminalOutcomeWriterRun.closed_at_ms).desc())
-                        .limit(1)
-                    )
-                ).first()
-                # A clean stop proves its drained records, not later process uptime.
-                lost_day = current.coverage_start_day
-                if last_clean_close is not None:
-                    lost_day = max(lost_day, _utc_day_from_ms(last_clean_close))
-                next_epoch = await self._stage_rotation(session, current, lost_day)
-                if next_epoch is None:
-                    await session.rollback()
-                    continue
-                try:
-                    await session.commit()
-                except IntegrityError:
-                    await session.rollback()
-                    continue
-                self._epoch = next_epoch
-                return
-        raise RuntimeError("Terminal outcome epoch kept changing")
+        await self._loss_journal.replay(self._session_factory, now)
 
     async def _reconcile(self, queued: _QueuedOutcome) -> _PersistResult:
         try:
@@ -626,8 +492,23 @@ class TerminalOutcomeWriter:
                     .values(**values)
                 )
                 await session.commit()
-        except asyncio.CancelledError:
-            raise
+        except (DataError, OverflowError, IntegrityError) as error:
+            try:
+                async with self._session_factory() as session:
+                    existing = await session.get(TerminalOutcome, queued.outcome_id)
+            except Exception:
+                return _PersistResult.RETRY
+            if existing is None:
+                return _PersistResult.RETRY
+            if _same_outcome(existing, queued):
+                return _PersistResult.STORED
+            if existing.pricing_source != UNKNOWN_PRICING_SOURCE:
+                return _PersistResult.CONFLICT
+            logger.error(
+                "Terminal outcome settlement rejected by storage",
+                extra={"error_type": type(error).__name__},
+            )
+            return _PersistResult.REJECTED
         except Exception:
             return _PersistResult.RETRY
         # Zero rows means another writer settled it first; reconcile against that.
@@ -641,79 +522,56 @@ class TerminalOutcomeWriter:
                 return _PersistResult.STORED
         except asyncio.CancelledError:
             raise
+        except (DataError, OverflowError, IntegrityError) as error:
+            reconciled = await self._reconcile(queued)
+            if reconciled is not _PersistResult.RETRY:
+                return reconciled
+            # Reconciliation must succeed before a constraint error is definitive.
+            try:
+                async with self._session_factory() as session:
+                    existing = await session.get(TerminalOutcome, queued.outcome_id)
+            except Exception:
+                return _PersistResult.RETRY
+            if existing is not None:
+                return _PersistResult.RETRY
+            logger.error(
+                "Terminal outcome rejected by storage",
+                extra={"error_type": type(error).__name__},
+            )
+            return _PersistResult.REJECTED
         except Exception:
             return await self._reconcile(queued)
 
-    async def _persist(self, queued: _QueuedOutcome) -> _PersistResult | None:
-        for attempt in range(_PERSIST_ATTEMPTS):
-            if self._loss_pending:
-                break
-            result = await self._persist_once(queued)
+    async def _persist(self, queued: _QueuedOutcome) -> _PersistResult:
+        attempts = 0
+        while True:
+            try:
+                result = await self._persist_once(queued)
+            except Exception:
+                result = _PersistResult.RETRY
             if result is not _PersistResult.RETRY:
                 return result
-            if attempt == 0:
-                logger.error(
-                    "Terminal outcome persistence will be retried",
-                    extra={"outcome_id": queued.outcome_id},
-                )
+            if attempts == 0:
+                logger.error("Terminal outcome persistence will be retried")
+            attempts += 1
             try:
                 await self._touch_run()
                 await self._recover_stale_runs(self._now_ms())
             except Exception:
                 pass
-            await asyncio.sleep(self._retry_seconds)
-        self.declare_loss(
-            "in-flight terminal outcome abandoned",
-            queued.terminal_day,
-        )
-        return None
-
-    async def _store_queue(self) -> None:
-        if self._queue is None:
-            return
-        storing = True
-        while True:
-            try:
-                queued = self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                return
-            stored = False
-            try:
-                if storing:
-                    for _ in range(_PERSIST_ATTEMPTS):
-                        result = await self._persist_once(queued)
-                        if result is not _PersistResult.RETRY:
-                            break
-                        # Keep the lease while recovery retries.
-                        try:
-                            await self._touch_run()
-                        except Exception:
-                            pass
-                        await asyncio.sleep(self._retry_seconds)
-                    storing = result is not _PersistResult.RETRY
-                    stored = result is _PersistResult.STORED
-            finally:
-                self._queue.task_done()
-            if not stored:
-                self.declare_loss(
-                    "queued terminal outcome discarded after continuity loss",
-                    queued.terminal_day,
-                )
+            # Keep ownership of this row; shutdown bounds the wait, not data retries.
+            await asyncio.sleep(
+                min(self._retry_seconds * attempts, _RECOVERY_BACKOFF_MAX_SECONDS)
+            )
 
     async def _recover_loss(self) -> None:
-        # Unbounded on purpose: a writer that gives up never rotates at its loss
-        # day, so days another worker covers meanwhile would read as complete.
-        await self._store_queue()
-        rotated_for: date | None = None
         failures = 0
         while self._loss_pending:
             lost_day = self._loss_day or _utc_day_from_ms(self._now_ms())
             try:
                 await self._recover_stale_runs(self._now_ms())
+                await self._loss_journal.replay(self._session_factory, self._now_ms())
                 await self._mark_degraded(lost_day)
-                if rotated_for is None or lost_day < rotated_for:
-                    await self._rotate_epoch(lost_day)
-                    rotated_for = lost_day
                 await self._activate_run()
             except asyncio.CancelledError:
                 raise
@@ -736,6 +594,7 @@ class TerminalOutcomeWriter:
                 continue
             self._loss_pending = False
             self._loss_day = None
+            self._journaled_loss_day = None
             if not self._stopping:
                 self._accepting = True
 
@@ -774,11 +633,18 @@ class TerminalOutcomeWriter:
                     continue
                 try:
                     result = await self._persist(queued)
-                    if result is _PersistResult.CONFLICT:
+                    if result in (_PersistResult.CONFLICT, _PersistResult.REJECTED):
                         self.declare_loss(
-                            "conflicting terminal outcome idempotency key",
+                            "terminal outcome rejected"
+                            if result is _PersistResult.REJECTED
+                            else "conflicting terminal outcome idempotency key",
                             queued.terminal_day,
                         )
+                except asyncio.CancelledError:
+                    self.declare_loss(
+                        "in-flight terminal outcome cancelled", queued.terminal_day
+                    )
+                    raise
                 finally:
                     self._queue.task_done()
                 if time.monotonic() >= next_heartbeat:

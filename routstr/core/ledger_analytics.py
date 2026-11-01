@@ -269,6 +269,18 @@ async def get_ledger_usage_dashboard(
             ).all()
         )
 
+        recovered_runs = list(
+            (
+                await session.exec(
+                    select(TerminalOutcomeWriterRun)
+                    .where(col(TerminalOutcomeWriterRun.status) == "recovered")
+                    .where(col(TerminalOutcomeWriterRun.loss_day).is_not(None))
+                    .where(col(TerminalOutcomeWriterRun.loss_day) <= end.date())
+                    .where(col(TerminalOutcomeWriterRun.closed_at_ms) >= start_ms)
+                )
+            ).all()
+        )
+
     # The log manager caches its dictionaries. Keep ledger overlays out of that cache.
     result = deepcopy(legacy_dashboard)
     if not diagnostic_available:
@@ -434,12 +446,23 @@ async def get_ledger_usage_dashboard(
         while day <= last:
             incomplete_days.append(day.isoformat())
             day += timedelta(days=1)
+    for run in recovered_runs:
+        assert run.loss_day is not None and run.closed_at_ms is not None
+        day = max(start.date(), run.loss_day)
+        last = min(
+            (end - timedelta(milliseconds=1)).date(),
+            datetime.fromtimestamp(run.closed_at_ms / 1000, UTC).date(),
+        )
+        while day <= last:
+            incomplete_days.append(day.isoformat())
+            day += timedelta(days=1)
     incomplete_days = sorted(set(incomplete_days))
     result["analytics_source"] = "terminal_outcomes"
     result["ledger_coverage"] = {
         "from": start.isoformat(),
         "to": end.isoformat(),
         "complete": not incomplete_days,
+        "collection_guarantee": "recorded_only",
         "incomplete_days": incomplete_days,
         "includes_current_day": start.date()
         <= clock.date()
