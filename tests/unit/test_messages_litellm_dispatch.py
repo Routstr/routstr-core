@@ -1125,6 +1125,46 @@ async def test_x_cashu_settlement_failure_still_serves_paid_body(
 
 
 @pytest.mark.asyncio
+async def test_x_cashu_streaming_without_usage_or_output_is_refunded_in_full() -> None:
+    provider = _make_provider()
+    model = _make_model()
+    model.sats_pricing = Pricing(prompt=0.001, completion=0.002)
+
+    async def empty_reply() -> AsyncIterator[dict]:
+        yield {
+            "type": "message_start",
+            "message": {"id": "m", "content": [], "usage": {"input_tokens": 0}},
+        }
+        yield {"type": "message_delta", "usage": {"output_tokens": 0}}
+        yield {"type": "message_stop"}
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(return_value=empty_reply()),
+        ),
+        patch("routstr.payment.cost_calculation.sats_usd_price", return_value=5.0e-4),
+        patch.object(
+            provider, "send_refund", new=AsyncMock(return_value="cashuREFUND")
+        ) as refund,
+    ):
+        result = await provider._forward_x_cashu_messages_via_litellm(
+            request_body=_anthropic_request_body(stream=True),
+            amount=200,
+            unit="sat",
+            max_cost_for_model=2_000_000,
+            model_obj=model,
+            mint="https://mint.example",
+            request_id="req-1",
+        )
+
+    refund.assert_awaited_once_with(
+        200, "sat", "https://mint.example", request_id="req-1"
+    )
+    assert result.headers["X-Cashu"] == "cashuREFUND"
+
+
+@pytest.mark.asyncio
 async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None:
     provider = _make_provider()
     model = _make_model()
