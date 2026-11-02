@@ -1183,11 +1183,23 @@ export interface TemporaryBalancesResponse {
   };
 }
 
+/** Per-section provenance is also returned by standalone usage endpoints. */
+export interface UsageFieldMetadata {
+  field_provenance?: Record<
+    string,
+    'logs' | 'unavailable' | 'terminal_outcomes'
+  >;
+  request_count_semantics?: 'recorded_outcomes_including_unknown_settlements';
+  revenue_semantics?: 'recorded_gross_retained_lower_bound_for_unknown_settlements';
+  deprecated_fields?: Record<string, string>;
+}
+
 export interface UsageMetricData {
   timestamp: string;
   coverage?: 'complete' | 'updating' | 'partial' | 'missing';
   total_requests: number;
   successful_chat_completions: number | null;
+  unknown_outcome_requests?: number | null;
   failed_requests: number;
   errors: number;
   warnings: number;
@@ -1201,7 +1213,7 @@ export interface UsageMetricData {
   [key: string]: unknown;
 }
 
-export interface UsageMetrics {
+export interface UsageMetrics extends UsageFieldMetadata {
   bucket_fill_complete?: boolean;
   metrics: UsageMetricData[];
   interval_minutes: number;
@@ -1210,6 +1222,7 @@ export interface UsageMetrics {
   totals?: {
     total_requests: number;
     successful_chat_completions: number;
+    unknown_outcome_requests?: number;
     failed_requests: number;
     errors: number;
     warnings: number;
@@ -1223,7 +1236,8 @@ export interface UsageMetrics {
   };
 }
 
-export interface UsageSummary {
+export interface UsageSummary extends UsageFieldMetadata {
+  unknown_outcome_requests?: number;
   total_entries: number;
   total_requests: number;
   successful_chat_completions: number;
@@ -1257,6 +1271,7 @@ export interface UsageSummary {
 
 export interface ErrorDetail {
   timestamp: string;
+  timestamp_utc?: string | null;
   message: string;
   error_type: string;
   pathname: string;
@@ -1270,6 +1285,7 @@ export interface ErrorDetails {
 }
 
 export interface ModelRevenueData {
+  unknown_outcome_requests?: number;
   model: string;
   revenue_sats: number;
   refunds_sats: number;
@@ -1280,7 +1296,7 @@ export interface ModelRevenueData {
   avg_revenue_per_request: number;
 }
 
-export interface RevenueByModel {
+export interface RevenueByModel extends UsageFieldMetadata {
   models: ModelRevenueData[];
   total_revenue_sats: number;
   total_models: number;

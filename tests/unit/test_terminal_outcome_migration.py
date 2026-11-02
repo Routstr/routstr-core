@@ -196,3 +196,52 @@ def test_terminal_outcome_migration_round_trips(tmp_path: Path) -> None:
             assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (
                 0,
             )
+
+
+def test_writer_loss_reason_migration_round_trips(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    database_path = tmp_path / "writer-loss-reason.db"
+    database_url = f"sqlite+aiosqlite:///{database_path}"
+    previous, revision = "a7c3e9f1b2d4", "e1b7c3d9a204"
+    # New schema changes extend the merged stack rather than creating a second head.
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    assert ScriptDirectory.from_config(config).get_heads() == [revision]
+    _run_alembic(root, database_url, "upgrade", previous)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO terminal_outcome_writer_runs "
+            "(run_id, status, started_at_ms, heartbeat_at_ms, closed_at_ms, loss_day) "
+            "VALUES ('old', 'recovered', 1, 1, 2, '2026-09-17')"
+        )
+        connection.commit()
+
+    _run_alembic(root, database_url, "upgrade", revision)
+    with sqlite3.connect(database_path) as connection:
+        assert _columns(connection, "terminal_outcome_writer_runs")["loss_reason"] == (
+            "VARCHAR",
+            0,
+        )
+        assert connection.execute(
+            "SELECT loss_reason FROM terminal_outcome_writer_runs WHERE run_id = 'old'"
+        ).fetchone() == (None,)
+        connection.execute(
+            "UPDATE terminal_outcome_writer_runs SET loss_reason = 'lease_expired'"
+        )
+        connection.commit()
+
+    _run_alembic(root, database_url, "downgrade", previous)
+    with sqlite3.connect(database_path) as connection:
+        assert "loss_reason" not in _columns(connection, "terminal_outcome_writer_runs")
+        assert connection.execute(
+            "SELECT run_id, status, loss_day FROM terminal_outcome_writer_runs"
+        ).fetchall() == [("old", "recovered", "2026-09-17")]
+
+    _run_alembic(root, database_url, "upgrade", revision)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT run_id, loss_reason FROM terminal_outcome_writer_runs"
+        ).fetchall() == [("old", None)]

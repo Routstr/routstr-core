@@ -8,7 +8,7 @@ from threading import Lock
 from typing import Any, Callable, Iterator, TypeVar
 
 from .logging import get_logger
-from .usage_analytics_store import UsageAnalyticsStore
+from .usage_analytics_store import UsageAnalyticsStore, local_log_timestamp_utc
 
 logger = get_logger(__name__)
 T = TypeVar("T")
@@ -422,6 +422,7 @@ class LogManager:
                     errors.append(
                         {
                             "timestamp": timestamp_str,
+                            "timestamp_utc": local_log_timestamp_utc(timestamp_str),
                             "message": entry.get("message", ""),
                             "error_type": entry.get("error_type", "unknown"),
                             "pathname": entry.get("pathname", ""),
@@ -752,6 +753,7 @@ class LogManager:
                     total_error_count += 1
                     error_item = {
                         "timestamp": timestamp_str,
+                        "timestamp_utc": local_log_timestamp_utc(timestamp_str),
                         "message": entry.get("message", ""),
                         "error_type": entry.get("error_type", "unknown"),
                         "pathname": entry.get("pathname", ""),

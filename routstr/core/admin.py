@@ -52,7 +52,12 @@ from .ledger_analytics import get_ledger_usage_dashboard
 from .log_manager import log_manager
 from .logging import get_logger
 from .provider_slugs import allocate_unique_provider_slug
-from .settings import SettingsService, derive_npub_from_nsec, settings
+from .settings import (
+    SettingsConflictError,
+    SettingsService,
+    derive_npub_from_nsec,
+    settings,
+)
 
 logger = get_logger(__name__)
 
@@ -274,6 +279,8 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict:
     try:
         async with create_session() as session:
             new_settings = await SettingsService.update(settings_data, session)
+    except SettingsConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except PydanticValidationError as e:
         # Surface validation issues (e.g. non-positive payout amounts)
         # as a clean 400 instead of a 500.
@@ -2208,8 +2215,17 @@ async def _usage_dashboard(
         if end_at - start_at > timedelta(hours=MAX_USAGE_ANALYTICS_HOURS):
             raise HTTPException(400, "Stats periods cannot exceed 365 days")
         end_at = min(end_at, now)
-    dashboard = log_manager.get_usage_dashboard(
-        interval=interval, hours=hours, error_limit=error_limit, model_limit=model_limit
+    # Rolling log diagnostics cannot describe arbitrary historical bounds.
+    # Do not index/scan logs only to discard their result in the ledger overlay.
+    dashboard = (
+        log_manager.get_usage_dashboard(
+            interval=interval,
+            hours=hours,
+            error_limit=error_limit,
+            model_limit=model_limit,
+        )
+        if start_at is None
+        else {}
     )
     return await get_ledger_usage_dashboard(
         dashboard,

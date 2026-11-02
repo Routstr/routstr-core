@@ -2,11 +2,13 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic.v1 import ValidationError
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlmodel import SQLModel, text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -479,3 +481,146 @@ async def test_update_does_not_persist_secret_fields(
         assert blob["name"] == "Updated"
         assert "nsec" not in blob
         assert "admin_password" not in blob
+
+
+@pytest.fixture
+async def hardened_settings_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[AsyncEngine]:
+    # File-backed WAL with separate connections exercises the real CAS race.
+    for field, value in settings.dict().items():
+        monkeypatch.setattr(settings, field, value)
+    monkeypatch.setattr(SettingsService, "_current", settings)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'settings.db'}")
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+        await connection.exec_driver_sql(
+            "CREATE TABLE settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL, "
+            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        await connection.execute(
+            text("INSERT INTO settings (id, data) VALUES (1, :data)"),
+            {"data": json.dumps({"name": "before", "enable_analytics_sharing": True})},
+        )
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+async def test_settings_cas_reloads_an_intervening_committed_write(
+    hardened_settings_db: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_exec = AsyncSession.exec
+    reads = 0
+
+    async def interleave(session: AsyncSession, statement: Any, **kwargs: Any) -> Any:
+        nonlocal reads
+        result = await original_exec(session, statement, **kwargs)
+        if str(statement) == "SELECT data FROM settings WHERE id = 1":
+            reads += 1
+            if reads == 1:
+                async with AsyncSession(hardened_settings_db) as other:
+                    await other.execute(
+                        text("UPDATE settings SET data = :data WHERE id = 1"),
+                        {
+                            "data": json.dumps(
+                                {"name": "other", "enable_analytics_sharing": False}
+                            )
+                        },
+                    )
+                    await other.commit()
+        return result
+
+    monkeypatch.setattr(AsyncSession, "exec", interleave)
+    async with AsyncSession(hardened_settings_db) as session:
+        updated = await SettingsService.update({"name": "mine"}, session)
+        assert updated.name == "mine"
+        assert updated.enable_analytics_sharing is False
+        assert reads == 2
+        saved = await _read_settings_blob(session)
+        assert saved["name"] == "mine"
+        assert saved["enable_analytics_sharing"] is False
+
+
+async def test_settings_update_missing_row_does_not_change_live_settings(
+    hardened_settings_db: AsyncEngine,
+) -> None:
+    before = settings.name
+    async with AsyncSession(hardened_settings_db) as session:
+        await session.execute(text("DELETE FROM settings"))
+        await session.commit()
+        with pytest.raises(RuntimeError, match="Settings row missing"):
+            await SettingsService.update({"name": "not persisted"}, session)
+    assert settings.name == before
+
+
+async def test_settings_cas_exhaustion_is_explicit_and_bounded(
+    hardened_settings_db: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from routstr.core.settings import _SETTINGS_UPDATE_ATTEMPTS, SettingsConflictError
+
+    original_exec = AsyncSession.exec
+    writes = 0
+    before = settings.name
+
+    async def conflicting(session: AsyncSession, statement: Any, **kwargs: Any) -> Any:
+        nonlocal writes
+        if str(statement).startswith("UPDATE settings SET data"):
+            writes += 1
+            return SimpleNamespace(rowcount=0)
+        return await original_exec(session, statement, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "exec", conflicting)
+    async with AsyncSession(hardened_settings_db) as session:
+        with pytest.raises(SettingsConflictError, match="reload and retry"):
+            await SettingsService.update({"name": "never saved"}, session)
+        assert not session.in_transaction()
+    assert writes == _SETTINGS_UPDATE_ATTEMPTS
+    assert settings.name == before
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+async def test_settings_refresh_validates_before_mutating_and_ignores_nonpersisted(
+    hardened_settings_db: AsyncEngine, invalid: bool
+) -> None:
+    before = settings.dict()
+    data = {
+        "enable_analytics_sharing": "false",
+        "relays": 42 if invalid else ["wss://relay.example"],
+        "nsec": "stale-secret",
+        "database_pool_size": 999,
+        "refund_sweep_ttl_seconds": 1,
+        "legacy_unknown": "ignored",
+    }
+    async with AsyncSession(hardened_settings_db) as session:
+        await session.execute(
+            text("UPDATE settings SET data = :data WHERE id = 1"),
+            {"data": json.dumps(data)},
+        )
+        await session.commit()
+        fields = tuple(data)
+        if invalid:
+            with pytest.raises(ValidationError):
+                await SettingsService.refresh(session, fields)
+            assert settings.dict() == before
+        else:
+            await SettingsService.refresh(session, fields)
+            assert settings.enable_analytics_sharing is False
+            assert settings.relays == ["wss://relay.example"]
+            for key in ("nsec", "database_pool_size", "refund_sweep_ttl_seconds"):
+                assert getattr(settings, key) == before[key]
+
+
+async def test_settings_refresh_rejects_nonobject_without_mutation(
+    hardened_settings_db: AsyncEngine,
+) -> None:
+    before = settings.dict()
+    async with AsyncSession(hardened_settings_db) as session:
+        await session.execute(text("UPDATE settings SET data = '[]' WHERE id = 1"))
+        await session.commit()
+        with pytest.raises(ValueError, match="must be an object"):
+            await SettingsService.refresh(session, ("enable_analytics_sharing",))
+    assert settings.dict() == before

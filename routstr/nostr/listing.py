@@ -16,7 +16,14 @@ from nostr_sdk import Event
 
 from ..core import get_logger
 from ..core.settings import settings
-from .sdk import create_signed_event, fetch_events, parse_keypair, send_event
+from .sdk import (
+    EventQueryResult,
+    QueryStatus,
+    create_signed_event,
+    fetch_events_with_status,
+    parse_keypair,
+    send_event,
+)
 
 logger = get_logger(__name__)
 
@@ -148,34 +155,24 @@ async def query_listing_events(
     relay_url: str,
     pubkey: str,
     provider_id: str | None = None,
-    timeout: int = 30,
-) -> tuple[list[dict[str, Any]], bool]:
-    """
-    Query a Nostr relay for listing provider announcements (kind:38421) via nostr library.
-
-    Returns a tuple of (events, ok) where ok indicates whether the relay interaction
-    succeeded without transport-level errors.
-    """
-
-    try:
-        events_out = await fetch_events(
-            relay_url,
-            kind=38421,
-            author=pubkey,
-            limit=10,
-            timeout=timeout,
-        )
-    except Exception as e:
-        logger.debug(f"Failed to query relay {relay_url}: {type(e).__name__}")
-        return [], False
-
+    timeout: float = 30,
+) -> EventQueryResult:
+    """Query listings, preserving completion status before provider filtering."""
+    result = await fetch_events_with_status(
+        relay_url,
+        kind=38421,
+        author=pubkey,
+        limit=10,
+        timeout=timeout,
+    )
+    events = result.events
     if provider_id is not None:
-        events_out = [
+        events = [
             event
-            for event in events_out
+            for event in events
             if _get_single_tag_value(event, "d") == provider_id
         ]
-    return events_out, True
+    return EventQueryResult(events, result.status)
 
 
 def discover_onion_url_from_tor(base_dir: str = "/var/lib/tor") -> str | None:
@@ -224,8 +221,8 @@ async def _determine_provider_id(public_key_hex: str, relay_urls: list[str]) -> 
 
     async def query_single_relay(relay_url: str) -> list[dict[str, Any]]:
         try:
-            events, _ok = await query_listing_events(relay_url, public_key_hex, None)
-            return events
+            result = await query_listing_events(relay_url, public_key_hex, None)
+            return result.events if result.status != QueryStatus.FAILED else []
         except Exception:
             return []
 
@@ -259,7 +256,7 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
     explicit = settings.provider_id
     if explicit:
         if len(explicit) > 64 or any(
-            unicodedata.category(char) == "Cc" for char in explicit
+            unicodedata.category(char) in ("Cc", "Cs") for char in explicit
         ):
             raise ValueError("PROVIDER_ID must contain 1 to 64 printable characters")
         return explicit
@@ -270,11 +267,16 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
     candidates: set[str] = set()
     for result in results:
         if isinstance(result, BaseException):
-            raise ValueError("Configure PROVIDER_ID while listing relays are unavailable")
-        events, ok = result
-        if not ok or len(events) >= 10:
+            raise ValueError(
+                "Configure PROVIDER_ID while listing relays are unavailable"
+            )
+        if result.status == QueryStatus.FAILED:
+            raise ValueError(
+                "Configure PROVIDER_ID while listing relays are unavailable"
+            )
+        if result.status == QueryStatus.TRUNCATED or len(result.events) >= 10:
             raise ValueError("Configure PROVIDER_ID when listing history is incomplete")
-        for event in events:
+        for event in result.events:
             try:
                 signed = Event.from_json(json.dumps(event))
                 if not signed.verify() or event.get("pubkey") != public_key_hex:
@@ -285,7 +287,9 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
             except Exception:
                 continue
     if len(candidates) != 1:
-        raise ValueError("Configure PROVIDER_ID to select one provider for public stats")
+        raise ValueError(
+            "Configure PROVIDER_ID to select one provider for public stats"
+        )
     return next(iter(candidates))
 
 
@@ -509,12 +513,14 @@ async def announce_provider() -> None:
                 if _should_skip(relay_url):
                     logger.debug(f"Skipping {relay_url} due to backoff")
                     continue
-                events, ok = await query_listing_events(
+                result = await query_listing_events(
                     relay_url, public_key_hex, provider_id
                 )
-                if ok:
+                # Announcements need matching events, not proof that no other
+                # coordinate exists: a truncated successful page is usable.
+                if result.status != QueryStatus.FAILED:
                     _register_success(relay_url)
-                    existing_events.extend(events)
+                    existing_events.extend(result.events)
                 else:
                     _register_failure(relay_url)
 

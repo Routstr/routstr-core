@@ -97,7 +97,7 @@ def record_terminal_outcome(
             or not _valid_nonnegative_int(timestamp)
         ):
             terminal_outcome_writer.declare_loss(
-                "invalid settled terminal outcome", terminal_day
+                "invalid settled terminal outcome", terminal_day, dropped=True
             )
             return
         terminal_outcome_writer.submit(
@@ -190,5 +190,7 @@ async def start_terminal_outcome_writer() -> bool:
     return await terminal_outcome_writer.start()
 
 
-async def stop_terminal_outcome_writer(*, timeout: float = 5.0) -> bool:
-    return await terminal_outcome_writer.stop(timeout=timeout)
+async def stop_terminal_outcome_writer(
+    *, timeout: float = 5.0, allow_clean: bool = True
+) -> bool:
+    return await terminal_outcome_writer.stop(timeout=timeout, allow_clean=allow_clean)
