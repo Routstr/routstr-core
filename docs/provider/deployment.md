@@ -302,6 +302,9 @@ docker compose -f compose.node.yml exec routstr /.venv/bin/python scripts/reset_
 docker compose -f compose.node.yml restart routstr
 ```
 
+The restart also ends every dashboard session. CLI tokens stay valid; if the
+node may have been compromised, add `--revoke-cli-tokens` to revoke them all.
+
 ---
 
 ## Reverse Proxy (Optional)

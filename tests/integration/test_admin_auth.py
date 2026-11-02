@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 from httpx import AsyncClient, Response
 
+from routstr.core.admin import admin_sessions
 from routstr.core.db import create_session, set_admin_password
 
 
@@ -119,3 +120,92 @@ async def test_update_password_rejects_short_new(
         json={"current_password": "old password", "new_password": "x"},
     )
     assert resp.status_code == 400
+
+
+async def _create_cli_token(client: AsyncClient, name: str) -> str:
+    resp = await client.post("/admin/api/cli-tokens", json={"name": name})
+    assert resp.status_code == 200, resp.text
+    return str(resp.json()["token"])
+
+
+async def _authorized(client: AsyncClient, token: str) -> bool:
+    resp = await client.get(
+        "/admin/api/cli-tokens", headers={"Authorization": f"Bearer {token}"}
+    )
+    return resp.status_code == 200
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_update_password_ends_other_sessions(
+    integration_client: AsyncClient,
+) -> None:
+    await _seed_password("old password")
+    caller = (await _login(integration_client, "old password")).json()["token"]
+    other = (await _login(integration_client, "old password")).json()["token"]
+    integration_client.headers["Authorization"] = f"Bearer {caller}"
+    cli_token = await _create_cli_token(integration_client, "survives")
+
+    resp = await integration_client.patch(
+        "/admin/api/password",
+        json={"current_password": "old password", "new_password": "new password"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["revoked_cli_tokens"] == 0
+
+    assert other not in admin_sessions
+    assert not await _authorized(integration_client, other)
+    # The session that changed the password stays signed in, and CLI tokens are
+    # independent credentials unless revocation is asked for.
+    assert await _authorized(integration_client, caller)
+    assert await _authorized(integration_client, cli_token)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_update_password_can_revoke_all_cli_tokens(
+    integration_client: AsyncClient,
+) -> None:
+    await _seed_password("old password")
+    caller = (await _login(integration_client, "old password")).json()["token"]
+    integration_client.headers["Authorization"] = f"Bearer {caller}"
+    cli_tokens = [
+        await _create_cli_token(integration_client, name) for name in ("a", "b")
+    ]
+
+    resp = await integration_client.patch(
+        "/admin/api/password",
+        json={
+            "current_password": "old password",
+            "new_password": "new password",
+            "revoke_cli_tokens": True,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["revoked_cli_tokens"] == 2
+    for cli_token in cli_tokens:
+        assert not await _authorized(integration_client, cli_token)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_failed_password_change_keeps_sessions_and_cli_tokens(
+    integration_client: AsyncClient,
+) -> None:
+    await _seed_password("old password")
+    caller = (await _login(integration_client, "old password")).json()["token"]
+    other = (await _login(integration_client, "old password")).json()["token"]
+    integration_client.headers["Authorization"] = f"Bearer {caller}"
+    cli_token = await _create_cli_token(integration_client, "kept")
+
+    resp = await integration_client.patch(
+        "/admin/api/password",
+        json={
+            "current_password": "not the password",
+            "new_password": "new password",
+            "revoke_cli_tokens": True,
+        },
+    )
+    assert resp.status_code == 401
+    assert await _authorized(integration_client, other)
+    assert await _authorized(integration_client, cli_token)
