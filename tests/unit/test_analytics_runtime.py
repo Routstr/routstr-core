@@ -461,7 +461,7 @@ async def test_coordinator_cancellation_does_not_stop_collection(
 @pytest.mark.asyncio
 async def test_collection_shutdown_requires_explicit_drained_serving(node: Any) -> None:
     await node.coordinator.prepare_startup()
-    with pytest.raises(AssertionError, match="drain settlement"):
+    with pytest.raises(RuntimeError, match="drain settlement"):
         await node.coordinator.close()
     assert node.writer.running
     assert not node.coordinator._closed

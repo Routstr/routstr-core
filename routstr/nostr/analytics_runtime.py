@@ -230,7 +230,8 @@ class AnalyticsCoordinator:
             self._relays = ()
 
     async def close(self, *, serving_stopped: bool = False) -> None:
-        assert serving_stopped, "Stop serving and drain settlement before collection"
+        if not serving_stopped:
+            raise RuntimeError("Stop serving and drain settlement before collection")
         if self._closed:
             return
         self._closed = True
@@ -269,7 +270,8 @@ async def run_analytics() -> None:
 
 
 async def shutdown_analytics(*, serving_stopped: bool = False) -> None:
-    assert serving_stopped, "Analytics shutdown requires drained request settlement"
+    if not serving_stopped:
+        raise RuntimeError("Analytics shutdown requires drained request settlement")
     global _coordinator
     coordinator = _coordinator
     if coordinator is not None:
