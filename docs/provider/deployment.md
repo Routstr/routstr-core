@@ -333,11 +333,21 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
 ```
 
 If you started with `--port`, proxy to that port instead of `8000`.
+
+The admin login locks out a client address after repeated wrong passwords.
+Behind a reverse proxy every request reaches the node from the proxy's address,
+so one client's failures would lock out everyone. Let the node trust the proxy's
+`X-Forwarded-For` header by setting `FORWARDED_ALLOW_IPS` in `.env` to the
+address or network the proxy connects from (with Docker port publishing, the
+container's bridge network, e.g. `172.16.0.0/12`). Do this only when the proxy is
+the sole way to reach the node's port, as with `compose.node.yml`, which binds
+it to `127.0.0.1`; otherwise clients can forge the header.
 
 ### Publishing a Node
 

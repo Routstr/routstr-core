@@ -955,8 +955,11 @@ async def set_admin_password(session: AsyncSession, password: str) -> None:
     """Store the admin password as a one-way hash on the Secret singleton."""
     from .vault import hash_password
 
+    # Hash before touching the session: scrypt is CPU-bound, so it runs in a
+    # worker thread instead of blocking the event loop.
+    password_hash = await asyncio.to_thread(hash_password, password)
     secret = await get_secret(session)
-    secret.admin_password_hash = hash_password(password)
+    secret.admin_password_hash = password_hash
     secret.updated_at = int(time.time())
     session.add(secret)
     await session.commit()
