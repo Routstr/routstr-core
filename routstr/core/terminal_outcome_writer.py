@@ -295,7 +295,7 @@ class TerminalOutcomeWriter:
             self._wake.set()
         if self._journaled_loss_day is None or day < self._journaled_loss_day:
             try:
-                self._loss_journal.record(day, self._now_ms())
+                self._loss_journal.record(day, self._now_ms(), self._loss_reason)
             except Exception:
                 logger.critical(
                     "Terminal outcome loss evidence could not be journaled",
