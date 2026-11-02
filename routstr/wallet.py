@@ -2489,6 +2489,7 @@ async def send_to_lnurl(
     address: str,
     *,
     on_melt_quote: Callable[[str, str], Awaitable[None]] | None = None,
+    on_melt_inputs: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> int:
     """``on_melt_quote`` gets the quote id and the mint that issued it, since
     fallback may pick a different mint than requested."""
@@ -2508,6 +2509,29 @@ async def send_to_lnurl(
             on_melt_quote=(
                 None if on_melt_quote is None else _quote_callback(on_melt_quote, mint)
             ),
+            **(
+                {"on_melt_inputs": on_melt_inputs} if on_melt_inputs is not None else {}
+            ),
+        )
+
+
+async def recover_lnurl_payment_receipt(
+    mint_url: str, unit: str, quote_id: str, sent_msats: int, input_msats: int
+) -> int:
+    """Recover a paid refund's accounting without dispatching another melt."""
+    from .payment.lnurl import MeltOutcomeAmbiguousError, lnurl_payment_receipt
+
+    async with wallet_operation_guard():
+        wallet = await get_wallet(mint_url, unit, force_reload=True)
+        quote = await wallet.get_melt_quote(quote_id)
+        if quote is None or str(quote.state).lower() != "paid":
+            raise MeltOutcomeAmbiguousError("LNURL quote is not confirmed paid")
+        return lnurl_payment_receipt(
+            sent_msats,
+            input_msats,
+            unit,
+            quote.change,
+            require_change_evidence=True,
         )
 
 

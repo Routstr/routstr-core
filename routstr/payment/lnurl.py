@@ -59,6 +59,37 @@ class MeltUnpaidError(LNURLError):
     """
 
 
+class LNURLPaymentReceipt(int):
+    """Recipient amount in msats, with the actual debit in the same unit."""
+
+    sent_msats: int
+    spent_msats: int
+
+    def __new__(cls, sent_msats: int, spent_msats: int) -> LNURLPaymentReceipt:
+        if not 0 < sent_msats <= spent_msats:
+            raise MeltOutcomeAmbiguousError("Invalid paid LNURL accounting")
+        receipt = super().__new__(cls, sent_msats)
+        receipt.sent_msats = sent_msats
+        receipt.spent_msats = spent_msats
+        return receipt
+
+
+def lnurl_payment_receipt(
+    sent_msats: int,
+    input_msats: int,
+    unit: str,
+    change: Any,
+    *,
+    require_change_evidence: bool = False,
+) -> LNURLPaymentReceipt:
+    """Account for change returned by a confirmed paid melt."""
+    if require_change_evidence and change is None and input_msats != sent_msats:
+        raise MeltOutcomeAmbiguousError("Paid LNURL quote has no change evidence")
+    scale = 1000 if unit == "sat" else 1
+    change_msats = sum(int(item.amount) for item in (change or [])) * scale
+    return LNURLPaymentReceipt(sent_msats, input_msats - change_msats)
+
+
 _MAX_LNURL_REDIRECTS = 3
 _MAX_LNURL_RESPONSE_BYTES = 64 * 1024
 _NON_PUBLIC_HOST_SUFFIXES = (".localhost", ".local", ".internal")
@@ -326,6 +357,7 @@ async def raw_send_to_lnurl(
     amount: int | None = None,
     *,
     on_melt_quote: Callable[[str, str], Awaitable[None]] | None = None,
+    on_melt_inputs: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> int:
     """Send funds to an LNURL address.
 
@@ -335,7 +367,7 @@ async def raw_send_to_lnurl(
         amount: Amount to send in the specified currency unit
 
     Returns:
-        Amount actually paid in the specified currency unit
+        Recipient amount in msats; the receipt also carries the actual wallet debit.
 
     Raises:
         WalletError: If amount is outside LNURL limits or insufficient balance
@@ -417,6 +449,10 @@ async def raw_send_to_lnurl(
 
     assert selected_proofs is not None
     proofs = selected_proofs
+    scale = 1000 if unit == "sat" else 1
+    input_msats = sum(proof.amount for proof in proofs) * scale
+    if on_melt_inputs is not None:
+        await on_melt_inputs(final_amount, input_msats)
     # Cashu uses this argument only to size blank outputs, not set mint fees.
     change_budget = sum(proof.amount for proof in proofs) - quoted_amount
     await wallet.set_reserved_for_send(proofs, reserved=True)
@@ -459,7 +495,9 @@ async def raw_send_to_lnurl(
 
     melt_state = getattr(melt_response, "state", None)
     if melt_state == MeltQuoteState.paid:
-        return final_amount
+        return lnurl_payment_receipt(
+            final_amount, input_msats, unit, getattr(melt_response, "change", None)
+        )
     if melt_state == MeltQuoteState.unpaid:
         await wallet.set_reserved_for_send(proofs, reserved=False)
         raise MeltUnpaidError("Cashu mint confirmed that the melt was unpaid")
@@ -480,7 +518,13 @@ async def raw_send_to_lnurl(
         ) from reconciliation_error
 
     if quote is not None and quote.state == MeltQuoteState.paid:
-        return final_amount
+        return lnurl_payment_receipt(
+            final_amount,
+            input_msats,
+            unit,
+            getattr(quote, "change", None),
+            require_change_evidence=True,
+        )
     if quote is not None and quote.state == MeltQuoteState.unpaid:
         # A just-dispatched quote can briefly report unpaid before transitioning.
         try:
