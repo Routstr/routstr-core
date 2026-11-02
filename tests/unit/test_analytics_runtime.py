@@ -633,8 +633,8 @@ async def test_pending_finalizer_cannot_leave_clean_restart_proof(
                 recovered = (await session.exec(select(TerminalOutcomeWriterRun))).all()
             assert any(
                 run.status == "recovered"
-                and run.loss_day is not None
-                and run.loss_reason is not None
+                and run.loss_day == datetime.now(UTC).date()
+                and run.loss_reason == "continuity_lost"
                 for run in recovered
             )
         finally:

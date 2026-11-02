@@ -62,6 +62,15 @@ def _timestamp(day: date, hour: int = 12) -> int:
     )
 
 
+async def _assert_no_loss_recorded(sessions: SessionFactory) -> None:
+    async with sessions() as session:
+        runs = (await session.exec(select(TerminalOutcomeWriterRun))).all()
+    assert runs
+    assert all(
+        run.status in ("clean", "active") and run.loss_day is None for run in runs
+    )
+
+
 def _record(
     outcome_id: str,
     timestamp_ms: int,
@@ -302,7 +311,7 @@ async def test_declared_loss_stores_whether_an_outcome_was_dropped(
     stored_reasons: list[str | None] = []
     mark_degraded = writer._mark_degraded
 
-    # In-process recovery clears the run's loss marker, so read it mid-recovery.
+    # Capture the reason each in-process recovery stores on its degraded run.
     async def capture_degraded(lost_day: date) -> None:
         await mark_degraded(lost_day)
         async with sessions() as session:
@@ -875,6 +884,7 @@ async def test_clean_restart_the_same_day_keeps_coverage(
     assert [(e.coverage_start_day, e.coverage_end_day) for e in epochs] == [
         (day + timedelta(days=1), None)
     ]
+    await _assert_no_loss_recorded(sessions)
     assert await writer.stop(timeout=1)
 
 
@@ -899,6 +909,7 @@ async def test_clean_restart_across_midnight_keeps_coverage(
     assert [(e.coverage_start_day, e.coverage_end_day) for e in epochs] == [
         (day + timedelta(days=1), None)
     ]
+    await _assert_no_loss_recorded(sessions)
     assert await writer.stop(timeout=1)
 
 
@@ -1512,6 +1523,7 @@ async def test_repeated_clean_overnight_maintenance_preserves_all_days(
     assert [(epoch.coverage_start_day, epoch.coverage_end_day) for epoch in epochs] == [
         (first_day + timedelta(days=1), None)
     ]
+    await _assert_no_loss_recorded(sessions)
 
 
 async def test_live_stalled_worker_is_fenced_only_by_another_collector(
