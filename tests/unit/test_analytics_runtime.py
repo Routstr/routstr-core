@@ -274,7 +274,7 @@ async def test_saved_identity_reaches_other_workers_without_disabling_sharing(
 
 
 @pytest.mark.asyncio
-async def test_restart_writer_failure_disables_publication_before_serving(
+async def test_restart_writer_failure_preserves_publication_before_serving(
     node: Any, monkeypatch: Any
 ) -> None:
     monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
@@ -285,17 +285,62 @@ async def test_restart_writer_failure_disables_publication_before_serving(
         await runtime.get_analytics_v2_delivery_state(node.sessions)
     ).sharing_enabled
 
+    before = await runtime.get_analytics_v2_delivery_state(node.sessions)
+
     async def failed_start() -> bool:
         return False
 
     monkeypatch.setattr(runtime, "start_terminal_outcome_writer", failed_start)
     restarted = runtime.AnalyticsCoordinator()
     await restarted.prepare_startup()
-    assert not (
-        await runtime.get_analytics_v2_delivery_state(node.sessions)
-    ).sharing_enabled
+    await restarted.sync_once()
+    after = await runtime.get_analytics_v2_delivery_state(node.sessions)
+    assert after == before
+    assert restarted._task is not None
     assert not node.writer.running
     await restarted.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["discovery", "relay"])
+async def test_identity_change_fences_siblings_even_if_setup_fails(
+    node: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    await node.coordinator.prepare_startup()
+    monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
+    await node.coordinator.sync_once()
+    before = await runtime.get_analytics_v2_delivery_state(node.sessions)
+    assert before.sharing_enabled
+    monkeypatch.setattr(runtime.settings, "nsec", "22" * 32)
+    if failure == "discovery":
+
+        async def unavailable(*args: object) -> str:
+            raise ValueError("provider discovery unavailable")
+
+        monkeypatch.setattr(runtime, "resolve_provider_id_strict", unavailable)
+    else:
+        monkeypatch.setattr(runtime.settings, "relays", ["ws://public.example.com"])
+    await node.coordinator.sync_once()
+    after = await runtime.get_analytics_v2_delivery_state(node.sessions)
+    assert not after.sharing_enabled
+    assert after.generation == before.generation + 1
+    assert node.writer.running
+
+
+@pytest.mark.asyncio
+async def test_coordinator_cancellation_does_not_stop_collection(node: Any) -> None:
+    await node.coordinator.prepare_startup()
+    task = asyncio.create_task(node.coordinator.run())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert node.writer.running
+    assert not node.coordinator._closed
+    await node.coordinator.close()
+    assert not node.writer.running
 
 
 @pytest.mark.asyncio
