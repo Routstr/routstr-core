@@ -97,7 +97,7 @@ def record_terminal_outcome(
             or not _valid_nonnegative_int(timestamp)
         ):
             terminal_outcome_writer.declare_loss(
-                "invalid settled terminal outcome", terminal_day
+                "invalid settled terminal outcome", terminal_day, dropped=True
             )
             return
         terminal_outcome_writer.submit(

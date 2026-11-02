@@ -228,13 +228,17 @@ class TerminalOutcomeWriter:
     def submit(self, outcome: _QueuedOutcome) -> bool:
         if not self._accepting or not self.running or self._queue is None:
             self.declare_loss(
-                "terminal outcome writer unavailable", outcome.terminal_day
+                "terminal outcome writer unavailable",
+                outcome.terminal_day,
+                dropped=True,
             )
             return False
         try:
             self._queue.put_nowait(outcome)
         except asyncio.QueueFull:
-            self.declare_loss("terminal outcome queue full", outcome.terminal_day)
+            self.declare_loss(
+                "terminal outcome queue full", outcome.terminal_day, dropped=True
+            )
             return False
         if self._idle is not None:
             self._idle.clear()
@@ -242,16 +246,13 @@ class TerminalOutcomeWriter:
             self._wake.set()
         return True
 
-    def declare_loss(self, reason: str, lost_day: date | None = None) -> None:
+    def declare_loss(
+        self, reason: str, lost_day: date | None = None, *, dropped: bool = False
+    ) -> None:
         day = lost_day or _utc_day_from_ms(self._now_ms())
         first_loss = not self._loss_pending
         self._loss_pending = True
-        confirmed_drop = reason in {
-            "terminal outcome queue full",
-            "terminal outcome writer unavailable",
-            "queued terminal outcome discarded after continuity loss",
-        }
-        if confirmed_drop:
+        if dropped:
             self._loss_reason = "outcome_dropped"
         elif self._loss_reason is None:
             self._loss_reason = "continuity_lost"
@@ -716,6 +717,7 @@ class TerminalOutcomeWriter:
                 self.declare_loss(
                     "queued terminal outcome discarded after continuity loss",
                     queued.terminal_day,
+                    dropped=True,
                 )
 
     async def _recover_loss(self) -> None:
@@ -797,6 +799,7 @@ class TerminalOutcomeWriter:
                         self.declare_loss(
                             "conflicting terminal outcome idempotency key",
                             queued.terminal_day,
+                            dropped=True,
                         )
                 finally:
                     self._queue.task_done()

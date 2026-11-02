@@ -198,6 +198,61 @@ async def test_conflicting_duplicate_rotates_epoch_without_overwriting(
     assert await writer.stop(timeout=1)
 
 
+@pytest.mark.parametrize(
+    ("loss", "loss_reason"),
+    [
+        ("conflict", "outcome_dropped"),
+        ("invalid", "outcome_dropped"),
+        ("writer_failed", "continuity_lost"),
+    ],
+)
+async def test_declared_loss_stores_whether_an_outcome_was_dropped(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+    loss: str,
+    loss_reason: str,
+) -> None:
+    _, sessions = ledger
+    timestamp = _timestamp(date(2026, 8, 31))
+    writer = TerminalOutcomeWriter(
+        session_factory=sessions, retry_seconds=0.01, clock=MutableClock(timestamp)
+    )
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+    stored_reasons: list[str | None] = []
+    mark_degraded = writer._mark_degraded
+
+    # In-process recovery clears the run's loss marker, so read it mid-recovery.
+    async def capture_degraded(lost_day: date) -> None:
+        await mark_degraded(lost_day)
+        async with sessions() as session:
+            run = await session.get(TerminalOutcomeWriterRun, writer._run_id)
+        assert run is not None
+        stored_reasons.append(run.loss_reason)
+
+    monkeypatch.setattr(writer, "_mark_degraded", capture_degraded)
+
+    assert await writer.start()
+    if loss == "conflict":
+        _record("request-conflict", timestamp, revenue_msats=1000)
+        assert await writer.flush(timeout=1)
+        _record("request-conflict", timestamp, revenue_msats=2000)
+    elif loss == "invalid":
+        record_terminal_outcome(
+            TerminalOutcomeContext("request-invalid", "author/model"),
+            input_tokens=-1,
+            output_tokens=0,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+            revenue_msats=0,
+            terminal_at_ms=timestamp,
+        )
+    else:
+        writer.declare_loss("terminal outcome writer failed")
+    assert await writer.flush(timeout=1)
+    assert stored_reasons == [loss_reason]
+    assert await writer.stop(timeout=1)
+
+
 async def test_temporary_insert_failure_retries_retained_item_without_rotation(
     ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
@@ -563,7 +618,9 @@ def test_record_wrapper_never_raises_on_invalid_or_failed_submission(
             self.losses: list[str] = []
             self.submissions: list[_QueuedOutcome] = []
 
-        def declare_loss(self, reason: str, lost_day: date | None = None) -> None:
+        def declare_loss(
+            self, reason: str, lost_day: date | None = None, *, dropped: bool = False
+        ) -> None:
             self.losses.append(reason)
 
         def submit(self, outcome: _QueuedOutcome) -> bool:
