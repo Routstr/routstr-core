@@ -5,13 +5,12 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from sqlmodel import SQLModel, col, select
+from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 import routstr.core.terminal_outcomes as outcomes_module
@@ -45,13 +44,9 @@ class MutableClock:
 
 @pytest.fixture
 async def ledger(
-    tmp_path: Path,
+    analytics_engine: AsyncEngine,
 ) -> AsyncGenerator[tuple[AsyncEngine, SessionFactory], None]:
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{tmp_path / 'terminal-outcomes.db'}"
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
+    engine = analytics_engine
 
     @asynccontextmanager
     async def sessions() -> AsyncGenerator[AsyncSession, None]:
@@ -59,7 +54,6 @@ async def ledger(
             yield session
 
     yield engine, sessions
-    await engine.dispose()
 
 
 def _timestamp(day: date, hour: int = 12) -> int:
@@ -73,9 +67,12 @@ def _record(
     timestamp_ms: int,
     *,
     revenue_msats: int = 2000,
+    pricing_source: str | None = None,
 ) -> None:
     record_terminal_outcome(
-        TerminalOutcomeContext(outcome_id, "author/model"),
+        TerminalOutcomeContext(
+            outcome_id, "author/model", pricing_source=pricing_source
+        ),
         input_tokens=10,
         output_tokens=5,
         cache_read_input_tokens=2,
@@ -83,6 +80,91 @@ def _record(
         revenue_msats=revenue_msats,
         terminal_at_ms=timestamp_ms,
     )
+
+
+@pytest.mark.parametrize("declare_loss", [False, True])
+async def test_extended_outage_retains_inflight_and_queued_rows(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+    declare_loss: bool,
+) -> None:
+    _, sessions = ledger
+    writer = TerminalOutcomeWriter(session_factory=sessions, retry_seconds=0.0001)
+    original = writer._persist_once
+    attempts = 0
+
+    async def unavailable_then_recovers(row: _QueuedOutcome) -> _PersistResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 35:
+            return _PersistResult.RETRY
+        return await original(row)
+
+    monkeypatch.setattr(writer, "_persist_once", unavailable_then_recovers)
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+    assert await writer.start()
+    try:
+        for i in range(3):
+            _record(f"retained-{i}", _timestamp(date(2026, 9, 1)))
+        if declare_loss:
+            writer.declare_loss("synthetic loss")
+        assert await writer.flush(timeout=3)
+        async with sessions() as session:
+            assert len((await session.exec(select(TerminalOutcome))).all()) == 3
+            assert len((await session.exec(select(TerminalOutcomeEpoch))).all()) == 1
+        assert attempts == 38
+    finally:
+        await writer.stop(timeout=1)
+
+
+@pytest.mark.parametrize("upgrade", [False, True])
+async def test_invalid_storage_row_does_not_discard_valid_rows(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+    upgrade: bool,
+) -> None:
+    from dataclasses import replace
+
+    _, sessions = ledger
+    writer = TerminalOutcomeWriter(session_factory=sessions, retry_seconds=0.001)
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+    assert await writer.start()
+    try:
+        _record(
+            "valid",
+            _timestamp(date(2026, 9, 1)),
+            pricing_source="unknown" if upgrade else "upstream",
+        )
+        assert await writer.flush(timeout=1)
+        async with sessions() as session:
+            stored = (await session.exec(select(TerminalOutcome))).one()
+        bad = _QueuedOutcome(
+            **{
+                name: getattr(stored, name)
+                for name in _QueuedOutcome.__dataclass_fields__
+            }
+        )
+        assert writer.submit(
+            replace(
+                bad,
+                outcome_id=bad.outcome_id if upgrade else "invalid",
+                input_source="invalid",
+                pricing_source="upstream",
+            )
+        )
+        _record("after-invalid", _timestamp(date(2026, 9, 1)))
+        assert await writer.flush(timeout=1)
+        async with sessions() as session:
+            assert len((await session.exec(select(TerminalOutcome))).all()) == 2
+            runs = (await session.exec(select(TerminalOutcomeWriterRun))).all()
+            preserved = await session.get(TerminalOutcome, bad.outcome_id)
+            assert preserved is not None
+            assert preserved.pricing_source == ("unknown" if upgrade else "upstream")
+        assert any(
+            run.status == "recovered" and run.loss_day is not None for run in runs
+        )
+    finally:
+        await writer.stop(timeout=1)
 
 
 async def test_writer_persists_one_immutable_outcome_and_closes_own_run(
@@ -161,7 +243,7 @@ async def test_writer_allocates_after_latest_closed_epoch(
     ]
 
 
-async def test_conflicting_duplicate_rotates_epoch_without_overwriting(
+async def test_conflicting_duplicate_preserves_epoch_without_overwriting(
     ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -191,10 +273,9 @@ async def test_conflicting_duplicate_rotates_epoch_without_overwriting(
             )
         ).all()
     assert stored.revenue_msats == 1000
-    assert [epoch.epoch for epoch in epochs] == [0, 1]
-    assert epochs[0].coverage_end_day == day - timedelta(days=1)
-    assert epochs[1].coverage_start_day == day + timedelta(days=1)
-    assert epochs[1].current_slot == 1
+    assert [epoch.epoch for epoch in epochs] == [0]
+    assert epochs[0].coverage_end_day is None
+    assert epochs[0].current_slot == 1
     assert await writer.stop(timeout=1)
 
 
@@ -292,7 +373,7 @@ async def test_temporary_insert_failure_retries_retained_item_without_rotation(
     assert await writer.stop(timeout=1)
 
 
-async def test_queue_overflow_is_nonblocking_and_rotates_epoch(
+async def test_queue_overflow_is_nonblocking_and_preserves_epoch(
     ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -336,9 +417,8 @@ async def test_queue_overflow_is_nonblocking_and_rotates_epoch(
                 select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
             )
         ).all()
-    assert [epoch.epoch for epoch in epochs] == [0, 1]
-    assert epochs[0].coverage_end_day == overflow_day - timedelta(days=1)
-    assert epochs[1].coverage_start_day == overflow_day + timedelta(days=1)
+    assert [epoch.epoch for epoch in epochs] == [0]
+    assert epochs[0].coverage_end_day is None
     assert await writer.stop(timeout=1)
 
 
@@ -464,7 +544,7 @@ async def test_live_workers_do_not_rotate_and_clean_stop_closes_only_owner(
 
 
 @pytest.mark.parametrize("missed", [False, True])
-async def test_worker_that_starts_collecting_late_voids_only_a_day_it_missed(
+async def test_worker_that_starts_collecting_late_preserves_recorded_days(
     ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
     missed: bool,
@@ -484,6 +564,8 @@ async def test_worker_that_starts_collecting_late_voids_only_a_day_it_missed(
     if missed:
         monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", late)
         _record("missed-request", _timestamp(day + timedelta(days=1), 0))
+    markers = list(late._loss_journal.directory.glob("*.json"))
+    assert len(markers) == int(missed)
     assert await late.start()
     async with sessions() as session:
         epochs = (
@@ -491,16 +573,26 @@ async def test_worker_that_starts_collecting_late_voids_only_a_day_it_missed(
                 select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
             )
         ).all()
-    assert [(row.coverage_start_day, row.coverage_end_day) for row in epochs] == (
-        [(day - timedelta(days=1), day), (day + timedelta(days=2), None)]
-        if missed
-        else [(day - timedelta(days=1), None)]
-    )
+        loss_days = [
+            run.loss_day
+            for run in (
+                await session.exec(
+                    select(TerminalOutcomeWriterRun)
+                    .where(col(TerminalOutcomeWriterRun.status) == "recovered")
+                    .where(col(TerminalOutcomeWriterRun.loss_day).is_not(None))
+                )
+            ).all()
+        ]
+    assert [(row.coverage_start_day, row.coverage_end_day) for row in epochs] == [
+        (day - timedelta(days=1), None),
+    ]
+    # The missed day stays durable loss evidence instead of voiding coverage.
+    assert set(loss_days) == ({day + timedelta(days=1)} if missed else set())
     assert await first.stop(timeout=1)
     assert await late.stop(timeout=1)
 
 
-async def test_stale_run_rotates_once_with_concurrent_recovery(
+async def test_stale_run_recovers_without_rotation_with_concurrent_recovery(
     ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
@@ -543,19 +635,16 @@ async def test_stale_run_rotates_once_with_concurrent_recovery(
             )
         ).all()
         lost_run = await session.get(TerminalOutcomeWriterRun, "lost-run")
-    assert [epoch.epoch for epoch in epochs] == [0, 1]
-    assert epochs[0].coverage_end_day == lost_day - timedelta(days=1)
-    assert epochs[1].coverage_start_day == recovery_day + timedelta(days=1)
+    assert [epoch.epoch for epoch in epochs] == [0]
+    assert epochs[0].coverage_end_day is None
     assert lost_run is not None and lost_run.status == "recovered"
 
 
-async def test_recovery_does_not_claim_a_late_earlier_loss(
+async def test_recovery_is_idempotent_and_preserves_loss_evidence(
     ledger: tuple[AsyncEngine, SessionFactory],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, sessions = ledger
     selected_day = date(2026, 8, 30)
-    late_day = date(2026, 8, 29)
     recovered_at = _timestamp(date(2026, 8, 31))
     async with sessions() as session:
         session.add(
@@ -580,34 +669,13 @@ async def test_recovery_does_not_claim_a_late_earlier_loss(
     writer = TerminalOutcomeWriter(
         session_factory=sessions, clock=MutableClock(recovered_at)
     )
-    original_stage_rotation = writer._stage_rotation
-
-    async def inject_late_loss(
-        session: AsyncSession,
-        current: TerminalOutcomeEpoch,
-        lost_day: date,
-    ) -> int | None:
-        next_epoch = await original_stage_rotation(session, current, lost_day)
-        session.add(
-            TerminalOutcomeWriterRun(
-                run_id="late-loss",
-                status="lost",
-                started_at_ms=_timestamp(late_day),
-                heartbeat_at_ms=_timestamp(late_day),
-                closed_at_ms=_timestamp(late_day),
-                loss_day=late_day,
-            )
-        )
-        return next_epoch
-
-    monkeypatch.setattr(writer, "_stage_rotation", inject_late_loss)
+    await writer._recover_pending_runs()
     await writer._recover_pending_runs()
 
     async with sessions() as session:
         selected = await session.get(TerminalOutcomeWriterRun, "selected-loss")
-        late = await session.get(TerminalOutcomeWriterRun, "late-loss")
     assert selected is not None and selected.status == "recovered"
-    assert late is not None and late.status == "lost"
+    assert selected.loss_day == selected_day
 
 
 def test_record_wrapper_never_raises_on_invalid_or_failed_submission(
@@ -766,7 +834,7 @@ def test_cashu_retained_msats_uses_exact_persisted_units(
     assert losses == ["invalid Cashu retained value"]
 
 
-async def test_clean_stop_then_long_downtime_preserves_coverage(
+async def test_clean_stop_then_downtime_preserves_recorded_days(
     ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
@@ -941,14 +1009,13 @@ async def test_writer_failure_does_not_fail_settlement_and_marks_gap(
                 select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
             )
         ).all()
-    assert len(epochs) == 2
-    assert epochs[0].coverage_end_day == date(2026, 9, 17)
-    assert epochs[1].coverage_start_day == date(2026, 9, 19)
+    assert len(epochs) == 1
+    assert epochs[0].coverage_end_day is None
     assert await writer.stop(timeout=1)
 
 
 @pytest.mark.parametrize("downtime_ms", [2000, 60 * 1000, 3 * 24 * 60 * 60 * 1000])
-async def test_unclean_restart_preserves_days_before_last_durable_flush(
+async def test_unclean_restart_preserves_all_recorded_days(
     ledger: tuple[AsyncEngine, SessionFactory],
     downtime_ms: int,
 ) -> None:
@@ -985,10 +1052,8 @@ async def test_unclean_restart_preserves_days_before_last_durable_flush(
             )
         ).all()
     try:
-        assert epochs[0].coverage_end_day == last_day - timedelta(days=1)
-        assert epochs[1].coverage_start_day == datetime.fromtimestamp(
-            clock.value / 1000, UTC
-        ).date() + timedelta(days=1)
+        assert len(epochs) == 1
+        assert epochs[0].coverage_end_day is None
     finally:
         assert await writer.stop(timeout=1)
 
@@ -1035,14 +1100,14 @@ async def test_sharing_disabled_startup_resumes_private_coverage_after_gap(
                 select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
             )
         ).all()
-    assert [
-        (epoch.coverage_start_day, epoch.coverage_end_day, epoch.current_slot)
-        for epoch in epochs
-    ] == [(day + timedelta(days=1), None, 1)]
+    assert len(epochs) == 1
+    assert epochs[0].current_slot == 1
+    assert epochs[0].coverage_start_day == day + timedelta(days=1)
+    assert epochs[0].coverage_end_day is None
 
 
 @pytest.mark.parametrize("fresh_process", [False, True])
-async def test_failed_writer_start_cannot_backfill_missed_days_as_zero(
+async def test_failed_writer_start_does_not_remove_recorded_days(
     ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
     fresh_process: bool,
@@ -1065,21 +1130,29 @@ async def test_failed_writer_start_cannot_backfill_missed_days_as_zero(
     clock.value = _timestamp(day + timedelta(days=3))
     assert await writer.start()
     async with sessions() as session:
+        if not fresh_process:
+            remembered = (
+                await session.exec(
+                    select(TerminalOutcomeWriterRun).where(
+                        col(TerminalOutcomeWriterRun.status) == "recovered"
+                    )
+                )
+            ).all()
+            assert any(run.loss_day == day for run in remembered)
         epochs = (
             await session.exec(
                 select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
             )
         ).all()
-    assert epochs[0].coverage_end_day == (
-        day if fresh_process else day - timedelta(days=1)
-    )
-    assert epochs[1].coverage_start_day == day + timedelta(days=4)
+    assert len(epochs) == 1
+    assert epochs[0].coverage_end_day is None
     assert await writer.stop(timeout=1)
 
 
 @pytest.mark.parametrize("failed_startup", [False, True])
 async def test_fresh_clean_restart_publishes_zero_for_stopped_service_days(
     ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
     failed_startup: bool,
 ) -> None:
     import json
@@ -1108,7 +1181,10 @@ async def test_fresh_clean_restart_publishes_zero_for_stopped_service_days(
         sessions, coverage_day=first_day, at_ms=clock.value
     )
     first = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", first)
     assert await first.start()
+    # Weeks without any persisted outcome are not published at all.
+    _record("before-clean-stop", _timestamp(first_day + timedelta(days=1)))
     clock.value = _timestamp(clean_day)
     assert await first.flush(timeout=1)
     assert await first.stop(timeout=1)
@@ -1210,43 +1286,18 @@ def _commit_fails_once(sessions: SessionFactory) -> SessionFactory:
     return factory
 
 
-@pytest.mark.parametrize("step", ["ensure", "rotate", "pending", "unattended"])
-async def test_epoch_steps_retry_after_losing_a_commit_race(
-    ledger: tuple[AsyncEngine, SessionFactory], step: str
+async def test_epoch_creation_retries_after_losing_a_commit_race(
+    ledger: tuple[AsyncEngine, SessionFactory],
 ) -> None:
     _, sessions = ledger
     day = date(2026, 9, 1)
     clock = MutableClock(_timestamp(day))
-    if step != "ensure":
-        await TerminalOutcomeWriter(
-            session_factory=sessions, clock=clock
-        )._ensure_epoch(clock.value)
     clock.value = _timestamp(day + timedelta(days=3))
-    if step == "pending":
-        async with sessions() as session:
-            session.add(
-                TerminalOutcomeWriterRun(
-                    run_id="lost-run",
-                    status="lost",
-                    started_at_ms=_timestamp(day),
-                    heartbeat_at_ms=_timestamp(day),
-                    closed_at_ms=_timestamp(day),
-                    loss_day=day + timedelta(days=2),
-                )
-            )
-            await session.commit()
     writer = TerminalOutcomeWriter(
         session_factory=_commit_fails_once(sessions), clock=clock
     )
 
-    if step == "ensure":
-        await writer._ensure_epoch(clock.value)
-    elif step == "rotate":
-        await writer._rotate_epoch(day + timedelta(days=2))
-    elif step == "pending":
-        await writer._recover_pending_runs()
-    else:
-        await writer._recover_unattended_coverage(clock.value)
+    await writer._ensure_epoch(clock.value)
 
     async with sessions() as session:
         epochs = (
@@ -1254,22 +1305,13 @@ async def test_epoch_steps_retry_after_losing_a_commit_race(
                 select(TerminalOutcomeEpoch).order_by(col(TerminalOutcomeEpoch.epoch))
             )
         ).all()
-        run = await session.get(TerminalOutcomeWriterRun, "lost-run")
     coverage = [
         (epoch.coverage_start_day, epoch.coverage_end_day, epoch.current_slot)
         for epoch in epochs
     ]
     reopened = (day + timedelta(days=4), None, 1)
-    expected = {
-        "ensure": [reopened],
-        "rotate": [(day + timedelta(days=1), day + timedelta(days=1), None), reopened],
-        "pending": [(day + timedelta(days=1), day + timedelta(days=1), None), reopened],
-        "unattended": [(day + timedelta(days=1), day, None), reopened],
-    }
-    assert coverage == expected[step]
-    assert writer.epoch == len(epochs) - 1
-    if step == "pending":
-        assert run is not None and run.status == "recovered"
+    assert coverage == [reopened]
+    assert writer.epoch == 0
 
 
 async def test_heartbeat_renews_the_lease_and_checkpoint(
@@ -1317,17 +1359,17 @@ async def test_writer_task_that_dies_declares_a_loss_and_restarts(
     first = writer._task
     assert first is not None
     for _ in range(300):
-        if first.done() and writer.epoch == 1 and not writer.loss_pending:
+        if first.done() and writer._task is not first and not writer.loss_pending:
             break
         await asyncio.sleep(0.01)
 
-    # The loss rotates coverage, and a fresh task keeps collecting.
-    assert writer.epoch == 1 and not writer.loss_pending
+    # A fresh task keeps collecting without erasing recorded-day coverage.
+    assert writer.epoch == 0 and not writer.loss_pending
     assert writer.running and writer._task is not first
     await writer.stop(timeout=1)
 
 
-async def test_recovery_keeps_retrying_until_it_rotates(
+async def test_recovery_keeps_retrying_until_it_reactivates(
     ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1337,17 +1379,17 @@ async def test_recovery_keeps_retrying_until_it_rotates(
     writer = TerminalOutcomeWriter(
         session_factory=sessions, retry_seconds=0.001, clock=clock
     )
-    original = writer._rotate_epoch
-    rotations = 0
+    original = writer._activate_run
+    attempts = 0
 
-    async def races_then_rotates(lost_day: date) -> None:
-        nonlocal rotations
-        rotations += 1
-        if rotations <= 6:
-            raise RuntimeError("Terminal outcome epoch kept changing")
-        await original(lost_day)
+    async def fails_then_activates() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 6:
+            raise RuntimeError("Synthetic activation failure")
+        await original()
 
-    monkeypatch.setattr(writer, "_rotate_epoch", races_then_rotates)
+    monkeypatch.setattr(writer, "_activate_run", fails_then_activates)
     monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
 
     assert await writer.start()
@@ -1358,8 +1400,8 @@ async def test_recovery_keeps_retrying_until_it_rotates(
             break
         await asyncio.sleep(0.01)
 
-    assert rotations == 7
-    assert writer.running and not writer.loss_pending and writer.epoch == 1
+    assert attempts == 7
+    assert writer.running and not writer.loss_pending and writer.epoch == 0
     _record("request-after-recovery", clock.value)
     assert await writer.flush(timeout=1)
     async with sessions() as session:
@@ -1370,8 +1412,8 @@ async def test_recovery_keeps_retrying_until_it_rotates(
             )
         ).all()
     assert len(stored) == 1
-    assert epochs[0].coverage_end_day == day - timedelta(days=1)
-    assert epochs[1].coverage_start_day == day + timedelta(days=1)
+    assert len(epochs) == 1
+    assert epochs[0].coverage_end_day is None
     assert await writer.stop(timeout=1)
 
 
@@ -1480,8 +1522,9 @@ async def test_live_stalled_worker_is_fenced_only_by_another_collector(
             epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
         assert fenced is not None and fenced.status == "recovered"
         assert fenced.loss_reason == "lease_expired"
-        assert epochs[0].coverage_end_day == first_day + timedelta(days=1)
-        assert epochs[1].coverage_start_day == first_day + timedelta(days=3)
+        assert fenced.loss_day == first_day + timedelta(days=2)
+        assert len(epochs) == 1
+        assert epochs[0].coverage_end_day is None
     finally:
         # A fenced writer must not overwrite the recovered run as clean.
         assert not await stalled.stop(timeout=1)
@@ -1505,9 +1548,9 @@ async def test_older_crashed_worker_is_not_hidden_by_newer_clean_close(
     assert await newer.stop(timeout=1)
     assert older._task is not None
     older._task.cancel()
+    # Simulate process death: no shutdown path runs.
     with pytest.raises(asyncio.CancelledError):
         await older._task
-    assert not await older.stop(timeout=1)
     clock.value += 120_000
     restarted = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
     try:
@@ -1517,8 +1560,9 @@ async def test_older_crashed_worker_is_not_hidden_by_newer_clean_close(
             epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
         assert old_run is not None and old_run.status == "recovered"
         assert old_run.loss_reason == "lease_expired"
-        assert epochs[0].coverage_end_day == day + timedelta(days=1)
-        assert epochs[1].coverage_start_day == day + timedelta(days=3)
+        assert old_run.loss_day == day + timedelta(days=2)
+        assert len(epochs) == 1
+        assert epochs[0].coverage_end_day is None
     finally:
         assert await restarted.stop(timeout=1)
 
@@ -1544,7 +1588,6 @@ async def test_stale_degraded_run_preserves_confirmed_drop_diagnostic(
     first._task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first._task
-    assert not await first.stop(timeout=1)
     clock.value += 120_000
     recovered = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
     try:

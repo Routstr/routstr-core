@@ -76,20 +76,24 @@ def isolated_lifespan(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_collector_start_failure_prevents_serving(
+async def test_collector_start_failure_keeps_serving(
     isolated_lifespan: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    events = isolated_lifespan
+
     async def failed_prepare() -> None:
         raise RuntimeError("collector unavailable")
 
     async def shutdown(*, serving_stopped: bool) -> None:
         assert serving_stopped
+        events.append("collector-stopped")
 
     monkeypatch.setattr(main, "prepare_analytics", failed_prepare)
     monkeypatch.setattr(main, "shutdown_analytics", shutdown)
-    with pytest.raises(RuntimeError, match="collector unavailable"):
-        async with main.lifespan(main.app):
-            pytest.fail("startup failure must not yield to the server")
+    async with main.lifespan(main.app):
+        events.append("serving")
+    assert "serving" in events
+    assert events[-1] == "collector-stopped"
 
 
 @pytest.mark.asyncio

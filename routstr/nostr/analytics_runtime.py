@@ -60,20 +60,15 @@ class AnalyticsCoordinator:
         self._relays: tuple[str, ...] = ()
         self._writer_started = False
         self._retry_at = 0.0
+        self._writer_retry_at = 0.0
         self._paused_reason: str | None = None
         self._closed = False
 
     async def prepare_startup(self) -> None:
         state = await get_analytics_v2_delivery_state(create_session)
         self._writer_started = await start_terminal_outcome_writer()
-        if state.sharing_enabled and (
-            not settings.enable_analytics_sharing or not self._writer_started
-        ):
+        if state.sharing_enabled and not settings.enable_analytics_sharing:
             await transition_analytics_v2_sharing(create_session, enabled=False)
-        if not self._writer_started:
-            # A failed collector cannot prove no requests were lost across a
-            # subsequent process exit. Do not serve behind an old clean marker.
-            raise RuntimeError("Terminal outcome collection must start before serving")
 
     async def run(self) -> None:
         try:
@@ -101,14 +96,13 @@ class AnalyticsCoordinator:
         wants_public = settings.enable_analytics_sharing
         if not wants_public:
             await self._stop_public(disable=state.sharing_enabled)
-        if not terminal_outcome_writer.running:
-            if time.monotonic() < self._retry_at:
-                return
+        if (
+            not terminal_outcome_writer.running
+            and time.monotonic() >= self._writer_retry_at
+        ):
             self._writer_started = await start_terminal_outcome_writer()
             if not self._writer_started:
-                await self._stop_public(disable=state.sharing_enabled)
-                self._retry_at = time.monotonic() + 10
-                return
+                self._writer_retry_at = time.monotonic() + 10
 
         if not wants_public:
             return
@@ -120,6 +114,13 @@ class AnalyticsCoordinator:
             await self._stop_public(disable=state.sharing_enabled)
             return
         private_key, pubkey = keypair
+        if state.identity_pubkey is not None and (
+            state.identity_pubkey != pubkey
+            or (settings.provider_id and settings.provider_id != state.provider_d)
+        ):
+            # Fence sibling senders before discovery/relay setup can fail.
+            await self._stop_public(disable=state.sharing_enabled)
+            state = await _read_state()
         relays = tuple(dict.fromkeys(settings.relays or DEFAULT_RELAY_URLS))
         if (
             state.identity_pubkey == pubkey
@@ -131,9 +132,15 @@ class AnalyticsCoordinator:
             try:
                 provider_d = await resolve_provider_id_strict(pubkey, list(relays))
             except ValueError as error:
-                await self._pause(str(error), disable=state.sharing_enabled)
+                await self._pause(str(error), disable=False)
                 return
         identity = (private_key, pubkey, provider_d)
+        identity_changed = state.identity_pubkey is not None and (
+            state.identity_pubkey != pubkey or state.provider_d != provider_d
+        )
+        if identity_changed:
+            await self._stop_public(disable=state.sharing_enabled)
+            state = await _read_state()
         if (
             self._identity == identity
             and self._relays == relays
@@ -147,13 +154,10 @@ class AnalyticsCoordinator:
         except AnalyticsV2DeliveryError as error:
             # Checked before activation, so a node that cannot deliver never
             # opens and closes sharing on every retry.
-            await self._pause(str(error), disable=state.sharing_enabled)
+            await self._pause(str(error), disable=False)
             return
 
-        identity_changed = state.identity_pubkey is not None and (
-            state.identity_pubkey != pubkey or state.provider_d != provider_d
-        )
-        await self._stop_public(disable=identity_changed)
+        await self._stop_public(disable=False)
         try:
             if identity_changed:
                 await rotate_analytics_v2_identity(
@@ -191,7 +195,7 @@ class AnalyticsCoordinator:
         except SharingDisabledError:
             return
         except Exception:
-            await self._stop_public(disable=True)
+            await self._stop_public(disable=False)
             self._retry_at = time.monotonic() + 60
             raise
 

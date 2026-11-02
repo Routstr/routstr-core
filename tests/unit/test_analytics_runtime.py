@@ -274,7 +274,7 @@ async def test_saved_identity_reaches_other_workers_without_disabling_sharing(
 
 
 @pytest.mark.asyncio
-async def test_restart_writer_failure_disables_publication_before_serving(
+async def test_restart_writer_failure_preserves_publication_before_serving(
     node: Any, monkeypatch: Any
 ) -> None:
     monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
@@ -285,18 +285,48 @@ async def test_restart_writer_failure_disables_publication_before_serving(
         await runtime.get_analytics_v2_delivery_state(node.sessions)
     ).sharing_enabled
 
+    before = await runtime.get_analytics_v2_delivery_state(node.sessions)
+
     async def failed_start() -> bool:
         return False
 
     monkeypatch.setattr(runtime, "start_terminal_outcome_writer", failed_start)
     restarted = runtime.AnalyticsCoordinator()
-    with pytest.raises(RuntimeError, match="must start before serving"):
-        await restarted.prepare_startup()
-    assert not (
-        await runtime.get_analytics_v2_delivery_state(node.sessions)
-    ).sharing_enabled
+    await restarted.prepare_startup()
+    await restarted.sync_once()
+    after = await runtime.get_analytics_v2_delivery_state(node.sessions)
+    assert after == before
+    assert restarted._task is not None
     assert not node.writer.running
     await restarted.close(serving_stopped=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["discovery", "relay"])
+async def test_identity_change_fences_siblings_even_if_setup_fails(
+    node: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    await node.coordinator.prepare_startup()
+    monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
+    await node.coordinator.sync_once()
+    before = await runtime.get_analytics_v2_delivery_state(node.sessions)
+    assert before.sharing_enabled
+    monkeypatch.setattr(runtime.settings, "nsec", "22" * 32)
+    if failure == "discovery":
+
+        async def unavailable(*args: object) -> str:
+            raise ValueError("provider discovery unavailable")
+
+        monkeypatch.setattr(runtime, "resolve_provider_id_strict", unavailable)
+    else:
+        monkeypatch.setattr(runtime.settings, "relays", ["ws://public.example.com"])
+    await node.coordinator.sync_once()
+    after = await runtime.get_analytics_v2_delivery_state(node.sessions)
+    assert not after.sharing_enabled
+    assert after.generation == before.generation + 1
+    assert node.writer.running
 
 
 @pytest.mark.asyncio
@@ -521,11 +551,10 @@ async def test_shutdown_drains_detached_settlement_before_writer_stop(
 
 @pytest.mark.asyncio
 async def test_incomplete_settlement_is_not_closed_as_clean(node: Any) -> None:
-    from routstr.core.db import TerminalOutcomeEpoch
+    from routstr.core.db import TerminalOutcomeWriterRun
     from routstr.upstream.stream_ownership import PersistentStreamFinalizer
 
     await node.coordinator.prepare_startup()
-    original_epoch = node.writer.epoch
 
     async def fail() -> None:
         raise RuntimeError("synthetic incomplete settlement")
@@ -533,8 +562,10 @@ async def test_incomplete_settlement_is_not_closed_as_clean(node: Any) -> None:
     PersistentStreamFinalizer(fail)
     await node.coordinator.close(serving_stopped=True)
     async with node.sessions() as session:
-        epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
-    assert max(epoch.epoch for epoch in epochs) > original_epoch
+        runs = (await session.exec(select(TerminalOutcomeWriterRun))).all()
+    assert runs
+    assert all(run.status != "clean" for run in runs)
+    assert any(run.loss_reason == "continuity_lost" for run in runs)
 
 
 @pytest.mark.asyncio
@@ -579,11 +610,11 @@ async def test_pending_finalizer_cannot_leave_clean_restart_proof(
             assert await restarted.start()
             async with node.sessions() as session:
                 recovered = (await session.exec(select(TerminalOutcomeWriterRun))).all()
-                epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
-            assert any(run.status == "recovered" for run in recovered)
-            assert max(epoch.epoch for epoch in epochs) >= 2
-            assert max(epoch.coverage_start_day for epoch in epochs) == (
-                datetime.fromtimestamp(now / 1000, UTC).date() + timedelta(days=1)
+            assert any(
+                run.status == "recovered"
+                and run.loss_day is not None
+                and run.loss_reason is not None
+                for run in recovered
             )
         finally:
             await restarted.stop()

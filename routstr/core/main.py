@@ -147,9 +147,12 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             s = await SettingsService.initialize(session)
             await release_leaked_reservations_on_startup(session, s)
 
-        # Collection must precede serving, including when public sharing is
-        # off. Otherwise an old clean run could hide requests served uncollected.
-        await prepare_analytics()
+        try:
+            await prepare_analytics()
+        except Exception:
+            logger.exception(
+                "Stats collection could not start; requests remain available"
+            )
 
         # Apply app metadata from settings
         try:
