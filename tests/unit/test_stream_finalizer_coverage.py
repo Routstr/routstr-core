@@ -14,7 +14,7 @@ from routstr.upstream.base import BaseUpstreamProvider
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("api", ["chat", "responses", "messages", "generic"])
+@pytest.mark.parametrize("api", ["chat", "responses", "messages", "litellm", "generic"])
 @pytest.mark.parametrize("failure", ["missing_key", "lookup", "adjustment"])
 async def test_disconnected_fallback_failure_records_unknown(
     monkeypatch: pytest.MonkeyPatch, api: str, failure: str
@@ -48,6 +48,9 @@ async def test_disconnected_fallback_failure_records_unknown(
     async def chunks() -> AsyncGenerator[bytes, None]:
         yield b"data: ignored\n\n"
 
+    async def events() -> AsyncGenerator[Any, None]:
+        yield {"type": "message_start"}
+
     response = MagicMock(spec=httpx.Response)
     response.status_code = 200
     response.headers = {"content-type": "text/event-stream"}
@@ -63,6 +66,18 @@ async def test_disconnected_fallback_failure_records_unknown(
                 await provider._finalize_generic_streaming_payment(
                     key.hashed_key, 500, "/opaque", None, None, snapshot, context
                 )
+            elif api == "litellm":
+                streaming = provider._stream_litellm_messages(
+                    events(),
+                    key,
+                    500,
+                    None,
+                    reservation_snapshot=snapshot,
+                    terminal_outcome=context,
+                )
+                await cast(
+                    AsyncGenerator[bytes, None], streaming.body_iterator
+                ).aclose()
             else:
                 handler = getattr(provider, f"handle_streaming_{api}_completion")
                 streaming = await handler(
@@ -83,7 +98,7 @@ async def test_disconnected_fallback_failure_records_unknown(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("api", ["chat", "responses", "messages", "generic"])
+@pytest.mark.parametrize("api", ["chat", "responses", "messages", "litellm", "generic"])
 @pytest.mark.parametrize("failure", ["ambiguous", "lookup"])
 async def test_ambiguous_settlement_unknown_is_not_promoted_to_day_loss(
     monkeypatch: pytest.MonkeyPatch,
@@ -144,6 +159,9 @@ async def test_ambiguous_settlement_unknown_is_not_promoted_to_day_loss(
     async def chunks() -> AsyncGenerator[bytes, None]:
         yield b"data: ignored\n\n"
 
+    async def events() -> AsyncGenerator[Any, None]:
+        yield {"type": "message_start"}
+
     response = MagicMock(spec=httpx.Response)
     response.status_code = 200
     response.headers = {"content-type": "text/event-stream"}
@@ -158,6 +176,18 @@ async def test_ambiguous_settlement_unknown_is_not_promoted_to_day_loss(
                 await provider._finalize_generic_streaming_payment(
                     "key", 500, "/opaque", None, None, snapshot, context
                 )
+            elif api == "litellm":
+                streaming = provider._stream_litellm_messages(
+                    events(),
+                    key,
+                    500,
+                    None,
+                    reservation_snapshot=snapshot,
+                    terminal_outcome=context,
+                )
+                await cast(
+                    AsyncGenerator[bytes, None], streaming.body_iterator
+                ).aclose()
             else:
                 handler = getattr(provider, f"handle_streaming_{api}_completion")
                 streaming = await handler(

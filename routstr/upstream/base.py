@@ -3428,6 +3428,9 @@ class BaseUpstreamProvider:
             async with create_session() as new_session:
                 fresh_key = await new_session.get(key.__class__, key.hashed_key)
                 if not fresh_key:
+                    mark_terminal_outcome_unknown(
+                        terminal_outcome, "LiteLLM Messages billing key missing"
+                    )
                     usage_finalized = True
                     return None
                 try:
@@ -3447,6 +3450,9 @@ class BaseUpstreamProvider:
                         f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n"
                     ).encode()
                 except BaseException as e:
+                    mark_terminal_outcome_unknown(
+                        terminal_outcome, "LiteLLM Messages settlement failed"
+                    )
                     logger.critical(
                         "Error during LiteLLM Messages usage finalization — CRITICAL",
                         extra={
@@ -3466,6 +3472,10 @@ class BaseUpstreamProvider:
             try:
                 if not usage_finalized:
                     await finalize_without_usage()
+            except Exception:
+                mark_terminal_outcome_unknown(
+                    terminal_outcome, "LiteLLM Messages settlement incomplete"
+                )
             finally:
                 await aclose_if_needed(iterator)
 
