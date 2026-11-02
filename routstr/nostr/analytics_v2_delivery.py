@@ -1786,8 +1786,10 @@ def _validate_identity(pubkey: str, provider_d: str) -> None:
     _require_lower_hex(pubkey, 64, "analytics pubkey")
     if not isinstance(provider_d, str) or not 1 <= len(provider_d) <= 64:
         raise IdentityMismatchError("provider_d must contain 1 to 64 characters")
-    if any(unicodedata.category(character) == "Cc" for character in provider_d):
-        raise IdentityMismatchError("provider_d contains control characters")
+    if any(unicodedata.category(character) in ("Cc", "Cs") for character in provider_d):
+        raise IdentityMismatchError(
+            "provider_d contains control or surrogate characters"
+        )
 
 
 def _require_nonnegative_int(value: object, name: str) -> None:

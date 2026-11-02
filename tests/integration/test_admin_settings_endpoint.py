@@ -42,6 +42,12 @@ async def test_dashboard_uses_exact_saved_dates_with_sharing_disabled(
     integration_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from routstr.core.admin import log_manager
+
+    def forbidden_log_scan(**kwargs: object) -> dict:
+        raise AssertionError("Explicit-date requests must skip legacy analytics")
+
+    monkeypatch.setattr(log_manager, "get_usage_dashboard", forbidden_log_scan)
     monkeypatch.setattr(settings, "enable_analytics_sharing", False)
     today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     start = today - timedelta(days=3)
@@ -186,3 +192,65 @@ async def test_existing_sharing_choice_is_saved(
     )
     assert stopped.status_code == 200
     assert stopped.json()["enable_analytics_sharing"] is False
+
+
+@pytest.mark.integration
+async def test_settings_retry_exhaustion_returns_conflict(
+    admin_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from routstr.core.settings import SettingsConflictError
+
+    async def conflict(*args: object, **kwargs: object) -> None:
+        raise SettingsConflictError("Settings changed concurrently; reload and retry")
+
+    monkeypatch.setattr(SettingsService, "update", conflict)
+    response = await admin_client.patch("/admin/api/settings", json={"name": "new"})
+    assert response.status_code == 409
+    assert "reload" in response.json()["detail"]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        (
+            "summary",
+            {
+                "successful_chat_completions": "terminal_outcomes",
+                "total_requests": "logs",
+            },
+        ),
+        (
+            "metrics",
+            {
+                "successful_chat_completions": "terminal_outcomes",
+                "total_requests": "logs",
+            },
+        ),
+        (
+            "revenue-by-model",
+            {
+                "successful": "terminal_outcomes",
+                "requests": "logs",
+                "refunds_sats": "logs",
+            },
+        ),
+    ],
+)
+async def test_standalone_analytics_endpoints_include_field_provenance(
+    admin_client: AsyncClient, path: str, expected: dict[str, str]
+) -> None:
+    response = await admin_client.get(f"/admin/api/usage/{path}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert expected.items() <= payload["field_provenance"].items()
+    assert (
+        payload["request_count_semantics"]
+        == "recorded_outcomes_including_unknown_settlements"
+    )
+    assert (
+        payload["revenue_semantics"]
+        == "recorded_gross_retained_lower_bound_for_unknown_settlements"
+    )
+    if path != "metrics":
+        assert payload["deprecated_fields"]["net_revenue_sats"] == "revenue_sats"

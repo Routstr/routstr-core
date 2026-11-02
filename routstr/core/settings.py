@@ -465,6 +465,11 @@ class SettingsRow(BaseModel):
 settings: Settings = resolve_bootstrap()
 
 SETTINGS_BOOTSTRAP_LOCK_KEY = 0x726F757473747222
+_SETTINGS_UPDATE_ATTEMPTS = 5
+
+
+class SettingsConflictError(RuntimeError):
+    """Concurrent workers repeatedly changed settings before this save."""
 
 
 class SettingsService:
@@ -602,12 +607,14 @@ class SettingsService:
             }
             from sqlmodel import text
 
-            while True:
+            for _attempt in range(_SETTINGS_UPDATE_ATTEMPTS):
                 row = await db_session.exec(  # type: ignore
                     text("SELECT data FROM settings WHERE id = 1")
                 )
                 row = row.first()
-                seen = row[0] if row else None
+                if row is None:
+                    raise RuntimeError("Settings row missing")
+                seen = row[0]
                 # Build on the saved document: another worker may have saved
                 # since this one loaded, and its choices must survive this edit.
                 stored = (
@@ -635,9 +642,13 @@ class SettingsService:
                         seen=seen,
                     )
                 )
-                if seen is None or saved.rowcount == 1:
+                if saved.rowcount == 1:
                     break
                 await db_session.rollback()
+            else:
+                raise SettingsConflictError(
+                    "Settings changed concurrently; reload and retry the save"
+                )
             if (
                 "enable_analytics_sharing" in sanitized_partial
                 and not candidate.enable_analytics_sharing
@@ -670,9 +681,15 @@ class SettingsService:
             if row is None:
                 return
             data = json.loads(row[0]) if isinstance(row[0], str) else dict(row[0])
-            for name in fields:
-                if name in data:
-                    setattr(settings, name, data[name])
+            if not isinstance(data, dict):
+                raise ValueError("Stored settings must be an object")
+            saved = _strip_secret_fields(_normalize_settings_data(data))
+            refreshed = {name: saved[name] for name in fields if name in saved}
+            # Validate all requested values before changing any live field. In
+            # particular, a saved string "false" must never become a truthy flag.
+            candidate = Settings(**{**settings.dict(), **refreshed})
+            for name in refreshed:
+                setattr(settings, name, getattr(candidate, name))
 
     @classmethod
     async def reload_from_db(cls, db_session: AsyncSession) -> Settings:

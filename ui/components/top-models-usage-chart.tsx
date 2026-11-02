@@ -19,6 +19,7 @@ import { parseBucketDate } from '@/lib/usage-time';
 interface TopModelsUsageChartProps {
   mix: ModelUsageMix;
   completeCoverage?: boolean;
+  ledgerMode?: boolean;
   displayUnit: DisplayUnit;
   usdPerSat: number | null;
 }
@@ -238,6 +239,7 @@ function getModelPresentation(model: string): {
 export function TopModelsUsageChart({
   mix,
   completeCoverage,
+  ledgerMode = false,
   displayUnit,
   usdPerSat,
 }: TopModelsUsageChartProps) {
@@ -456,7 +458,7 @@ export function TopModelsUsageChart({
     activeHoverSeriesKey && activeHoverSeriesKey !== dataKey ? 0.18 : 1;
   const formatLeaderboardTotal = (rawValue: number): string => {
     if (mode === 'requests') {
-      return `${compactNumber.format(rawValue)} requests`;
+      return `${compactNumber.format(rawValue)} ${ledgerMode ? 'recorded outcomes' : 'requests'}`;
     }
 
     if (mode === 'tokens') {
@@ -582,8 +584,10 @@ export function TopModelsUsageChart({
                 Model Usage
               </CardTitle>
               <p className='text-muted-foreground mt-1 text-xs sm:text-sm'>
-                Stacked requests, revenue, or tokens by model (
-                {mix.interval_minutes}m buckets).
+                Stacked {ledgerMode ? 'recorded outcomes' : 'requests'},
+                revenue, or tokens by model ({mix.interval_minutes}m buckets).
+                {ledgerMode &&
+                  ' Outcomes include interrupted streams and unknown settlements, not only successful responses.'}
               </p>
             </div>
             <div className='flex items-center gap-2 sm:shrink-0'>
@@ -595,7 +599,7 @@ export function TopModelsUsageChart({
                   onClick={() => setMode('requests')}
                   className='h-7 rounded-full px-2.5 text-xs'
                 >
-                  Requests
+                  {ledgerMode ? 'Outcomes' : 'Requests'}
                 </Button>
                 <Button
                   type='button'

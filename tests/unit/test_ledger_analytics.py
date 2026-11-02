@@ -4,12 +4,11 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlmodel import SQLModel, text
+from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlmodel import text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import (
@@ -24,10 +23,10 @@ NOW = datetime(2026, 9, 18, 12, tzinfo=UTC)
 
 
 @pytest.fixture
-async def sessions(tmp_path: Path) -> AsyncGenerator[SessionFactory, None]:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'dashboard.db'}")
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
+async def sessions(
+    analytics_engine: AsyncEngine,
+) -> AsyncGenerator[SessionFactory, None]:
+    engine = analytics_engine
 
     @asynccontextmanager
     async def factory() -> AsyncGenerator[AsyncSession, None]:
@@ -35,7 +34,6 @@ async def sessions(tmp_path: Path) -> AsyncGenerator[SessionFactory, None]:
             yield session
 
     yield factory
-    await engine.dispose()
 
 
 def _row(
@@ -233,7 +231,8 @@ async def test_dashboard_keeps_one_snapshot_while_queued_outcomes_flush(
     new_bucket: bool,
 ) -> None:
     async with sessions() as session:
-        await session.execute(text("PRAGMA journal_mode=WAL"))
+        if session.get_bind().dialect.name == "sqlite":
+            await session.execute(text("PRAGMA journal_mode=WAL"))
     await _seed(sessions)
     original_exec = AsyncSession.exec
     flushed = False
@@ -860,3 +859,131 @@ async def test_coverage_diagnostics_distinguish_lease_uncertainty_from_drops(
     ]
     # Diagnostic history does not become an active watermark or extend a gap.
     assert result["ledger_coverage"]["complete"]
+
+
+@pytest.mark.parametrize("historical", [False, True])
+async def test_sections_explain_mixed_sources_and_deprecated_gross_aliases(
+    sessions: SessionFactory, historical: bool
+) -> None:
+    await _seed(sessions)
+    legacy = _legacy()
+    # Unrecognized extension fields must not be mislabeled as log diagnostics.
+    legacy["summary"]["extension_metadata"] = {"source": "external"}
+    result = await get_ledger_usage_dashboard(
+        legacy,
+        interval=60,
+        hours=24,
+        session_factory=sessions,
+        now=NOW,
+        start_at=NOW - timedelta(days=1) if historical else None,
+        end_at=NOW if historical else None,
+    )
+    summary = result["summary"]
+    diagnostic_source = "unavailable" if historical else "logs"
+    assert summary["field_provenance"]["total_requests"] == diagnostic_source
+    assert summary["field_provenance"]["success_rate"] == diagnostic_source
+    assert summary["field_provenance"]["avg_latency_ms"] == diagnostic_source
+    assert summary["avg_latency_ms"] == (0 if historical else 45)
+    assert "extension_metadata" not in summary["field_provenance"]
+    assert summary["revenue_msats"] == summary["net_revenue_msats"] == 1250
+    assert summary["refunds_msats"] == (0 if historical else 9000)
+    assert summary["deprecated_fields"] == {
+        "net_revenue_msats": "revenue_msats",
+        "net_revenue_sats": "revenue_sats",
+    }
+    for section in ("summary", "metrics", "revenue_by_model"):
+        payload = result[section]
+        # Metadata lives in each section so narrow API endpoints retain it.
+        assert payload["request_count_semantics"] == (
+            "recorded_outcomes_including_unknown_settlements"
+        )
+        assert payload["revenue_semantics"] == (
+            "recorded_gross_retained_lower_bound_for_unknown_settlements"
+        )
+        assert payload["field_provenance"]["unknown_outcome_requests"] == (
+            "terminal_outcomes"
+        )
+    metrics = result["metrics"]
+    assert metrics["field_provenance"]["successful_chat_completions"] == (
+        "terminal_outcomes"
+    )
+    assert metrics["field_provenance"]["total_requests"] == diagnostic_source
+    models = result["revenue_by_model"]
+    assert models["field_provenance"]["requests"] == diagnostic_source
+    assert models["field_provenance"]["failed"] == diagnostic_source
+    assert models["field_provenance"]["refunds_sats"] == diagnostic_source
+    assert models["field_provenance"]["successful"] == "terminal_outcomes"
+    assert models["deprecated_fields"] == {"net_revenue_sats": "revenue_sats"}
+    model = next(row for row in models["models"] if row["model"] == "reported/model")
+    assert model["requests"] == (0 if historical else 7)
+    assert model["successful"] == 1
+    assert model["revenue_sats"] == model["net_revenue_sats"] == 1
+
+
+async def test_unknown_settlement_counts_do_not_mean_missing_model_or_usage(
+    sessions: SessionFactory,
+) -> None:
+    await _seed(sessions)
+    # The existing unattributed row has missing usage but known pricing. It
+    # must not contribute to the unknown-settlement count.
+    at = NOW - timedelta(hours=1)
+    unknown = _row(
+        "unknown-settlement",
+        at,
+        model="reported/model",
+        revenue=500,
+        input_tokens=0,
+        output_tokens=0,
+        cache_read=0,
+        cache_write=0,
+        source="missing",
+    )
+    unknown.pricing_source = "unknown"
+    async with sessions() as session:
+        session.add(unknown)
+        await session.commit()
+    result = await get_ledger_usage_dashboard(
+        _legacy(), interval=60, hours=24, session_factory=sessions, now=NOW
+    )
+    summary = result["summary"]
+    assert summary["successful_chat_completions"] == 4
+    assert summary["unknown_outcome_requests"] == 1
+    assert summary["revenue_msats"] == 1750
+    assert summary["avg_revenue_per_request_msats"] == 1750 / 4
+    assert summary["avg_total_tokens_per_completion"] == 33 / 3
+    metrics = result["metrics"]
+    assert metrics["totals"]["unknown_outcome_requests"] == 1
+    assert (
+        sum(point["unknown_outcome_requests"] or 0 for point in metrics["metrics"]) == 1
+    )
+    models = {row["model"]: row for row in result["revenue_by_model"]["models"]}
+    assert models["reported/model"]["unknown_outcome_requests"] == 1
+    assert models["reported/model"]["successful"] == 2
+    assert models["unknown"]["unknown_outcome_requests"] == 0
+    assert models["free/model"]["unknown_outcome_requests"] == 0
+
+
+async def test_bigint_revenue_sums_are_json_safe_in_every_section(
+    sessions: SessionFactory,
+) -> None:
+    import json
+
+    revenue = 3_000_000_000
+    async with sessions() as session:
+        session.add_all(
+            [
+                _row("big-a", NOW - timedelta(hours=1), revenue=revenue),
+                _row("big-b", NOW - timedelta(hours=2), revenue=revenue),
+            ]
+        )
+        await session.commit()
+    result = await get_ledger_usage_dashboard(
+        _legacy(), interval=60, hours=24, session_factory=sessions, now=NOW
+    )
+    # PostgreSQL SUM(bigint) returns Decimal; the real helper must convert it
+    # before HTTP serialization, not just compile compatible SQL.
+    assert type(result["summary"]["revenue_msats"]) is int
+    assert result["summary"]["revenue_msats"] == 2 * revenue
+    assert result["metrics"]["totals"]["revenue_msats"] == 2 * revenue
+    assert result["revenue_by_model"]["models"][0]["revenue_sats"] == 2 * revenue / 1000
+    json.dumps(result)
