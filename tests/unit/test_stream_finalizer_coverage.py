@@ -1,7 +1,7 @@
 """Fallback settlement must not turn missing outcomes into clean coverage."""
 
-from collections.abc import AsyncGenerator
-from typing import cast
+from collections.abc import AsyncGenerator, AsyncIterator
+from typing import Any, NoReturn, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -17,7 +17,7 @@ from routstr.upstream.base import BaseUpstreamProvider
 @pytest.mark.parametrize("api", ["chat", "responses", "messages", "generic"])
 @pytest.mark.parametrize("failure", ["missing_key", "lookup", "adjustment"])
 async def test_disconnected_fallback_failure_records_unknown(
-    api: str, failure: str
+    monkeypatch: pytest.MonkeyPatch, api: str, failure: str
 ) -> None:
     provider = BaseUpstreamProvider(base_url="https://example.com", api_key="test")
     key = MagicMock(spec=ApiKey)
@@ -39,7 +39,11 @@ async def test_disconnected_fallback_failure_records_unknown(
     session_context.__aenter__ = AsyncMock(return_value=session)
     session_context.__aexit__ = AsyncMock(return_value=None)
     adjust = AsyncMock(side_effect=RuntimeError("settlement failed"))
-    provider._release_failed_streaming_reservation = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        provider,
+        "_release_failed_streaming_reservation",
+        AsyncMock(return_value=True),
+    )
 
     async def chunks() -> AsyncGenerator[bytes, None]:
         yield b"data: ignored\n\n"
@@ -100,7 +104,7 @@ async def test_ambiguous_settlement_unknown_is_not_promoted_to_day_loss(
         await connection.run_sync(SQLModel.metadata.create_all)
 
     @asynccontextmanager
-    async def sessions():
+    async def sessions() -> AsyncIterator[AsyncSession]:
         async with AsyncSession(engine, expire_on_commit=False) as session:
             yield session
 
@@ -123,7 +127,7 @@ async def test_ambiguous_settlement_unknown_is_not_promoted_to_day_loss(
         release_id="release", key_hash="key", billing_key_hash="key", reserved_msats=500
     )
 
-    async def ambiguous(*args, **kwargs):
+    async def ambiguous(*args: Any, **kwargs: Any) -> NoReturn:
         # _commit_settlement already emits this placeholder before re-raising.
         terminal_outcomes.mark_terminal_outcome_unknown(
             context, "prepaid_commit_ambiguous"
@@ -131,7 +135,11 @@ async def test_ambiguous_settlement_unknown_is_not_promoted_to_day_loss(
         raise RuntimeError("commit acknowledgement lost")
 
     provider = BaseUpstreamProvider(base_url="https://example.com", api_key="test")
-    provider._release_failed_streaming_reservation = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        provider,
+        "_release_failed_streaming_reservation",
+        AsyncMock(return_value=True),
+    )
 
     async def chunks() -> AsyncGenerator[bytes, None]:
         yield b"data: ignored\n\n"
@@ -164,9 +172,9 @@ async def test_ambiguous_settlement_unknown_is_not_promoted_to_day_loss(
                 ).aclose()
         assert await writer.flush(timeout=1)
         assert not writer.loss_pending
-        async with sessions() as session:
-            rows = (await session.exec(select(TerminalOutcome))).all()
-            epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
+        async with sessions() as db_session:
+            rows = (await db_session.exec(select(TerminalOutcome))).all()
+            epochs = (await db_session.exec(select(TerminalOutcomeEpoch))).all()
         assert len(rows) == 1
         assert rows[0].pricing_source == "unknown"
         assert rows[0].revenue_msats == 0
