@@ -299,7 +299,8 @@ class MissingUsageEstimator:
         response_data: dict[str, Any] | None,
         model: str | None = None,
     ) -> dict[str, Any]:
-        """Use measured usage when present, otherwise return a local estimate."""
+        """Use measured usage when present, otherwise a local estimate (none
+        when the upstream generated nothing)."""
         if isinstance(response_data, dict):
             usage = response_data.get("usage")
             if not isinstance(usage, dict):
@@ -312,7 +313,10 @@ class MissingUsageEstimator:
                 }
             if not self._output_parts:
                 self.observe(response_data)
-        return self.response_data(model)
+        return {
+            "model": model or self.model_name or "unknown",
+            "usage": self.estimated_usage(model),
+        }
 
     def response_data(self, model: str | None = None) -> dict[str, Any]:
         text = self.output_text

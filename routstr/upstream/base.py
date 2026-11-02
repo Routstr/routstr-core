@@ -1798,9 +1798,10 @@ class BaseUpstreamProvider:
             if not isinstance(usage, dict) or not usage:
                 usage_estimator = MissingUsageEstimator(request_body, model_obj)
                 usage_estimator.observe(response_json)
-                response_json["usage"] = usage_estimator.openai_response_data(
-                    response_json.get("model")
-                )["usage"]
+                if usage_estimator.estimated_usage() is not None:
+                    response_json["usage"] = usage_estimator.openai_response_data(
+                        response_json.get("model")
+                    )["usage"]
 
             cost_data = await adjust_payment_for_tokens(
                 key,
@@ -1816,7 +1817,7 @@ class BaseUpstreamProvider:
             remaining_balance_msats = key.balance
 
             # Merge the shared cost contract into usage for SDKs and OpenCode.
-            if "usage" in response_json:
+            if isinstance(response_json.get("usage"), dict):
                 _inject_cost_into_usage(response_json, cost_data)
                 response_json["usage"]["remaining_balance_msats"] = (
                     remaining_balance_msats
@@ -2254,9 +2255,9 @@ class BaseUpstreamProvider:
             if not isinstance(response_json.get("usage"), dict):
                 usage_estimator = MissingUsageEstimator(request_body, model_obj)
                 usage_estimator.observe(response_json)
-                response_json["usage"] = usage_estimator.response_data(
-                    response_json.get("model")
-                )["usage"]
+                estimated = usage_estimator.estimated_usage(response_json.get("model"))
+                if estimated is not None:
+                    response_json["usage"] = estimated
 
             if requested_model:
                 response_json["model"] = requested_model
@@ -2277,7 +2278,7 @@ class BaseUpstreamProvider:
             remaining_balance_msats = key.balance
 
             # Merge the shared cost contract into usage for SDKs and OpenCode.
-            if "usage" in response_json:
+            if isinstance(response_json.get("usage"), dict):
                 _inject_cost_into_usage(response_json, cost_data)
                 response_json["usage"]["remaining_balance_msats"] = (
                     remaining_balance_msats
@@ -2638,7 +2639,7 @@ class BaseUpstreamProvider:
         last_model_seen: str | None = None
         provider_seen: str | None = None
 
-        async def finalize_without_usage() -> bytes | None:
+        async def finalize_without_usage(*, charge_prompt: bool = True) -> bytes | None:
             nonlocal usage_finalized
             if usage_finalized:
                 return None
@@ -2650,7 +2651,9 @@ class BaseUpstreamProvider:
                 try:
                     cost_data = await adjust_payment_for_tokens(
                         fresh_key,
-                        usage_estimator.response_data(last_model_seen),
+                        usage_estimator.response_data(last_model_seen)
+                        if charge_prompt
+                        else usage_estimator.billing_data(None, last_model_seen),
                         new_session,
                         max_cost_for_model,
                         model_obj,
@@ -2916,7 +2919,7 @@ class BaseUpstreamProvider:
                                 raise
 
                 if not usage_finalized:
-                    maybe_cost_event = await finalize_without_usage()
+                    maybe_cost_event = await finalize_without_usage(charge_prompt=False)
                     if maybe_cost_event is not None:
                         yield maybe_cost_event
                 if guarded_chunks.timed_out:
@@ -2972,9 +2975,9 @@ class BaseUpstreamProvider:
             if not isinstance(response_json.get("usage"), dict):
                 usage_estimator = MissingUsageEstimator(request_body, model_obj)
                 usage_estimator.observe(response_json)
-                response_json["usage"] = usage_estimator.response_data(
-                    response_json.get("model")
-                )["usage"]
+                estimated = usage_estimator.estimated_usage(response_json.get("model"))
+                if estimated is not None:
+                    response_json["usage"] = estimated
 
             cost_data = await adjust_payment_for_tokens(
                 key,
@@ -3258,7 +3261,7 @@ class BaseUpstreamProvider:
         usage_finalized = False
         last_model_seen: str | None = None
 
-        async def finalize_without_usage() -> bytes | None:
+        async def finalize_without_usage(*, charge_prompt: bool = True) -> bytes | None:
             nonlocal usage_finalized
             if usage_finalized:
                 return None
@@ -3282,7 +3285,9 @@ class BaseUpstreamProvider:
                 try:
                     cost_data = await adjust_payment_for_tokens(
                         fresh_key,
-                        usage_estimator.response_data(last_model_seen),
+                        usage_estimator.response_data(last_model_seen)
+                        if charge_prompt
+                        else usage_estimator.billing_data(None, last_model_seen),
                         new_session,
                         max_cost_for_model,
                         model_obj,
@@ -3421,13 +3426,13 @@ class BaseUpstreamProvider:
                                 raise
 
                 if not usage_finalized:
-                    cost_event = await finalize_without_usage()
+                    cost_event = await finalize_without_usage(charge_prompt=False)
                     if cost_event is not None:
                         yield cost_event
 
             except Exception:
                 if not usage_finalized:
-                    await finalize_without_usage()
+                    await finalize_without_usage(charge_prompt=False)
                 raise
             finally:
                 await stream_finalizer.run()

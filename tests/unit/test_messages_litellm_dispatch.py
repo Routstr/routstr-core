@@ -6,6 +6,7 @@ and the shortcuts wired into `forward_request` and
 `forward_x_cashu_request`.
 """
 
+import contextlib
 import json
 import os
 from typing import Any, AsyncIterator
@@ -844,6 +845,69 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
     assert combined["usage"]["output_tokens"] == 7
     assert combined["model"] == "openai/gpt-4o-mini"
     assert captured_cost_call["reservation_snapshot"] is reservation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_streaming_with_no_output_and_no_usage_is_not_charged(
+    fails: bool,
+) -> None:
+    provider = _make_provider()
+    key = _make_key()
+
+    async def empty_reply() -> AsyncIterator[dict]:
+        yield {
+            "type": "message_start",
+            "message": {"id": "m", "content": [], "usage": {"input_tokens": 0}},
+        }
+        if fails:
+            raise RuntimeError("Provider returned error")
+        yield {"type": "message_delta", "usage": {"output_tokens": 0}}
+        yield {"type": "message_stop"}
+
+    settled: list[dict] = []
+
+    async def fake_adjust(fresh_key: Any, data: dict, *args: Any) -> dict:
+        settled.append(data)
+        return {"total_msats": 0}
+
+    fake_session = MagicMock()
+    fake_session.get = AsyncMock(return_value=key)
+
+    class FakeSessionCtx:
+        async def __aenter__(self) -> Any:
+            return fake_session
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(return_value=empty_reply()),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(side_effect=fake_adjust),
+        ),
+        patch(
+            "routstr.upstream.base.create_session",
+            new=lambda: FakeSessionCtx(),
+        ),
+    ):
+        result = await provider._forward_messages_via_litellm(
+            request_body=_anthropic_request_body(stream=True),
+            key=key,
+            session=_make_session(),
+            max_cost_for_model=10_000,
+            model_obj=_make_model(),
+        )
+        assert isinstance(result, StreamingResponse)
+        with pytest.raises(RuntimeError) if fails else contextlib.nullcontext():
+            async for _ in result.body_iterator:
+                pass
+
+    assert [data["usage"] for data in settled] == [None]
 
 
 @pytest.mark.asyncio

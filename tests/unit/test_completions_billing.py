@@ -116,11 +116,13 @@ async def _forward(
     path: str,
     body: dict,
     upstream: httpx.Response,
+    native_messages: bool = False,
 ) -> tuple[bytes, ReservationSnapshot, AsyncMock]:
     """Reserve, forward through the real ``forward_request`` and settle."""
     provider = BaseUpstreamProvider(
         base_url="http://upstream", api_key="k", provider_fee=1.0
     )
+    provider.supports_anthropic_messages = native_messages
     request = MagicMock()
     request.method = "POST"
     request.query_params = {}
@@ -144,7 +146,12 @@ async def _forward(
                 auth_module.adjust_payment_for_tokens,
             ),
         ):
-            response = await provider.forward_request(
+            forward = (
+                provider.forward_responses_request
+                if path.endswith("responses")
+                else provider.forward_request
+            )
+            response = await forward(
                 request,
                 path,
                 {},
@@ -324,6 +331,135 @@ async def test_chat_completion_aliases_are_charged(path: str) -> None:
         "charged",
     )
     assert json.loads(out)["usage"]["cost"]["total_msats"] == EXPECTED_MSATS
+    await engine.dispose()
+
+
+ERROR_BODY = {"error": {"message": "Provider returned error"}}
+FAILED_RESPONSE = {
+    "id": "resp_1",
+    "object": "response",
+    "status": "failed",
+    "error": {"code": "server_error", "message": "Provider returned error"},
+    "output": [],
+}
+ANTHROPIC_ERROR = {
+    "type": "error",
+    "error": {"type": "overloaded_error", "message": "Overloaded"},
+}
+MESSAGES_BODY = {
+    "model": MODEL.id,
+    "max_tokens": 100,
+    "messages": [{"role": "user", "content": "hi"}],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "body", "stream", "content", "content_type"),
+    [
+        (
+            "v1/chat/completions",
+            CHAT_BODY,
+            False,
+            json.dumps(ERROR_BODY).encode(),
+            "application/json",
+        ),
+        (
+            "v1/chat/completions",
+            CHAT_BODY,
+            True,
+            _sse(
+                [
+                    {
+                        "id": "gen-1",
+                        "object": "chat.completion.chunk",
+                        "model": MODEL.id,
+                        "error": {"code": 502, "message": "Provider returned error"},
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": ""},
+                                "finish_reason": "error",
+                            }
+                        ],
+                    }
+                ]
+            ),
+            "text/event-stream",
+        ),
+        (
+            "v1/chat/completions",
+            CHAT_BODY,
+            False,
+            json.dumps(
+                {
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion",
+                    "model": MODEL.id,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": None},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": None,
+                }
+            ).encode(),
+            "application/json",
+        ),
+        (
+            "v1/responses",
+            {"model": MODEL.id, "input": "hi"},
+            False,
+            json.dumps(FAILED_RESPONSE).encode(),
+            "application/json",
+        ),
+        (
+            "v1/responses",
+            {"model": MODEL.id, "input": "hi"},
+            False,
+            json.dumps({**FAILED_RESPONSE, "usage": None}).encode(),
+            "application/json",
+        ),
+        (
+            "v1/responses",
+            {"model": MODEL.id, "input": "hi"},
+            True,
+            _sse([{"type": "response.failed", "response": FAILED_RESPONSE}]),
+            "text/event-stream",
+        ),
+        (
+            "v1/messages",
+            MESSAGES_BODY,
+            False,
+            json.dumps(ANTHROPIC_ERROR).encode(),
+            "application/json",
+        ),
+        (
+            "v1/messages",
+            MESSAGES_BODY,
+            True,
+            b"event: error\ndata: " + json.dumps(ANTHROPIC_ERROR).encode() + b"\n\n",
+            "text/event-stream",
+        ),
+    ],
+)
+async def test_reply_with_no_output_and_no_usage_is_free(
+    path: str, body: dict, stream: bool, content: bytes, content_type: str
+) -> None:
+    """Nothing generated and no usage reported: no charge, as with X-Cashu."""
+    engine = await _engine()
+    _, snapshot, _ = await _forward(
+        engine,
+        path,
+        {**body, "stream": stream},
+        _upstream(content, content_type),
+        native_messages=path.endswith("messages"),
+    )
+
+    balance, spent, reserved, _ = await _ledger(engine, snapshot)
+    assert (balance, spent, reserved) == (BALANCE, 0, 0)
     await engine.dispose()
 
 
