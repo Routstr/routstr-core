@@ -550,6 +550,27 @@ async def test_shutdown_drains_detached_settlement_before_writer_stop(
 
 
 @pytest.mark.asyncio
+async def test_shutdown_drains_settlement_when_collector_never_started(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from routstr.upstream.stream_ownership import PersistentStreamFinalizer
+
+    async def failed_start() -> bool:
+        return False
+
+    monkeypatch.setattr(runtime, "start_terminal_outcome_writer", failed_start)
+    await node.coordinator.prepare_startup()
+    settled = asyncio.Event()
+
+    async def settle() -> None:
+        settled.set()
+
+    PersistentStreamFinalizer(settle)
+    await node.coordinator.close(serving_stopped=True)
+    assert settled.is_set()
+
+
+@pytest.mark.asyncio
 async def test_incomplete_settlement_is_not_closed_as_clean(node: Any) -> None:
     from routstr.core.db import TerminalOutcomeWriterRun
     from routstr.upstream.stream_ownership import PersistentStreamFinalizer

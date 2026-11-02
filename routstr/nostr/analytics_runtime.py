@@ -242,15 +242,14 @@ class AnalyticsCoordinator:
         try:
             await self._stop_public(disable=False)
         finally:
-            if self._writer_started:
-                requests_drained = await drain_request_work()
-                settlement_drained = (
-                    await drain_stream_finalizers() and requests_drained
+            # Billing settles even when the collector never started.
+            requests_drained = await drain_request_work()
+            settlement_drained = await drain_stream_finalizers() and requests_drained
+            if not settlement_drained:
+                terminal_outcome_writer.declare_loss(
+                    "stream settlement did not drain before shutdown"
                 )
-                if not settlement_drained:
-                    terminal_outcome_writer.declare_loss(
-                        "stream settlement did not drain before shutdown"
-                    )
+            if self._writer_started:
                 await stop_terminal_outcome_writer(allow_clean=settlement_drained)
                 self._writer_started = False
 
