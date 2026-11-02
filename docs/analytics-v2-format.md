@@ -18,6 +18,8 @@ Another collector or a startup can fence a writer whose heartbeat lease expired.
 
 The existing "Share analytics to Nostr" switch controls public reports through `ENABLE_ANALYTICS_SHARING`. Its existing default remains `true`; an explicitly saved `false` remains off after upgrading or restarting. There is no separate format opt-in.
 
+Upgrade disclosure: legacy sharing already published named-model request counts, revenue and combined token totals. V2 can name models previously folded into `others`, publishes per-model input/output/cache composition, and retains daily partitions where the legacy one-year window used weekly buckets. Recent legacy hourly buckets were finer than V2 daily buckets. Existing sharing consent is reused; changing the default alone would not change a saved `true`. Operators who do not want this disclosure should disable sharing before upgrading.
+
 Local collection starts automatically for the private dashboard and continues when public sharing is off. An upgraded node uses completed-day reports whenever its existing sharing setting is on. New coverage begins with the next full UTC day, so private history from before activation is not published. The runtime no longer starts the legacy publisher; consumers can still read legacy reports already on relays.
 
 A provider's signing identity must remain stable, and an identity change creates a new publication transition. Turning sharing off stops pending delivery but cannot retract reports already published.
@@ -76,3 +78,25 @@ Rejected outcomes also leave crash-durable **loss evidence**, not a copy of the 
 This update does **not automatically widen historical epochs** already closed by older builds. Their rows do not retain enough identity/opt-in provenance to distinguish collector gaps from private intervals. Back up the database and establish eligibility from retained operator evidence before repair; never lower the public floor just to recover old rows. A proven eligible gap can extend a predecessor forward without overlapping its successor; already attempted frames must be corrected, never edited. Backward changes to an attempted coordinate's `coverage_start` are forbidden. Consumers must resolve corrections as replacements and must not interpret included days as lossless collection. External consumer compatibility must be checked before deployment.
 
 The shared signed example is `tests/fixtures/analytics-v2/daily-models-signed.json`. It includes a paid model with both cache components, a free model, an unknown model, and actual zero-use days. Its three completions contain 190 recorded tokens and 3,250 msat of revenue.
+
+
+## Private admin analytics API compatibility
+
+The dashboard combines **recorded terminal outcomes** with separately labelled **log diagnostics**. These are different populations: logs can rotate, and some recorded settlements do not have corresponding success logs. Never calculate a success rate by dividing ledger outcomes by logged requests. `successful_chat_completions` (and model-row `successful`) are retained API names for all recorded outcomes, including interrupted streams, image requests, zero-charge requests and unknown settlement outcomes; the UI labels them **Recorded Outcomes**. `unknown_outcome_requests` counts rows whose pricing source is `unknown`, not rows with an unknown model. It is included in summaries, metric buckets/totals and model rows without changing existing revenue or token denominators.
+
+Each `summary`, `metrics`, and `revenue_by_model` object carries additive metadata, including when returned by its standalone endpoint:
+
+- `field_provenance` maps data-field names to `terminal_outcomes`, `logs`, or `unavailable`. In metrics it describes bucket/totals measures; in revenue-by-model it describes model-row measures and totals. In particular, model `requests`, `failed` and `refunds_sats` are log diagnostics, while `successful`, revenue and average revenue come from the ledger.
+- `request_count_semantics` is `recorded_outcomes_including_unknown_settlements`.
+- `revenue_semantics` is `recorded_gross_retained_lower_bound_for_unknown_settlements`. Unknown settlements contribute only ecash known to be retained, not guaranteed final revenue.
+- `deprecated_fields` maps legacy aliases to their replacement fields. Summary `net_revenue_msats`/`net_revenue_sats`, and model `net_revenue_sats`, are deprecated aliases of `revenue_msats`/`revenue_sats`. **They no longer mean legacy log revenue minus reverted holds.** Clients must migrate to the named revenue fields and check their semantics. Do not subtract reverted authorization holds from recorded retained revenue to reconstruct a net figure.
+
+Explicit calendar ranges are UTC day selections. Arbitrary historical log diagnostics are not available; `ledger_coverage.diagnostic_available` is false and log-field provenance is `unavailable`. Their legacy zero placeholders are not observed zero activity. These requests bypass legacy indexing/aggregation entirely. Rolling presets continue to include log diagnostics.
+
+Error-detail objects retain the legacy offset-free, server-local `timestamp` for compatibility and add ISO-8601 `timestamp_utc` (with `Z`, or null for an invalid timestamp). The UI uses the UTC companion to align errors with charts and explicitly marks older-server fallback values as server local. Existing local log stamps have no offset: a duplicated DST hour cannot be disambiguated retrospectively and retains the existing first-occurrence interpretation. This release does not rewrite stored logs or change their schema.
+
+## Control-loop and identity safety
+
+The coordinator continues to refresh the database sharing fence and settings every second, so cross-worker opt-outs and identity rotations retain their existing responsiveness. Unchanged encrypted identities reuse decrypted/derived key material; ciphertext or identity-state changes invalidate that cache. Settings refresh validates values before mutating live fields, and settings saves bound compare-and-swap attempts; repeated conflicts return HTTP 409 and require retrying the save.
+
+Identity discovery distinguishes complete, truncated and failed relay reads. Only a matching end-of-stored-events response establishes a complete page. A full page remains conservatively truncated: deduplicating its visible provider coordinates cannot rule out another coordinate outside the page. Failed or truncated history cannot establish an unambiguous public identity; configure an explicit `PROVIDER_ID` when full history cannot be read. Listing and report validators consistently reject control and surrogate characters.

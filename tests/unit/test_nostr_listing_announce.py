@@ -33,10 +33,8 @@ def _quiet_settings(monkeypatch: Any, nsec: str = "") -> None:
 def _capture_publishes(monkeypatch: Any) -> list[dict[str, Any]]:
     published: list[dict[str, Any]] = []
 
-    async def fake_query(
-        *args: Any, **kwargs: Any
-    ) -> tuple[list[dict[str, Any]], bool]:
-        return [], True
+    async def fake_query(*args: Any, **kwargs: Any) -> listing.EventQueryResult:
+        return listing.EventQueryResult([], listing.QueryStatus.COMPLETE)
 
     async def fake_publish(
         relay_url: str, event: dict[str, Any], timeout: int = 30

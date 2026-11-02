@@ -687,3 +687,167 @@ async def test_request_cleanup_outliving_asgi_prevents_clean_stop(
     finally:
         release.set()
         await asyncio.gather(*pending)
+
+
+async def test_unchanged_encrypted_identity_caches_crypto_but_refreshes_settings(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from routstr.core.db import NsecState
+
+    calls = {"decrypt": 0, "derive": 0, "parse": 0}
+    for name, counter in (
+        ("decrypt", "decrypt"),
+        ("derive_npub_from_nsec", "derive"),
+        ("nsec_to_keypair", "parse"),
+    ):
+        original = getattr(runtime, name)
+
+        def counted(
+            value: Any, _original: Any = original, _counter: str = counter
+        ) -> Any:
+            calls[_counter] += 1
+            return _original(value)
+
+        monkeypatch.setattr(runtime, name, counted)
+    async with node.sessions() as session:
+        session.add(
+            Secret(
+                id=1,
+                nsec_state=NsecState.encrypted,
+                encrypted_nsec=vault.encrypt("11" * 32),
+            )
+        )
+        await session.commit()
+    monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
+    await node.coordinator.prepare_startup()
+    await node.coordinator.sync_once()
+    await node.coordinator.sync_once()
+    assert calls == {"decrypt": 1, "derive": 1, "parse": 1}
+
+    # A stale local edit cannot override unchanged authoritative ciphertext.
+    monkeypatch.setattr(runtime.settings, "nsec", "22" * 32)
+    await node.coordinator.sync_once()
+    assert runtime.settings.nsec == "11" * 32
+    assert calls == {"decrypt": 1, "derive": 1, "parse": 1}
+
+    async with node.sessions() as session:
+        await session.execute(
+            text("INSERT INTO settings (id, data) VALUES (1, :data)"),
+            {"data": json.dumps({"enable_analytics_sharing": False})},
+        )
+        await session.commit()
+    await node.coordinator.sync_once()
+    assert node.coordinator._task is None
+    assert not (
+        await runtime.get_analytics_v2_delivery_state(node.sessions)
+    ).sharing_enabled
+    assert calls == {"decrypt": 1, "derive": 1, "parse": 1}
+
+
+async def test_identity_cache_rotation_clear_and_decrypt_error_recovery(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cryptography.fernet import InvalidToken
+
+    from routstr.core.db import NsecState
+
+    async def save(state: NsecState, ciphertext: str | None) -> None:
+        async with node.sessions() as session:
+            secret = await session.get(Secret, 1)
+            if secret is None:
+                secret = Secret(id=1)
+            secret.nsec_state, secret.encrypted_nsec = state, ciphertext
+            session.add(secret)
+            await session.commit()
+
+    first, second = vault.encrypt("11" * 32), vault.encrypt("22" * 32)
+    await save(NsecState.encrypted, first)
+    await node.coordinator._read_state()
+    assert node.coordinator._signing_keypair() == runtime.nsec_to_keypair("11" * 32)
+    await save(NsecState.encrypted, "fernet:v1:broken")
+    for _ in range(2):
+        with pytest.raises(InvalidToken):
+            await node.coordinator._read_state()
+    # Failed reads must not poison the cache or mark the new ciphertext handled.
+    await save(NsecState.encrypted, second)
+    await node.coordinator._read_state()
+    assert runtime.settings.nsec == "22" * 32
+    assert node.coordinator._signing_keypair() == runtime.nsec_to_keypair("22" * 32)
+    await save(NsecState.cleared, None)
+    await node.coordinator._read_state()
+    assert runtime.settings.nsec == runtime.settings.npub == ""
+    assert node.coordinator._signing_keypair() is None
+    await save(NsecState.encrypted, first)
+    await node.coordinator._read_state()
+    assert runtime.settings.nsec == "11" * 32
+    # Legacy/no-row ownership releases the vault cache, allowing live identity changes.
+    await save(NsecState.legacy, None)
+    monkeypatch.setattr(runtime.settings, "nsec", "22" * 32)
+    await node.coordinator._read_state()
+    assert node.coordinator._signing_keypair() == runtime.nsec_to_keypair("22" * 32)
+    await node.coordinator.close(serving_stopped=True)
+    assert node.coordinator._secret_identity is None
+    assert node.coordinator._keypair is None
+
+
+async def test_identity_cache_retries_derivation_and_keypair_exceptions(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from routstr.core.db import NsecState
+
+    async with node.sessions() as session:
+        session.add(
+            Secret(
+                id=1,
+                nsec_state=NsecState.encrypted,
+                encrypted_nsec=vault.encrypt("11" * 32),
+            )
+        )
+        await session.commit()
+    original_derive = runtime.derive_npub_from_nsec
+    with monkeypatch.context() as patch:
+
+        def failed(value: str) -> str:
+            raise RuntimeError("derive failed")
+
+        patch.setattr(runtime, "derive_npub_from_nsec", failed)
+        with pytest.raises(RuntimeError, match="derive failed"):
+            await node.coordinator._read_state()
+        assert node.coordinator._secret_snapshot is None
+    await node.coordinator._read_state()
+    assert runtime.settings.npub == original_derive("11" * 32)
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "nsec_to_keypair", failed)
+        with pytest.raises(RuntimeError, match="derive failed"):
+            node.coordinator._signing_keypair()
+        assert node.coordinator._keypair_nsec is None
+    assert node.coordinator._signing_keypair() == runtime.nsec_to_keypair("11" * 32)
+
+
+async def test_identity_cache_rejects_missing_ciphertext_and_reloads_after_row_removal(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from routstr.core.db import NsecState
+
+    async with node.sessions() as session:
+        session.add(Secret(id=1, nsec_state=NsecState.encrypted))
+        await session.commit()
+    with pytest.raises(RuntimeError, match="no ciphertext"):
+        await node.coordinator._read_state()
+    assert node.coordinator._secret_snapshot is None
+    async with node.sessions() as session:
+        secret = await session.get(Secret, 1)
+        assert secret is not None
+        secret.encrypted_nsec = vault.encrypt("11" * 32)
+        session.add(secret)
+        await session.commit()
+    await node.coordinator._read_state()
+    assert node.coordinator._signing_keypair() == runtime.nsec_to_keypair("11" * 32)
+    async with node.sessions() as session:
+        await session.execute(text("DELETE FROM secrets WHERE id = 1"))
+        await session.commit()
+    monkeypatch.setattr(runtime.settings, "nsec", "22" * 32)
+    await node.coordinator._read_state()
+    assert node.coordinator._secret_snapshot is None
+    assert node.coordinator._secret_identity is None
+    assert node.coordinator._signing_keypair() == runtime.nsec_to_keypair("22" * 32)

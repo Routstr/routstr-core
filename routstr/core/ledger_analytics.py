@@ -24,6 +24,7 @@ _SETTLED_FIELDS = (
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
     "total_tokens",
+    "unknown_outcome_requests",
 )
 _DIAGNOSTIC_FIELDS = (
     "total_requests",
@@ -60,6 +61,12 @@ def _measures() -> list[Any]:
         func.sum(input_tokens + col(TerminalOutcome.output_tokens)).label(
             "total_tokens"
         ),
+        func.sum(
+            case(
+                (col(TerminalOutcome.pricing_source) == UNKNOWN_PRICING_SOURCE, 1),
+                else_=0,
+            )
+        ).label("unknown_outcome_requests"),
     ]
 
 
@@ -133,7 +140,9 @@ async def get_ledger_usage_dashboard(
         < min(end_ms, int(clock.timestamp() * 1000)),
     )
     measures = _measures()
-    total_tokens = measures[-1]
+    total_tokens = next(
+        measure for measure in measures if measure.name == "total_tokens"
+    )
     provenance = []
     sources = {}
     for dimension in _DIMENSIONS:
@@ -315,6 +324,7 @@ async def get_ledger_usage_dashboard(
             "refunds_sats",
             "success_rate",
             "refund_rate",
+            "avg_latency_ms",
         ):
             summary[name] = 0
         summary["error_types"] = {}
@@ -423,6 +433,7 @@ async def get_ledger_usage_dashboard(
                 "refunds_sats": previous.get("refunds_sats", 0),
                 "requests": previous.get("requests", 0),
                 "successful": count,
+                "unknown_outcome_requests": int(row.unknown_outcome_requests or 0),
                 "failed": previous.get("failed", 0),
                 "avg_revenue_per_request": sats / count if count else 0,
             }
@@ -577,4 +588,72 @@ async def get_ledger_usage_dashboard(
             total_buckets=len(stamps),
             bucket_fill_complete=fill_complete,
         )
+    # Each section carries its own metadata because standalone endpoints return
+    # only that section. Never combine log and ledger counts into success ratios.
+    ledger_source = "terminal_outcomes"
+    log_source = "logs" if diagnostic_available else "unavailable"
+    summary_ledger_fields = (
+        *_SETTLED_FIELDS,
+        "unique_models_count",
+        "unique_models",
+        "unique_models_truncated",
+        "revenue_sats",
+        "net_revenue_msats",
+        "net_revenue_sats",
+        "avg_input_tokens_per_completion",
+        "avg_output_tokens_per_completion",
+        "avg_total_tokens_per_completion",
+        "measured_token_requests",
+        "measured_tokens",
+        "avg_measured_tokens_per_completion",
+        "avg_revenue_per_request_msats",
+    )
+    summary_log_fields = (
+        *_DIAGNOSTIC_FIELDS,
+        "total_entries",
+        "total_errors",
+        "total_warnings",
+        "refunds_sats",
+        "success_rate",
+        "refund_rate",
+        "avg_latency_ms",
+        "error_types",
+    )
+    summary["field_provenance"] = {
+        **{name: ledger_source for name in summary_ledger_fields},
+        **{name: log_source for name in summary_log_fields if name in summary},
+    }
+    # In metrics this describes fields of both bucket rows and totals, not
+    # envelope fields such as hours_back or bucket_fill_complete.
+    result["metrics"]["field_provenance"] = {
+        **{name: ledger_source for name in _SETTLED_FIELDS},
+        **{name: log_source for name in _DIAGNOSTIC_FIELDS},
+    }
+    result["revenue_by_model"]["field_provenance"] = {
+        "model": ledger_source,
+        "revenue_sats": ledger_source,
+        "net_revenue_sats": ledger_source,
+        "successful": ledger_source,
+        "unknown_outcome_requests": ledger_source,
+        "avg_revenue_per_request": ledger_source,
+        "requests": log_source,
+        "failed": log_source,
+        "refunds_sats": log_source,
+        "total_revenue_sats": ledger_source,
+        "total_models": ledger_source,
+    }
+    for section in ("summary", "metrics", "revenue_by_model"):
+        result[section]["request_count_semantics"] = (
+            "recorded_outcomes_including_unknown_settlements"
+        )
+        result[section]["revenue_semantics"] = (
+            "recorded_gross_retained_lower_bound_for_unknown_settlements"
+        )
+    summary["deprecated_fields"] = {
+        "net_revenue_msats": "revenue_msats",
+        "net_revenue_sats": "revenue_sats",
+    }
+    result["revenue_by_model"]["deprecated_fields"] = {
+        "net_revenue_sats": "revenue_sats"
+    }
     return result
