@@ -150,7 +150,9 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         try:
             await prepare_analytics()
         except Exception:
-            logger.exception("Stats collection could not start; requests remain available")
+            logger.exception(
+                "Stats collection could not start; requests remain available"
+            )
 
         # Apply app metadata from settings
         try:
@@ -329,7 +331,9 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                     "Error closing upstream HTTP connection pools",
                     extra={"error": str(e), "error_type": type(e).__name__},
                 )
-        await shutdown_analytics()
+        # ASGI lifespan shutdown follows request draining. Background tasks
+        # have also stopped; only now may collection close its clean run.
+        await shutdown_analytics(serving_stopped=True)
 
 
 class _ImmutableStaticFiles(StaticFiles):

@@ -703,7 +703,9 @@ export default function DashboardPage() {
         id: 'requests',
         title: 'Request Volume',
         mobileTitle: 'Requests',
-        description: 'Understand traffic and completion reliability over time.',
+        description: ledgerMode
+          ? 'Logged requests and failures are diagnostics; recorded outcomes come from the ledger. These populations may differ and do not form a success-rate breakdown.'
+          : 'Understand traffic and completion reliability over time.',
         data: metricPoints,
         metricType: 'count',
         totals: metricsTotals
@@ -717,17 +719,17 @@ export default function DashboardPage() {
         dataKeys: [
           {
             key: 'total_requests',
-            name: 'Total Requests',
+            name: ledgerMode ? 'Logged Requests' : 'Total Requests',
             color: 'var(--chart-1)',
           },
           {
             key: 'successful_chat_completions',
-            name: 'Successful',
+            name: ledgerMode ? 'Recorded Outcomes' : 'Successful',
             color: 'var(--chart-2)',
           },
           {
             key: 'failed_requests',
-            name: 'Failed',
+            name: ledgerMode ? 'Logged Failures' : 'Failed',
             color: 'var(--chart-5)',
           },
         ],
@@ -828,6 +830,7 @@ export default function DashboardPage() {
     revenueDisplayUnit,
     usdPerSat,
     diagnosticsAvailable,
+    ledgerMode,
   ]);
 
   useEffect(() => {
@@ -979,8 +982,15 @@ export default function DashboardPage() {
             </div>
             <p className='text-muted-foreground text-xs sm:text-sm'>
               All cards and charts in this section update from the selected
-              range.
+              range. Chart times and calendar dates are UTC.
             </p>
+            {ledgerMode && !diagnosticsAvailable && (
+              <p className='text-muted-foreground text-xs sm:text-sm'>
+                Logged request, failure, latency, and error diagnostics are
+                unavailable for calendar ranges. Choose a preset range to view
+                them. Ledger outcomes, tokens, and revenue remain available.
+              </p>
+            )}
             {isUsageRangeCapped ? (
               <p className='text-muted-foreground text-[11px] sm:text-xs'>
                 Usage analytics are capped to the last{' '}
@@ -1009,7 +1019,7 @@ export default function DashboardPage() {
                       id='dashboard-date-range'
                       disabled={!ledgerMode}
                       className='text-muted-foreground hover:bg-muted/50 hover:text-foreground dark:hover:bg-input/50 h-full w-8 rounded-none border-0 bg-transparent p-0 sm:w-9'
-                      aria-label='Open custom date range'
+                      aria-label='Open custom UTC date range'
                     >
                       <CalendarIcon className='h-3.5 w-3.5' />
                     </Button>
@@ -1018,6 +1028,9 @@ export default function DashboardPage() {
                     align='start'
                     className='w-auto overflow-hidden p-0'
                   >
+                    <p className='text-muted-foreground px-3 pt-3 text-xs'>
+                      Select UTC calendar days. The current UTC day is partial.
+                    </p>
                     <Calendar
                       mode='range'
                       disabled={{ after: latestCalendarDay }}
@@ -1116,6 +1129,7 @@ export default function DashboardPage() {
           {!metricsLoading && modelUsageMixData && hasModelUsageMixMetrics ? (
             <TopModelsUsageChart
               mix={modelUsageMixData}
+              ledgerMode={ledgerMode}
               completeCoverage={ledgerCoverage?.complete}
               displayUnit={displayUnit}
               usdPerSat={usdPerSat}

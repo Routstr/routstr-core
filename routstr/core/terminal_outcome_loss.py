@@ -41,7 +41,9 @@ class LossJournal:
         path.mkdir(mode=0o700, exist_ok=True)
         self._sync_directory(path.parent)
 
-    def record(self, lost_day: date, detected_at_ms: int) -> None:
+    def record(
+        self, lost_day: date, detected_at_ms: int, reason: str | None = None
+    ) -> None:
         directory = self.directory
         self._mkdir(directory)
         marker_id = uuid.uuid4().hex
@@ -54,6 +56,7 @@ class LossJournal:
                     {
                         "loss_day": lost_day.isoformat(),
                         "detected_at_ms": detected_at_ms,
+                        "loss_reason": reason,
                     },
                     output,
                 )
@@ -91,6 +94,8 @@ class LossJournal:
                             run_id=run_id,
                             status="recovered",
                             loss_day=day,
+                            # Markers written before reasons were stored have none.
+                            loss_reason=evidence.get("loss_reason"),
                             started_at_ms=detected,
                             heartbeat_at_ms=detected,
                             closed_at_ms=max(now, detected),

@@ -72,10 +72,22 @@ export function UsageSummaryCards({
       iconClassName: 'text-blue-600 dark:text-blue-300',
     },
     {
-      title: 'Successful Completions',
+      title: ledgerMode ? 'Recorded Outcomes' : 'Successful Completions',
+      description: ledgerMode
+        ? 'Ledger records include interrupted streams and unknown settlements; they do not confirm successful response delivery.'
+        : undefined,
       value: summary.successful_chat_completions.toLocaleString(),
-      icon: CheckCircle2,
+      icon: ledgerMode ? Activity : CheckCircle2,
       iconClassName: 'text-emerald-600 dark:text-emerald-300',
+    },
+    {
+      title: 'Unknown Settlements',
+      hidden: !ledgerMode || summary.unknown_outcome_requests == null,
+      description:
+        'Settlement is uncertain, not necessarily failed. Included revenue is only retained ecash known to the node—a lower bound.',
+      value: (summary.unknown_outcome_requests ?? 0).toLocaleString(),
+      icon: AlertTriangle,
+      iconClassName: 'text-amber-600 dark:text-amber-300',
     },
     {
       title: 'Total Tokens',
@@ -113,7 +125,7 @@ export function UsageSummaryCards({
       iconClassName: 'text-rose-600 dark:text-rose-300',
     },
     {
-      title: ledgerMode ? 'Avg Revenue/Completion' : 'Avg Revenue/Request',
+      title: ledgerMode ? 'Avg Revenue/Outcome' : 'Avg Revenue/Request',
       value: formatAmount(summary.avg_revenue_per_request_msats),
       icon: CreditCard,
       iconClassName: 'text-violet-600 dark:text-violet-300',
@@ -126,21 +138,21 @@ export function UsageSummaryCards({
       iconClassName: 'text-teal-600 dark:text-teal-300',
     },
     {
-      title: 'Refund Rate',
+      title: ledgerMode ? 'Logged Refund Rate' : 'Refund Rate',
       diagnostic: true,
       value: `${summary.refund_rate.toFixed(1)}%`,
       icon: XCircle,
       iconClassName: 'text-fuchsia-600 dark:text-fuchsia-300',
     },
     {
-      title: 'Failed Requests',
+      title: ledgerMode ? 'Logged Failures' : 'Failed Requests',
       diagnostic: true,
       value: summary.failed_requests.toLocaleString(),
       icon: XCircle,
       iconClassName: 'text-red-600 dark:text-red-300',
     },
     {
-      title: 'Errors',
+      title: ledgerMode ? 'Logged Errors' : 'Errors',
       diagnostic: true,
       value: summary.total_errors.toLocaleString(),
       icon: AlertTriangle,
@@ -153,7 +165,7 @@ export function UsageSummaryCards({
       iconClassName: 'text-cyan-600 dark:text-cyan-300',
     },
     {
-      title: 'Upstream Errors',
+      title: ledgerMode ? 'Logged Upstream Errors' : 'Upstream Errors',
       diagnostic: true,
       value: summary.upstream_errors.toLocaleString(),
       icon: AlertTriangle,
@@ -184,6 +196,11 @@ export function UsageSummaryCards({
             <div className='text-base font-semibold break-words tabular-nums sm:text-2xl'>
               {card.value}
             </div>
+            {card.description && (
+              <p className='text-muted-foreground mt-1 text-xs'>
+                {card.description}
+              </p>
+            )}
           </CardContent>
         </Card>
       ))}

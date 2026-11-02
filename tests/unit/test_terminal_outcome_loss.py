@@ -51,7 +51,8 @@ os._exit(0)
     markers = list(directory.glob("*.json"))
     assert len(markers) == 1
     evidence = json.loads(markers[0].read_text())
-    assert set(evidence) == {"loss_day", "detected_at_ms"}
+    assert set(evidence) == {"loss_day", "detected_at_ms", "loss_reason"}
+    assert evidence["loss_reason"] == "outcome_dropped"
     assert "never-log-this" not in markers[0].read_text()
     sessions = async_sessionmaker(
         analytics_engine, class_=AsyncSession, expire_on_commit=False
@@ -66,7 +67,25 @@ os._exit(0)
         runs = (await session.exec(select(TerminalOutcomeWriterRun))).all()
     assert len(runs) == 1 and runs[0].status == "recovered"
     assert runs[0].loss_day == date(2026, 9, 1)
+    assert runs[0].loss_reason == "outcome_dropped"
     assert not list(directory.glob("*.json"))
+
+
+@pytest.mark.asyncio
+async def test_marker_written_before_loss_reasons_replays_without_one(
+    analytics_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / f"{'a' * 32}.json"
+    marker.write_text(json.dumps({"loss_day": "2026-09-01", "detected_at_ms": 1000}))
+    sessions = async_sessionmaker(
+        analytics_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    await LossJournal(tmp_path).replay(sessions, 2000)
+    async with sessions() as session:
+        run = (await session.exec(select(TerminalOutcomeWriterRun))).one()
+    assert run.loss_day == date(2026, 9, 1)
+    assert run.loss_reason is None
 
 
 @pytest.mark.asyncio

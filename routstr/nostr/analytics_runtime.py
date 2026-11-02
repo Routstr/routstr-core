@@ -5,6 +5,7 @@ import time
 from datetime import UTC, datetime
 
 from ..core.db import NsecState, Secret, create_session
+from ..core.lifecycle import drain_request_work
 from ..core.logging import get_logger
 from ..core.settings import SettingsService, derive_npub_from_nsec, settings
 from ..core.terminal_outcomes import (
@@ -13,6 +14,7 @@ from ..core.terminal_outcomes import (
     terminal_outcome_writer,
 )
 from ..core.vault import decrypt
+from ..upstream.stream_ownership import drain_stream_finalizers
 from .analytics_v2_delivery import (
     AnalyticsV2Delivery,
     AnalyticsV2DeliveryError,
@@ -31,25 +33,6 @@ from .listing import DEFAULT_RELAY_URLS, nsec_to_keypair, resolve_provider_id_st
 logger = get_logger(__name__)
 
 
-async def _read_state() -> DeliveryStateSnapshot:
-    # Read the fence before the setting so a later opt-out refuses activation.
-    state = await get_analytics_v2_delivery_state(create_session)
-    async with create_session() as session:
-        await SettingsService.refresh(
-            session, ("enable_analytics_sharing", "relays", "provider_id")
-        )
-        secret = await session.get(Secret, 1)
-        if secret is not None and secret.nsec_state != NsecState.legacy:
-            if secret.nsec_state == NsecState.encrypted:
-                if secret.encrypted_nsec is None:
-                    raise RuntimeError("Encrypted Nostr identity has no ciphertext")
-                settings.nsec = decrypt(secret.encrypted_nsec)
-            else:
-                settings.nsec = ""
-            settings.npub = derive_npub_from_nsec(settings.nsec) or ""
-    return state
-
-
 class AnalyticsCoordinator:
     def __init__(self) -> None:
         self._task: asyncio.Task[None] | None = None
@@ -61,6 +44,50 @@ class AnalyticsCoordinator:
         self._writer_retry_at = 0.0
         self._paused_reason: str | None = None
         self._closed = False
+        self._secret_snapshot: tuple[NsecState, str | None] | None = None
+        self._secret_identity: tuple[str, str] | None = None
+        self._keypair_nsec: str | None = None
+        self._keypair: tuple[str, str] | None = None
+
+    async def _read_state(self) -> DeliveryStateSnapshot:
+        # Always refresh the fence and settings; caching crypto must not delay
+        # another worker's opt-out or identity rotation.
+        state = await get_analytics_v2_delivery_state(create_session)
+        async with create_session() as session:
+            await SettingsService.refresh(
+                session, ("enable_analytics_sharing", "relays", "provider_id")
+            )
+            secret = await session.get(Secret, 1)
+            if secret is None or secret.nsec_state == NsecState.legacy:
+                self._secret_snapshot = None
+                self._secret_identity = None
+            else:
+                snapshot = (secret.nsec_state, secret.encrypted_nsec)
+                if snapshot != self._secret_snapshot:
+                    if secret.nsec_state == NsecState.encrypted:
+                        if secret.encrypted_nsec is None:
+                            raise RuntimeError(
+                                "Encrypted Nostr identity has no ciphertext"
+                            )
+                        nsec = decrypt(secret.encrypted_nsec)
+                    else:
+                        nsec = ""
+                    npub = derive_npub_from_nsec(nsec) or ""
+                    # Never cache failed decryption/derivation attempts.
+                    self._secret_identity = (nsec, npub)
+                    self._secret_snapshot = snapshot
+                if self._secret_identity is not None:
+                    settings.nsec, settings.npub = self._secret_identity
+        return state
+
+    def _signing_keypair(self) -> tuple[str, str] | None:
+        if settings.nsec != self._keypair_nsec:
+            # Cache invalid/empty identities too, but only after parsing returns:
+            # exceptions remain retryable on the next coordinator pass.
+            keypair = nsec_to_keypair(settings.nsec) if settings.nsec else None
+            self._keypair = keypair
+            self._keypair_nsec = settings.nsec
+        return self._keypair
 
     async def prepare_startup(self) -> None:
         state = await get_analytics_v2_delivery_state(create_session)
@@ -83,13 +110,14 @@ class AnalyticsCoordinator:
                     delay = 10
                 await asyncio.sleep(delay)
         finally:
-            # Only lifespan shutdown may stop collection after requests drain.
+            # The coordinator owns publication, not collection's lifetime.
+            # Cancellation can happen while requests are still settling.
             await self._stop_public(disable=False)
 
     async def sync_once(self) -> None:
         if self._closed:
             return
-        state = await _read_state()
+        state = await self._read_state()
         wants_public = settings.enable_analytics_sharing
         if not wants_public:
             await self._stop_public(disable=state.sharing_enabled)
@@ -106,7 +134,7 @@ class AnalyticsCoordinator:
 
         if time.monotonic() < self._retry_at:
             return
-        keypair = nsec_to_keypair(settings.nsec) if settings.nsec else None
+        keypair = self._signing_keypair()
         if keypair is None:
             await self._stop_public(disable=state.sharing_enabled)
             return
@@ -117,7 +145,7 @@ class AnalyticsCoordinator:
         ):
             # Fence sibling senders before discovery/relay setup can fail.
             await self._stop_public(disable=state.sharing_enabled)
-            state = await _read_state()
+            state = await self._read_state()
         relays = tuple(dict.fromkeys(settings.relays or DEFAULT_RELAY_URLS))
         if (
             state.identity_pubkey == pubkey
@@ -137,7 +165,7 @@ class AnalyticsCoordinator:
         )
         if identity_changed:
             await self._stop_public(disable=state.sharing_enabled)
-            state = await _read_state()
+            state = await self._read_state()
         if (
             self._identity == identity
             and self._relays == relays
@@ -160,7 +188,7 @@ class AnalyticsCoordinator:
                 await rotate_analytics_v2_identity(
                     create_session, pubkey=pubkey, provider_d=provider_d
                 )
-                state = await _read_state()
+                state = await self._read_state()
                 if not settings.enable_analytics_sharing:
                     return
             else:
@@ -230,15 +258,28 @@ class AnalyticsCoordinator:
             self._identity = None
             self._relays = ()
 
-    async def close(self) -> None:
+    async def close(self, *, serving_stopped: bool = False) -> None:
+        if not serving_stopped:
+            raise RuntimeError("Stop serving and drain settlement before collection")
         if self._closed:
             return
         self._closed = True
         try:
             await self._stop_public(disable=False)
         finally:
+            self._secret_snapshot = None
+            self._secret_identity = None
+            self._keypair_nsec = None
+            self._keypair = None
+            # Billing settles even when the collector never started.
+            requests_drained = await drain_request_work()
+            settlement_drained = await drain_stream_finalizers() and requests_drained
+            if not settlement_drained:
+                terminal_outcome_writer.declare_loss(
+                    "stream settlement did not drain before shutdown"
+                )
             if self._writer_started:
-                await stop_terminal_outcome_writer()
+                await stop_terminal_outcome_writer(allow_clean=settlement_drained)
                 self._writer_started = False
 
 
@@ -260,8 +301,11 @@ async def run_analytics() -> None:
     await _get_coordinator().run()
 
 
-async def shutdown_analytics() -> None:
+async def shutdown_analytics(*, serving_stopped: bool = False) -> None:
+    if not serving_stopped:
+        raise RuntimeError("Analytics shutdown requires drained request settlement")
     global _coordinator
-    coordinator, _coordinator = _coordinator, None
+    coordinator = _coordinator
     if coordinator is not None:
-        await coordinator.close()
+        await coordinator.close(serving_stopped=serving_stopped)
+        _coordinator = None

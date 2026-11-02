@@ -1479,6 +1479,9 @@ class BaseUpstreamProvider:
                 async with create_session() as new_session:
                     fresh_key = await new_session.get(key.__class__, key.hashed_key)
                     if not fresh_key:
+                        mark_terminal_outcome_unknown(
+                            terminal_outcome, "stream fallback billing key missing"
+                        )
                         return
                     try:
                         await adjust_payment_for_tokens(
@@ -1494,6 +1497,9 @@ class BaseUpstreamProvider:
                         )
                         usage_finalized = True
                     except Exception:
+                        mark_terminal_outcome_unknown(
+                            terminal_outcome, "stream fallback settlement failed"
+                        )
                         logger.exception(
                             "Fallback stream billing finalization failed; releasing reservation",
                             extra={"key_hash": key.hashed_key[:8] + "..."},
@@ -1504,6 +1510,9 @@ class BaseUpstreamProvider:
                             )
                         )
             except Exception:
+                mark_terminal_outcome_unknown(
+                    terminal_outcome, "stream fallback database unavailable"
+                )
                 logger.exception(
                     "Fallback stream billing recovery could not access the database",
                     extra={"key_hash": key.hashed_key[:8] + "..."},
@@ -1977,6 +1986,9 @@ class BaseUpstreamProvider:
                 async with create_session() as new_session:
                     fresh_key = await new_session.get(key.__class__, key.hashed_key)
                     if not fresh_key:
+                        mark_terminal_outcome_unknown(
+                            terminal_outcome, "stream fallback billing key missing"
+                        )
                         return
                     try:
                         await adjust_payment_for_tokens(
@@ -1992,6 +2004,9 @@ class BaseUpstreamProvider:
                         )
                         usage_finalized = True
                     except Exception:
+                        mark_terminal_outcome_unknown(
+                            terminal_outcome, "stream fallback settlement failed"
+                        )
                         logger.exception(
                             "Fallback Responses billing finalization failed; releasing reservation",
                             extra={"key_hash": key.hashed_key[:8] + "..."},
@@ -2002,6 +2017,9 @@ class BaseUpstreamProvider:
                             )
                         )
             except Exception:
+                mark_terminal_outcome_unknown(
+                    terminal_outcome, "stream fallback database unavailable"
+                )
                 logger.exception(
                     "Fallback Responses billing recovery could not access the database",
                     extra={"key_hash": key.hashed_key[:8] + "..."},
@@ -2548,45 +2566,56 @@ class BaseUpstreamProvider:
         terminal_outcome: TerminalOutcomeContext | None = None,
     ) -> None:
         """Finalize payment for a generic streaming request."""
-        async with create_session() as session:
-            key = await session.get(ApiKey, key_hash)
-            if not key:
-                logger.warning(
-                    "Key not found during generic streaming payment finalization",
-                    extra={"key_hash": key_hash[:8] + "..."},
-                )
-                return
+        try:
+            async with create_session() as session:
+                key = await session.get(ApiKey, key_hash)
+                if not key:
+                    mark_terminal_outcome_unknown(
+                        terminal_outcome, "generic stream billing key missing"
+                    )
+                    logger.warning(
+                        "Key not found during generic streaming payment finalization",
+                        extra={"key_hash": key_hash[:8] + "..."},
+                    )
+                    return
 
-            try:
-                # Generic opaque streams have no request/response token seam.
-                # Missing usage therefore releases the reservation; the hold is
-                # never treated as evidence of consumption.
-                await adjust_payment_for_tokens(
-                    key,
-                    {"model": "unknown", "usage": None},
-                    session,
-                    max_cost,
-                    model_obj=model_obj,
-                    provider_fee=provider_fee,
-                    reservation_snapshot=reservation_snapshot,
-                    terminal_outcome=terminal_outcome,
-                )
-                logger.debug(
-                    "Finalized generic streaming payment",
-                    extra={
-                        "path": path,
-                        "key_hash": key_hash[:8] + "...",
-                    },
-                )
-            except Exception as e:
-                logger.error(
-                    "Error finalizing generic streaming payment",
-                    extra={
-                        "error": str(e),
-                        "key_hash": key_hash[:8] + "...",
-                        "path": path,
-                    },
-                )
+                try:
+                    # Generic opaque streams have no request/response token seam.
+                    # Missing usage therefore releases the reservation; the hold is
+                    # never treated as evidence of consumption.
+                    await adjust_payment_for_tokens(
+                        key,
+                        {"model": "unknown", "usage": None},
+                        session,
+                        max_cost,
+                        model_obj=model_obj,
+                        provider_fee=provider_fee,
+                        reservation_snapshot=reservation_snapshot,
+                        terminal_outcome=terminal_outcome,
+                    )
+                    logger.debug(
+                        "Finalized generic streaming payment",
+                        extra={
+                            "path": path,
+                            "key_hash": key_hash[:8] + "...",
+                        },
+                    )
+                except Exception as e:
+                    mark_terminal_outcome_unknown(
+                        terminal_outcome, "generic stream settlement failed"
+                    )
+                    logger.error(
+                        "Error finalizing generic streaming payment",
+                        extra={
+                            "error": str(e),
+                            "key_hash": key_hash[:8] + "...",
+                            "path": path,
+                        },
+                    )
+        except Exception:
+            mark_terminal_outcome_unknown(
+                terminal_outcome, "generic stream settlement incomplete"
+            )
 
     async def _stream_generic_with_settlement(
         self,
@@ -2702,6 +2731,9 @@ class BaseUpstreamProvider:
             async with create_session() as new_session:
                 fresh_key = await new_session.get(key.__class__, key.hashed_key)
                 if not fresh_key:
+                    mark_terminal_outcome_unknown(
+                        terminal_outcome, "Messages fallback billing key missing"
+                    )
                     usage_finalized = True
                     return None
                 try:
@@ -2720,6 +2752,9 @@ class BaseUpstreamProvider:
                     usage_finalized = True
                     return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
                 except BaseException as e:
+                    mark_terminal_outcome_unknown(
+                        terminal_outcome, "Messages fallback settlement failed"
+                    )
                     logger.critical(
                         "Error during Messages API usage finalization — CRITICAL",
                         extra={
@@ -2737,7 +2772,12 @@ class BaseUpstreamProvider:
 
         async def finalize_db_only() -> None:
             if not usage_finalized:
-                await finalize_without_usage()
+                try:
+                    await finalize_without_usage()
+                except Exception:
+                    mark_terminal_outcome_unknown(
+                        terminal_outcome, "Messages fallback settlement incomplete"
+                    )
 
         stream_finalizer = PersistentStreamFinalizer(
             lambda: finalize_and_close_stream(finalize_db_only, response)
@@ -3388,6 +3428,9 @@ class BaseUpstreamProvider:
             async with create_session() as new_session:
                 fresh_key = await new_session.get(key.__class__, key.hashed_key)
                 if not fresh_key:
+                    mark_terminal_outcome_unknown(
+                        terminal_outcome, "LiteLLM Messages billing key missing"
+                    )
                     usage_finalized = True
                     return None
                 try:
@@ -3407,6 +3450,9 @@ class BaseUpstreamProvider:
                         f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n"
                     ).encode()
                 except BaseException as e:
+                    mark_terminal_outcome_unknown(
+                        terminal_outcome, "LiteLLM Messages settlement failed"
+                    )
                     logger.critical(
                         "Error during LiteLLM Messages usage finalization — CRITICAL",
                         extra={
@@ -3426,6 +3472,10 @@ class BaseUpstreamProvider:
             try:
                 if not usage_finalized:
                     await finalize_without_usage()
+            except Exception:
+                mark_terminal_outcome_unknown(
+                    terminal_outcome, "LiteLLM Messages settlement incomplete"
+                )
             finally:
                 await aclose_if_needed(iterator)
 

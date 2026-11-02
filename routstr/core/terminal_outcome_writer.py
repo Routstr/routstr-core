@@ -10,6 +10,7 @@ from enum import Enum
 from pathlib import Path
 from typing import AsyncContextManager
 
+from sqlalchemy import func
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlmodel import col, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -126,6 +127,7 @@ class TerminalOutcomeWriter:
         self._stopping = False
         self._loss_pending = False
         self._loss_day: date | None = None
+        self._loss_reason: str | None = None
 
     @property
     def epoch(self) -> int:
@@ -148,11 +150,13 @@ class TerminalOutcomeWriter:
         if self.running:
             return True
         previous_loss_day = self._loss_day
+        previous_loss_reason = self._loss_reason
         self._enabled = True
         self._accepting = False
         self._stopping = False
         self._loss_pending = False
         self._loss_day = None
+        self._loss_reason = None
         self._journaled_loss_day = None
         self._queue = asyncio.Queue(maxsize=self._queue_size)
         self._idle = asyncio.Event()
@@ -163,7 +167,9 @@ class TerminalOutcomeWriter:
             await self._ensure_epoch(now)
             await self._loss_journal.replay(self._session_factory, now)
             if previous_loss_day is not None:
+                self._loss_reason = previous_loss_reason
                 await self._create_run(now, "degraded", lost_day=previous_loss_day)
+                self._loss_reason = None
                 await self._activate_run()
             else:
                 await self._create_run(now, "active")
@@ -171,6 +177,7 @@ class TerminalOutcomeWriter:
         except Exception:
             self._loss_pending = True
             self._loss_day = previous_loss_day or _utc_day_from_ms(self._now_ms())
+            self._loss_reason = previous_loss_reason
             self._clear_runtime()
             logger.critical("Terminal outcome writer could not start", exc_info=True)
             return False
@@ -178,7 +185,7 @@ class TerminalOutcomeWriter:
         self._task = self._new_task()
         return True
 
-    async def stop(self, *, timeout: float = 5.0) -> bool:
+    async def stop(self, *, timeout: float = 5.0, allow_clean: bool = True) -> bool:
         if not self._enabled:
             return not self._loss_pending
         self._stopping = True
@@ -205,15 +212,26 @@ class TerminalOutcomeWriter:
             except asyncio.CancelledError:
                 pass
         try:
-            clean = drained and not self._loss_pending and await self._close_run()
+            clean = (
+                allow_clean
+                and drained
+                and not self._loss_pending
+                and await self._close_run()
+            )
             if not clean:
                 lost_day = self._loss_day or _utc_day_from_ms(self._now_ms())
+                discarded = False
                 if self._queue is not None:
                     while not self._queue.empty():
                         pending = self._queue.get_nowait()
                         lost_day = min(lost_day, pending.terminal_day)
                         self._queue.task_done()
-                self.declare_loss("terminal outcome shutdown did not drain", lost_day)
+                        discarded = True
+                self.declare_loss(
+                    "terminal outcome shutdown did not drain",
+                    lost_day,
+                    dropped=discarded,
+                )
                 await self._mark_degraded(
                     self._loss_day or _utc_day_from_ms(self._now_ms())
                 )
@@ -240,13 +258,17 @@ class TerminalOutcomeWriter:
     def submit(self, outcome: _QueuedOutcome) -> bool:
         if not self._accepting or not self.running or self._queue is None:
             self.declare_loss(
-                "terminal outcome writer unavailable", outcome.terminal_day
+                "terminal outcome writer unavailable",
+                outcome.terminal_day,
+                dropped=True,
             )
             return False
         try:
             self._queue.put_nowait(outcome)
         except asyncio.QueueFull:
-            self.declare_loss("terminal outcome queue full", outcome.terminal_day)
+            self.declare_loss(
+                "terminal outcome queue full", outcome.terminal_day, dropped=True
+            )
             return False
         if self._idle is not None:
             self._idle.clear()
@@ -254,10 +276,16 @@ class TerminalOutcomeWriter:
             self._wake.set()
         return True
 
-    def declare_loss(self, reason: str, lost_day: date | None = None) -> None:
+    def declare_loss(
+        self, reason: str, lost_day: date | None = None, *, dropped: bool = False
+    ) -> None:
         day = lost_day or _utc_day_from_ms(self._now_ms())
         first_loss = not self._loss_pending
         self._loss_pending = True
+        if dropped:
+            self._loss_reason = "outcome_dropped"
+        elif self._loss_reason is None:
+            self._loss_reason = "continuity_lost"
         if self._loss_day is None or day < self._loss_day:
             self._loss_day = day
         self._accepting = False
@@ -267,7 +295,7 @@ class TerminalOutcomeWriter:
             self._wake.set()
         if self._journaled_loss_day is None or day < self._journaled_loss_day:
             try:
-                self._loss_journal.record(day, self._now_ms())
+                self._loss_journal.record(day, self._now_ms(), self._loss_reason)
             except Exception:
                 logger.critical(
                     "Terminal outcome loss evidence could not be journaled",
@@ -348,6 +376,9 @@ class TerminalOutcomeWriter:
                     heartbeat_at_ms=now,
                     flushed_through_ms=now if status == "active" else None,
                     loss_day=lost_day,
+                    loss_reason=(self._loss_reason or "continuity_lost")
+                    if status == "degraded"
+                    else None,
                 )
             )
             await session.commit()
@@ -390,6 +421,7 @@ class TerminalOutcomeWriter:
             ("active", "degraded"),
             status="degraded",
             loss_day=lost_day,
+            loss_reason=self._loss_reason or "continuity_lost",
         )
         if not updated:
             await self._create_run(self._now_ms(), "degraded", lost_day)
@@ -434,6 +466,9 @@ class TerminalOutcomeWriter:
                         status="lost",
                         closed_at_ms=now,
                         loss_day=lost_day,
+                        loss_reason=func.coalesce(
+                            col(TerminalOutcomeWriterRun.loss_reason), "lease_expired"
+                        ),
                     )
                 )
                 claimed += int(result.rowcount == 1)
@@ -594,6 +629,7 @@ class TerminalOutcomeWriter:
                 continue
             self._loss_pending = False
             self._loss_day = None
+            self._loss_reason = None
             self._journaled_loss_day = None
             if not self._stopping:
                 self._accepting = True
@@ -639,6 +675,7 @@ class TerminalOutcomeWriter:
                             if result is _PersistResult.REJECTED
                             else "conflicting terminal outcome idempotency key",
                             queued.terminal_day,
+                            dropped=True,
                         )
                 except asyncio.CancelledError:
                     self.declare_loss(

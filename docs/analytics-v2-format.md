@@ -6,9 +6,19 @@ A public-sharing activation begins coverage on the next full UTC day. Toggle day
 
 These are **recorded totals, not an exhaustive request census**. An included all-zero day means no persisted contribution was found, not proof that no requests occurred. Entire weeks without persisted outcomes are not initially published; a previously published week can still receive a zero-valued correction. An omitted day is not evidence of zero activity. In-memory outcomes lost to process death cannot be reconstructed from a checkpoint or a counter.
 
+## Coverage and restarts
+
+A clean service shutdown stops serving and drains request settlement before closing the collector. Restarting collection preserves coverage regardless of downtime length, including overnight and multi-day maintenance. There is no same-day or ten-minute cutoff. A collector that fails to start does not block serving: the node retries it, and outcomes it cannot accept meanwhile are recorded as dropped loss evidence. Cancelling the publication coordinator does not stop collection. Detached stream settlement is drained before the collector may close cleanly; incomplete settlement leaves loss evidence instead of a clean close.
+
+An unclean process stop can lose in-memory queued outcomes. Public reports still publish the rows that were recorded. The private dashboard lists the uncertain days, from the last proven collection checkpoint through recovery, in `ledger_coverage.incomplete_days`. Persisting the queue during in-process recovery does not make it survive process death.
+
+Another collector or a startup can fence a writer whose heartbeat lease expired. Lease expiry means continuity is uncertain, not that an outcome was proven dropped. The private dashboard's `ledger_coverage.loss_diagnostics` distinguishes `lease_expired` (uncertain continuity), `continuity_lost` (the writer itself declared continuity uncertain without proving a drop, such as a writer failure, a lost lease, or stream settlement that did not finish), and `outcome_dropped` (a confirmed drop: an outcome was discarded because the writer was unavailable, its queue was full, the outcome was invalid or rejected by storage, its idempotency key conflicted with a stored outcome, or shutdown discarded it from the queue). Historical rows and replayed loss markers have no recorded reason and are reported as `unknown`, which remains uncertain. These diagnostics are not a complete drop audit: outcomes lost to process death leave only the expired lease.
+
 ## Operator controls and upgrades
 
 The existing "Share analytics to Nostr" switch controls public reports through `ENABLE_ANALYTICS_SHARING`. Its existing default remains `true`; an explicitly saved `false` remains off after upgrading or restarting. There is no separate format opt-in.
+
+Upgrade disclosure: legacy sharing already published named-model request counts, revenue and combined token totals. V2 can name models previously folded into `others`, publishes per-model input/output/cache composition, and retains daily partitions where the legacy one-year window used weekly buckets. Recent legacy hourly buckets were finer than V2 daily buckets. Existing sharing consent is reused; changing the default alone would not change a saved `true`. Operators who do not want this disclosure should disable sharing before upgrading.
 
 Local collection starts automatically for the private dashboard and continues when public sharing is off. An upgraded node uses completed-day reports whenever its existing sharing setting is on. New coverage begins with the next full UTC day, so private history from before activation is not published. The runtime no longer starts the legacy publisher; consumers can still read legacy reports already on relays.
 
@@ -47,7 +57,7 @@ The `columns` array defines these positions, in order:
 
 Token counts are the ones billing used: the upstream's reported usage where it sent one, otherwise the node's estimate. Every integer is nonnegative and no greater than JavaScript's maximum safe integer. Days and daily model rows must each satisfy these rules independently.
 
-The report does not support a tokens-per-request average. `completed_requests` includes image and unknown-outcome requests, which carry no tokens, so dividing token totals by it understates usage per request. Per-request usage provenance stays in the node's private ledger and dashboard and is not published.
+The report does not support a tokens-per-request average. `completed_requests` includes image and unknown-outcome requests, which carry no tokens, so dividing token totals by it understates usage per request. Per-request usage provenance stays in the node's private ledger and dashboard and is not published. Public reports do not identify which completions have unknown settlement outcomes, so consumers cannot distinguish their lower-bound revenue contributions from final settled amounts.
 
 This unpublished format has exactly these 6 columns. Earlier 18- and 20-column drafts are not accepted published formats. A node reads its own earlier 20-column signed versions back as these 6 columns, so it can correct them after upgrading. Existing legacy public report formats remain separate inputs for consumers.
 
@@ -68,3 +78,25 @@ Rejected outcomes also leave crash-durable **loss evidence**, not a copy of the 
 This update does **not automatically widen historical epochs** already closed by older builds. Their rows do not retain enough identity/opt-in provenance to distinguish collector gaps from private intervals. Back up the database and establish eligibility from retained operator evidence before repair; never lower the public floor just to recover old rows. A proven eligible gap can extend a predecessor forward without overlapping its successor; already attempted frames must be corrected, never edited. Backward changes to an attempted coordinate's `coverage_start` are forbidden. Consumers must resolve corrections as replacements and must not interpret included days as lossless collection. External consumer compatibility must be checked before deployment.
 
 The shared signed example is `tests/fixtures/analytics-v2/daily-models-signed.json`. It includes a paid model with both cache components, a free model, an unknown model, and actual zero-use days. Its three completions contain 190 recorded tokens and 3,250 msat of revenue.
+
+
+## Private admin analytics API compatibility
+
+The dashboard combines **recorded terminal outcomes** with separately labelled **log diagnostics**. These are different populations: logs can rotate, and some recorded settlements do not have corresponding success logs. Never calculate a success rate by dividing ledger outcomes by logged requests. `successful_chat_completions` (and model-row `successful`) are retained API names for all recorded outcomes, including interrupted streams, image requests, zero-charge requests and unknown settlement outcomes; the UI labels them **Recorded Outcomes**. `unknown_outcome_requests` counts rows whose pricing source is `unknown`, not rows with an unknown model. It is included in summaries, metric buckets/totals and model rows without changing existing revenue or token denominators.
+
+Each `summary`, `metrics`, and `revenue_by_model` object carries additive metadata, including when returned by its standalone endpoint:
+
+- `field_provenance` maps data-field names to `terminal_outcomes`, `logs`, or `unavailable`. In metrics it describes bucket/totals measures; in revenue-by-model it describes model-row measures and totals. In particular, model `requests`, `failed` and `refunds_sats` are log diagnostics, while `successful`, revenue and average revenue come from the ledger.
+- `request_count_semantics` is `recorded_outcomes_including_unknown_settlements`.
+- `revenue_semantics` is `recorded_gross_retained_lower_bound_for_unknown_settlements`. Unknown settlements contribute only ecash known to be retained, not guaranteed final revenue.
+- `deprecated_fields` maps legacy aliases to their replacement fields. Summary `net_revenue_msats`/`net_revenue_sats`, and model `net_revenue_sats`, are deprecated aliases of `revenue_msats`/`revenue_sats`. **They no longer mean legacy log revenue minus reverted holds.** Clients must migrate to the named revenue fields and check their semantics. Do not subtract reverted authorization holds from recorded retained revenue to reconstruct a net figure.
+
+Explicit calendar ranges are UTC day selections. Arbitrary historical log diagnostics are not available; `ledger_coverage.diagnostic_available` is false and log-field provenance is `unavailable`. Their legacy zero placeholders are not observed zero activity. These requests bypass legacy indexing/aggregation entirely. Rolling presets continue to include log diagnostics.
+
+Error-detail objects retain the legacy offset-free, server-local `timestamp` for compatibility and add ISO-8601 `timestamp_utc` (with `Z`, or null for an invalid timestamp). The UI uses the UTC companion to align errors with charts and explicitly marks older-server fallback values as server local. Existing local log stamps have no offset: a duplicated DST hour cannot be disambiguated retrospectively and retains the existing first-occurrence interpretation. This release does not rewrite stored logs or change their schema.
+
+## Control-loop and identity safety
+
+The coordinator continues to refresh the database sharing fence and settings every second, so cross-worker opt-outs and identity rotations retain their existing responsiveness. Unchanged encrypted identities reuse decrypted/derived key material; ciphertext or identity-state changes invalidate that cache. Settings refresh validates values before mutating live fields, and settings saves bound compare-and-swap attempts; repeated conflicts return HTTP 409 and require retrying the save.
+
+Identity discovery distinguishes complete, truncated and failed relay reads. Only a matching end-of-stored-events response establishes a complete page. A full page remains conservatively truncated: deduplicating its visible provider coordinates cannot rule out another coordinate outside the page. Failed or truncated history cannot establish an unambiguous public identity; configure an explicit `PROVIDER_ID` when full history cannot be read. Listing and report validators consistently reject control and surrogate characters.
