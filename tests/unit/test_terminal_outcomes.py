@@ -1149,6 +1149,29 @@ async def test_failed_writer_start_does_not_remove_recorded_days(
     assert await writer.stop(timeout=1)
 
 
+async def test_outcome_dropped_before_writer_start_keeps_its_loss_reason(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, sessions = ledger
+    day = date(2026, 9, 1)
+    writer = TerminalOutcomeWriter(
+        session_factory=sessions, clock=MutableClock(_timestamp(day))
+    )
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+    _record("dropped-while-down", _timestamp(day))
+    assert writer.loss_pending
+    assert await writer.start()
+    async with sessions() as session:
+        runs = (await session.exec(select(TerminalOutcomeWriterRun))).all()
+    assert [
+        (run.loss_day, run.loss_reason)
+        for run in runs
+        if run.status == "recovered" and not run.run_id.startswith("loss-")
+    ] == [(day, "outcome_dropped")]
+    assert await writer.stop(timeout=1)
+
+
 @pytest.mark.parametrize("failed_startup", [False, True])
 async def test_fresh_clean_restart_publishes_zero_for_stopped_service_days(
     ledger: tuple[AsyncEngine, SessionFactory],

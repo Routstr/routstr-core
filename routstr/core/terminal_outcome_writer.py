@@ -150,6 +150,7 @@ class TerminalOutcomeWriter:
         if self.running:
             return True
         previous_loss_day = self._loss_day
+        previous_loss_reason = self._loss_reason
         self._enabled = True
         self._accepting = False
         self._stopping = False
@@ -166,7 +167,9 @@ class TerminalOutcomeWriter:
             await self._ensure_epoch(now)
             await self._loss_journal.replay(self._session_factory, now)
             if previous_loss_day is not None:
+                self._loss_reason = previous_loss_reason
                 await self._create_run(now, "degraded", lost_day=previous_loss_day)
+                self._loss_reason = None
                 await self._activate_run()
             else:
                 await self._create_run(now, "active")
@@ -174,6 +177,7 @@ class TerminalOutcomeWriter:
         except Exception:
             self._loss_pending = True
             self._loss_day = previous_loss_day or _utc_day_from_ms(self._now_ms())
+            self._loss_reason = previous_loss_reason
             self._clear_runtime()
             logger.critical("Terminal outcome writer could not start", exc_info=True)
             return False
