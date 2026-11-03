@@ -343,6 +343,64 @@ async def test_declared_loss_stores_whether_an_outcome_was_dropped(
     assert await writer.stop(timeout=1)
 
 
+@pytest.mark.parametrize("trigger", ["sibling_start", "self_restart", "rejected"])
+async def test_open_epoch_survives_restart_and_rejection_triggers(
+    ledger: tuple[AsyncEngine, SessionFactory],
+    monkeypatch: pytest.MonkeyPatch,
+    trigger: str,
+) -> None:
+    """An epoch opened days ago keeps every recorded day when a sibling starts,
+    the same writer restarts inside its lease, or storage rejects one row."""
+    _, sessions = ledger
+    opened = date(2026, 9, 1)
+    clock = MutableClock(_timestamp(opened))
+    writer = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    sibling = TerminalOutcomeWriter(session_factory=sessions, clock=clock)
+    monkeypatch.setattr(outcomes_module, "terminal_outcome_writer", writer)
+    assert await writer.start()
+    recorded_days = [opened + timedelta(days=offset) for offset in (1, 2, 3)]
+    for day in recorded_days:
+        clock.value = _timestamp(day)
+        _record(f"before-{day}", clock.value)
+    assert await writer.flush(timeout=1)
+
+    if trigger == "sibling_start":
+        assert await sibling.start()
+    elif trigger == "self_restart":
+        task = writer._task
+        assert task is not None
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        assert not writer.running
+        assert await writer.start()
+    else:
+        original = writer._persist_once
+
+        async def reject_marked(queued: _QueuedOutcome) -> _PersistResult:
+            if queued.revenue_msats == 1:
+                return _PersistResult.REJECTED
+            return await original(queued)
+
+        monkeypatch.setattr(writer, "_persist_once", reject_marked)
+        _record("rejected", clock.value, revenue_msats=1)
+    _record("after", clock.value)
+    assert await writer.flush(timeout=1)
+
+    try:
+        async with sessions() as session:
+            epochs = (await session.exec(select(TerminalOutcomeEpoch))).all()
+            stored = (await session.exec(select(TerminalOutcome))).all()
+        assert len(epochs) == 1
+        assert epochs[0].coverage_start_day == recorded_days[0]
+        assert epochs[0].coverage_end_day is None
+        assert {row.terminal_day for row in stored} == set(recorded_days)
+        assert len(stored) == len(recorded_days) + 1
+    finally:
+        await writer.stop(timeout=1)
+        if sibling.running:
+            await sibling.stop(timeout=1)
+
+
 async def test_temporary_insert_failure_retries_retained_item_without_rotation(
     ledger: tuple[AsyncEngine, SessionFactory],
     monkeypatch: pytest.MonkeyPatch,
