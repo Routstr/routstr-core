@@ -1928,6 +1928,7 @@ class BaseUpstreamProvider:
         usage_finalized = False
         last_model_seen: str | None = None
         provider_seen: str | None = None
+        usage_chunk_data: dict | None = None
 
         async def finalize_db_only() -> None:
             nonlocal usage_finalized
@@ -1941,7 +1942,12 @@ class BaseUpstreamProvider:
                     try:
                         await adjust_payment_for_tokens(
                             fresh_key,
-                            usage_estimator.response_data(last_model_seen),
+                            usage_estimator.billing_data(
+                                usage_chunk_data, last_model_seen
+                            )
+                            if usage_chunk_data is not None
+                            and usage_chunk_data.get("type") == "response.failed"
+                            else usage_estimator.response_data(last_model_seen),
                             new_session,
                             max_cost_for_model,
                             model_obj,
@@ -1975,9 +1981,9 @@ class BaseUpstreamProvider:
         async def stream_with_responses_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
-            nonlocal usage_finalized, last_model_seen
+            nonlocal usage_finalized, last_model_seen, usage_chunk_data
             reasoning_tokens: int = 0
-            usage_chunk_data: dict | None = None
+            usage_chunk_prefix = b""
             done_seen: bool = False
 
             def _process_event(
@@ -1992,7 +1998,7 @@ class BaseUpstreamProvider:
                 line so Responses API event framing stays intact.
                 """
                 nonlocal last_model_seen, usage_chunk_data, done_seen, provider_seen
-                nonlocal reasoning_tokens
+                nonlocal reasoning_tokens, usage_chunk_prefix
 
                 event = raw_event.strip(b"\r\n")
                 if not event:
@@ -2038,13 +2044,17 @@ class BaseUpstreamProvider:
                         if isinstance(usage, dict) and "reasoning_tokens" in usage:
                             reasoning_tokens += usage.get("reasoning_tokens", 0)
 
-                    # Responses API usage is in response.completed/incomplete events
+                    # Terminal Responses events carry the final measured usage.
                     chunk_type = obj.get("type", "")
                     if chunk_type in (
                         "response.completed",
                         "response.incomplete",
+                        "response.failed",
                     ):
                         usage_chunk_data = obj
+                        usage_chunk_prefix = (
+                            prefix if chunk_type == "response.failed" else b""
+                        )
                         if not usage_estimator.output_text:
                             usage_estimator.observe(obj)
                         return
@@ -2062,20 +2072,8 @@ class BaseUpstreamProvider:
                     body = b"".join(b"data: " + ln + b"\n" for ln in data.split(b"\n"))
                     yield prefix + body + b"\n"
 
-            try:
-                # Buffer across network chunks; dispatch only on the SSE event
-                # delimiter so parsing is independent of byte boundaries.
-                splitter = SSEEventSplitter()
-                async for chunk in guarded_chunks:
-                    for raw_event in splitter.feed(chunk):
-                        for out in _process_event(raw_event):
-                            yield out
-
-                buffer = splitter.flush()
-                if buffer.strip():
-                    for out in _process_event(buffer, final=True):
-                        yield out
-
+            async def finalize_with_cost() -> bytes | None:
+                nonlocal usage_finalized, usage_chunk_data
                 # Always emit a cost-bearing data chunk
                 async with create_session() as session:
                     fresh_key = await session.get(key.__class__, key.hashed_key)
@@ -2160,7 +2158,40 @@ class BaseUpstreamProvider:
                                 },
                             )
 
-                        yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
+                        return (
+                            usage_chunk_prefix
+                            + f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
+                        )
+                return None
+
+            try:
+                # Buffer across network chunks; dispatch only on the SSE event
+                # delimiter so parsing is independent of byte boundaries.
+                splitter = SSEEventSplitter()
+                async for chunk in guarded_chunks:
+                    for raw_event in splitter.feed(chunk):
+                        for out in _process_event(raw_event):
+                            yield out
+                        if (
+                            not usage_finalized
+                            and usage_chunk_data is not None
+                            and usage_chunk_data.get("type") == "response.failed"
+                        ):
+                            # A failed terminal is already complete: settle and
+                            # deliver it before another upstream read can fail.
+                            cost_event = await finalize_with_cost()
+                            if cost_event is not None:
+                                yield cost_event
+
+                buffer = splitter.flush()
+                if buffer.strip():
+                    for out in _process_event(buffer, final=True):
+                        yield out
+
+                if not usage_finalized:
+                    cost_event = await finalize_with_cost()
+                    if cost_event is not None:
+                        yield cost_event
 
                 if guarded_chunks.timed_out and (
                     usage_chunk_data is None
@@ -2634,7 +2665,9 @@ class BaseUpstreamProvider:
     ) -> StreamingResponse:
         guarded_chunks = await self._guard_stream(response, model_obj, sse=True)
 
-        usage_estimator = MissingUsageEstimator(request_body, model_obj)
+        usage_estimator = MissingUsageEstimator(
+            request_body, model_obj, count_native_tool_output=True
+        )
         usage_finalized = False
         last_model_seen: str | None = None
         provider_seen: str | None = None
@@ -2691,6 +2724,7 @@ class BaseUpstreamProvider:
         ) -> AsyncGenerator[bytes, None]:
             nonlocal usage_finalized, last_model_seen, provider_seen
             stored_chunks: list[bytes] = []
+            usage_seen = False
             input_tokens: int = 0
             output_tokens: int = 0
             cache_read_input_tokens: int = 0
@@ -2739,114 +2773,124 @@ class BaseUpstreamProvider:
                         decoded_chunk = chunk.decode("utf-8", errors="ignore")
                         modified_lines = []
                         changed = False
-                        for line in decoded_chunk.split("\n"):
-                            if line.startswith("data: "):
-                                try:
-                                    data = json.loads(line[6:])
-                                    if isinstance(data, dict):
-                                        usage_estimator.observe(data)
-                                        msg = data.get("message", {})
-                                        if msg and msg.get("model"):
-                                            last_model_seen = str(msg.get("model"))
+                        for field_lines, payload in _parse_sse_events(decoded_chunk):
+                            modified_lines.extend(field_lines)
+                            line = "\n".join(
+                                "data: " + part for part in payload.split("\n")
+                            )
+                            try:
+                                data = json.loads(payload)
+                                if isinstance(data, dict):
+                                    usage_estimator.observe(data)
+                                    msg = data.get("message", {})
+                                    if msg and msg.get("model"):
+                                        last_model_seen = str(msg.get("model"))
 
-                                        provider_added = "provider" not in data
-                                        provider_seen = self._stamp_streamed_provider(
-                                            data, provider_seen
-                                        )
+                                    provider_added = "provider" not in data
+                                    provider_seen = self._stamp_streamed_provider(
+                                        data, provider_seen
+                                    )
 
-                                        if requested_model:
-                                            # Apply requested_model override
-                                            model_updated = False
-                                            if msg:
-                                                msg["model"] = requested_model
-                                                model_updated = True
-                                            if data.get("model"):
-                                                data["model"] = requested_model
-                                                model_updated = True
+                                    if requested_model:
+                                        # Apply requested_model override
+                                        model_updated = False
+                                        if msg:
+                                            msg["model"] = requested_model
+                                            model_updated = True
+                                        if data.get("model"):
+                                            data["model"] = requested_model
+                                            model_updated = True
 
-                                            if model_updated or provider_added:
-                                                line = "data: " + json.dumps(data)
-                                                changed = True
-                                        elif provider_added:
+                                        if model_updated or provider_added:
                                             line = "data: " + json.dumps(data)
                                             changed = True
+                                    elif provider_added:
+                                        line = "data: " + json.dumps(data)
+                                        changed = True
 
-                                        if usage := msg.get("usage"):
-                                            input_tokens += usage.get("input_tokens", 0)
-                                            output_tokens += usage.get(
-                                                "output_tokens", 0
-                                            )
-                                            # Anthropic's `message_start.usage`
-                                            # carries the cumulative cache
-                                            # snapshot for the prompt — pick
-                                            # the max() so subsequent
-                                            # `message_delta.usage` events
-                                            # (which only restate the same
-                                            # numbers) don't double-count.
-                                            cache_read_input_tokens = max(
-                                                cache_read_input_tokens,
-                                                int(
-                                                    usage.get(
-                                                        "cache_read_input_tokens", 0
-                                                    )
-                                                    or 0
-                                                ),
-                                            )
-                                            cache_creation_input_tokens = max(
-                                                cache_creation_input_tokens,
-                                                int(
-                                                    usage.get(
-                                                        "cache_creation_input_tokens",
-                                                        0,
-                                                    )
-                                                    or 0
-                                                ),
-                                            )
-                                            _absorb_usd(usage)
+                                    if (
+                                        isinstance(usage := msg.get("usage"), dict)
+                                        and usage
+                                    ):
+                                        usage_seen = True
+                                        input_tokens += usage.get("input_tokens", 0)
+                                        output_tokens += usage.get("output_tokens", 0)
+                                        # Anthropic's `message_start.usage`
+                                        # carries the cumulative cache
+                                        # snapshot for the prompt — pick
+                                        # the max() so subsequent
+                                        # `message_delta.usage` events
+                                        # (which only restate the same
+                                        # numbers) don't double-count.
+                                        cache_read_input_tokens = max(
+                                            cache_read_input_tokens,
+                                            int(
+                                                usage.get("cache_read_input_tokens", 0)
+                                                or 0
+                                            ),
+                                        )
+                                        cache_creation_input_tokens = max(
+                                            cache_creation_input_tokens,
+                                            int(
+                                                usage.get(
+                                                    "cache_creation_input_tokens",
+                                                    0,
+                                                )
+                                                or 0
+                                            ),
+                                        )
+                                        _absorb_usd(usage)
 
-                                        if usage := data.get("usage"):
-                                            input_tokens = max(
-                                                input_tokens,
-                                                usage.get("input_tokens", 0),
-                                            )
-                                            output_tokens = max(
-                                                output_tokens,
-                                                usage.get("output_tokens", 0),
-                                            )
-                                            cache_read_input_tokens = max(
-                                                cache_read_input_tokens,
-                                                int(
-                                                    usage.get(
-                                                        "cache_read_input_tokens", 0
-                                                    )
-                                                    or 0
-                                                ),
-                                            )
-                                            cache_creation_input_tokens = max(
-                                                cache_creation_input_tokens,
-                                                int(
-                                                    usage.get(
-                                                        "cache_creation_input_tokens",
-                                                        0,
-                                                    )
-                                                    or 0
-                                                ),
-                                            )
-                                            server_tool_use = (
-                                                usage.get("server_tool_use")
-                                                or server_tool_use
-                                            )
-                                            _absorb_usd(usage)
-                                        # Some upstreams attach cost fields at
-                                        # the event root rather than nested
-                                        # under `usage`.
-                                        _absorb_usd(data)
-                                except json.JSONDecodeError:
-                                    pass
-                            modified_lines.append(line)
+                                    if (
+                                        isinstance(usage := data.get("usage"), dict)
+                                        and usage
+                                    ):
+                                        usage_seen = True
+                                        input_tokens = max(
+                                            input_tokens,
+                                            usage.get("input_tokens", 0),
+                                        )
+                                        output_tokens = max(
+                                            output_tokens,
+                                            usage.get("output_tokens", 0),
+                                        )
+                                        cache_read_input_tokens = max(
+                                            cache_read_input_tokens,
+                                            int(
+                                                usage.get("cache_read_input_tokens", 0)
+                                                or 0
+                                            ),
+                                        )
+                                        cache_creation_input_tokens = max(
+                                            cache_creation_input_tokens,
+                                            int(
+                                                usage.get(
+                                                    "cache_creation_input_tokens",
+                                                    0,
+                                                )
+                                                or 0
+                                            ),
+                                        )
+                                        server_tool_use = (
+                                            usage.get("server_tool_use")
+                                            or server_tool_use
+                                        )
+                                        _absorb_usd(usage)
+                                    # Some upstreams attach cost fields at
+                                    # the event root rather than nested
+                                    # under `usage`.
+                                    _absorb_usd(data)
+                            except json.JSONDecodeError:
+                                pass
+                            modified_lines.extend((line, ""))
 
                         if changed:
-                            yield "\n".join(modified_lines).encode("utf-8")
+                            # The guard keeps an EOF tail unterminated; stamping
+                            # metadata must not manufacture a complete event.
+                            ending = decoded_chunk[len(decoded_chunk.rstrip("\r\n")) :]
+                            yield (
+                                "\n".join(modified_lines).rstrip("\n") + ending
+                            ).encode("utf-8")
                         else:
                             yield chunk
                     except Exception:
@@ -2868,7 +2912,8 @@ class BaseUpstreamProvider:
                 )
 
                 if (
-                    input_tokens > 0
+                    usage_seen
+                    or input_tokens > 0
                     or output_tokens > 0
                     or cache_read_input_tokens > 0
                     or cache_creation_input_tokens > 0
@@ -2973,7 +3018,9 @@ class BaseUpstreamProvider:
                     response_json["message"]["model"] = requested_model
 
             if not isinstance(response_json.get("usage"), dict):
-                usage_estimator = MissingUsageEstimator(request_body, model_obj)
+                usage_estimator = MissingUsageEstimator(
+                    request_body, model_obj, count_native_tool_output=True
+                )
                 usage_estimator.observe(response_json)
                 estimated = usage_estimator.estimated_usage(response_json.get("model"))
                 if estimated is not None:

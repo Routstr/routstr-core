@@ -9,7 +9,7 @@ and the shortcuts wired into `forward_request` and
 import contextlib
 import json
 import os
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -2128,3 +2128,106 @@ async def test_dispatch_passes_placeholder_key_for_keyless_upstream() -> None:
         )
 
     assert captured_kwargs["api_key"] == "no-key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_kind", "reported_tokens"),
+    [("tool", None), ("tool", 0), ("tool", 7), ("text", None), ("text", 7)],
+)
+async def test_real_litellm_adapter_preserves_tool_billing_boundary(
+    output_kind: str, reported_tokens: int | None
+) -> None:
+    from litellm.llms.anthropic.experimental_pass_through.adapters.streaming_iterator import (
+        AnthropicStreamWrapper,
+    )
+    from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
+    async def openai_chunks() -> AsyncIterator[ModelResponseStream]:
+        delta: dict[str, Any] = (
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "tool_1",
+                        "type": "function",
+                        "function": {"name": "calc", "arguments": ""},
+                    }
+                ]
+            }
+            if output_kind == "tool"
+            else {"content": "hello"}
+        )
+        yield ModelResponseStream(
+            id="c",
+            model="gpt-4o-mini",
+            choices=[StreamingChoices(index=0, delta=Delta(**delta))],
+        )
+        yield ModelResponseStream(
+            id="c",
+            model="gpt-4o-mini",
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(),
+                    finish_reason="tool_calls" if output_kind == "tool" else "stop",
+                )
+            ],
+        )
+        if reported_tokens is not None:
+            yield ModelResponseStream(
+                id="c",
+                model="gpt-4o-mini",
+                choices=[],
+                usage={
+                    "prompt_tokens": reported_tokens,
+                    "completion_tokens": reported_tokens,
+                    "total_tokens": reported_tokens * 2,
+                },
+            )
+
+    adapter = AnthropicStreamWrapper(cast(Any, openai_chunks()), "gpt-4o-mini")
+    key = _make_key()
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+
+    class SessionContext:
+        async def __aenter__(self) -> Any:
+            return session
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    adjust = AsyncMock(return_value={"total_msats": 0})
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(return_value=adapter.async_anthropic_sse_wrapper()),
+        ),
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.create_session", new=SessionContext),
+    ):
+        response = await _make_provider()._forward_messages_via_litellm(
+            request_body=_anthropic_request_body(stream=True),
+            key=key,
+            session=_make_session(),
+            max_cost_for_model=10_000,
+            model_obj=_make_model(),
+        )
+        assert isinstance(response, StreamingResponse)
+        async for _ in response.body_iterator:
+            pass
+
+    adjust.assert_awaited_once()
+    usage = adjust.call_args.args[1]["usage"]
+    if reported_tokens:
+        assert usage["input_tokens"] == reported_tokens
+        assert usage["output_tokens"] == reported_tokens
+        assert "estimated" not in usage
+    elif output_kind == "tool":
+        # Adapter placeholders and measured zeros are indistinguishable on
+        # the wire. Keep prior behavior until usage provenance is available.
+        assert usage is None
+    else:
+        assert usage["estimated"] is True
+        assert usage["output_tokens"] > 0
