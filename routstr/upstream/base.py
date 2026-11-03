@@ -1693,6 +1693,9 @@ class BaseUpstreamProvider:
                             )
                             usage_finalized = True
                         except BaseException as e:
+                            mark_terminal_outcome_unknown(
+                                terminal_outcome, "stream settlement failed"
+                            )
                             logger.critical(
                                 "Error during usage finalization — CRITICAL",
                                 extra={
@@ -2158,6 +2161,9 @@ class BaseUpstreamProvider:
                             )
                             usage_finalized = True
                         except BaseException as e:
+                            mark_terminal_outcome_unknown(
+                                terminal_outcome, "Responses stream settlement failed"
+                            )
                             logger.critical(
                                 "Error during Responses API usage finalization — CRITICAL",
                                 extra={
@@ -3011,6 +3017,10 @@ class BaseUpstreamProvider:
                                 # Emit the full combined_data as the cost
                                 yield f"event: cost\ndata: {json.dumps(combined_data)}\n\n".encode()
                             except BaseException as e:
+                                mark_terminal_outcome_unknown(
+                                    terminal_outcome,
+                                    "Messages stream settlement failed",
+                                )
                                 logger.critical(
                                     "Error during Messages API usage finalization — CRITICAL",
                                     extra={
@@ -3571,6 +3581,10 @@ class BaseUpstreamProvider:
                                     f"{json.dumps({'cost': cost_data})}\n\n"
                                 ).encode()
                             except BaseException as e:
+                                mark_terminal_outcome_unknown(
+                                    terminal_outcome,
+                                    "LiteLLM Messages stream settlement failed",
+                                )
                                 logger.critical(
                                     "Error during LiteLLM Messages usage finalization — CRITICAL",
                                     extra={

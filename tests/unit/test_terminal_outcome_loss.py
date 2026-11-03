@@ -89,6 +89,37 @@ async def test_marker_written_before_loss_reasons_replays_without_one(
 
 
 @pytest.mark.asyncio
+async def test_foreign_and_damaged_files_do_not_block_replay(
+    analytics_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    foreign = tmp_path / "notes.bak.json"
+    foreign.write_text("operator notes")
+    damaged = tmp_path / f"{'b' * 32}.json"
+    damaged.write_text('{"loss_day": ')
+    os.utime(damaged, (1_788_000_000, 1_788_000_000))
+    journal = LossJournal(tmp_path)
+    journal.record(date(2026, 9, 1), 1000)
+    sessions = async_sessionmaker(
+        analytics_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    await journal.replay(sessions, 2000)
+    await journal.replay(sessions, 3000)
+    async with sessions() as session:
+        runs = {
+            run.run_id: run
+            for run in (await session.exec(select(TerminalOutcomeWriterRun))).all()
+        }
+    assert len(runs) == 2
+    recovered = runs[f"loss-{'b' * 32}"]
+    assert recovered.loss_reason == "unreadable loss marker"
+    assert recovered.started_at_ms == 1_788_000_000_000
+    assert recovered.loss_day == date(2026, 8, 29)
+    assert foreign.exists()
+    assert list(tmp_path.glob("*.json")) == [foreign]
+
+
+@pytest.mark.asyncio
 async def test_replay_keeps_marker_until_commit_and_is_idempotent_after_unlink_failure(
     analytics_engine: AsyncEngine,
     tmp_path: Path,

@@ -509,6 +509,7 @@ async def announce_provider() -> None:
 
             # Fetch existing events for this provider_id
             existing_events: list[dict[str, Any]] = []
+            unread_relays: set[str] = set()
             for relay_url in relay_urls:
                 if _should_skip(relay_url):
                     logger.debug(f"Skipping {relay_url} due to backoff")
@@ -522,14 +523,16 @@ async def announce_provider() -> None:
                     _register_success(relay_url)
                     existing_events.extend(result.events)
                 else:
-                    _register_failure(relay_url)
+                    # Write-only or read-limited relays still take the listing;
+                    # only a failed publish backs a relay off.
+                    unread_relays.add(relay_url)
 
             found_any = len(existing_events) > 0
             all_match = found_any and all(
                 events_semantically_equal(ev, candidate_event) for ev in existing_events
             )
 
-            if all_match:
+            if all_match and not unread_relays:
                 logger.debug(
                     "Matching listing announcement already present; skipping publish"
                 )
@@ -538,8 +541,13 @@ async def announce_provider() -> None:
                     "No matching listing announcement found or differences "
                     "detected; publishing update"
                 )
+                publish_relays = (
+                    [relay for relay in relay_urls if relay in unread_relays]
+                    if all_match
+                    else relay_urls
+                )
                 success_count = 0
-                for relay_url in relay_urls:
+                for relay_url in publish_relays:
                     if _should_skip(relay_url):
                         logger.debug(f"Skipping publish to {relay_url} due to backoff")
                         continue
@@ -550,7 +558,7 @@ async def announce_provider() -> None:
                         _register_failure(relay_url)
                 logger.info(
                     "Published listing announcement to "
-                    f"{success_count}/{len(relay_urls)} relays"
+                    f"{success_count}/{len(publish_relays)} relays"
                 )
 
             # Re-announce periodically; wakes early if the NSEC changes.

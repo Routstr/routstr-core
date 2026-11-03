@@ -608,6 +608,7 @@ async def test_streaming_release_is_terminal_before_error_propagates() -> None:
         ),
         patch("routstr.upstream.base.release_reservation", release),
         patch("routstr.upstream.base.create_session", return_value=session_context),
+        patch("routstr.upstream.base.mark_terminal_outcome_unknown") as mark_unknown,
     ):
         response = await provider.handle_streaming_chat_completion(
             response=upstream_response,
@@ -621,6 +622,7 @@ async def test_streaming_release_is_terminal_before_error_propagates() -> None:
 
     session.rollback.assert_awaited_once()
     release.assert_awaited_once_with(reservation_snapshot, session, 500)
+    mark_unknown.assert_called_once_with(None, "stream settlement failed")
 
 
 @pytest.mark.asyncio
@@ -672,6 +674,7 @@ async def test_responses_streaming_releases_and_raises_on_billing_failure(
         patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
         patch("routstr.upstream.base.release_reservation", release),
         patch("routstr.upstream.base.create_session", return_value=session_context),
+        patch("routstr.upstream.base.mark_terminal_outcome_unknown") as mark_unknown,
     ):
         response = await provider.handle_streaming_responses_completion(
             response=upstream_response,
@@ -691,6 +694,7 @@ async def test_responses_streaming_releases_and_raises_on_billing_failure(
     adjust.assert_awaited_once()
     session.rollback.assert_awaited_once()
     release.assert_awaited_once_with(snapshot, session, 500)
+    mark_unknown.assert_called_once_with(None, "Responses stream settlement failed")
 
 
 @pytest.mark.asyncio
@@ -1071,6 +1075,7 @@ async def test_messages_streaming_releases_and_raises_on_billing_failure(
         patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
         patch("routstr.upstream.base.release_reservation", release),
         patch("routstr.upstream.base.create_session", return_value=session_context),
+        patch("routstr.upstream.base.mark_terminal_outcome_unknown") as mark_unknown,
     ):
         if via_litellm:
             response = provider._stream_litellm_messages(
@@ -1100,6 +1105,12 @@ async def test_messages_streaming_releases_and_raises_on_billing_failure(
     adjust.assert_awaited_once()
     session.rollback.assert_awaited_once()
     release.assert_awaited_once_with(snapshot, session, 500)
+    expected = (
+        "LiteLLM Messages stream settlement failed"
+        if via_litellm
+        else "Messages stream settlement failed"
+    )
+    assert (None, expected) in [call.args for call in mark_unknown.call_args_list]
 
 
 @pytest.mark.asyncio

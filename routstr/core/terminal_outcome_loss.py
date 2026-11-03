@@ -6,7 +6,7 @@ import json
 import os
 import uuid
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import AsyncContextManager
 
@@ -14,11 +14,37 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from .db import TerminalOutcomeWriterRun
+from .logging import get_logger
+
+logger = get_logger(__name__)
+
+UNREADABLE_MARKER_REASON = "unreadable loss marker"
+
+
+def _marker_id(marker: Path) -> str | None:
+    try:
+        marker_id = uuid.UUID(hex=marker.stem).hex
+    except ValueError:
+        return None
+    return marker_id if marker_id == marker.stem else None
+
+
+def _parse_marker(text: str) -> tuple[date, int, str | None]:
+    evidence = json.loads(text)
+    day = date.fromisoformat(evidence["loss_day"])
+    detected = evidence["detected_at_ms"]
+    if type(detected) is not int or detected < 0:
+        raise ValueError("Invalid terminal loss marker timestamp")
+    reason = evidence.get("loss_reason")
+    if reason is not None and not isinstance(reason, str):
+        raise ValueError("Invalid terminal loss marker reason")
+    return day, detected, reason
 
 
 class LossJournal:
     def __init__(self, directory: Path | None = None) -> None:
         self._directory = directory
+        self._ignored: set[str] = set()
 
     @property
     def directory(self) -> Path:
@@ -74,17 +100,33 @@ class LossJournal:
     ) -> None:
         directory = self.directory
         for marker in directory.glob("*.json"):
-            marker_id = uuid.UUID(hex=marker.stem).hex
-            if marker_id != marker.stem:
-                raise ValueError("Invalid terminal loss marker name")
+            marker_id = _marker_id(marker)
+            if marker_id is None:
+                # Not written by record(); leave the operator's file alone.
+                if marker.name not in self._ignored:
+                    self._ignored.add(marker.name)
+                    logger.warning(
+                        "Ignoring unexpected file in terminal loss directory",
+                        extra={"file_name": marker.name},
+                    )
+                continue
             try:
-                evidence = json.loads(marker.read_text())
+                text = marker.read_text()
+                modified_ms = int(marker.stat().st_mtime * 1000)
             except FileNotFoundError:
                 continue  # A sibling already committed and removed this marker.
-            day = date.fromisoformat(evidence["loss_day"])
-            detected = evidence["detected_at_ms"]
-            if type(detected) is not int or detected < 0:
-                raise ValueError("Invalid terminal loss marker timestamp")
+            try:
+                day, detected, reason = _parse_marker(text)
+            except (ValueError, KeyError, TypeError):
+                # A loss happened but its record is damaged: keep the evidence,
+                # dated by when the marker was written.
+                logger.error(
+                    "Terminal loss marker unreadable; recording it by file time",
+                    extra={"file_name": marker.name},
+                )
+                detected = max(modified_ms, 0)
+                day = datetime.fromtimestamp(detected / 1000, timezone.utc).date()
+                reason = UNREADABLE_MARKER_REASON
             run_id = f"loss-{marker_id}"
             async with session_factory() as session:
                 existing = await session.get(TerminalOutcomeWriterRun, run_id)
@@ -95,7 +137,7 @@ class LossJournal:
                             status="recovered",
                             loss_day=day,
                             # Markers written before reasons were stored have none.
-                            loss_reason=evidence.get("loss_reason"),
+                            loss_reason=reason,
                             started_at_ms=detected,
                             heartbeat_at_ms=detected,
                             closed_at_ms=max(now, detected),
