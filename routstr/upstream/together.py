@@ -227,6 +227,9 @@ class TogetherUpstreamProvider(BaseUpstreamProvider):
             else []
         )
 
+    def _catalog_settings(self) -> dict[str, object]:
+        return {"image_prices": self.image_prices}
+
     async def fetch_models(self) -> list[Model]:
         try:
             entries = await self._fetch_catalog()

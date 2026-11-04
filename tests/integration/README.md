@@ -63,6 +63,35 @@ USE_LOCAL_SERVICES=1 pytest tests/integration/ -v
 docker-compose -f compose.testing.yml down -v
 ```
 
+### PostgreSQL Mode
+
+`test_postgres_compatibility.py` runs the main application DB against a real
+PostgreSQL server. It covers the full Alembic chain in both directions plus the
+billing, reservation, refund, invoice and payout paths, and it catches the
+things SQLite cannot express: native enum types, INT4 column widths, per-dialect
+`ON CONFLICT`, and genuinely concurrent transactions.
+
+Every test there skips unless `ROUTSTR_TEST_POSTGRES_URL` is set, so the default
+suite is unaffected.
+
+```bash
+docker run -d --name routstr-pg \
+  -e POSTGRES_PASSWORD=routstr -e POSTGRES_USER=routstr -e POSTGRES_DB=routstr \
+  -p 55433:5432 postgres:16-alpine
+
+ROUTSTR_TEST_POSTGRES_URL=postgresql+asyncpg://routstr:routstr@127.0.0.1:55433/routstr \
+  pytest tests/integration/test_postgres_compatibility.py -v
+
+docker rm -f routstr-pg
+```
+
+Each test drops and recreates the `public` schema, so point it only at a
+disposable database.
+
+The dialect-portability invariants that do **not** need a server — column
+widths, enum rendering, per-dialect upsert selection — live in
+`tests/unit/test_postgres_schema_compat.py` and run in the normal suite.
+
 ### CI/CD Mode
 
 ```bash

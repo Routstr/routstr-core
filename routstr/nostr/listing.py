@@ -9,11 +9,21 @@ import json
 import os
 import random
 import time
+import unicodedata
 from typing import Any, cast
+
+from nostr_sdk import Event
 
 from ..core import get_logger
 from ..core.settings import settings
-from .sdk import create_signed_event, fetch_events, parse_keypair, send_event
+from .sdk import (
+    EventQueryResult,
+    QueryStatus,
+    create_signed_event,
+    fetch_events_with_status,
+    parse_keypair,
+    send_event,
+)
 
 logger = get_logger(__name__)
 
@@ -145,34 +155,24 @@ async def query_listing_events(
     relay_url: str,
     pubkey: str,
     provider_id: str | None = None,
-    timeout: int = 30,
-) -> tuple[list[dict[str, Any]], bool]:
-    """
-    Query a Nostr relay for listing provider announcements (kind:38421) via nostr library.
-
-    Returns a tuple of (events, ok) where ok indicates whether the relay interaction
-    succeeded without transport-level errors.
-    """
-
-    try:
-        events_out = await fetch_events(
-            relay_url,
-            kind=38421,
-            author=pubkey,
-            limit=10,
-            timeout=timeout,
-        )
-    except Exception as e:
-        logger.debug(f"Failed to query relay {relay_url}: {type(e).__name__}")
-        return [], False
-
+    timeout: float = 30,
+) -> EventQueryResult:
+    """Query listings, preserving completion status before provider filtering."""
+    result = await fetch_events_with_status(
+        relay_url,
+        kind=38421,
+        author=pubkey,
+        limit=10,
+        timeout=timeout,
+    )
+    events = result.events
     if provider_id is not None:
-        events_out = [
+        events = [
             event
-            for event in events_out
+            for event in events
             if _get_single_tag_value(event, "d") == provider_id
         ]
-    return events_out, True
+    return EventQueryResult(events, result.status)
 
 
 def discover_onion_url_from_tor(base_dir: str = "/var/lib/tor") -> str | None:
@@ -221,8 +221,8 @@ async def _determine_provider_id(public_key_hex: str, relay_urls: list[str]) -> 
 
     async def query_single_relay(relay_url: str) -> list[dict[str, Any]]:
         try:
-            events, _ok = await query_listing_events(relay_url, public_key_hex, None)
-            return events
+            result = await query_listing_events(relay_url, public_key_hex, None)
+            return result.events if result.status != QueryStatus.FAILED else []
         except Exception:
             return []
 
@@ -249,6 +249,48 @@ async def _determine_provider_id(public_key_hex: str, relay_urls: list[str]) -> 
     fallback = public_key_hex[:12]
     logger.info(f"No existing provider_id found; using fallback: {fallback}")
     return fallback
+
+
+async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str]) -> str:
+    """Require a configured or unambiguous signed coordinate for durable stats."""
+    explicit = settings.provider_id
+    if explicit:
+        if len(explicit) > 64 or any(
+            unicodedata.category(char) in ("Cc", "Cs") for char in explicit
+        ):
+            raise ValueError("PROVIDER_ID must contain 1 to 64 printable characters")
+        return explicit
+    results = await asyncio.gather(
+        *(query_listing_events(url, public_key_hex) for url in relay_urls),
+        return_exceptions=True,
+    )
+    candidates: set[str] = set()
+    for result in results:
+        if isinstance(result, BaseException):
+            raise ValueError(
+                "Configure PROVIDER_ID while listing relays are unavailable"
+            )
+        if result.status == QueryStatus.FAILED:
+            raise ValueError(
+                "Configure PROVIDER_ID while listing relays are unavailable"
+            )
+        if result.status == QueryStatus.TRUNCATED or len(result.events) >= 10:
+            raise ValueError("Configure PROVIDER_ID when listing history is incomplete")
+        for event in result.events:
+            try:
+                signed = Event.from_json(json.dumps(event))
+                if not signed.verify() or event.get("pubkey") != public_key_hex:
+                    continue
+                values = _get_tag_values(event, "d")
+                if event.get("kind") == 38421 and len(values) == 1 and values[0]:
+                    candidates.add(values[0])
+            except Exception:
+                continue
+    if len(candidates) != 1:
+        raise ValueError(
+            "Configure PROVIDER_ID to select one provider for public stats"
+        )
+    return next(iter(candidates))
 
 
 async def publish_to_relay(
@@ -467,25 +509,30 @@ async def announce_provider() -> None:
 
             # Fetch existing events for this provider_id
             existing_events: list[dict[str, Any]] = []
+            unread_relays: set[str] = set()
             for relay_url in relay_urls:
                 if _should_skip(relay_url):
                     logger.debug(f"Skipping {relay_url} due to backoff")
                     continue
-                events, ok = await query_listing_events(
+                result = await query_listing_events(
                     relay_url, public_key_hex, provider_id
                 )
-                if ok:
+                # Announcements need matching events, not proof that no other
+                # coordinate exists: a truncated successful page is usable.
+                if result.status != QueryStatus.FAILED:
                     _register_success(relay_url)
-                    existing_events.extend(events)
+                    existing_events.extend(result.events)
                 else:
-                    _register_failure(relay_url)
+                    # Write-only or read-limited relays still take the listing;
+                    # only a failed publish backs a relay off.
+                    unread_relays.add(relay_url)
 
             found_any = len(existing_events) > 0
             all_match = found_any and all(
                 events_semantically_equal(ev, candidate_event) for ev in existing_events
             )
 
-            if all_match:
+            if all_match and not unread_relays:
                 logger.debug(
                     "Matching listing announcement already present; skipping publish"
                 )
@@ -494,8 +541,13 @@ async def announce_provider() -> None:
                     "No matching listing announcement found or differences "
                     "detected; publishing update"
                 )
+                publish_relays = (
+                    [relay for relay in relay_urls if relay in unread_relays]
+                    if all_match
+                    else relay_urls
+                )
                 success_count = 0
-                for relay_url in relay_urls:
+                for relay_url in publish_relays:
                     if _should_skip(relay_url):
                         logger.debug(f"Skipping publish to {relay_url} due to backoff")
                         continue
@@ -506,7 +558,7 @@ async def announce_provider() -> None:
                         _register_failure(relay_url)
                 logger.info(
                     "Published listing announcement to "
-                    f"{success_count}/{len(relay_urls)} relays"
+                    f"{success_count}/{len(publish_relays)} relays"
                 )
 
             # Re-announce periodically; wakes early if the NSEC changes.

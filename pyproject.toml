@@ -8,6 +8,7 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi[standard-no-fastapi-cloud-cli]>=0.141",
     "aiosqlite>=0.20",
+    "asyncpg>=0.30",     # PostgreSQL backend for DATABASE_URL=postgresql+asyncpg://
     "sqlmodel>=0.0.42",  # Python 3.14 deferred-annotation support
     "httpx[socks]>=0.28.1",
     "h11>=0.16",
