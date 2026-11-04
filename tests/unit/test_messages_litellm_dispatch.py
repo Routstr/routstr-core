@@ -6,9 +6,10 @@ and the shortcuts wired into `forward_request` and
 `forward_x_cashu_request`.
 """
 
+import contextlib
 import json
 import os
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -56,7 +57,9 @@ def _make_model(
     return Model(
         id=model_id,
         name=model_id,
-        forwarded_model_id=forwarded_model_id if forwarded_model_id is not None else model_id,
+        forwarded_model_id=forwarded_model_id
+        if forwarded_model_id is not None
+        else model_id,
         created=0,
         description="",
         context_length=8192,
@@ -214,9 +217,7 @@ def test_events_from_chunk_handles_bytes_chunks() -> None:
 
 def test_events_from_chunk_handles_str_chunks() -> None:
     provider = _make_provider()
-    events, buf = provider._events_from_chunk(
-        'event: a\ndata: {"type":"a"}\n\n', b""
-    )
+    events, buf = provider._events_from_chunk('event: a\ndata: {"type":"a"}\n\n', b"")
     assert events == [{"type": "a"}]
     assert buf == b""
 
@@ -259,9 +260,7 @@ def test_base_provider_resolves_prefix_from_base_url() -> None:
     )
     assert groq.get_litellm_provider_prefix() == "groq/"
 
-    xai = BaseUpstreamProvider(
-        base_url="https://api.x.ai/v1", api_key="sk-test"
-    )
+    xai = BaseUpstreamProvider(base_url="https://api.x.ai/v1", api_key="sk-test")
     assert xai.get_litellm_provider_prefix() == "xai/"
 
     deepseek = BaseUpstreamProvider(
@@ -269,9 +268,7 @@ def test_base_provider_resolves_prefix_from_base_url() -> None:
     )
     assert deepseek.get_litellm_provider_prefix() == "deepseek/"
 
-    unknown = BaseUpstreamProvider(
-        base_url="https://example.com/v1", api_key="sk-test"
-    )
+    unknown = BaseUpstreamProvider(base_url="https://example.com/v1", api_key="sk-test")
     assert unknown.get_litellm_provider_prefix() == "openai/"
 
 
@@ -860,6 +857,71 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end(
     assert captured_cost_call["reservation_snapshot"] is reservation
     assert captured_cost_call["usage_presence"].input_source == "reported"
     assert captured_cost_call["usage_presence"].output_source == "reported"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_streaming_with_no_output_and_no_usage_is_not_charged(
+    fails: bool,
+) -> None:
+    provider = _make_provider()
+    key = _make_key()
+
+    async def empty_reply() -> AsyncIterator[dict]:
+        yield {
+            "type": "message_start",
+            "message": {"id": "m", "content": [], "usage": {"input_tokens": 0}},
+        }
+        if fails:
+            raise RuntimeError("Provider returned error")
+        yield {"type": "message_delta", "usage": {"output_tokens": 0}}
+        yield {"type": "message_stop"}
+
+    settled: list[dict] = []
+
+    async def fake_adjust(
+        fresh_key: Any, data: dict, *args: Any, **kwargs: Any
+    ) -> dict:
+        settled.append(data)
+        return {"total_msats": 0}
+
+    fake_session = MagicMock()
+    fake_session.get = AsyncMock(return_value=key)
+
+    class FakeSessionCtx:
+        async def __aenter__(self) -> Any:
+            return fake_session
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(return_value=empty_reply()),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(side_effect=fake_adjust),
+        ),
+        patch(
+            "routstr.upstream.base.create_session",
+            new=lambda: FakeSessionCtx(),
+        ),
+    ):
+        result = await provider._forward_messages_via_litellm(
+            request_body=_anthropic_request_body(stream=True),
+            key=key,
+            session=_make_session(),
+            max_cost_for_model=10_000,
+            model_obj=_make_model(),
+        )
+        assert isinstance(result, StreamingResponse)
+        with pytest.raises(RuntimeError) if fails else contextlib.nullcontext():
+            async for _ in result.body_iterator:
+                pass
+
+    assert [data["usage"] for data in settled] == [None]
 
 
 @pytest.mark.asyncio
@@ -1565,7 +1627,7 @@ async def test_aggregator_parses_tool_use_input_json_delta() -> None:
         {
             "type": "content_block_delta",
             "index": 0,
-            "delta": {"type": "input_json_delta", "partial_json": ' 7}'},
+            "delta": {"type": "input_json_delta", "partial_json": " 7}"},
         },
         {"type": "content_block_stop", "index": 0},
         {
@@ -1593,18 +1655,18 @@ async def test_aggregator_parses_sse_byte_chunks() -> None:
     provider = _make_provider()
 
     sse = (
-        b'event: message_start\n'
+        b"event: message_start\n"
         b'data: {"type":"message_start","message":{"id":"m1","type":"message",'
         b'"role":"assistant","model":"x","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
-        b'event: content_block_start\n'
+        b"event: content_block_start\n"
         b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
-        b'event: content_block_delta\n'
+        b"event: content_block_delta\n"
         b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n'
-        b'event: content_block_stop\n'
+        b"event: content_block_stop\n"
         b'data: {"type":"content_block_stop","index":0}\n\n'
-        b'event: message_delta\n'
+        b"event: message_delta\n"
         b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\n'
-        b'event: message_stop\n'
+        b"event: message_stop\n"
         b'data: {"type":"message_stop"}\n\n'
     )
 
@@ -1673,11 +1735,13 @@ async def test_dispatch_always_streams_upstream_and_aggregates_for_non_streaming
         "litellm.anthropic.messages.acreate",
         new=AsyncMock(side_effect=fake_acreate),
     ):
-        client_stream, result, requested_model = (
-            await provider._dispatch_anthropic_messages(
-                request_body=body,
-                model_obj=model,
-            )
+        (
+            client_stream,
+            result,
+            requested_model,
+        ) = await provider._dispatch_anthropic_messages(
+            request_body=body,
+            model_obj=model,
         )
 
     # Upstream was streamed regardless of client preference.
@@ -1715,13 +1779,9 @@ async def test_dispatch_uses_url_detected_prefix_for_fireworks_custom_row() -> N
         "litellm.anthropic.messages.acreate",
         new=AsyncMock(side_effect=fake_acreate),
     ):
-        await provider._dispatch_anthropic_messages(
-            request_body=body, model_obj=model
-        )
+        await provider._dispatch_anthropic_messages(request_body=body, model_obj=model)
 
-    assert captured_kwargs["model"] == (
-        "fireworks_ai/accounts/fireworks/models/glm-5"
-    )
+    assert captured_kwargs["model"] == ("fireworks_ai/accounts/fireworks/models/glm-5")
     assert captured_kwargs["api_base"] == "https://api.fireworks.ai/inference/v1"
 
 
@@ -1771,9 +1831,7 @@ async def test_x_cashu_mint_unreachable_returns_503(
     model = _make_model()
     request = _make_request()
 
-    with patch(
-        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
-    ):
+    with patch("routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)):
         handler = getattr(provider, handler_name)
         response = await handler(
             request=request,
@@ -1862,9 +1920,7 @@ async def test_x_cashu_error_code_is_stable_string(
     model = _make_model()
     request = _make_request()
 
-    with patch(
-        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
-    ):
+    with patch("routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)):
         handler = getattr(provider, handler_name)
         response = await handler(
             request=request,
@@ -1934,7 +1990,10 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
     assert response.headers["X-Cashu"] == "cashuArefund"
     assert body["error"]["refund_token"] == "cashuArefund"
     refund.assert_awaited_once_with(
-        5_000, "sat", "https://mint", request_id=getattr(request.state, "request_id", None)
+        5_000,
+        "sat",
+        "https://mint",
+        request_id=getattr(request.state, "request_id", None),
     )
 
 
@@ -1994,9 +2053,7 @@ async def test_x_cashu_echoes_token_only_when_recoverable(
     model = _make_model()
     request = _make_request()
 
-    with patch(
-        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
-    ):
+    with patch("routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)):
         handler = getattr(provider, handler_name)
         response = await handler(
             request=request,
@@ -2040,7 +2097,9 @@ async def test_x_cashu_zero_value_rejected_not_forwarded(
         patch.object(
             provider,
             forward_attr,
-            new=AsyncMock(side_effect=AssertionError("must not forward a zero-value token")),
+            new=AsyncMock(
+                side_effect=AssertionError("must not forward a zero-value token")
+            ),
         ),
     ):
         handler = getattr(provider, handler_name)
@@ -2090,3 +2149,106 @@ async def test_dispatch_passes_placeholder_key_for_keyless_upstream() -> None:
         )
 
     assert captured_kwargs["api_key"] == "no-key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_kind", "reported_tokens"),
+    [("tool", None), ("tool", 0), ("tool", 7), ("text", None), ("text", 7)],
+)
+async def test_real_litellm_adapter_preserves_tool_billing_boundary(
+    output_kind: str, reported_tokens: int | None
+) -> None:
+    from litellm.llms.anthropic.experimental_pass_through.adapters.streaming_iterator import (
+        AnthropicStreamWrapper,
+    )
+    from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
+    async def openai_chunks() -> AsyncIterator[ModelResponseStream]:
+        delta: dict[str, Any] = (
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "tool_1",
+                        "type": "function",
+                        "function": {"name": "calc", "arguments": ""},
+                    }
+                ]
+            }
+            if output_kind == "tool"
+            else {"content": "hello"}
+        )
+        yield ModelResponseStream(
+            id="c",
+            model="gpt-4o-mini",
+            choices=[StreamingChoices(index=0, delta=Delta(**delta))],
+        )
+        yield ModelResponseStream(
+            id="c",
+            model="gpt-4o-mini",
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(),
+                    finish_reason="tool_calls" if output_kind == "tool" else "stop",
+                )
+            ],
+        )
+        if reported_tokens is not None:
+            yield ModelResponseStream(
+                id="c",
+                model="gpt-4o-mini",
+                choices=[],
+                usage={
+                    "prompt_tokens": reported_tokens,
+                    "completion_tokens": reported_tokens,
+                    "total_tokens": reported_tokens * 2,
+                },
+            )
+
+    adapter = AnthropicStreamWrapper(cast(Any, openai_chunks()), "gpt-4o-mini")
+    key = _make_key()
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+
+    class SessionContext:
+        async def __aenter__(self) -> Any:
+            return session
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    adjust = AsyncMock(return_value={"total_msats": 0})
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(return_value=adapter.async_anthropic_sse_wrapper()),
+        ),
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.create_session", new=SessionContext),
+    ):
+        response = await _make_provider()._forward_messages_via_litellm(
+            request_body=_anthropic_request_body(stream=True),
+            key=key,
+            session=_make_session(),
+            max_cost_for_model=10_000,
+            model_obj=_make_model(),
+        )
+        assert isinstance(response, StreamingResponse)
+        async for _ in response.body_iterator:
+            pass
+
+    adjust.assert_awaited_once()
+    usage = adjust.call_args.args[1]["usage"]
+    if reported_tokens:
+        assert usage["input_tokens"] == reported_tokens
+        assert usage["output_tokens"] == reported_tokens
+        assert "estimated" not in usage
+    elif output_kind == "tool":
+        # Adapter placeholders and measured zeros are indistinguishable on
+        # the wire. Keep prior behavior until usage provenance is available.
+        assert usage is None
+    else:
+        assert usage["estimated"] is True
+        assert usage["output_tokens"] > 0

@@ -1278,7 +1278,8 @@ async def test_native_messages_error_event_still_records_its_settlement() -> Non
             (10, 5),
             ("reported", "reported"),
         ),
-        (False, {}, {}, 3, (3, 0), ("estimated", "estimated")),
+        (False, {}, {}, 0, (0, 0), ("missing", "missing")),
+        (True, {}, {}, 0, (0, 0), ("missing", "missing")),
         (True, {}, {"output_tokens": 5}, 5, (0, 5), ("missing", "reported")),
     ],
 )
@@ -1796,3 +1797,64 @@ async def test_messages_streaming_bills_upstream_routstr_node_charge() -> None:
             pass
 
     assert usage["cost"] == pytest.approx(0.000123)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_tokens", [None, 0, 400])
+async def test_responses_failed_finalizer_keeps_usage_if_settlement_is_cancelled(
+    input_tokens: int | None,
+) -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+    failed: dict = {"id": "resp-failed", "status": "failed", "output": []}
+    if input_tokens is not None:
+        failed["usage"] = {
+            "input_tokens": input_tokens,
+            "output_tokens": 0,
+            "total_tokens": input_tokens,
+        }
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield (
+            b"data: "
+            + json.dumps({"type": "response.failed", "response": failed}).encode()
+            + b"\n\n"
+        )
+        pytest.fail("Failure settlement must not wait for another upstream read")
+
+    upstream = MagicMock(status_code=200, headers={"content-type": "text/event-stream"})
+    upstream.aiter_bytes = aiter_bytes
+    upstream.aclose = AsyncMock()
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = "failed-cancelled"
+    key.balance = 10_000
+    session = MagicMock()
+    # Cancel the first settlement before it starts. Persistent cleanup must
+    # still have the captured terminal, not only an empty text estimator.
+    session.get = AsyncMock(side_effect=[asyncio.CancelledError(), key])
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    adjust = AsyncMock(return_value={"input_tokens": input_tokens or 0})
+
+    with (
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+    ):
+        response = await provider.handle_streaming_responses_completion(
+            upstream, key, 500, request_body=b'{"input":"hi"}'
+        )
+        with pytest.raises(asyncio.CancelledError):
+            async for _ in response.body_iterator:
+                pytest.fail("Cancelled settlement cannot emit a terminal event")
+
+    adjust.assert_awaited_once()
+    assert adjust.await_args is not None
+    billing_data = adjust.await_args.args[1]
+    if input_tokens is None:
+        assert billing_data["usage"] is None
+    else:
+        assert billing_data["usage"]["input_tokens"] == input_tokens
+        assert billing_data["usage"]["output_tokens"] == 0
+    upstream.aclose.assert_awaited_once()
