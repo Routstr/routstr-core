@@ -15,14 +15,14 @@ dependencies = [
     "greenlet>=3.2.1",
     "alembic>=1.13",
     "python-json-logger>=2.0.0",
-    "cashu>=0.20",
+    "cashu>=0.21",
     "marshmallow>=3.13,<4.0",
     "websockets>=12.0",
     "nostr-sdk>=0.45.1,<0.46",
     "mdurl==0.1.2",
     "pillow>=13.0.0",
     "openai>=1.98.0",
-    "litellm>=1.101.2,<1.102",
+    "litellm>=1.101.3,<1.102",
     "backoff>=2.2",  # litellm's native Anthropic-messages streaming (e.g. deepseek/) imports litellm.proxy, which needs it
     "orjson>=3.10",
 ]
@@ -94,7 +94,7 @@ disallow_untyped_decorators = true
 [tool.uv.sources]
 routstr = { workspace = true }
 
-# Security floors. cashu 0.20.x caps httpx, h11, fastapi, cryptography,
+# Security floors. cashu 0.21.x caps httpx, h11, fastapi, cryptography,
 # setuptools and wheel below their patched versions. routstr uses only cashu's
 # wallet modules, not its server paths, so the caps are safe to lift here.
 [tool.uv]
@@ -111,12 +111,16 @@ override-dependencies = [
     "cryptography>=49.0.0",
     "setuptools>=84.1.0",
     "wheel>=0.46.2",
+    # cashu 0.21 caps breez-sdk-spark<0.18, which has no Python 3.14 wheels.
+    # breez is only imported by cashu's Spark mint backend, which routstr never loads.
+    "breez-sdk-spark>=0.17.0",
 ]
 
 # Transitive deps whose dependents allow the patched version but don't require
 # it. Constraints raise the floor without bypassing any upstream pin.
 constraint-dependencies = [
     "certifi>=2026.10.19",
+    "dnspython>=2.9.0",
     "aiohttp>=3.14.4",
     "brotli>=1.2.1",
     "filelock>=4.2.1",
