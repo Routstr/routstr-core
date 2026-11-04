@@ -57,7 +57,9 @@ def _make_model(
     return Model(
         id=model_id,
         name=model_id,
-        forwarded_model_id=forwarded_model_id if forwarded_model_id is not None else model_id,
+        forwarded_model_id=forwarded_model_id
+        if forwarded_model_id is not None
+        else model_id,
         created=0,
         description="",
         context_length=8192,
@@ -215,9 +217,7 @@ def test_events_from_chunk_handles_bytes_chunks() -> None:
 
 def test_events_from_chunk_handles_str_chunks() -> None:
     provider = _make_provider()
-    events, buf = provider._events_from_chunk(
-        'event: a\ndata: {"type":"a"}\n\n', b""
-    )
+    events, buf = provider._events_from_chunk('event: a\ndata: {"type":"a"}\n\n', b"")
     assert events == [{"type": "a"}]
     assert buf == b""
 
@@ -260,9 +260,7 @@ def test_base_provider_resolves_prefix_from_base_url() -> None:
     )
     assert groq.get_litellm_provider_prefix() == "groq/"
 
-    xai = BaseUpstreamProvider(
-        base_url="https://api.x.ai/v1", api_key="sk-test"
-    )
+    xai = BaseUpstreamProvider(base_url="https://api.x.ai/v1", api_key="sk-test")
     assert xai.get_litellm_provider_prefix() == "xai/"
 
     deepseek = BaseUpstreamProvider(
@@ -270,9 +268,7 @@ def test_base_provider_resolves_prefix_from_base_url() -> None:
     )
     assert deepseek.get_litellm_provider_prefix() == "deepseek/"
 
-    unknown = BaseUpstreamProvider(
-        base_url="https://example.com/v1", api_key="sk-test"
-    )
+    unknown = BaseUpstreamProvider(base_url="https://example.com/v1", api_key="sk-test")
     assert unknown.get_litellm_provider_prefix() == "openai/"
 
 
@@ -729,7 +725,12 @@ async def test_non_streaming_dispatches_via_litellm_and_returns_anthropic_respon
 
 
 @pytest.mark.asyncio
-async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
+@pytest.mark.parametrize(
+    "input_tokens,output_tokens,estimated", [(5, 7, False), (0, 0, True)]
+)
+async def test_streaming_emits_sse_and_reconciles_cost_at_end(
+    input_tokens: int, output_tokens: int, estimated: bool
+) -> None:
     provider = _make_provider()
     key = _make_key()
     model = _make_model()
@@ -745,7 +746,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
                 "role": "assistant",
                 "model": "openai/gpt-4o-mini",
                 "content": [],
-                "usage": {"input_tokens": 5, "output_tokens": 0},
+                "usage": {"input_tokens": input_tokens, "output_tokens": 0},
             },
         }
         yield {
@@ -762,7 +763,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
         yield {
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 7},
+            "usage": {"output_tokens": output_tokens},
         }
         yield {"type": "message_stop"}
 
@@ -784,10 +785,13 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
         model_obj: Any = None,
         provider_fee: Any = None,
         reservation_snapshot: Any = None,
+        terminal_outcome: Any = None,
+        usage_presence: Any = None,
     ) -> dict:
         captured_cost_call["combined_data"] = combined_data
         captured_cost_call["max_cost"] = max_cost
         captured_cost_call["reservation_snapshot"] = reservation_snapshot
+        captured_cost_call["usage_presence"] = usage_presence
         return fake_cost
 
     fake_session = MagicMock()
@@ -813,6 +817,11 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
         patch(
             "routstr.upstream.base.create_session",
             new=lambda: FakeSessionCtx(),
+        ),
+        patch("routstr.upstream.count_tokens._count_with_litellm", return_value=0),
+        patch(
+            "routstr.upstream.count_tokens._count_text_with_litellm",
+            return_value=0,
         ),
     ):
         result = await provider._forward_messages_via_litellm(
@@ -841,10 +850,13 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
     assert "event: cost" in joined
 
     combined = captured_cost_call["combined_data"]
-    assert combined["usage"]["input_tokens"] == 5
-    assert combined["usage"]["output_tokens"] == 7
+    assert combined["usage"]["input_tokens"] == input_tokens
+    assert combined["usage"]["output_tokens"] == output_tokens
+    assert combined["usage"].get("estimated", False) is estimated
     assert combined["model"] == "openai/gpt-4o-mini"
     assert captured_cost_call["reservation_snapshot"] is reservation
+    assert captured_cost_call["usage_presence"].input_source == "reported"
+    assert captured_cost_call["usage_presence"].output_source == "reported"
 
 
 @pytest.mark.asyncio
@@ -867,7 +879,9 @@ async def test_streaming_with_no_output_and_no_usage_is_not_charged(
 
     settled: list[dict] = []
 
-    async def fake_adjust(fresh_key: Any, data: dict, *args: Any) -> dict:
+    async def fake_adjust(
+        fresh_key: Any, data: dict, *args: Any, **kwargs: Any
+    ) -> dict:
         settled.append(data)
         return {"total_msats": 0}
 
@@ -951,9 +965,12 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
         model_obj: Any = None,
         provider_fee: Any = None,
         reservation_snapshot: Any = None,
+        terminal_outcome: Any = None,
+        usage_presence: Any = None,
     ) -> dict:
         captured["combined_data"] = combined_data
         captured["reservation_snapshot"] = reservation_snapshot
+        captured["usage_presence"] = usage_presence
         return fake_cost
 
     fake_session = MagicMock()
@@ -1011,6 +1028,8 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
     assert combined["usage"]["output_tokens"] == 4
     assert combined["model"] == "openai/gpt-4o-mini"
     assert captured["reservation_snapshot"] is reservation
+    assert captured["usage_presence"].input_source == "reported"
+    assert captured["usage_presence"].output_source == "reported"
 
 
 # ---------------------------------------------------------------------------
@@ -1233,7 +1252,7 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
             provider,
             "get_x_cashu_cost",
             new=AsyncMock(return_value=cost),
-        ),
+        ) as mock_get_cost,
         patch.object(
             provider,
             "send_refund",
@@ -1258,6 +1277,11 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
     refund_call = mock_refund.await_args
     assert refund_call is not None
     assert refund_call.args[0] == 3_500
+    get_cost_call = mock_get_cost.await_args
+    assert get_cost_call is not None
+    usage_presence = get_cost_call.args[3]
+    assert usage_presence.input_source == "reported"
+    assert usage_presence.output_source == "reported"
 
     emitted: list[bytes] = []
     async for chunk in result.body_iterator:
@@ -1603,7 +1627,7 @@ async def test_aggregator_parses_tool_use_input_json_delta() -> None:
         {
             "type": "content_block_delta",
             "index": 0,
-            "delta": {"type": "input_json_delta", "partial_json": ' 7}'},
+            "delta": {"type": "input_json_delta", "partial_json": " 7}"},
         },
         {"type": "content_block_stop", "index": 0},
         {
@@ -1631,18 +1655,18 @@ async def test_aggregator_parses_sse_byte_chunks() -> None:
     provider = _make_provider()
 
     sse = (
-        b'event: message_start\n'
+        b"event: message_start\n"
         b'data: {"type":"message_start","message":{"id":"m1","type":"message",'
         b'"role":"assistant","model":"x","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
-        b'event: content_block_start\n'
+        b"event: content_block_start\n"
         b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
-        b'event: content_block_delta\n'
+        b"event: content_block_delta\n"
         b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n'
-        b'event: content_block_stop\n'
+        b"event: content_block_stop\n"
         b'data: {"type":"content_block_stop","index":0}\n\n'
-        b'event: message_delta\n'
+        b"event: message_delta\n"
         b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\n'
-        b'event: message_stop\n'
+        b"event: message_stop\n"
         b'data: {"type":"message_stop"}\n\n'
     )
 
@@ -1711,11 +1735,13 @@ async def test_dispatch_always_streams_upstream_and_aggregates_for_non_streaming
         "litellm.anthropic.messages.acreate",
         new=AsyncMock(side_effect=fake_acreate),
     ):
-        client_stream, result, requested_model = (
-            await provider._dispatch_anthropic_messages(
-                request_body=body,
-                model_obj=model,
-            )
+        (
+            client_stream,
+            result,
+            requested_model,
+        ) = await provider._dispatch_anthropic_messages(
+            request_body=body,
+            model_obj=model,
         )
 
     # Upstream was streamed regardless of client preference.
@@ -1753,13 +1779,9 @@ async def test_dispatch_uses_url_detected_prefix_for_fireworks_custom_row() -> N
         "litellm.anthropic.messages.acreate",
         new=AsyncMock(side_effect=fake_acreate),
     ):
-        await provider._dispatch_anthropic_messages(
-            request_body=body, model_obj=model
-        )
+        await provider._dispatch_anthropic_messages(request_body=body, model_obj=model)
 
-    assert captured_kwargs["model"] == (
-        "fireworks_ai/accounts/fireworks/models/glm-5"
-    )
+    assert captured_kwargs["model"] == ("fireworks_ai/accounts/fireworks/models/glm-5")
     assert captured_kwargs["api_base"] == "https://api.fireworks.ai/inference/v1"
 
 
@@ -1809,9 +1831,7 @@ async def test_x_cashu_mint_unreachable_returns_503(
     model = _make_model()
     request = _make_request()
 
-    with patch(
-        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
-    ):
+    with patch("routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)):
         handler = getattr(provider, handler_name)
         response = await handler(
             request=request,
@@ -1900,9 +1920,7 @@ async def test_x_cashu_error_code_is_stable_string(
     model = _make_model()
     request = _make_request()
 
-    with patch(
-        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
-    ):
+    with patch("routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)):
         handler = getattr(provider, handler_name)
         response = await handler(
             request=request,
@@ -1972,7 +1990,10 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
     assert response.headers["X-Cashu"] == "cashuArefund"
     assert body["error"]["refund_token"] == "cashuArefund"
     refund.assert_awaited_once_with(
-        5_000, "sat", "https://mint", request_id=getattr(request.state, "request_id", None)
+        5_000,
+        "sat",
+        "https://mint",
+        request_id=getattr(request.state, "request_id", None),
     )
 
 
@@ -2032,9 +2053,7 @@ async def test_x_cashu_echoes_token_only_when_recoverable(
     model = _make_model()
     request = _make_request()
 
-    with patch(
-        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
-    ):
+    with patch("routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)):
         handler = getattr(provider, handler_name)
         response = await handler(
             request=request,
@@ -2078,7 +2097,9 @@ async def test_x_cashu_zero_value_rejected_not_forwarded(
         patch.object(
             provider,
             forward_attr,
-            new=AsyncMock(side_effect=AssertionError("must not forward a zero-value token")),
+            new=AsyncMock(
+                side_effect=AssertionError("must not forward a zero-value token")
+            ),
         ),
     ):
         handler = getattr(provider, handler_name)
