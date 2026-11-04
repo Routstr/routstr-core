@@ -39,7 +39,7 @@ from .mint import (
 )
 from .payment.lnurl import MeltUnpaidError, raw_send_to_lnurl
 
-# cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28; see the module
+# cashu 0.21.x passes the `proxies` kwarg httpx removed in 0.28; see the module
 # docstring. Installed at import so no mint call can run before the patch.
 install_cashu_httpx_shim()
 
