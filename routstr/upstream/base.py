@@ -532,8 +532,9 @@ def _ascii_safe_forward_headers(headers: dict[str, str]) -> dict[str, str]:
     request. A cosmetic header such as OpenRouter's ``X-Title`` must not turn a
     paid inference request into a 500.
 
-    Non-ASCII characters are stripped from values; a value that becomes empty
-    and a name that is not ASCII are dropped. Header values are never logged
+    Non-ASCII characters are stripped from values, along with any exposed
+    surrounding spaces/tabs; a value that becomes empty and a name that is not
+    ASCII are dropped. Header values are never logged
     because clients sometimes put credentials in custom headers.
     """
     safe: dict[str, str] = {}
@@ -551,8 +552,10 @@ def _ascii_safe_forward_headers(headers: dict[str, str]) -> dict[str, str]:
         try:
             text.encode("ascii")
         except UnicodeEncodeError:
-            cleaned = text.encode("ascii", "ignore").decode("ascii")
-            if text and not cleaned:
+            # Removing Unicode can expose whitespace at either end, which h11
+            # rejects even though httpx.Request construction accepts it.
+            cleaned = text.encode("ascii", "ignore").decode("ascii").strip(" \t")
+            if not cleaned:
                 dropped.append(name)
                 continue
             safe[name] = cleaned
