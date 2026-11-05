@@ -500,6 +500,8 @@ async def withdraw(
             withdraw_request.amount, withdraw_request.unit, effective_mint
         )
     except ValueError as error:
+        if str(error).startswith("Too many small coins"):
+            raise HTTPException(status_code=400, detail=str(error)) from error
         if not str(error).startswith("No trusted mint has "):
             raise
         raise HTTPException(
