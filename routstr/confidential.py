@@ -740,7 +740,7 @@ def price_entry(model_id: str, cand: Candidate) -> dict[str, float] | None:
             "cache_write": in_rate,
             "out": out_rate,
         }
-    in_rate, out_rate, cache_read_rate, cache_write_rate = rates
+    in_rate, out_rate, cache_read_rate, cache_write_rate = rates[:4]
     return {
         "in": float(in_rate),
         "cached_in": float(cache_read_rate),
