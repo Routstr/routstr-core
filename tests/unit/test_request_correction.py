@@ -84,6 +84,20 @@ class TestCorrectRequest:
         body = _body(model="gpt-3", temperature=1, messages=[])
         assert correct_request(body, "`gpt-3` is deprecated, use gpt-4", set()) is None
 
+    def test_strips_store_after_capability_rejection(self) -> None:
+        body = _body(model="z-ai/glm-5.3-flash", store=False, messages=[])
+        result = correct_request(
+            body,
+            "store requires an admitted execution or privacy capability",
+            set(),
+        )
+        assert isinstance(result, Correction)
+        assert result.label == "store"
+        assert json.loads(result.body) == {
+            "model": "z-ai/glm-5.3-flash",
+            "messages": [],
+        }
+
     def test_streaming_400_buffered_error_is_correctable(self) -> None:
         """Streaming 400s funnel through a buffered JSON Response, so the same
         correction path applies as for non-streaming requests."""
@@ -169,6 +183,24 @@ class TestStripUnsupportedParam:
             "Unsupported parameter: messages[0].name",
         ):
             assert strip_unsupported_param(body, message) is None, message
+
+    def test_strips_param_that_requires_an_admitted_capability(self) -> None:
+        message = "store requires an admitted execution or privacy capability"
+        for value in (False, True):
+            body = {"model": "m", "messages": [], "store": value}
+            assert strip_unsupported_param(body, message) == (
+                {"model": "m", "messages": []},
+                "store",
+            )
+
+    def test_capability_wording_without_present_param_declines(self) -> None:
+        assert (
+            strip_unsupported_param(
+                {"model": "m", "messages": []},
+                "store requires an admitted execution or privacy capability",
+            )
+            is None
+        )
 
     def test_never_strips_request_identity_params(self) -> None:
         body = {"model": "m", "messages": [], "input": "x", "stream": False}
