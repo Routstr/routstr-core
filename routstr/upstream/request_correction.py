@@ -52,6 +52,17 @@ _UNSUPPORTED_PARAM_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Some gateways reject an optional param by naming the capability it would
+# require instead of calling the param unsupported, e.g. Numes' "store requires
+# an admitted execution or privacy capability". Match that wording too, so the
+# named top-level param can be stripped and the request retried without it.
+_REQUIRES_CAPABILITY_RE = re.compile(
+    r"[`'\"]?(?P<param>[a-zA-Z_][a-zA-Z0-9_]*)[`'\"]?\s+"
+    r"requires\s+an?\s+(?:admitted\s+)?(?:execution|privacy)"
+    r"(?:\s+or\s+(?:execution|privacy))?\s+capability\b",
+    re.IGNORECASE,
+)
+
 
 # Matches upstream error text that rejects a param and names its replacement,
 # e.g. OpenAI's "Unsupported parameter: 'max_tokens' is not supported with this
@@ -183,19 +194,23 @@ def rename_unsupported_param(body: dict, error_message: str) -> tuple[dict, str]
 
 
 def strip_unsupported_param(body: dict, error_message: str) -> tuple[dict, str] | None:
-    """Drop a top-level param the upstream named as unsupported/deprecated.
+    """Drop a top-level param the upstream named as unsupported or unavailable.
 
     Returns ``(new_body, param)`` (a new dict, original untouched) when the
     error names a top-level param present in the body, otherwise ``None``.
+    Handles both explicit "unsupported/deprecated" wording and a rejection that
+    names the capability a param would require (e.g. Numes' ``store``).
 
     Spend-shaping fields (output caps, fan-out counts) are never stripped:
     removing one after the reservation was priced would uncap the retry and
     overcharge. When the upstream names such a field, decline so the original
     error propagates rather than silently resizing the request's cost.
     """
-    match = _UNSUPPORTED_PARAM_RE.search(
-        error_message
-    ) or _UNSUPPORTED_PARAM_PREFIX_RE.search(error_message)
+    match = (
+        _UNSUPPORTED_PARAM_RE.search(error_message)
+        or _UNSUPPORTED_PARAM_PREFIX_RE.search(error_message)
+        or _REQUIRES_CAPABILITY_RE.search(error_message)
+    )
     if not match:
         return None
     param = match.group("param")
