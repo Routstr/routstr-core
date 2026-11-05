@@ -311,3 +311,42 @@ def test_empty_catalog_on_error() -> None:
     provider = TogetherUpstreamProvider(api_key="k")
     with patch("routstr.upstream.together.httpx.AsyncClient", lambda *a, **kw: Boom()):
         assert asyncio.run(provider.fetch_models()) == []
+
+
+@pytest.mark.parametrize(
+    ("asked", "sent"),
+    [(None, "base64"), ("b64_json", "base64"), ("url", "url")],
+)
+def test_image_requests_ask_together_for_bytes_unless_a_link_was_asked(
+    asked: str | None, sent: str
+) -> None:
+    models, _ = _fetch()
+    schnell = next(m for m in models if m.id == "black-forest-labs/FLUX.1-schnell")
+    body: dict[str, Any] = {"model": schnell.id, "prompt": "a red fox"}
+    if asked is not None:
+        body["response_format"] = asked
+    provider = TogetherUpstreamProvider(api_key="sk-test")
+    out = provider.prepare_request_body(json.dumps(body).encode(), schnell)
+    assert out is not None
+    assert json.loads(out)["response_format"] == sent
+
+
+def test_an_operator_priced_image_model_also_asks_for_bytes() -> None:
+    models, _ = _fetch()
+    schnell = next(m for m in models if m.id == "black-forest-labs/FLUX.1-schnell")
+    unbooked = schnell.copy(update={"image_pricing": None})
+    body = {"model": unbooked.id, "prompt": "a red fox"}
+    provider = TogetherUpstreamProvider(api_key="sk-test")
+    out = provider.prepare_request_body(json.dumps(body).encode(), unbooked)
+    assert out is not None
+    assert json.loads(out)["response_format"] == "base64"
+
+
+def test_chat_requests_are_left_alone() -> None:
+    models, _ = _fetch()
+    llama = next(m for m in models if m.id == "meta-llama/Llama-3.3-70B-Instruct-Turbo")
+    body = {"model": llama.id, "messages": [{"role": "user", "content": "hi"}]}
+    provider = TogetherUpstreamProvider(api_key="sk-test")
+    out = provider.prepare_request_body(json.dumps(body).encode(), llama)
+    assert out is not None
+    assert "response_format" not in json.loads(out)
