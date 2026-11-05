@@ -5,10 +5,14 @@ import socket
 from collections.abc import AsyncIterator, Generator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import httpx
 import pytest
+from cashu.core.base import Proof, Unit
+from cashu.wallet.wallet import Wallet
 
 from routstr.core.db import ApiKey
 from routstr.wallet import (
@@ -673,11 +677,179 @@ async def test_send_from_thousands_of_small_coins_skips_recursive_coinselect() -
         patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=coins),
     ):
         assert await send(901, "sat", mint) == (901, "token")
-        with pytest.raises(ValueError, match="at most 1900 sat can be sent at once"):
+        with pytest.raises(
+            ValueError, match="selected proofs cover 1900 sat after swap fees"
+        ):
             await send(2500, "sat", mint)
 
     wallet.split.assert_awaited_once_with(coins[:475], 901)
     wallet.set_reserved_for_send.assert_awaited_once_with(sent, reserved=True)
+
+
+@pytest.fixture
+def cashu_selection_wallet(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    mint = "https://mint.invalid"
+    wallet = SimpleNamespace(
+        keysets={
+            "ks": SimpleNamespace(
+                id="ks", unit=Unit.sat, input_fee_ppk=100, mint_url=mint, active=True
+            )
+        },
+        unit=Unit.sat,
+        proofs=[],
+        split=AsyncMock(),
+        serialize_proofs=AsyncMock(return_value="token"),
+        set_reserved_for_send=AsyncMock(),
+    )
+    for name in (
+        "active_proofs",
+        "coinselect",
+        "get_fees_for_proofs",
+        "get_fees_for_proofs_ppk",
+        "select_to_send",
+    ):
+        setattr(wallet, name, getattr(Wallet, name).__get__(wallet))
+    monkeypatch.setattr(
+        "routstr.wallet.find_trusted_mint_with_funds", AsyncMock(return_value=mint)
+    )
+    monkeypatch.setattr("routstr.wallet.get_wallet", AsyncMock(return_value=wallet))
+    monkeypatch.setattr(
+        "routstr.wallet.get_proofs_per_mint_and_unit",
+        lambda *args, **kwargs: wallet.proofs,
+    )
+    return wallet
+
+
+def dust_proofs(amounts: list[int]) -> list[Proof]:
+    return [
+        Proof(id="ks", amount=amount, secret=str(i), C="02" + "01" * 32)
+        for i, amount in enumerate(amounts)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cap", [999, 1000, 1001])
+async def test_send_exact_mixed_dust_with_real_cashu_selection(
+    cashu_selection_wallet: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    cap: int,
+) -> None:
+    from routstr.wallet import cashu_settings
+
+    wallet = cashu_selection_wallet
+    coins = dust_proofs([4] * 999 + [2, 1])
+    wallet.proofs = coins
+    monkeypatch.setattr(cashu_settings, "mint_max_request_length", cap)
+    # Exercise the installed SDK, not an injected RecursionError.
+    with pytest.raises(RecursionError):
+        await wallet.select_to_send(coins, 3997, set_reserved=False, include_fees=False)
+
+    if cap < 1000:
+        with pytest.raises(ValueError, match="Too many small coins: selected proofs"):
+            await send(3997, "sat")
+        wallet.serialize_proofs.assert_not_awaited()
+        wallet.set_reserved_for_send.assert_not_awaited()
+    else:
+        assert await send(3997, "sat") == (3997, "token")
+        exact = coins[:999] + coins[-1:]
+        assert len(exact) == 1000
+        assert sum(proof.amount for proof in exact) == 3997
+        assert wallet.get_fees_for_proofs(exact) == 100
+        wallet.serialize_proofs.assert_awaited_once_with(
+            exact, include_dleq=False, legacy=False, memo=None
+        )
+        wallet.set_reserved_for_send.assert_awaited_once_with(exact, reserved=True)
+    wallet.split.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_exact_dust_releases_proofs_on_serialization_failure(
+    cashu_selection_wallet: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from routstr.wallet import cashu_settings
+
+    wallet = cashu_selection_wallet
+    coins = dust_proofs([4] * 999 + [2, 1])
+    wallet.proofs = coins
+    wallet.serialize_proofs.side_effect = RuntimeError("serialization failed")
+    monkeypatch.setattr(cashu_settings, "mint_max_request_length", 1000)
+
+    with pytest.raises(RuntimeError, match="serialization failed"):
+        await send(3997, "sat")
+
+    wallet.split.assert_not_awaited()
+    wallet.set_reserved_for_send.assert_awaited_once_with(
+        coins[:999] + coins[-1:], reserved=False
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cap", [1000, 1100])
+async def test_send_dust_without_exact_selection_covers_real_cashu_fees(
+    cashu_selection_wallet: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    cap: int,
+) -> None:
+    from routstr.wallet import cashu_settings
+
+    wallet = cashu_selection_wallet
+    coins = dust_proofs([4] * 1200)
+    wallet.proofs = coins
+    sent = dust_proofs([3997])
+    wallet.split.return_value = ([], sent)
+    monkeypatch.setattr(cashu_settings, "mint_max_request_length", cap)
+    with pytest.raises(RecursionError):
+        await wallet.select_to_send(coins, 3997, set_reserved=False, include_fees=False)
+
+    if cap == 1000:
+        with pytest.raises(
+            ValueError, match="selected proofs cover 3900 sat after swap fees"
+        ):
+            await send(3997, "sat")
+        wallet.split.assert_not_awaited()
+        wallet.serialize_proofs.assert_not_awaited()
+        wallet.set_reserved_for_send.assert_not_awaited()
+    else:
+        assert await send(3997, "sat") == (3997, "token")
+        selected = coins[:1025]
+        assert sum(p.amount for p in selected) == (
+            3997 + wallet.get_fees_for_proofs(selected)
+        )
+        wallet.split.assert_awaited_once_with(selected, 3997)
+        wallet.set_reserved_for_send.assert_awaited_once_with(sent, reserved=True)
+
+
+def test_largest_proofs_first_exact_selection_preserves_cashu_eligibility(
+    cashu_selection_wallet: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from routstr.wallet import _largest_proofs_first, cashu_settings
+
+    wallet = cashu_selection_wallet
+    wallet.keysets["old"] = SimpleNamespace(
+        id="old", unit=Unit.sat, input_fee_ppk=100, active=False
+    )
+    wallet.keysets["msat"] = SimpleNamespace(
+        id="msat", unit=Unit.msat, input_fee_ppk=100, active=True
+    )
+    coins = dust_proofs([8, 8, 8, 4, 2, 1])
+    coins[0].reserved = True
+    coins[1].id = "unknown"
+    coins[2].id = "msat"
+    coins[3].id = "old"
+    monkeypatch.setattr(cashu_settings, "mint_max_request_length", 2)
+
+    assert _largest_proofs_first(cast(Wallet, wallet), coins, 5) == [coins[3], coins[5]]
+
+
+def test_largest_proofs_first_custom_denominations_keep_swap_fallback(
+    cashu_selection_wallet: SimpleNamespace,
+) -> None:
+    from routstr.wallet import _largest_proofs_first
+
+    wallet = cast(Wallet, cashu_selection_wallet)
+    coins = dust_proofs([4, 3, 3])
+    # Greedy exact selection need not find every custom-denomination combination.
+    assert _largest_proofs_first(wallet, coins, 6) == coins[:2]
 
 
 @pytest.mark.asyncio
