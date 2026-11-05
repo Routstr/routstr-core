@@ -523,6 +523,52 @@ def _x_cashu_path_has_settlement_handler(path: str) -> bool:
     )
 
 
+def _ascii_safe_forward_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Make client headers safe for httpx's ASCII-only header encoder.
+
+    Starlette exposes request-header bytes as latin-1 strings, so a client can
+    send any Unicode character in a header value. httpx (via h11) only accepts
+    ASCII and raises ``UnicodeEncodeError`` while building the upstream
+    request. A cosmetic header such as OpenRouter's ``X-Title`` must not turn a
+    paid inference request into a 500.
+
+    Non-ASCII characters are stripped from values; a value that becomes empty
+    and a name that is not ASCII are dropped. Header values are never logged
+    because clients sometimes put credentials in custom headers.
+    """
+    safe: dict[str, str] = {}
+    dropped: list[str] = []
+    sanitized: list[str] = []
+
+    for name, value in headers.items():
+        try:
+            name.encode("ascii")
+        except UnicodeEncodeError:
+            dropped.append(name.encode("ascii", "backslashreplace").decode("ascii"))
+            continue
+
+        text = str(value)
+        try:
+            text.encode("ascii")
+        except UnicodeEncodeError:
+            cleaned = text.encode("ascii", "ignore").decode("ascii")
+            if text and not cleaned:
+                dropped.append(name)
+                continue
+            safe[name] = cleaned
+            sanitized.append(name)
+        else:
+            safe[name] = text
+
+    if dropped or sanitized:
+        logger.warning(
+            "Adjusted non-ASCII headers before upstream forwarding",
+            extra={"dropped_headers": dropped, "sanitized_headers": sanitized},
+        )
+
+    return safe
+
+
 class TopupData(BaseModel):
     """Universal top-up data schema for Lightning Network invoices."""
 
@@ -867,6 +913,10 @@ class BaseUpstreamProvider:
 
         # Explicitly define the list of supported compression encodings
         headers["accept-encoding"] = "gzip, deflate, br, identity"
+
+        # httpx/h11 only accept ASCII header names and values. Sanitize last so
+        # every caller-built header (including auth) goes through the check.
+        headers = _ascii_safe_forward_headers(headers)
 
         logger.debug(
             "Headers prepared for upstream",
