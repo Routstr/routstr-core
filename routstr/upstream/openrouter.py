@@ -11,7 +11,7 @@ from .image_catalog import (
     attach_image_books,
     fetch_openrouter_image_books,
 )
-from .model_paths import public_provider_url
+from .model_paths import pinned_endpoint_context, public_provider_url
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -47,6 +47,8 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
 
         - Real upstream sub-provider (e.g. ``"GMICloud"``) -> ``"openrouter:GMICloud"``.
         - Missing sub-provider, or one that merely echoes ``"openrouter"`` ->
+          the endpoint the request was pinned to via the model path
+          (``"openrouter:deepinfra/fp8"``) when there is one, else
           ``"openrouter:unknown"``: the router is still known even when the
           serving provider is not (e.g. the Responses API never reports it).
         - Idempotent: re-stamping never produces ``"openrouter:openrouter:..."``;
@@ -68,6 +70,9 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
             return
         # No real sub-provider, or it just echoes our own router name.
         if not sub or sub.lower() == provider_type.lower():
+            # A pinned endpoint is the only provider OpenRouter may route to
+            # (allow_fallbacks=False), so it names the serving provider.
+            pinned = pinned_endpoint_context.get()
             # Warn only on the billed payload, not on every stream chunk.
             if _carries_usage(response_json):
                 logger.warning(
@@ -75,9 +80,12 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
                     extra={
                         "model": response_json.get("model"),
                         "response_id": response_json.get("id"),
+                        "pinned_endpoint": pinned,
                     },
                 )
-            response_json["provider"] = f"{provider_type}:{_UNKNOWN_SUB_PROVIDER}"
+            response_json["provider"] = (
+                f"{provider_type}:{pinned or _UNKNOWN_SUB_PROVIDER}"
+            )
             return
         response_json["provider"] = f"{provider_type}:{sub}"
 
