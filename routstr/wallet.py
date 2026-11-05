@@ -654,20 +654,35 @@ async def _recieve_token_locked(
 def _largest_proofs_first(
     wallet: Wallet, proofs: list[Proof], amount: int
 ) -> list[Proof]:
-    """Largest coins until they pay ``amount`` exactly or cover it and the swap fee."""
-    selected: list[Proof] = []
-    total = 0
-    for proof in sorted(
+    """Try exact coins first, then a largest-first candidate covering the swap fee."""
+    eligible = sorted(
         wallet.active_proofs(proofs), key=lambda p: p.amount, reverse=True
-    )[: cashu_settings.mint_max_request_length]:
+    )
+    limit = cashu_settings.mint_max_request_length
+    selected: list[Proof] = []
+    remaining = amount
+    # Binary denominations admit greedy exact selection; custom amounts may miss
+    # an exact combination and fall through to the swap candidate below.
+    for proof in eligible:
+        if len(selected) >= limit:
+            break
+        if proof.amount <= remaining:
+            selected.append(proof)
+            remaining -= proof.amount
+            if remaining == 0:
+                return selected
+
+    selected = []
+    total = 0
+    for proof in eligible[:limit]:
         selected.append(proof)
         total += proof.amount
         if total == amount or total >= amount + wallet.get_fees_for_proofs(selected):
             return selected
     raise ValueError(
-        "Too many small coins: at most "
+        "Too many small coins: selected proofs cover "
         f"{total - wallet.get_fees_for_proofs(selected)} {wallet.unit.name} "
-        "can be sent at once"
+        "after swap fees"
     )
 
 
