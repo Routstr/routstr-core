@@ -193,6 +193,24 @@ async def test_images_are_charged_per_returned_image(
     assert status == "charged"
 
 
+@pytest.mark.asyncio
+async def test_charged_images_are_recorded_for_stats() -> None:
+    engine = await _engine()
+    payload = {"data": [{"b64_json": "a"}, {"b64_json": "b"}]}
+    record_outcome = MagicMock()
+    with patch("routstr.auth.record_terminal_outcome", record_outcome):
+        await _forward(
+            engine,
+            "v1/images/generations",
+            _upstream(json.dumps(payload).encode(), "application/json"),
+        )
+
+    record_outcome.assert_called_once()
+    assert record_outcome.call_args.kwargs["revenue_msats"] == int(
+        2 * SATS_PER_IMAGE * 1000
+    )
+
+
 class _NativeImagesProvider(BaseUpstreamProvider):
     def normalize_request_path(self, path: str, model_obj: Model | None = None) -> str:
         path = super().normalize_request_path(path, model_obj)

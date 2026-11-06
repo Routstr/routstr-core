@@ -319,6 +319,30 @@ async def test_anthropic_cache_write_billed_at_write_rate(model_pricing: Mock) -
 
 
 @pytest.mark.asyncio
+async def test_one_hour_cache_writes_billed_at_twice_input(
+    model_pricing: Mock,
+) -> None:
+    response = {
+        "model": "claude-haiku-5.5",
+        "usage": {
+            "input_tokens": 300,
+            "output_tokens": 100,
+            "cache_creation_input_tokens": 1000,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 200,
+                "ephemeral_1h_input_tokens": 800,
+            },
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=100000, model_obj=model_pricing)
+
+    assert isinstance(result, CostData)
+    assert result.cache_creation_msats == 1850
+    assert result.total_msats == 2350
+
+
+@pytest.mark.asyncio
 async def test_web_search_requests_billed_at_listed_rate(model_pricing: Mock) -> None:
     model_pricing.sats_pricing.web_search = 10.0
     response = {

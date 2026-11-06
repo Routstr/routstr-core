@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PREVIOUS_HEAD = "c8a1d2e3f4b5"
+PREVIOUS_HEAD = "e1b7c3d9a204"
 
 
 def _run_alembic(root: Path, database_url: str, command: str, revision: str) -> None:

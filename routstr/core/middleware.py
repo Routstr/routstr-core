@@ -5,8 +5,9 @@ from typing import AsyncIterator, Callable
 from urllib.parse import urlsplit
 
 from fastapi import Request, Response
-from starlette.datastructures import Headers
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .logging import get_logger
 from .settings import settings
@@ -30,6 +31,40 @@ _CLIENT_APP_HEADERS: tuple[str, ...] = (
 
 # Limit untrusted header data repeated in every log record.
 _CLIENT_APP_MAX_LENGTH = 120
+
+# Balance responses carry API keys and Cashu tokens, and GET /create takes a
+# token in the URL, so keep them out of caches and the next page's Referer.
+_NO_STORE_PREFIXES: tuple[str, ...] = ("/v1/balance", "/v1/wallet")
+
+
+def no_store_headers(path: str) -> dict[str, str]:
+    if any(path == p or path.startswith(p + "/") for p in _NO_STORE_PREFIXES):
+        return {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+    return {}
+
+
+class NoStoreMiddleware:
+    """Adds ``no_store_headers`` at response start, so error and validation
+    responses built by exception handlers are covered too."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        extra = no_store_headers(scope["path"]) if scope["type"] == "http" else {}
+        if not extra:
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in extra.items():
+                    headers[name] = value
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
 
 # Upstream responses are relayed with their headers, and these identify the
 # operator's provider account. Stripped here so every relay path is covered.

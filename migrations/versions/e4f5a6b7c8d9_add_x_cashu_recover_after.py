@@ -26,7 +26,9 @@ def upgrade() -> None:
     # Existing rows stay NULL and fall back to the current request lifetime.
     if "recover_after" not in _columns():
         with op.batch_alter_table("cashu_transactions") as batch_op:
-            batch_op.add_column(sa.Column("recover_after", sa.Integer(), nullable=True))
+            batch_op.add_column(
+                sa.Column("recover_after", sa.BigInteger(), nullable=True)
+            )
 
 
 def downgrade() -> None:

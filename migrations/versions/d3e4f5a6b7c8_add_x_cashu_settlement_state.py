@@ -1,7 +1,7 @@
 """add x-cashu settlement state to cashu_transactions
 
 Revision ID: d3e4f5a6b7c8
-Revises: c8a1d2e3f4b5
+Revises: e1b7c3d9a204
 Create Date: 2026-10-26 00:00:00.000000
 """
 
@@ -11,7 +11,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "d3e4f5a6b7c8"
-down_revision = "c8a1d2e3f4b5"
+down_revision = "e1b7c3d9a204"
 branch_labels = None
 depends_on = None
 
@@ -46,7 +46,9 @@ def upgrade() -> None:
                 )
             )
         if "settlement_at" not in columns:
-            batch_op.add_column(sa.Column("settlement_at", sa.Integer(), nullable=True))
+            batch_op.add_column(
+                sa.Column("settlement_at", sa.BigInteger(), nullable=True)
+            )
     if INDEX not in _indexes():
         op.create_index(
             INDEX, "cashu_transactions", ["settlement", "settlement_at"], unique=False
