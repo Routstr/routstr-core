@@ -2769,6 +2769,7 @@ class BaseUpstreamProvider:
         usage_finalized = False
         last_model_seen: str | None = None
         provider_seen: str | None = None
+        prompt_usage: dict[str, int] | None = None
         usage_presence = UsageFieldPresence()
         outcome_state = TerminalOutcomeState()
 
@@ -2784,10 +2785,17 @@ class BaseUpstreamProvider:
                     )
                     usage_finalized = True
                     return None
+                billing_data = usage_estimator.response_data(last_model_seen)
+                if prompt_usage:
+                    billing_data["usage"] = {
+                        **prompt_usage,
+                        "output_tokens": billing_data["usage"]["output_tokens"],
+                        "estimated": True,
+                    }
                 try:
                     cost_data = await adjust_payment_for_tokens(
                         fresh_key,
-                        usage_estimator.response_data(last_model_seen)
+                        billing_data
                         if charge_prompt
                         else usage_estimator.billing_data(None, last_model_seen),
                         new_session,
@@ -2837,6 +2845,7 @@ class BaseUpstreamProvider:
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
             nonlocal usage_finalized, last_model_seen, provider_seen, usage_presence
+            nonlocal prompt_usage
             stored_chunks: list[bytes] = []
             usage_seen = False
             input_tokens: int = 0
@@ -2965,6 +2974,18 @@ class BaseUpstreamProvider:
                                             ),
                                         )
                                         _absorb_usd(usage)
+                                        # litellm-adapted streams open with
+                                        # zeroed usage; keep the estimate then.
+                                        if (
+                                            input_tokens
+                                            or cache_read_input_tokens
+                                            or cache_creation_input_tokens
+                                        ):
+                                            prompt_usage = {
+                                                "input_tokens": input_tokens,
+                                                "cache_read_input_tokens": cache_read_input_tokens,
+                                                "cache_creation_input_tokens": cache_creation_input_tokens,
+                                            }
 
                                     if (
                                         isinstance(usage := data.get("usage"), dict)
