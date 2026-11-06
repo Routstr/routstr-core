@@ -33,6 +33,7 @@ from ..wallet import (
     is_trusted_source_mint,
 )
 from .image_pricing import image_reservation_msats
+from .rates import is_usable_rate
 from .responses_input import (
     FILE_ID_URL_PREFIX,
     count_input_images,
@@ -189,17 +190,134 @@ async def get_max_cost_for_model(
     return max(settings.min_request_msat, settings.fixed_cost_per_request * 1000)
 
 
+_COMPLETION_CAP_FIELDS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+
+
+def _largest_declared_completion_cap(body: dict, model: str) -> int | None:
+    """The largest valid completion cap the request body declares, if any.
+
+    Completion caps arrive under several names: ``max_tokens`` (legacy chat),
+    ``max_completion_tokens`` (modern chat) and ``max_output_tokens`` (Responses
+    API). When a request declares more than one, the largest bounds the
+    reservation: upstream precedence between the fields varies by provider, so
+    the smaller cap may not be honored and the reservation must never
+    under-cover what the upstream could bill. An unparseable value yields no
+    contribution rather than a discount.
+    """
+    largest: int | None = None
+    for cap_field in _COMPLETION_CAP_FIELDS:
+        cap_raw = body.get(cap_field)
+        if cap_raw is None:
+            continue
+        try:
+            cap_int = int(cap_raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid completion token cap; ignoring in cost adjustment",
+                extra={
+                    "field": cap_field,
+                    "value": str(cap_raw)[:64],
+                    "model": model,
+                },
+            )
+            continue
+        largest = cap_int if largest is None else max(largest, cap_int)
+    return largest
+
+
+def _as_token_limit(value: object) -> int | None:
+    """Coerce a model-metadata token limit, or ``None`` when unusable."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        limit = int(value)
+    except (TypeError, ValueError, OverflowError):
+        # ``inf``/``NaN`` metadata, or a string that is not an integer.
+        return None
+    return limit if limit > 0 else None
+
+
+def _model_token_window(model_obj: Any) -> int | None:
+    """The model's context window, read the way ``_calculate_usd_max_costs`` does.
+
+    The window is the *total* prompt-plus-output budget, so only context
+    lengths qualify: ``top_provider.context_length`` when published, else the
+    model's own ``context_length``. A ``max_completion_tokens`` limit is the
+    output share of the window, not the window itself — using it as the window
+    would under-reserve a request whose valid input runs far past it (e.g. a
+    100k context with a 10k completion cap). ``None`` means the window is
+    unknown, so no cost bound exists and the full envelope is kept.
+    """
+    top_provider = getattr(model_obj, "top_provider", None)
+    if top_provider is not None:
+        limit = _as_token_limit(getattr(top_provider, "context_length", None))
+        if limit is not None:
+            return limit
+    return _as_token_limit(getattr(model_obj, "context_length", None))
+
+
+def _enforced_cap_max_cost(
+    max_cost_for_model: int,
+    model_obj: Any,
+    model_pricing: Any,
+    cap: int,
+    tol_factor: float,
+) -> int:
+    """Worst-case cost when the output is capped but the input size is unseen.
+
+    This is the sealed-body case: the upstream enforces ``cap`` output tokens
+    over an encrypted body, so the input is unknown and must be assumed to be as
+    large as the model allows. A token is either input or output and the two
+    share the context window, so an output cap of ``cap`` bounds the bill to
+    ``(window - cap) * prompt + cap * completion`` — but never below the
+    all-input case ``window * prompt``, because with input priced above output
+    the entire window can bill as hidden prompt.
+
+    The result is clamped to ``max_cost_for_model`` (the full envelope, which is
+    an upper bound on both terms) and to the request minimum. Unlike the
+    plaintext path this never subtracts the completion envelope from an
+    envelope that does not contain the prompt envelope, which is exactly the
+    shape Tinfoil models present (``context_length`` with no ``top_provider``).
+    """
+    prompt_price = float(getattr(model_pricing, "prompt", 0.0) or 0.0)
+    completion_price = float(getattr(model_pricing, "completion", 0.0) or 0.0)
+    if not (is_usable_rate(prompt_price) and is_usable_rate(completion_price)):
+        return max_cost_for_model
+
+    window = _model_token_window(model_obj)
+    if window is None:
+        return max_cost_for_model
+
+    worst_case_sats = max(
+        max(0, window - cap) * prompt_price + cap * completion_price,
+        window * prompt_price,
+    )
+    capped_msats = math.ceil(worst_case_sats * 1000 * tol_factor)
+    return max(settings.min_request_msat, min(max_cost_for_model, capped_msats))
+
+
 async def calculate_discounted_max_cost(
     max_cost_for_model: int,
     body: dict,
     model_obj: Any | None = None,
     path: str = "",
+    *,
+    enforced_completion_cap: int | None = None,
 ) -> int:
     """Calculate the discounted max cost for a request using model pricing when available.
 
     Completion discounts are trimmed from the largest declared cap among
     ``max_tokens`` and ``max_completion_tokens`` (chat/completions) or
     ``max_output_tokens`` (responses).
+
+    ``enforced_completion_cap`` is a ceiling the *upstream* enforces for a
+    request whose body the node cannot read — the EHBP case, where the cap
+    travels in a visible header (see
+    ``BaseUpstreamProvider.enforced_completion_cap``). It is folded into the
+    same largest-cap rule as the body's own caps, and the reservation is then
+    computed from the capped worst case instead of by subtracting a completion
+    envelope from the full one, because an unseen input must stay fully
+    reserved: a hidden input estimate is not an input estimate.
     """
     if settings.fixed_pricing:
         return max_cost_for_model
@@ -216,6 +334,28 @@ async def calculate_discounted_max_cost(
 
     tol = settings.tolerance_percentage
     tol_factor = max(0.0, 1 - float(tol) / 100.0)
+
+    if enforced_completion_cap is not None:
+        declared_cap = _largest_declared_completion_cap(body, model)
+        effective_cap = (
+            enforced_completion_cap
+            if declared_cap is None
+            else max(enforced_completion_cap, declared_cap)
+        )
+        adjusted = _enforced_cap_max_cost(
+            max_cost_for_model, model_obj, model_pricing, effective_cap, tol_factor
+        )
+        logger.debug(
+            "Discounted max cost computed from an enforced completion cap",
+            extra={
+                "model": model,
+                "original_msats": max_cost_for_model,
+                "adjusted_msats": adjusted,
+                "enforced_completion_cap": effective_cap,
+                "tolerance_pct": tol,
+            },
+        )
+        return adjusted
 
     max_prompt_allowed_sats = model_pricing.max_prompt_cost * tol_factor
     max_completion_allowed_sats = model_pricing.max_completion_cost * tol_factor
@@ -280,32 +420,7 @@ async def calculate_discounted_max_cost(
         if estimated_prompt_delta_sats > 0:
             adjusted = adjusted - math.floor(estimated_prompt_delta_sats * 1000)
 
-    # Completion caps arrive under several names: ``max_tokens`` (legacy
-    # chat), ``max_completion_tokens`` (modern chat) and ``max_output_tokens``
-    # (Responses API). When a request declares more than one, reserve against
-    # the largest: upstream precedence between the fields varies by provider,
-    # so the smaller cap may not be honored and the reservation must never
-    # under-cover what the upstream could bill.
-    max_tokens_int: int | None = None
-    for cap_field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
-        cap_raw = body.get(cap_field)
-        if cap_raw is None:
-            continue
-        try:
-            cap_int = int(cap_raw)
-        except (TypeError, ValueError):
-            logger.warning(
-                "Invalid completion token cap; ignoring in cost adjustment",
-                extra={
-                    "field": cap_field,
-                    "value": str(cap_raw)[:64],
-                    "model": model,
-                },
-            )
-            continue
-        max_tokens_int = (
-            cap_int if max_tokens_int is None else max(max_tokens_int, cap_int)
-        )
+    max_tokens_int = _largest_declared_completion_cap(body, model)
 
     if max_tokens_int is not None:
         estimated_completion_delta_sats = (

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, Optional
+import re
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import httpx
 from fastapi import Request
@@ -25,11 +26,172 @@ from .ehbp import (
     ConfidentialInferenceProfile,
     EHBPForwardingTarget,
 )
+from .tinfoil_trailer import _strip_hop_by_hop_headers
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
 
 logger = get_logger(__name__)
+
+# A visible request header the enclave uses to override the output cap of the
+# sealed (EHBP) body: tinfoilsh/confidential-model-router#518 maps it onto
+# ``max_completion_tokens`` on ``/v1/chat/completions`` (dropping ``max_tokens``)
+# and onto ``max_output_tokens`` on ``/v1/responses``. It is the only completion
+# ceiling the node can read on a sealed request, which is what makes a smaller
+# reservation than the model's whole context possible.
+_TINFOIL_MAX_OUTPUT_TOKENS_HEADER = "X-Tinfoil-Max-Output-Tokens"
+
+# Whether a sealed request may be quoted from the enforced header at all.
+#
+# The header is not a *request* bound, so this is off. The engine applies the cap
+# per choice and the router forwards ``n``/``best_of`` untouched, so a sealed
+# body can hide ``n`` and bill ``n * cap``. Measured on router-0.tinfoil.sh
+# (deepseek-v4-1-flash, header = 8): n=1 -> 8 completion tokens, n=2 -> 16,
+# n=3 -> 24, header=200/n=2 -> 400; prompt tokens counted once. The node cannot
+# see ``n`` inside a sealed body, so nothing server-side bounds that fan-out and
+# any capped hold would be a fiction.
+#
+# Every piece below is kept, tested scaffolding: the parser, the route gate, the
+# capped worst-case math and the /v1/info advertisement are exercised by
+# ``tests/unit/test_tinfoil_max_output_tokens_reservation.py`` with this constant
+# patched on. Activation is a code change gated on the *upstream* guarantee —
+# confidential-model-router rejecting ``n``/``best_of`` > 1 when the header is
+# supplied, or dividing the budget across choices — never an operator toggle and
+# never a client-declared promise: a seal hides the body from the node, so trust
+# has to come from the enclave enforcing the total.
+EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED = False
+
+# Candidate routes for a future activation — NOT a claim that any is proven
+# sound today. The cap is **per choice**, not per request:
+#
+#   probe (router-0.tinfoil.sh, deepseek-v4-1-flash, header=8)
+#     n=1 -> completion_tokens=8;  n=2 -> 16;  n=3 -> 24;  header=200/n=2 -> 400
+#   while ``best_of=3`` with header=8 -> completion_tokens=8
+#
+# so a sealed chat body hiding ``n`` can bill an unbounded multiple of the quoted
+# cap. ``n``/``best_of`` are invisible on a sealed body, so no server-side check
+# can bound that fan-out; chat completions is therefore excluded.
+#
+# ``/v1/responses`` is the only plausible candidate: it has neither ``n`` nor
+# ``best_of``, and one probe showed an injected ``n: 3`` ignored there
+# (output_tokens=8, one output) while the header still overrides
+# ``max_output_tokens`` in both directions (body=100/header=8 -> 8;
+# body=8/header=100 -> 100). That observation is **one request shape, not a
+# proof**: other budget paths — tool/server-side loops, multi-turn agentic runs,
+# provider-side retries, knobs not exercised by the probe — could still multiply
+# the billed output past the cap. So even Responses stays UNVERIFIED and nothing
+# is quoted while ``EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED`` is False. Widening
+# this set requires a measured, request-total guarantee from the upstream.
+#
+# ``/v1/completions`` is excluded for a second reason: deployed enclaves answer it
+# with 404, so its mapping has never been observed live.
+_TINFOIL_MAX_OUTPUT_TOKENS_ROUTES = frozenset({"responses"})
+
+# The enclave parses the value with a signed 64-bit base-10 ParseInt. Bounding
+# it here keeps a caller-supplied digit string from reaching ``int()`` at all,
+# and anything above a model's context window yields no discount anyway.
+_TINFOIL_MAX_OUTPUT_TOKENS_LIMIT = 2**31 - 1
+
+_CANONICAL_POSITIVE_INT = re.compile(r"[1-9][0-9]*\Z")
+
+# Public, stable contract: the canonical routes this provider quotes an
+# enforced output-token cap on. ``/v1/info`` advertises exactly this list so a
+# client funds a capped hold only where the node can prove the ceiling bounds
+# the whole request (see ``_TINFOIL_MAX_OUTPUT_TOKENS_ROUTES``).
+EHBP_OUTPUT_TOKEN_RESERVATION_ROUTES = _TINFOIL_MAX_OUTPUT_TOKENS_ROUTES
+
+
+def _canonical_route(path: str) -> str:
+    """Collapse an API path onto the key the header's route table uses.
+
+    The proxy screens the path before routing, so this only has to absorb the
+    spellings an OpenAI-style client may use: a leading slash, a ``v1/``
+    prefix, or a trailing slash.
+    """
+    return path.split("?", 1)[0].strip("/").removeprefix("v1/")
+
+
+def _header_field_values(headers: object, name: str) -> list[str]:
+    """Every field value for ``name``, in wire order and case-insensitively.
+
+    Starlette's ``Headers`` keeps repeated field lines reachable through
+    ``getlist``, which is what lets a repeated field be detected at all. A plain
+    mapping (how upstream code hands headers around) has already collapsed its
+    duplicates, so it is scanned case-insensitively instead of by lookup — HTTP
+    field names are not case-sensitive, and a ``dict`` would otherwise miss
+    ``x-tinfoil-max-output-tokens`` spelled any other way.
+    """
+    getlist = getattr(headers, "getlist", None)
+    if callable(getlist):
+        return [str(value) for value in getlist(name)]
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        return []
+    wanted = name.lower()
+    return [
+        str(value)
+        for key, value in items()
+        if str(key).lower() == wanted and value is not None
+    ]
+
+
+def _cap_header_would_be_dropped(headers: object) -> bool:
+    """True when the forwarding sanitizer would strip the cap header.
+
+    The EHBP request is re-framed onto a new upstream connection, so
+    ``forward_with_trailer`` removes hop-by-hop headers — including every header
+    a ``Connection`` field nominates. If that nomination names the cap header,
+    the enclave never receives it while the node quoted against it, leaving the
+    output unbounded against a smaller hold. Quote nothing in that case.
+
+    The check runs the *real* sanitizer over the request headers rather than
+    reimplementing its rules, so a future change to the forwarding path cannot
+    silently invalidate the quote. Provider-added target headers are merged
+    after this stripping step, so a provider must never re-add this header from
+    its own target set (Tinfoil's adds only usage metrics); if one ever does,
+    this hook has to take the merged headers instead.
+    """
+    cap_name = _TINFOIL_MAX_OUTPUT_TOKENS_HEADER.lower()
+    for value in _header_field_values(headers, "Connection"):
+        for token in value.split(","):
+            if token.strip().lower() == cap_name:
+                return True
+
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        return False
+    outgoing: dict[str, str] = {}
+    for key, value in items():
+        if value is not None:
+            outgoing[str(key)] = str(value)
+    sanitized = _strip_hop_by_hop_headers(outgoing)
+    return not any(str(key).lower() == cap_name for key in sanitized)
+
+
+def parse_max_output_tokens_header(values: Sequence[str]) -> int | None:
+    """Return the output ceiling a visible Tinfoil header declares, if any.
+
+    Deliberately strict, because the value becomes a *quote* the reservation is
+    sized against: exactly one field value, ASCII-whitespace-stripped, matching
+    ``[1-9][0-9]*`` and within ``2**31 - 1``. Anything else — repeated values, a
+    comma-joined list, zero, a sign, a fraction, an empty field — yields ``None``
+    and the request keeps the full reserve.
+
+    The header itself is still forwarded verbatim, so the enclave remains the
+    authority that rejects a malformed value with its own 400. Being stricter
+    than the enclave here can only over-reserve, never under-cover.
+    """
+    if len(values) != 1:
+        # No field line, or several (repeated header / comma-joined list). The
+        # enclave rejects repeats rather than picking one, so no cap is quoted.
+        return None
+    raw = values[0].strip(" \t")
+    if len(raw) > len(str(_TINFOIL_MAX_OUTPUT_TOKENS_LIMIT)):
+        return None
+    if not _CANONICAL_POSITIVE_INT.match(raw):
+        return None
+    cap = int(raw)
+    return cap if 1 <= cap <= _TINFOIL_MAX_OUTPUT_TOKENS_LIMIT else None
 
 
 class TinfoilModelPricing(BaseModel):
@@ -266,6 +428,32 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
 
     def get_confidential_inference_profile(self) -> ConfidentialInferenceProfile:
         return self.confidential_inference_profile
+
+    def enforced_completion_cap(self, headers: object, path: str) -> int | None:
+        """Return the output ceiling this enclave enforces for a sealed request.
+
+        ``X-Tinfoil-Max-Output-Tokens`` is visible to the enclave while the body
+        stays sealed, and the enclave overrides the body's caps with it in both
+        directions, so the value is a per-choice output ceiling Routstr can read
+        without decrypting anything. Whether that ceiling also bounds the *whole*
+        request is UNVERIFIED (one probe suggests Responses ignores an injected
+        ``n``, but other budget paths may still multiply output), so nothing is
+        quoted while ``EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED`` is False. See
+        ``_TINFOIL_MAX_OUTPUT_TOKENS_ROUTES`` for why chat completions is not a
+        candidate. The header is forwarded regardless (it is not a proxy-only
+        header): the enclave, not this method, decides whether a value is
+        acceptable.
+        """
+        if not EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED:
+            return None
+        if _canonical_route(path) not in _TINFOIL_MAX_OUTPUT_TOKENS_ROUTES:
+            return None
+        if _cap_header_would_be_dropped(headers):
+            # The quote would describe a header the enclave never sees.
+            return None
+        return parse_max_output_tokens_header(
+            _header_field_values(headers, _TINFOIL_MAX_OUTPUT_TOKENS_HEADER)
+        )
 
     async def forward_get_request(
         self,
