@@ -67,6 +67,39 @@ async def finalize_and_close_stream(
         await aclose_if_needed(response)
 
 
+_stream_finalizers: set[PersistentStreamFinalizer] = set()
+
+
+async def drain_stream_finalizers() -> bool:
+    """Drain detached settlement before the collector can record a clean stop.
+
+    Finalizers register at construction, not task creation: a disconnected
+    request may not have started its shielded cleanup task yet.
+    """
+    deadline = (
+        asyncio.get_running_loop().time() + settings.request_cleanup_timeout_seconds
+    )
+    successful = True
+    while _stream_finalizers:
+        tasks = {
+            asyncio.create_task(finalizer.run())
+            for finalizer in _stream_finalizers.copy()
+        }
+        done, pending = await asyncio.wait(
+            tasks, timeout=max(0, deadline - asyncio.get_running_loop().time())
+        )
+        for task in done:
+            if task.cancelled() or task.exception() is not None:
+                successful = False
+        if pending:
+            # run() shields settlement. Do not wait for cancellation-suppressing
+            # billing code: leave the collector's run unclean instead.
+            for task in pending:
+                task.cancel()
+            return False
+    return successful
+
+
 class PersistentStreamFinalizer:
     """Run one stream finalizer to completion across cancellation boundaries."""
 
@@ -74,10 +107,22 @@ class PersistentStreamFinalizer:
         self._finalize = finalize
         self._task: asyncio.Future[None] | None = None
         self._lock = asyncio.Lock()
+        _stream_finalizers.add(self)
 
     async def _bounded_finalize(self) -> None:
-        async with asyncio.timeout(settings.request_cleanup_timeout_seconds):
-            await self._finalize()
+        try:
+            async with asyncio.timeout(settings.request_cleanup_timeout_seconds):
+                await self._finalize()
+        except BaseException:
+            # An abandoned finalizer can otherwise leave a drained collector
+            # falsely claiming complete coverage. Import lazily to avoid the
+            # upstream/payment import cycle.
+            from ..core.terminal_outcomes import terminal_outcome_writer
+
+            terminal_outcome_writer.declare_loss("stream settlement finalizer failed")
+            raise
+        finally:
+            _stream_finalizers.discard(self)
 
     async def run(self) -> None:
         async with self._lock:

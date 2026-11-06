@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import uuid
+from dataclasses import dataclass
 from datetime import timedelta
+from enum import Enum
 from typing import Any, cast
 
 from nostr_sdk import (
     AckPolicy,
     Client,
+    ClientNotification,
     Event,
     EventBuilder,
     Filter,
     Keys,
     Kind,
     PublicKey,
+    RelayMessageEnum,
     RelayUrl,
     ReqExitPolicy,
     ReqTarget,
@@ -80,6 +86,100 @@ async def fetch_events(
         return [cast(dict[str, Any], json.loads(event.as_json())) for event in events]
     finally:
         await client.shutdown()
+
+
+class QueryStatus(str, Enum):
+    COMPLETE = "complete"
+    TRUNCATED = "truncated"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class EventQueryResult:
+    events: list[dict[str, Any]]
+    status: QueryStatus
+
+
+async def fetch_events_with_status(
+    relay_url: str,
+    *,
+    kind: int,
+    author: str,
+    limit: int,
+    timeout: float,
+) -> EventQueryResult:
+    """Read a bounded page, requiring EOSE rather than buffered SDK results.
+
+    ``Client.fetch_events`` drops individual relay-stream errors. Notifications
+    let us distinguish a successful empty page from a failed read. A full page
+    is conservatively truncated, even if the relay subsequently sends EOSE.
+    """
+    if limit < 1:
+        raise ValueError("Event query limit must be positive")
+    events: dict[str, dict[str, Any]] = {}
+    client = Client()
+    try:
+        async with asyncio.timeout(timeout):
+            relay = RelayUrl.parse(relay_url)
+            await client.add_relay(relay)
+            # Register before sending REQ: even a very fast EOSE must be seen.
+            notifications = client.notifications()
+            await client.connect()
+            subscription_id = uuid.uuid4().hex
+            event_filter = (
+                Filter()
+                .kinds([Kind(kind)])
+                .authors([PublicKey.parse(author)])
+                .limit(limit)
+            )
+            output = await client.subscribe(
+                ReqTarget.single(relay, [event_filter]), id=subscription_id
+            )
+            if output.failed or relay not in output.success:
+                return EventQueryResult([], QueryStatus.FAILED)
+            while notification := await notifications.next():
+                if not isinstance(notification, ClientNotification.MESSAGE):
+                    continue
+                if notification.relay_url != relay:
+                    continue
+                message = notification.message.as_enum()
+                if isinstance(message, RelayMessageEnum.EVENT_MSG):
+                    if message.subscription_id != subscription_id:
+                        continue
+                    event = message.event
+                    # MESSAGE notifications include raw events, not just SDK-
+                    # accepted NEW_EVENTs. Verify and constrain them ourselves.
+                    if (
+                        not event.verify()
+                        or event.kind().as_u16() != kind
+                        or event.author().to_hex() != author
+                    ):
+                        continue
+                    events[event.id().to_hex()] = cast(
+                        dict[str, Any], json.loads(event.as_json())
+                    )
+                    if len(events) >= limit:
+                        return EventQueryResult(
+                            list(events.values()), QueryStatus.TRUNCATED
+                        )
+                elif isinstance(message, RelayMessageEnum.END_OF_STORED_EVENTS):
+                    if message.subscription_id == subscription_id:
+                        return EventQueryResult(
+                            list(events.values()), QueryStatus.COMPLETE
+                        )
+                elif isinstance(message, RelayMessageEnum.CLOSED):
+                    if message.subscription_id == subscription_id:
+                        return EventQueryResult(
+                            list(events.values()), QueryStatus.FAILED
+                        )
+    except Exception:
+        # Keep buffered events for callers doing best-effort discovery, but
+        # never let them establish complete identity history.
+        return EventQueryResult(list(events.values()), QueryStatus.FAILED)
+    finally:
+        # Shutdown also closes the subscription and reconnecting relay task.
+        await client.shutdown()
+    return EventQueryResult(list(events.values()), QueryStatus.FAILED)
 
 
 async def send_event(relay_url: str, event: dict[str, Any], *, timeout: int) -> None:

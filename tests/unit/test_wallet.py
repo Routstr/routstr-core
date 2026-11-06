@@ -648,6 +648,39 @@ async def test_send_refreshes_reservations_inside_wallet_guard() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_from_thousands_of_small_coins_skips_recursive_coinselect() -> None:
+    mint = "http://mint:3338"
+    coins = [Mock(amount=2, reserved=False) for _ in range(3000)]
+    sent = [Mock(amount=901)]
+    wallet = Mock(
+        keysets={},
+        proofs=coins,
+        select_to_send=AsyncMock(side_effect=RecursionError),
+        active_proofs=lambda proofs: proofs,
+        get_fees_for_proofs=lambda proofs: (len(proofs) * 100 + 999) // 1000,
+        split=AsyncMock(return_value=([], sent)),
+        serialize_proofs=AsyncMock(return_value="token"),
+        set_reserved_for_send=AsyncMock(),
+    )
+    wallet.unit.name = "sat"
+
+    with (
+        patch(
+            "routstr.wallet.find_trusted_mint_with_funds",
+            AsyncMock(return_value=mint),
+        ),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=coins),
+    ):
+        assert await send(901, "sat", mint) == (901, "token")
+        with pytest.raises(ValueError, match="at most 1900 sat can be sent at once"):
+            await send(2500, "sat", mint)
+
+    wallet.split.assert_awaited_once_with(coins[:475], 901)
+    wallet.set_reserved_for_send.assert_awaited_once_with(sent, reserved=True)
+
+
+@pytest.mark.asyncio
 async def test_send_falls_back_when_preferred_mint_has_only_reserved_balance() -> None:
     from routstr.core.settings import settings
 

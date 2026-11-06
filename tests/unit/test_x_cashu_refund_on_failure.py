@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -394,3 +395,49 @@ async def test_settlement_cancellation_propagates(api: str) -> None:
         with pytest.raises(asyncio.CancelledError):
             await completion(httpx.Response(200, json={"model": "m"}), 20, "sat", 1501)
     refund.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["chat", "responses"])
+async def test_failed_non_streaming_settlement_marks_what_the_fallback_keeps(
+    api: str,
+) -> None:
+    from routstr.core.terminal_outcomes import TerminalOutcomeContext
+
+    provider = BaseUpstreamProvider(base_url="http://upstream", api_key="test")
+    mark_unknown = MagicMock()
+    kwargs: dict[str, Any] = (
+        {"terminal_outcome": TerminalOutcomeContext("request-1", "m")}
+        if api == "chat"
+        else {}
+    )
+    completion = (
+        provider.handle_x_cashu_chat_completion
+        if api == "chat"
+        else provider.handle_x_cashu_responses_completion
+    )
+    with (
+        patch.object(
+            provider,
+            "get_x_cashu_cost",
+            AsyncMock(side_effect=RuntimeError("pricing unavailable")),
+        ),
+        patch.object(
+            provider, "send_refund", AsyncMock(return_value="cashuArefund")
+        ) as refund,
+        patch("routstr.upstream.base.mark_terminal_outcome_unknown", mark_unknown),
+    ):
+        result = await completion(
+            httpx.Response(200, content=b'{"model":"m"}'),
+            20,
+            "sat",
+            1501,
+            "mint",
+            request_id="refund-request",
+            **kwargs,
+        )
+
+    assert result.status_code == 200
+    refund.assert_awaited_once_with(18, "sat", "mint", request_id="refund-request")
+    mark_unknown.assert_called_once()
+    assert mark_unknown.call_args.kwargs["revenue_msats"] == 2000
