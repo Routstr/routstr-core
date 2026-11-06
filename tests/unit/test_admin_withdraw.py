@@ -146,3 +146,17 @@ async def test_withdraw_maps_true_aggregate_insufficient_funds_to_400(
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "Insufficient wallet balance"
+
+
+@pytest.mark.asyncio
+async def test_withdraw_reports_too_many_small_coins_as_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = "Too many small coins: at most 86648 sat can be sent at once"
+    monkeypatch.setattr(admin, "send_token", AsyncMock(side_effect=ValueError(message)))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await admin.withdraw(Mock(), admin.WithdrawRequest(amount=87628))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == message

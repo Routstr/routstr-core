@@ -948,13 +948,18 @@ export class AdminService {
     hours: number = 24,
     interval: number = 15,
     errorLimit: number = 100,
-    modelLimit: number = 20
+    modelLimit: number = 20,
+    range?: { start: string; end: string }
   ): Promise<UsageDashboardResponse> {
     const params = new URLSearchParams();
     params.set('interval', String(interval));
     params.set('hours', String(hours));
     params.set('error_limit', String(errorLimit));
     params.set('model_limit', String(modelLimit));
+    if (range) {
+      params.set('start_at', range.start);
+      params.set('end_at', range.end);
+    }
 
     return await apiClient.get<UsageDashboardResponse>(
       `/admin/api/usage/dashboard?${params.toString()}`
@@ -1178,24 +1183,38 @@ export interface TemporaryBalancesResponse {
   };
 }
 
+/** Per-section provenance is also returned by standalone usage endpoints. */
+export interface UsageFieldMetadata {
+  field_provenance?: Record<
+    string,
+    'logs' | 'unavailable' | 'terminal_outcomes'
+  >;
+  request_count_semantics?: 'recorded_outcomes_including_unknown_settlements';
+  revenue_semantics?: 'recorded_gross_retained_lower_bound_for_unknown_settlements';
+  deprecated_fields?: Record<string, string>;
+}
+
 export interface UsageMetricData {
   timestamp: string;
+  coverage?: 'complete' | 'updating' | 'partial' | 'missing';
   total_requests: number;
-  successful_chat_completions: number;
+  successful_chat_completions: number | null;
+  unknown_outcome_requests?: number | null;
   failed_requests: number;
   errors: number;
   warnings: number;
   payment_processed: number;
   upstream_errors: number;
-  revenue_msats: number;
+  revenue_msats: number | null;
   refunds_msats: number;
-  input_tokens: number;
-  output_tokens: number;
-  total_tokens: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
   [key: string]: unknown;
 }
 
-export interface UsageMetrics {
+export interface UsageMetrics extends UsageFieldMetadata {
+  bucket_fill_complete?: boolean;
   metrics: UsageMetricData[];
   interval_minutes: number;
   hours_back: number;
@@ -1203,6 +1222,7 @@ export interface UsageMetrics {
   totals?: {
     total_requests: number;
     successful_chat_completions: number;
+    unknown_outcome_requests?: number;
     failed_requests: number;
     errors: number;
     warnings: number;
@@ -1216,7 +1236,8 @@ export interface UsageMetrics {
   };
 }
 
-export interface UsageSummary {
+export interface UsageSummary extends UsageFieldMetadata {
+  unknown_outcome_requests?: number;
   total_entries: number;
   total_requests: number;
   successful_chat_completions: number;
@@ -1234,6 +1255,9 @@ export interface UsageSummary {
   avg_input_tokens_per_completion: number;
   avg_output_tokens_per_completion: number;
   avg_total_tokens_per_completion: number;
+  measured_token_requests?: number;
+  measured_tokens?: number;
+  avg_measured_tokens_per_completion?: number | null;
   success_rate: number;
   revenue_msats: number;
   refunds_msats: number;
@@ -1247,6 +1271,7 @@ export interface UsageSummary {
 
 export interface ErrorDetail {
   timestamp: string;
+  timestamp_utc?: string | null;
   message: string;
   error_type: string;
   pathname: string;
@@ -1260,6 +1285,7 @@ export interface ErrorDetails {
 }
 
 export interface ModelRevenueData {
+  unknown_outcome_requests?: number;
   model: string;
   revenue_sats: number;
   refunds_sats: number;
@@ -1270,7 +1296,7 @@ export interface ModelRevenueData {
   avg_revenue_per_request: number;
 }
 
-export interface RevenueByModel {
+export interface RevenueByModel extends UsageFieldMetadata {
   models: ModelRevenueData[];
   total_revenue_sats: number;
   total_models: number;
@@ -1278,18 +1304,20 @@ export interface RevenueByModel {
 
 export interface ModelUsageMixMetric {
   timestamp: string;
-  total_successful: number;
-  total_revenue_msats: number;
-  total_tokens: number;
-  others: number;
-  others_revenue_msats: number;
-  others_tokens: number;
+  coverage?: 'complete' | 'updating' | 'partial' | 'missing';
+  total_successful: number | null;
+  total_revenue_msats: number | null;
+  total_tokens: number | null;
+  others: number | null;
+  others_revenue_msats: number | null;
+  others_tokens: number | null;
   model_counts: Record<string, number>;
   model_revenue_msats: Record<string, number>;
   model_tokens: Record<string, number>;
 }
 
 export interface ModelUsageMix {
+  bucket_fill_complete?: boolean;
   top_models: string[];
   metrics: ModelUsageMixMetric[];
   interval_minutes: number;
@@ -1298,6 +1326,20 @@ export interface ModelUsageMix {
 }
 
 export interface UsageDashboardResponse {
+  analytics_source?: 'terminal_outcomes';
+  ledger_coverage?: {
+    from: string;
+    to: string;
+    complete: boolean;
+    incomplete_days: string[];
+    includes_current_day: boolean;
+    latest_outcome_at: string | null;
+    diagnostic_available: boolean;
+    token_sources: Record<
+      string,
+      { reported: number; estimated: number; missing: number }
+    >;
+  };
   metrics: UsageMetrics;
   summary: UsageSummary;
   error_details: ErrorDetails;

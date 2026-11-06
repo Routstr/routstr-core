@@ -119,7 +119,9 @@ async def create_balance_from_body(
     )
 
 
-@router.get("/create")
+# The token is in the URL here, where server and proxy logs and browser history
+# keep it; POST /create takes it in the body.
+@router.get("/create", deprecated=True)
 async def create_balance(
     initial_balance_token: str,
     validity_date: int | None = None,

@@ -33,10 +33,8 @@ def _quiet_settings(monkeypatch: Any, nsec: str = "") -> None:
 def _capture_publishes(monkeypatch: Any) -> list[dict[str, Any]]:
     published: list[dict[str, Any]] = []
 
-    async def fake_query(
-        *args: Any, **kwargs: Any
-    ) -> tuple[list[dict[str, Any]], bool]:
-        return [], True
+    async def fake_query(*args: Any, **kwargs: Any) -> listing.EventQueryResult:
+        return listing.EventQueryResult([], listing.QueryStatus.COMPLETE)
 
     async def fake_publish(
         relay_url: str, event: dict[str, Any], timeout: int = 30
@@ -174,3 +172,40 @@ async def test_sleep_until_next_announcement_buckets_a_short_interval(
 
     # 45s interval: a full 30s tick, then the 15s remainder (never overshoots).
     assert sleeps == [listing.IDENTITY_POLL_SECONDS, 15]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("readable_relay_matches", [False, True])
+async def test_relay_that_refuses_reads_still_receives_the_listing(
+    monkeypatch: Any, readable_relay_matches: bool
+) -> None:
+    _quiet_settings(monkeypatch, nsec=NSEC_A)
+    monkeypatch.setattr(listing.settings, "relays", ["wss://write-only", "wss://open"])
+    published: list[str] = []
+
+    async def fake_query(relay_url: str, *args: Any) -> listing.EventQueryResult:
+        if relay_url == "wss://write-only":
+            return listing.EventQueryResult([], listing.QueryStatus.FAILED)
+        events = [{"id": "existing"}] if readable_relay_matches else []
+        return listing.EventQueryResult(events, listing.QueryStatus.COMPLETE)
+
+    async def fake_publish(
+        relay_url: str, event: dict[str, Any], timeout: int = 30
+    ) -> bool:
+        published.append(relay_url)
+        return True
+
+    async def stop(*args: Any) -> None:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(listing, "query_listing_events", fake_query)
+    monkeypatch.setattr(listing, "publish_to_relay", fake_publish)
+    monkeypatch.setattr(listing, "events_semantically_equal", lambda *_: True)
+    monkeypatch.setattr(listing, "_sleep_until_next_announcement", stop)
+
+    await listing.announce_provider()
+
+    expected = ["wss://write-only"]
+    if not readable_relay_matches:
+        expected.append("wss://open")
+    assert published == expected

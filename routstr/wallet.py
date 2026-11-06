@@ -14,6 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from cashu.core.base import MeltQuote, Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
+from cashu.core.settings import settings as cashu_settings
 from cashu.wallet.crud import get_keysets as get_cashu_keysets
 from cashu.wallet.crud import get_proofs as get_cashu_proofs
 from cashu.wallet.helpers import deserialize_token_from_string
@@ -650,6 +651,26 @@ async def _recieve_token_locked(
     return amount, unit, mint_url
 
 
+def _largest_proofs_first(
+    wallet: Wallet, proofs: list[Proof], amount: int
+) -> list[Proof]:
+    """Largest coins until they pay ``amount`` exactly or cover it and the swap fee."""
+    selected: list[Proof] = []
+    total = 0
+    for proof in sorted(
+        wallet.active_proofs(proofs), key=lambda p: p.amount, reverse=True
+    )[: cashu_settings.mint_max_request_length]:
+        selected.append(proof)
+        total += proof.amount
+        if total == amount or total >= amount + wallet.get_fees_for_proofs(selected):
+            return selected
+    raise ValueError(
+        "Too many small coins: at most "
+        f"{total - wallet.get_fees_for_proofs(selected)} {wallet.unit.name} "
+        "can be sent at once"
+    )
+
+
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
     """Create a token from the preferred mint or another funded trusted mint."""
     async with wallet_operation_guard():
@@ -704,9 +725,16 @@ async def _send_locked(
     # Reserve proofs only after serialization succeeds — if serialize_proofs or
     # swap_to_send fails mid-way, proofs stay unreserved so dashboard balance
     # doesn't go negative.
-    send_proofs, _ = await wallet.select_to_send(
-        proofs, amount, set_reserved=False, include_fees=False
-    )
+    try:
+        send_proofs, _ = await wallet.select_to_send(
+            proofs, amount, set_reserved=False, include_fees=False
+        )
+    except RecursionError:
+        # cashu's coinselect recurses once per coin it picks, so a large send
+        # from thousands of small coins overflows the stack before any swap.
+        send_proofs = _largest_proofs_first(wallet, proofs, amount)
+        if sum(proof.amount for proof in send_proofs) != amount:
+            _, send_proofs = await wallet.split(send_proofs, amount)
     try:
         token = await wallet.serialize_proofs(
             send_proofs, include_dleq=False, legacy=False, memo=None
