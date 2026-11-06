@@ -2782,6 +2782,7 @@ class BaseUpstreamProvider:
                     billing_data["usage"] = {
                         **prompt_usage,
                         "output_tokens": billing_data["usage"]["output_tokens"],
+                        "estimated": True,
                     }
                 try:
                     cost_data = await adjust_payment_for_tokens(
