@@ -3701,7 +3701,17 @@ class BaseUpstreamProvider:
         from headers today.
         """
         _refund = _refund or _XCashuRefund(self)
-        usage_estimator = MissingUsageEstimator(request_body, model_obj)
+        messages_body = json.loads(request_body) if request_body else {}
+        estimation_body = {
+            key: value
+            for key, value in messages_body.items()
+            if key in messages_dispatch.ALLOWED_MESSAGES_REQUEST_FIELDS
+        }
+        usage_estimator = MissingUsageEstimator(
+            json.dumps(estimation_body).encode(),
+            model_obj,
+            count_native_tool_output=True,
+        )
         buffered: list[messages_dispatch.AnnotatedEvent] = []
         last_model_seen: str | None = None
         input_tokens = 0

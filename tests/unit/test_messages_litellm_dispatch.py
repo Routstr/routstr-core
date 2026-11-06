@@ -1207,6 +1207,113 @@ async def test_x_cashu_settlement_failure_still_serves_paid_body(
 # ---------------------------------------------------------------------------
 
 
+async def _settle_usage_free_gemini_stream(
+    delta: dict[str, Any], extra_body: dict[str, Any] | None = None
+) -> tuple[Response, bytes, int, dict[str, Any]]:
+    from routstr.upstream.gemini import GeminiUpstreamProvider
+
+    provider = GeminiUpstreamProvider(base_url="http://test", api_key="test")
+    model = _make_model()
+    model.sats_pricing = Pricing(prompt=0.01, completion=0.02)
+    body = json.loads(_anthropic_request_body(stream=True))
+    body["messages"] = [{"role": "user", "content": "long prompt " * 1000}]
+    body.update(extra_body or {})
+    forwarded: dict[str, Any] = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        forwarded.update(json.loads(request.content))
+        chunk = {"choices": [{"delta": delta, "finish_reason": "stop"}]}
+        return httpx.Response(
+            200,
+            content=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        with (
+            patch(
+                "routstr.upstream.gemini_messages.acquire_upstream_http_client",
+                return_value=client,
+            ),
+            patch("routstr.payment.cost_calculation.sats_usd_price", return_value=5e-4),
+            patch.object(
+                provider, "send_refund", new=AsyncMock(return_value="cashuREFUND")
+            ) as refund,
+        ):
+            result = await provider._forward_x_cashu_messages_via_litellm(
+                request_body=json.dumps(body).encode(),
+                amount=200,
+                unit="sat",
+                max_cost_for_model=2_000_000,
+                model_obj=model,
+                mint="https://mint.example",
+                request_id="req-1",
+            )
+            assert isinstance(result, StreamingResponse)
+            replay = b"".join(
+                [
+                    chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+                    async for chunk in result.body_iterator
+                ]
+            )
+    refund.assert_awaited_once()
+    assert refund.await_args is not None
+    return result, replay, refund.await_args.args[0], forwarded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [None, "", "{}", '{"city":"Rome"}'])
+async def test_x_cashu_usage_free_gemini_tool_call_is_not_empty(
+    arguments: str | None,
+) -> None:
+    function: dict[str, Any] = {"name": "get_time"}
+    if arguments is not None:
+        function["arguments"] = arguments
+    result, replay, refund, _ = await _settle_usage_free_gemini_stream(
+        {
+            "tool_calls": [
+                {"index": 0, "id": "call_1", "type": "function", "function": function}
+            ]
+        }
+    )
+    assert b"get_time" in replay
+    assert int(result.headers["X-Routstr-Output-Cost-Msats"]) > 0
+    assert 0 < refund < 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra_body",
+    [{"input": []}, {"input": "x"}, {"prompt": "ignored " * 1000}],
+)
+async def test_x_cashu_messages_estimation_ignores_other_request_dialects(
+    extra_body: dict[str, Any],
+) -> None:
+    (
+        baseline,
+        _,
+        baseline_refund,
+        baseline_forwarded,
+    ) = await _settle_usage_free_gemini_stream({"content": "Hello world"})
+    result, _, refund, forwarded = await _settle_usage_free_gemini_stream(
+        {"content": "Hello world"}, extra_body
+    )
+    assert forwarded["messages"] == baseline_forwarded["messages"]
+    assert int(baseline.headers["X-Routstr-Input-Cost-Msats"]) > 0
+    assert (
+        result.headers["X-Routstr-Cost-Msats"]
+        == baseline.headers["X-Routstr-Cost-Msats"]
+    )
+    assert refund == baseline_refund
+
+
+@pytest.mark.asyncio
+async def test_x_cashu_usage_free_gemini_empty_output_is_refunded_in_full() -> None:
+    result, _, refund, _ = await _settle_usage_free_gemini_stream({})
+    assert result.headers["X-Routstr-Cost-Msats"] == "0"
+    assert refund == 200
+
+
 @pytest.mark.asyncio
 async def test_x_cashu_streaming_without_usage_or_output_is_refunded_in_full() -> None:
     provider = _make_provider()
