@@ -3799,7 +3799,10 @@ class BaseUpstreamProvider:
         response_data: dict = {"model": last_model_seen or "unknown", "usage": usage}
         try:
             cost_data = await self.get_x_cashu_cost(
-                response_data, max_cost_for_model, model_obj, usage_presence
+                response_data,
+                max_cost_for_model,
+                model_obj,
+                usage_presence,
             )
             if cost_data:
                 refund_amount = messages_dispatch.compute_refund(
@@ -3813,8 +3816,8 @@ class BaseUpstreamProvider:
                         mint,
                         request_id=request_id,
                     )
-                    refund_amount_sent = refund_amount
                     response_headers["X-Cashu"] = refund_token
+                    refund_amount_sent = refund_amount
                     logger.info(
                         "Refund processed for streaming /v1/messages via litellm",
                         extra={
