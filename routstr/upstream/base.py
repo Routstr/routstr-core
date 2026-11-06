@@ -3346,6 +3346,7 @@ class BaseUpstreamProvider:
                 request_id,
                 model_obj,
                 _refund=_refund,
+                request_body=request_body,
             )
 
         response_json = messages_dispatch.coerce_litellm_payload(result)
@@ -3684,6 +3685,7 @@ class BaseUpstreamProvider:
         request_id: str | None,
         model_obj: Model | None = None,
         _refund: _XCashuRefund | None = None,
+        request_body: bytes | None = None,
     ) -> StreamingResponse | Response:
         """Buffer a litellm stream end-to-end, compute cost, then replay.
 
@@ -3699,6 +3701,17 @@ class BaseUpstreamProvider:
         from headers today.
         """
         _refund = _refund or _XCashuRefund(self)
+        messages_body = json.loads(request_body) if request_body else {}
+        estimation_body = {
+            key: value
+            for key, value in messages_body.items()
+            if key in messages_dispatch.ALLOWED_MESSAGES_REQUEST_FIELDS
+        }
+        usage_estimator = MissingUsageEstimator(
+            json.dumps(estimation_body).encode(),
+            model_obj,
+            count_native_tool_output=True,
+        )
         buffered: list[messages_dispatch.AnnotatedEvent] = []
         last_model_seen: str | None = None
         input_tokens = 0
@@ -3716,6 +3729,7 @@ class BaseUpstreamProvider:
                 iterator, requested_model
             )
             async for annotated in annotated_events:
+                usage_estimator.observe(annotated.event)
                 usage_presence = usage_presence.merged(
                     event_usage_presence(annotated.event)
                 )
@@ -3758,27 +3772,7 @@ class BaseUpstreamProvider:
         refund_attempted = 0
         settlement_failed = False
 
-        if (
-            input_tokens == 0
-            and output_tokens == 0
-            and cache_read_input_tokens == 0
-            and cache_creation_input_tokens == 0
-            and total_cost == 0
-        ):
-            logger.warning(
-                "x-cashu /v1/messages stream finished with no usage data "
-                "— refund cannot be computed and the client effectively "
-                "pays the full cashu amount. Likely cause: upstream "
-                "omitted `usage` from the SSE stream.",
-                extra={
-                    "model": last_model_seen or "unknown",
-                    "provider": self.provider_type or self.base_url,
-                    "amount": amount,
-                    "unit": unit,
-                },
-            )
-
-        cost_data: CostData | MaxCostData | None = None
+        usage: dict | None
         if (
             input_tokens > 0
             or output_tokens > 0
@@ -3786,84 +3780,98 @@ class BaseUpstreamProvider:
             or cache_creation_input_tokens > 0
             or total_cost > 0
         ):
-            rebuilt_usage: dict = {
+            usage = {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "cache_read_input_tokens": cache_read_input_tokens,
                 "cache_creation_input_tokens": cache_creation_input_tokens,
             }
             messages_dispatch.embed_usd_costs(
-                rebuilt_usage, total_cost, input_cost, output_cost
+                usage, total_cost, input_cost, output_cost
             )
-            response_data: dict = {
-                "model": last_model_seen or "unknown",
-                "usage": rebuilt_usage,
-            }
-            try:
-                cost_data = await self.get_x_cashu_cost(
-                    response_data,
-                    max_cost_for_model,
-                    model_obj,
-                    usage_presence,
+        else:
+            # Like the other x-cashu paths: estimate from the request and the
+            # generated text, and refund it all when nothing was generated.
+            usage = usage_estimator.estimated_usage(last_model_seen)
+            logger.warning(
+                "x-cashu /v1/messages stream finished with no usage data, "
+                "settling from a local estimate",
+                extra={
+                    "model": last_model_seen or "unknown",
+                    "provider": self.provider_type or self.base_url,
+                    "amount": amount,
+                    "unit": unit,
+                    "estimated_usage": usage,
+                },
+            )
+
+        cost_data: CostData | MaxCostData | None = None
+        response_data: dict = {"model": last_model_seen or "unknown", "usage": usage}
+        try:
+            cost_data = await self.get_x_cashu_cost(
+                response_data,
+                max_cost_for_model,
+                model_obj,
+                usage_presence,
+            )
+            if cost_data:
+                refund_amount = messages_dispatch.compute_refund(
+                    amount, unit, cost_data.total_msats
                 )
-                if cost_data:
-                    refund_amount = messages_dispatch.compute_refund(
-                        amount, unit, cost_data.total_msats
+                if refund_amount > 0:
+                    refund_attempted = refund_amount
+                    refund_token = await _refund.send(
+                        refund_amount,
+                        unit,
+                        mint,
+                        request_id=request_id,
                     )
-                    if refund_amount > 0:
-                        refund_attempted = refund_amount
-                        refund_token = await _refund.send(
-                            refund_amount,
-                            unit,
-                            mint,
-                            request_id=request_id,
-                        )
-                        response_headers["X-Cashu"] = refund_token
-                        refund_amount_sent = refund_amount
-                        logger.info(
-                            "Refund processed for streaming /v1/messages via litellm",
-                            extra={
-                                "refund_amount": refund_amount,
-                                "unit": unit,
-                                "model": last_model_seen,
-                            },
-                        )
-            except asyncio.CancelledError:
-                mark_terminal_outcome_unknown(
-                    terminal_outcome,
-                    "X-Cashu LiteLLM stream settlement cancelled",
-                    revenue_msats=cashu_retained_msats(amount, unit, refund_attempted),
-                )
-                raise
-            except Exception as exc:
-                settlement_failed = True
-                mark_terminal_outcome_unknown(
-                    terminal_outcome,
-                    "X-Cashu LiteLLM stream settlement failed",
-                    revenue_msats=_retained_after_failed_settlement(
-                        amount, unit, max_cost_for_model, refund_attempted
-                    ),
-                )
-                logger.error(
-                    "Error calculating cost for streaming /v1/messages",
-                    extra={
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                        "amount": amount,
-                        "unit": unit,
-                    },
-                )
-                return await _refund.serve_body(
-                    b"".join(annotated.sse_bytes for annotated in buffered),
-                    200,
-                    response_headers,
-                    amount,
-                    unit,
-                    max_cost_for_model,
-                    mint,
-                    request_id,
-                    media_type="text/event-stream",
-                )
+                    response_headers["X-Cashu"] = refund_token
+                    refund_amount_sent = refund_amount
+                    logger.info(
+                        "Refund processed for streaming /v1/messages via litellm",
+                        extra={
+                            "refund_amount": refund_amount,
+                            "unit": unit,
+                            "model": last_model_seen,
+                        },
+                    )
+        except asyncio.CancelledError:
+            mark_terminal_outcome_unknown(
+                terminal_outcome,
+                "X-Cashu LiteLLM stream settlement cancelled",
+                revenue_msats=cashu_retained_msats(amount, unit, refund_attempted),
+            )
+            raise
+        except Exception as exc:
+            settlement_failed = True
+            mark_terminal_outcome_unknown(
+                terminal_outcome,
+                "X-Cashu LiteLLM stream settlement failed",
+                revenue_msats=_retained_after_failed_settlement(
+                    amount, unit, max_cost_for_model, refund_attempted
+                ),
+            )
+            logger.error(
+                "Error calculating cost for streaming /v1/messages",
+                extra={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "amount": amount,
+                    "unit": unit,
+                },
+            )
+            return await _refund.serve_body(
+                b"".join(annotated.sse_bytes for annotated in buffered),
+                200,
+                response_headers,
+                amount,
+                unit,
+                max_cost_for_model,
+                mint,
+                request_id,
+                media_type="text/event-stream",
+            )
 
         if not settlement_failed:
             record_x_cashu_terminal_outcome(
