@@ -161,12 +161,13 @@ async def _add_x_cashu_payment(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("settlement", ["pending", "refunding"])
+@pytest.mark.parametrize("settlement", ["pending", "refunding", "failed"])
 async def test_counts_unsettled_x_cashu_payments(
     session: AsyncSession, settlement: str
 ) -> None:
     # A payment left unsettled by a restart is refunded in full by recovery,
-    # so the payout must not treat its proofs as owner surplus.
+    # and a failed refund is still owed until reconciled, so the payout must
+    # not treat its proofs as owner surplus.
     await _add_key(session, "a", 1000)
     await _add_x_cashu_payment(session, "r1", 60, settlement)
     await _add_x_cashu_payment(session, "r2", 5000, settlement, unit="msat")
@@ -177,7 +178,7 @@ async def test_counts_unsettled_x_cashu_payments(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("settlement", ["charged", "refunded", "failed", None])
+@pytest.mark.parametrize("settlement", ["charged", "refunded", None])
 async def test_excludes_settled_x_cashu_payments(
     session: AsyncSession, settlement: str | None
 ) -> None:
@@ -195,3 +196,12 @@ async def test_unsettled_x_cashu_payments_on_other_mints_are_excluded(
 
     assert await user_liability_for_mint_and_unit(session, MINT, "sat") == 0
     assert await total_user_liability(session) == 60_000
+
+
+@pytest.mark.asyncio
+async def test_large_x_cashu_payment_does_not_overflow(session: AsyncSession) -> None:
+    # 3M sats * 1000 exceeds a 32-bit INTEGER on PostgreSQL.
+    await _add_x_cashu_payment(session, "r1", 3_000_000, "pending")
+
+    assert await user_liability_for_mint_and_unit(session, MINT, "sat") == 3 * 10**9
+    assert await total_user_liability(session) == 3 * 10**9

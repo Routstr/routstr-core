@@ -20,15 +20,15 @@ import time
 from collections.abc import Awaitable, Iterable
 from typing import TypeVar
 
-from sqlmodel import col, select, update
+from sqlmodel import col, or_, select, update
 
 from ..core import get_logger
 from ..core.db import (
     CashuTransaction,
     create_session,
     store_cashu_transaction_with_retry,
+    x_cashu_abandoned_after_seconds,
 )
-from ..core.settings import settings
 from ..wallet import (
     recieve_token,
     send_token,
@@ -45,9 +45,6 @@ CHARGED = "charged"
 FAILED = "failed"
 
 RECOVERY_INTERVAL_SECONDS = 60
-# Slack past the request deadline and its cleanup window before a payment is
-# treated as abandoned.
-RECOVERY_MARGIN_SECONDS = 60
 
 T = TypeVar("T")
 
@@ -57,12 +54,12 @@ _settling: set[asyncio.Future[object]] = set()
 _paying: set[asyncio.Future[object]] = set()
 
 
-def abandoned_after_seconds() -> float:
-    return (
-        settings.max_request_lifetime_seconds
-        + settings.request_cleanup_timeout_seconds
-        + RECOVERY_MARGIN_SECONDS
-    )
+abandoned_after_seconds = x_cashu_abandoned_after_seconds
+
+
+def past_recovery_deadline(payment: CashuTransaction, now: float) -> bool:
+    """Whether the deadline fixed when the payment was accepted has passed."""
+    return payment.recover_after is None or payment.recover_after < now
 
 
 async def _transition(request_id: str, from_states: Iterable[str], to: str) -> bool:
@@ -322,13 +319,20 @@ async def _close_stale_refund(payment: CashuTransaction) -> None:
 
 async def recover_abandoned_payments() -> int:
     """Refund payments whose request ended without settling; returns the count."""
-    cutoff = int(time.time() - abandoned_after_seconds())
+    now = int(time.time())
+    cutoff = int(now - abandoned_after_seconds())
     async with create_session() as session:
         result = await session.exec(
             select(CashuTransaction).where(
                 CashuTransaction.type == "in",
                 col(CashuTransaction.settlement).in_([PENDING, REFUNDING]),
                 col(CashuTransaction.settlement_at) < cutoff,
+                # A lowered request lifetime must not cut short a request
+                # accepted under the longer one.
+                or_(
+                    col(CashuTransaction.recover_after).is_(None),
+                    col(CashuTransaction.recover_after) < now,
+                ),
                 col(CashuTransaction.request_id).is_not(None),
             )
         )

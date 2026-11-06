@@ -20,7 +20,14 @@ from fastapi.responses import JSONResponse
 from sqlmodel import col, select, update
 
 from routstr.balance import refund_wallet_endpoint
-from routstr.core.db import AsyncSession, CashuTransaction, store_cashu_transaction
+from routstr.core.db import (
+    AsyncSession,
+    CashuTransaction,
+    store_cashu_transaction,
+    total_user_liability,
+    user_liability_for_mint_and_unit,
+)
+from routstr.core.settings import settings
 from routstr.payment import x_cashu_settlement as xs
 from routstr.payment.cost_calculation import MaxCostData
 from routstr.upstream import ehbp as ehbp_module
@@ -212,6 +219,9 @@ async def _age(session: AsyncSession, seconds: int, token: str = PAYMENT) -> Non
         .values(
             created_at=int(time.time()) - seconds,
             settlement_at=int(time.time()) - seconds,
+            recover_after=int(time.time())
+            - seconds
+            + int(xs.abandoned_after_seconds()),
         )
     )
     await session.commit()
@@ -372,6 +382,21 @@ async def test_recent_payment_is_left_to_its_request(
     assert await xs.recover_abandoned_payments() == 0
     assert wallet.mints == []
     assert (await _payment(integration_session)).settlement == xs.PENDING
+
+
+async def test_lowered_request_lifetime_keeps_the_accepted_deadline(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    # Accepted under a 1800s lifetime; the operator then lowers it to 30s.
+    with patch.object(settings, "max_request_lifetime_seconds", 1800):
+        await _seed(integration_session, settlement=xs.PENDING, age=200)
+    with patch.object(settings, "max_request_lifetime_seconds", 30):
+        assert await xs.recover_abandoned_payments() == 0
+        assert (await _claim(integration_session)).status_code == 425
+
+    assert wallet.mints == []
+    assert (await _payment(integration_session)).settlement == xs.PENDING
+    assert await xs.mark_charged("req-876")
 
 
 async def test_concurrent_recoveries_mint_once(
@@ -658,6 +683,12 @@ async def test_failed_recovery_mint_is_terminal(
     assert await xs.recover_abandoned_payments() == 0
     assert (await _payment(integration_session)).settlement == xs.FAILED
     assert (await _claim(integration_session)).status_code == 409
+    # Still owed until reconciled, so payouts cannot spend the proofs.
+    assert await total_user_liability(integration_session) == AMOUNT * 1000
+    assert (
+        await user_liability_for_mint_and_unit(integration_session, MINT, "sat")
+        == AMOUNT * 1000
+    )
 
     wallet.fail = False
     assert await xs.recover_abandoned_payments() == 0

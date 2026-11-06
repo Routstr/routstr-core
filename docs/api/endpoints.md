@@ -708,7 +708,7 @@ Returns the change token in the body and in an `X-Cashu` response header. Other 
 | `409` `refund_unavailable` / `refund_not_recorded` | Paid before this node recorded refund outcomes; contact the operator with the `payment_request_id` from the body if change is owed. |
 | `410` | The change was swept after going unclaimed. |
 
-If the node stops while a paid request is in flight, no response was delivered, so the whole payment is refunded, less the mint's input fee for redeeming it: at once on a graceful shutdown, otherwise once the request lifetime (`MAX_REQUEST_LIFETIME_SECONDS` plus `REQUEST_CLEANUP_TIMEOUT_SECONDS` and a minute) has passed. Until then the endpoint answers `425`.
+If the node stops while a paid request is in flight and before its charge is settled, no response was delivered, so the whole payment is refunded, less the mint's input fee for redeeming it: at once on a graceful shutdown, otherwise once the request lifetime the node had when the payment was accepted (`MAX_REQUEST_LIFETIME_SECONDS` plus `REQUEST_CLEANUP_TIMEOUT_SECONDS` and a minute) has passed. Until then the endpoint answers `425`. If minting the change had already started, that change is what the endpoint returns; and if the mint's outcome is unknown, the refund is not retried and the endpoint answers `409` `refund_unresolved` for manual reconciliation.
 
 ## Provider Discovery
 

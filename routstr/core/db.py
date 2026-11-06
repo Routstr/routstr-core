@@ -12,7 +12,17 @@ from typing import Any, AsyncGenerator
 from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
-from sqlalchemy import Index, UniqueConstraint, case, delete, event, or_, text
+from sqlalchemy import (
+    BigInteger,
+    Index,
+    UniqueConstraint,
+    case,
+    cast,
+    delete,
+    event,
+    or_,
+    text,
+)
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -580,14 +590,32 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
         default=None,
         description="Unix timestamp of the last settlement state change",
     )
+    recover_after: int | None = Field(
+        default=None,
+        description="Unix timestamp after which recovery may refund the payment, "
+        "fixed when it was accepted so later setting changes cannot shorten it",
+    )
 
 
 REFUND_OPEN_STATUSES = ("pending", "ambiguous")
 
 # Debited from the key but neither paid out nor restored, so still owed.
 REFUND_UNRESOLVED_STATUSES = ("pending", "ambiguous", "stuck")
-# X-Cashu payments that may still be refunded in full.
-X_CASHU_UNSETTLED_STATES = ("pending", "refunding")
+# X-Cashu payments still owed to the payer: refundable in full, or failed and
+# awaiting manual reconciliation.
+X_CASHU_UNSETTLED_STATES = ("pending", "refunding", "failed")
+# Slack past the request deadline and its cleanup window before an X-Cashu
+# payment is treated as abandoned.
+X_CASHU_RECOVERY_MARGIN_SECONDS = 60
+
+
+def x_cashu_abandoned_after_seconds() -> float:
+    return (
+        settings.max_request_lifetime_seconds
+        + settings.request_cleanup_timeout_seconds
+        + X_CASHU_RECOVERY_MARGIN_SECONDS
+    )
+
 
 _REFUND_OPEN_PREDICATE = "status IN ('pending', 'ambiguous')"
 
@@ -720,6 +748,11 @@ async def store_cashu_transaction(
                 api_key_hashed_key=api_key_hashed_key,
                 settlement=settlement,
                 settlement_at=created_at if settlement is not None else None,
+                recover_after=(
+                    created_at + int(x_cashu_abandoned_after_seconds())
+                    if settlement is not None
+                    else None
+                ),
             )
             session.add(tx)
             await session.commit()
@@ -1164,7 +1197,8 @@ def _unsettled_x_cashu_msats(*filters: Any) -> Any:
     """Redeemed X-Cashu payments recovery may still refund in full, in msats."""
     amount_msats = case(
         (col(CashuTransaction.unit) == "msat", col(CashuTransaction.amount)),
-        else_=col(CashuTransaction.amount) * 1000,
+        # Widen before multiplying: PostgreSQL overflows INTEGER * 1000.
+        else_=cast(col(CashuTransaction.amount), BigInteger) * 1000,
     )
     return (
         select(func.coalesce(func.sum(amount_msats), 0))

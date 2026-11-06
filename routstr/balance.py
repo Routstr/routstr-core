@@ -304,10 +304,13 @@ def _raise_unsettled_x_cashu_refund(in_tx: CashuTransaction) -> NoReturn:
                 "payment_request_id": in_tx.request_id,
             },
         )
-    age = int(time.time()) - (in_tx.settlement_at or in_tx.created_at)
+    now = int(time.time())
+    age = now - (in_tx.settlement_at or in_tx.created_at)
     # A pending payment is refunded by recovery once its request is abandoned.
-    stale = state != x_cashu_settlement.PENDING and (
-        age > x_cashu_settlement.abandoned_after_seconds()
+    stale = (
+        state != x_cashu_settlement.PENDING
+        and age > x_cashu_settlement.abandoned_after_seconds()
+        and x_cashu_settlement.past_recovery_deadline(in_tx, now)
     )
     if state is None and stale:
         # Paid before settlement was tracked: the outcome is unknown.
