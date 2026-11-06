@@ -406,12 +406,12 @@ async def test_native_messages_stream_keeps_input_usage_in_stats() -> None:
         await _collect_streaming(response)
 
     send_refund.assert_awaited_once_with(
-        95, "msat", None, request_id="messages-request"
+        85, "msat", None, request_id="messages-request"
     )
     assert response.headers["x-cashu"] == "cashu-refund"
     writer.submit.assert_called_once()
     outcome = writer.submit.call_args.args[0]
-    assert outcome.revenue_msats == 5
+    assert outcome.revenue_msats == 15
     assert (outcome.input_tokens, outcome.output_tokens) == (10, 5)
     assert outcome.input_source == outcome.output_source == "reported"
     writer.declare_loss.assert_not_called()

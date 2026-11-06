@@ -2835,6 +2835,7 @@ class BaseUpstreamProvider:
             output_tokens: int = 0
             cache_read_input_tokens: int = 0
             cache_creation_input_tokens: int = 0
+            cache_creation: dict = {}
             server_tool_use: dict = {}
             total_cost: float = 0.0
             input_cost: float = 0.0
@@ -2928,6 +2929,9 @@ class BaseUpstreamProvider:
                                         usage_seen = True
                                         input_tokens += usage.get("input_tokens", 0)
                                         output_tokens += usage.get("output_tokens", 0)
+                                        cache_creation = (
+                                            usage.get("cache_creation") or {}
+                                        )
                                         # Anthropic's `message_start.usage`
                                         # carries the cumulative cache
                                         # snapshot for the prompt — pick
@@ -3018,6 +3022,8 @@ class BaseUpstreamProvider:
                     "cache_read_input_tokens": cache_read_input_tokens,
                     "cache_creation_input_tokens": cache_creation_input_tokens,
                 }
+                if cache_creation:
+                    usage_data["cache_creation"] = cache_creation
                 if server_tool_use:
                     usage_data["server_tool_use"] = server_tool_use
                 messages_dispatch.embed_usd_costs(
@@ -4932,7 +4938,10 @@ class BaseUpstreamProvider:
                     data_json = json.loads(line[6:])
                     # OpenAI format: usage and model at top level
                     if "usage" in data_json:
-                        usage_data = data_json["usage"]
+                        usage_data = {
+                            **(usage_data or {}),
+                            **(data_json["usage"] or {}),
+                        }
                         model = data_json.get("model") or model
                     elif "model" in data_json and not model:
                         model = data_json["model"]

@@ -93,6 +93,7 @@ class NormalizedUsage(BaseModel):
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    cache_write_1h_tokens: int = 0
     web_search_requests: int = 0
 
 
@@ -268,6 +269,12 @@ def normalize_usage(usage_data: object) -> NormalizedUsage | None:
     else:
         input_tokens = parse_token_count(usage_data.get("input_tokens", 0))
 
+    cache_creation = usage_data.get("cache_creation")
+    cache_write_1h_tokens = (
+        parse_token_count(cache_creation.get("ephemeral_1h_input_tokens"))
+        if isinstance(cache_creation, dict)
+        else 0
+    )
     server_tool_use = usage_data.get("server_tool_use")
     web_search_requests = (
         parse_token_count(server_tool_use.get("web_search_requests"))
@@ -280,5 +287,6 @@ def normalize_usage(usage_data: object) -> NormalizedUsage | None:
         output_tokens=output_tokens,
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
+        cache_write_1h_tokens=cache_write_1h_tokens,
         web_search_requests=web_search_requests,
     )

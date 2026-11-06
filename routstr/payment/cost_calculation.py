@@ -388,6 +388,7 @@ async def calculate_cost(
         output_tokens,
         cache_read_tokens,
         cache_creation_tokens,
+        usage.cache_write_1h_tokens if pricing_rates is not None else 0,
         input_rate,
         output_rate,
         cache_read_rate,
@@ -700,6 +701,7 @@ def _calculate_from_tokens(
     output_tokens: int,
     cache_read_tokens: int,
     cache_creation_tokens: int,
+    cache_write_1h_tokens: int,
     input_rate: float,
     output_rate: float,
     cache_read_rate: float,
@@ -714,7 +716,9 @@ def _calculate_from_tokens(
     calc_output_msats = round(output_tokens / 1000 * output_rate, 3)
     calc_cache_read_msats = round(cache_read_tokens / 1000 * cache_read_rate, 3)
     calc_cache_write_msats = round(
-        cache_creation_tokens / 1000 * cache_creation_rate, 3
+        (cache_creation_tokens - cache_write_1h_tokens) / 1000 * cache_creation_rate
+        + cache_write_1h_tokens / 1000 * input_rate * 2,
+        3,
     )
     token_based_cost = math.ceil(
         calc_input_msats
