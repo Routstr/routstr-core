@@ -1,0 +1,286 @@
+# Confidential-upstream mode (node side)
+
+The client (routstrd / `@routstr/sdk`) becomes the TLS 1.3 client of the
+upstream provider through this node. The node relays TLS records and writes
+the one record that carries its provider API key. It never sees the prompt or
+the response; the client never sees the API key. Protocol, security analysis
+and measurements: the *Confidential and verifiable upstream inference over
+standard TLS 1.3* paper.
+
+Everything here is **additive and off by default**: with
+`CONFIDENTIAL_SIDECAR_URL` unset none of the routes below exist and
+`/v1/models` is unchanged.
+
+## How it plugs in
+
+| Piece | What |
+|---|---|
+| `routstr/confidential.py` | the Nostr-signed offer (`GET /v1/confidential/offer`), model selection (the candidate whose provider host is the sidecar's upstream), the signed rate snapshot (same rate function as billing), the `/v1/models` field (exactly the models in the signed `price_list`), and thin billing glue over the node's normal path |
+| `routstr/confidential_ws.py` | `GET /v1/confidential/ws` (control + TLS relay to the sidecar) and `GET /v1/confidential/zk` (one ZK proof) |
+| `core/main.py`, `core/settings.py`, `payment/models.py` | route registration, the one setting, the additive models field |
+
+The **cu-sidecar** (Rust, separate process on loopback; source, build and the
+protocol paper: <https://github.com/jooray/routstr-confidential>, `crypto/relay`)
+holds the provider key, verifies the relayed handshake, runs the node side of the proofs, holds
+the record that completes the request body until π_C2S verifies, and writes the
+credential record.
+
+**Protocol version.** The node speaks only protocol v2 (the two-party TLS
+handshake, π_NK/π_C2S/π_C3S): its offer advertises `v = min_v = max_v = 2`,
+`/v1/confidential/ws` refuses any other `v` (a v1 client is closed with
+`1008`), `/v1/confidential/zk` accepts only `twopc`, `zkchan`, `pi_nk`,
+`pi_c2s` and `pi_c3s`, and a sidecar whose offer does not name `v = 2` is
+refused (no offer, no `confidential_upstream` models field). Protocol v1 (the
+client ran the handshake alone; π_C1/π_N/π_C2/π_C3) is retired; it remains on
+the `confidential-upstream` branch for reference.
+
+## Billing (the node's normal path)
+
+Confidential sessions are billed like any request whose prompt the node
+cannot read (cf. EHBP), at rates fixed when the session starts:
+
+1. The client's `setup` frame carries its ordinary bearer: an `sk-` key or a
+   Cashu token. `validate_bearer_key` turns it into an account. The setup may
+   also carry `offer_sig`, the `sig` of the signed offer the client verified.
+2. The session's rates (msats per 1k tokens: `in`, `cached_in`,
+   `cache_write`, `out`) are frozen at setup. With `offer_sig` they are that offer's `price_list` entry
+   for the model; the node honours an offer for 10 minutes after it last
+   served it (an unchanged offer keeps its signature, and serving it again
+   restarts the 10 minutes) and keeps at most 512 offers. An unknown or expired
+   `offer_sig`, or a model the offer does not price, is refused with
+   `409` / `offer_expired`, and the client refetches the offer. Without
+   `offer_sig` the current rates are frozen.
+3. The prompt is opaque to the node, so `pay_for_request` reserves the
+   full-context prompt plus the pinned `max_tokens` at the frozen rates:
+   `max(MIN_REQUEST_MSAT, ceil((prompt_limit*max(in,cache_write) + (max_tokens+margin)*out)/1000))`,
+   where `prompt_limit` is the model's full context length (a prompt cap
+   smaller than that would leave part of an accepted prompt unreserved) and
+   `margin` is the offer's `reserve_margin_tokens` (providers may bill a few
+   completion tokens past the cap; the charge is still the usage). Usage
+   beyond the reservation (an overshoot larger than the margin, or a prompt
+   longer than the listed context length) is paid by the node, so size the
+   margin for the provider. A model without a known context length reserves
+   its undiscounted maximum cost (no `TOLERANCE_PERCENTAGE` discount) plus the
+   margin; a model whose metadata lists a negative context length is refused;
+   fixed-pricing deployments reserve their fixed per-request cost. Only the
+   setup fields the sidecar uses are forwarded (`nonce_c`, `model`,
+   `max_tokens`, `len`, `armed`); the bearer, `offer_sig` and the fees are
+   not, and the reservation id binds the session id instead.
+4. On the π_C3S-verified usage the node charges exactly
+   `ceil((in*(prompt-cached-written) + min(cached_in,in)*cached + cache_write*written + out*completion)/1000)`,
+   capped at the reservation, where `cached` is
+   `usage.prompt_tokens_details.cached_tokens` (at most `prompt`) and
+   `written` the prompt-cache writes (at most `prompt-cached`): the first
+   positive integer of `prompt_tokens_details.cache_creation_input_tokens`,
+   `…cache_write_tokens`, `…cache_creation_tokens` and the top-level
+   `cache_creation_input_tokens`. Both are counted inside `prompt_tokens`, as
+   OpenAI-style usage reports them. An offer signed without `cache_write`
+   bills writes at `in`. The client computes the same bound from its own
+   usage event and the signed rates. The reservation is finalized through the EHBP
+   actual-cost path (released when the cost is zero). A usage event for
+   another model, or without token counts, charges the reservation.
+5. The node then sends a signed receipt with the usage, the cost, the
+   reservation, the frozen rates, the new balance and the SHA-256 of the
+   session attestation. The attestation comes from the sidecar when the
+   provider closes the connection: it binds the session id, the
+   certificate-chain hash, both handshake transcript hashes, the record count
+   and the SHA-256 of all bytes in each direction, the credential-record
+   commitment (`c_commit`) and the time. The sidecar signs it with a
+   per-process Ed25519 key; the node re-signs it with its Nostr key (the
+   sidecar's signature is passed along as `sidecar_sig`). The client checks
+   the node's signature and that the session id and transcript hashes are
+   its own.
+6. An upstream HTTP error is disclosed under π_C3S from the response's status
+   line and headers only; the node learns the status and those headers, never
+   the error body. A 429 or 503 (the provider's capacity) or a 401, 402 or 403
+   (the node's own provider key or account) releases the reservation less the
+   session fee, if set (below); any other 4xx (a request the provider
+   rejected) releases it less the abandon fee; other 5xx charge it.
+   A usage disclosed before the sidecar's attestation (a fault on the node's
+   side: the sidecar attests first) charges nothing: the reservation is
+   released and the client gets an error frame instead of a receipt.
+7. An abort before the sidecar released the final body record releases the
+   reservation (less the abandon fee, if set; below), because the upstream
+   never had a complete request. After the
+   release, a usage disclosure missing at the end of the post-release window
+   (below) charges the reservation. (EHBP can
+   charge nothing in that case because the node reads the usage itself; here
+   the client controls the disclosure.) If settlement fails, the same rule
+   applies and the client gets an error frame. Each reservation is finalized
+   exactly once.
+8. Unused balance is withdrawn with the existing `/v1/wallet/refund`.
+
+### Session fees and rate surcharge (optional, off by default)
+
+A confidential session costs the node far more than a plain request: about
+22 MB of 2PC data and ~0.5 s of CPU per session, before the provider sees
+anything, and a pre-warmed session does all of it before a request exists.
+Three settings price that work; all are 0 by default, and then the offer, the
+setup, the receipt and every charge are exactly as above.
+
+- `CONFIDENTIAL_RATE_SURCHARGE_PCT` raises the per-token rates of confidential
+  sessions by that percentage. The signed offer's `price_list` carries the
+  surcharged rates (the ones billed), so the client's rate check is
+  unchanged; the offer also states `rate_surcharge_pct`.
+- `CONFIDENTIAL_SESSION_FEE_MSAT` (`session_fee_msat`): a flat fee on top of
+  the usage of a **completed** request.
+- `CONFIDENTIAL_ABANDON_FEE_MSAT` (`abandon_fee_msat`): the anti-DoS deposit,
+  charged instead when a session ends **without** a request reaching the
+  provider. It is never below the session fee; unset (0), it equals the
+  session fee. The node cannot tell a pre-warmed session from a cold one and
+  does not need to: any session that ends that way pays it.
+
+Both fees go into the signed offer (and, like the surcharge, into the model
+listing's `confidential_upstream` field, so clients can size their deposit):
+
+| Session outcome | Charge |
+|---|---|
+| completed (usage disclosed and verified) | usage at the (surcharged) rates + session fee, capped at the reservation |
+| provider refused for capacity or the node's key (429, 503, 401, 402, 403, disclosed under π_C3S) | session fee: the request reached the provider and the node did the 2PC, but no inference ran |
+| provider rejected the request (any other 4xx) | abandon fee |
+| ended before the final body record was released, after the sidecar accepted the setup (`ready`): armed and never used, aborted, failed proof, client gone | abandon fee; the rest of the reservation is released |
+| the sidecar never accepted the setup (unreachable, refused) | nothing |
+| other 5xx, or no disclosure after the body was released | the reservation, as before |
+
+- **Acceptance.** A client accepts the fees by echoing `session_fee_msat` and
+  `abandon_fee_msat` in its `setup`. A setup that does not echo exactly the
+  frozen offer's fees is refused before anything is reserved (`409` /
+  `session_fee_not_accepted`), so a client that does not know about fees is
+  never charged one silently. The node bills at the terms of the offer named
+  by `offer_sig` (fees and rates), even if the settings changed since.
+- **Reservation** = the usual reservation (at the surcharged rates) +
+  max(session fee, abandon fee).
+- **Receipts** carry `session_fee_msat`, `abandon_fee_msat` and
+  `rate_surcharge_pct` (only when set). Clients check
+  the usage bound above plus the session fee at the signed rates,
+  `cost ≤ session fee` for a 429/503/401/402/403, and `cost ≤ abandon fee`
+  for another 4xx. An abandoned session gets no
+  receipt; its charge (the abandon fee) shows in the balance.
+
+Example: abandon fee 10 sat, session fee 2 sat. A pre-warmed session that is
+used costs its usage + 2 sat (the other 8 sat of the deposit are released with
+the reservation); one that is never used costs 10 sat.
+
+The fees combine with the per-address unused-session limit
+(`CONFIDENTIAL_MAX_UNUSED_PER_IP`): the limit caps how many sessions one
+address can hold unused at a time, the abandon fee makes each one cost money.
+Without fees, an armed and abandoned session is free for the client. Clients
+that pre-warm (routstrd, the SDK) arm at most `maxArmedWithFee` (default 6)
+sessions for a node that charges an abandon fee, and none when it exceeds their
+`maxSessionFeeMsat`. The main protection is money: every session reserves the
+full worst-case cost on a funded credential before the sidecar does any work,
+so the per-address limit only needs to stop one address from tying up many
+sessions at once; parallel coding agents need several. A connection takes a
+session slot only once its setup is reserved: before that it is pending
+(below), so idle sockets without a credential cannot keep paying clients out.
+
+## Session limits
+
+- The node dials the sidecar only after a valid `setup` has been reserved.
+  The `setup` must arrive within 10 s of the websocket opening (clients send
+  it as soon as the socket is open, a pre-warmed session included).
+- Until its `setup` is reserved, a connection is pending. At most 1024
+  connections are pending per node process and 4 per client address (an IPv6
+  address counts by its /64). A new connection that finds either full closes
+  the oldest one still waiting for its `setup` (503) rather than being
+  refused; it is refused (429/503) only when every pending connection there
+  is already being reserved.
+- The sidecar does not check client credentials, so it must be reachable
+  only by the node: every node request to it carries
+  `CONFIDENTIAL_SIDECAR_TOKEN`, and a sidecar off loopback refuses requests
+  without it (and refuses to start without a token).
+- `setup` is validated before anything is reserved: `model` a non-empty
+  string, `max_tokens` an integer in `[1, max_tokens_cap]`, `len` (the request
+  body size) an integer in `[1, 8 MiB]`, `nonce_c` 64 hex characters.
+- At most 32 confidential sessions run at once per node process, counted
+  from the reservation of their `setup`. A setup reserved while all 32 are
+  taken is refused (503) and its reservation released in full, before the
+  sidecar is dialed.
+- A session has 10 minutes from the websocket accept until the sidecar
+  releases the final body record (`body_released`): setup, 2PC, the armed
+  wait and the body upload. From the release it gets a fresh window of up to
+  10 minutes (`POST_RELEASE_TIMEOUT_S`, within the reservation lease less the
+  60 s settlement grace) for the response and the usage disclosure; the
+  sidecar resets its own limit when it writes that record. Only a session
+  with no disclosure at the end of that window is charged the reservation.
+- A session counts as unused for `CONFIDENTIAL_MAX_UNUSED_PER_IP` from the
+  reservation of its `setup` until the sidecar reports that the credential
+  record was written (`head_written`), or until the session ends.
+- Every refusal or failure is sent as
+  `{"type":"error","status":<int>,"reason":<str>,"detail":<…>}` before the
+  socket closes (400 bad setup, 402 balance, 408 timeout, 409 stale offer,
+  502/503 sidecar unavailable or session limit, 500 internal).
+- The sidecar's offer is fetched with a 3 s timeout and cached for 30 s; a
+  failed fetch is remembered for 10 s, and the last good offer is served for
+  up to 10 minutes while the sidecar cannot be reached, so `/v1/models` never
+  waits on it for long.
+  A sidecar that answers with an offer the node refuses (malformed, not run
+  with `--node-settles`, another protocol version) is not served from that
+  cache: the mode is off until the sidecar is fixed.
+- The offer's `ws` URL is built from `HTTP_URL` (`https`→`wss`); without it the
+  offer carries the relative path `/v1/confidential/ws`.
+- `/v1/confidential/zk` admits only the sid of a session that is live on the
+  same node process (announced by the sidecar's `ready`), at most 6 proof
+  connections per session (the sidecar's limit) and 192 per process at once;
+  any other sid never reaches the sidecar.
+- The reservation's lease (its expiry and heartbeat) covers both 10-minute
+  phases plus 60 s for settlement (21 minutes), even when
+  `MAX_REQUEST_LIFETIME_SECONDS` is shorter, so the stale-reservation sweeper
+  never releases it mid-session. A `/zk` proxy closes with its session.
+- The signed offers, the live sessions and the per-address counts are kept
+  per process: run the node as a single worker process (one uvicorn worker).
+  With several, an offer signed by one worker is unknown to another (`409`),
+  `/zk` connections reaching another worker are refused, and the limits
+  multiply. The node refuses to start when its launcher names more than one
+  worker, or when another process of the same node holds its lock file
+  (`routstr-confidential-<uid>/` in `$XDG_RUNTIME_DIR` or the temporary
+  directory; the directory must be this user's, mode 0700).
+
+## Configuration
+
+| Env | Meaning | Default |
+|---|---|---|
+| `CONFIDENTIAL_SIDECAR_URL` | cu-sidecar base URL; empty disables the mode; env-only, read at startup (the routes are mounted then), never stored in the database | `""` |
+| `CONFIDENTIAL_SIDECAR_TOKEN` | shared secret sent to the sidecar as `Authorization: Bearer` (the sidecar's `CU_SIDECAR_TOKEN`); required when the sidecar is not on loopback, since it does not check client credentials itself; env-only, never stored in the database | `""` |
+| `CONFIDENTIAL_MAX_UNUSED_PER_IP` | refuse (429) a new session from a client address (IPv6: its /64) that already has this many unused sessions (setup reserved, credential record not yet written; pre-warmed sessions count; connections still waiting for their setup are limited separately, see Session limits); 0 disables | `12` |
+| `CONFIDENTIAL_TRUSTED_PROXIES` | comma-separated peers whose client-address header is believed (e.g. `127.0.0.1,::1` for nginx on the same host); `self` adds the node's own addresses (where a rootless container port forwarder connects from; enable only behind a reverse proxy that always sets the header) | empty (no peer is trusted) |
+| `CONFIDENTIAL_SESSION_FEE_MSAT` | fee (msat) on top of the usage of a completed confidential request, and the charge for a provider refusal (4xx/503); published in the signed offer; clients must accept it at setup | `0` (off) |
+| `CONFIDENTIAL_ABANDON_FEE_MSAT` | fee (msat) for a session the sidecar accepted that ends without a request reaching the provider (armed and never used, aborted, client gone): the anti-DoS deposit, reserved at setup; never below the session fee (0 = equal to it) | `0` (off) |
+| `CONFIDENTIAL_RATE_SURCHARGE_PCT` | percentage added to the per-token rates of confidential sessions; the signed offer's `price_list` carries the surcharged rates | `0` (off) |
+| `CONFIDENTIAL_RESERVE_MARGIN_TOKENS` | completion tokens reserved beyond the pinned `max_tokens` (a provider may bill a few more than the cap, and the charge never exceeds the reservation); only the hold grows, the charge is the reported usage; a usage with more completion tokens than `max_tokens` plus this is logged as a warning; published in the signed offer as `reserve_margin_tokens` | `16` |
+| `CONFIDENTIAL_CLIENT_IP_HEADER` | header a trusted proxy puts the client address in; for `X-Forwarded-For` the rightmost entry over all its header lines is used (a proxy may append to the client's line or add its own); another header is read from its last line | `x-forwarded-for` |
+| `NSEC` | node key; signs offer, attestation and receipt (required) | |
+
+Accepted mints, pricing and refunds are the node's existing settings. Apart
+from the env-only `CONFIDENTIAL_SIDECAR_URL` and `CONFIDENTIAL_SIDECAR_TOKEN`,
+these are persisted in its database on first start, like the node's other
+settings:
+afterwards a value in the database wins over the environment, so change them
+with the admin settings API (`PATCH /admin/api/settings`, e.g.
+`{"confidential_session_fee_msat": 2000, "confidential_abandon_fee_msat": 10000}`)
+or the dashboard. Clients pick up a
+change with the next offer; sessions set up on an older signed offer (valid
+for 10 minutes after it was last served) keep its terms.
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest tests/unit/test_confidential.py -q
+```
+
+## Client addresses
+
+The per-address limit identifies clients by the TCP peer address, or, when the peer is a trusted
+proxy, by the proxy's header. Without a reverse proxy nothing needs configuring, as long as the node
+sees real peer addresses. A container port forwarder that rewrites them (rootless podman/docker
+publishing a port) makes every client look like the node itself: put a reverse proxy in front and set
+`CONFIDENTIAL_TRUSTED_PROXIES=127.0.0.1,::1,self`, or raise or disable the limit. Never trust `self`
+without such a proxy, since any client could then name its own address. Tor clients all arrive from the
+Tor daemon and share one limit.
+
+No peer is trusted by default. A reverse proxy on the same host (nginx connecting over loopback) needs
+`CONFIDENTIAL_TRUSTED_PROXIES=127.0.0.1,::1`; without it all its clients share the proxy's address and one
+limit. Trust an address only if every connection from it comes through a proxy that sets the header: a
+Tor daemon or any other local process that connects to the node's loopback port directly could otherwise
+name any client address. A node whose database already holds a value keeps it (the database wins over
+the environment); a new node starts with none.
