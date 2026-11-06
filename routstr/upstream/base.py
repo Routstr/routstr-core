@@ -1678,8 +1678,12 @@ class BaseUpstreamProvider:
                     if fresh_key:
                         cost_data: dict
                         try:
-                            adjustment_input = usage_estimator.billing_data(
-                                usage_chunk_data, last_model_seen
+                            adjustment_input = (
+                                usage_estimator.response_data(last_model_seen)
+                                if guarded_chunks.timed_out and usage_chunk_data is None
+                                else usage_estimator.billing_data(
+                                    usage_chunk_data, last_model_seen
+                                )
                             )
                             cost_data = await adjust_payment_for_tokens(
                                 fresh_key,
@@ -2145,8 +2149,12 @@ class BaseUpstreamProvider:
                     if fresh_key:
                         cost_data: dict
                         try:
-                            adjustment_input = usage_estimator.billing_data(
-                                usage_chunk_data, last_model_seen
+                            adjustment_input = (
+                                usage_estimator.response_data(last_model_seen)
+                                if guarded_chunks.timed_out and usage_chunk_data is None
+                                else usage_estimator.billing_data(
+                                    usage_chunk_data, last_model_seen
+                                )
                             )
                             cost_data = await adjust_payment_for_tokens(
                                 fresh_key,
@@ -3087,7 +3095,9 @@ class BaseUpstreamProvider:
                                 raise
 
                 if not usage_finalized:
-                    maybe_cost_event = await finalize_without_usage(charge_prompt=False)
+                    maybe_cost_event = await finalize_without_usage(
+                        charge_prompt=guarded_chunks.timed_out
+                    )
                     if maybe_cost_event is not None:
                         yield maybe_cost_event
                 if guarded_chunks.timed_out:
