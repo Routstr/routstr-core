@@ -1,9 +1,10 @@
-"""cashu 0.21.x builds its mint client with the `proxies` kwarg httpx removed in
-0.28. These tests pin the shim that keeps every wallet call working."""
+"""Pins routstr.cashu_compat: the httpx shim for cashu 0.21's removed `proxies`
+kwarg, and the mint compat for older mints (missing `method`, legacy NUT-20)."""
 
 import asyncio
 from types import SimpleNamespace
 
+import httpcore
 import httpx
 import pytest
 from cashu.core.base import BlindedMessage
@@ -119,6 +120,32 @@ async def test_cashu_decorator_builds_a_client_after_shim() -> None:
         await client.aclose()
 
 
+async def test_cashu_decorator_routes_through_configured_socks_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_cashu_httpx_shim()
+    monkeypatch.setattr(v1_api.settings, "tor", False)
+    monkeypatch.setattr(v1_api.settings, "socks_proxy", "localhost:9050")
+
+    class _Ledger:
+        url = "http://mint.test/"
+        httpx: AsyncClient
+
+        @v1_api.async_set_httpx_client  # type: ignore[misc]
+        async def call(self) -> AsyncClient:
+            return self.httpx
+
+    client: httpx.AsyncClient = await _Ledger().call()
+    try:
+        transports = list(client._mounts.values())
+        assert len(transports) == 1
+        pool = transports[0]._pool  # type: ignore[union-attr]
+        assert isinstance(pool, httpcore.AsyncSOCKSProxy)
+        assert pool._proxy_url == httpcore.URL("socks5://localhost:9050")
+    finally:
+        await client.aclose()
+
+
 def test_install_is_idempotent() -> None:
     install_cashu_httpx_shim()
     patched = v1_api.httpx
@@ -145,6 +172,22 @@ def test_quote_responses_from_pre_method_mints_default_to_bolt11() -> None:
         {**common, "fee_reserve": 2, "method": "bolt12"}
     )
     assert sent.method == "bolt12"
+
+
+def test_mint_compat_install_does_not_double_wrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def plain_mint(
+        self: object, outputs: list, quote: str, signature: str | None = None
+    ) -> list:
+        return []
+
+    monkeypatch.setattr(v1_api.LedgerAPI, "mint", plain_mint)
+    install_cashu_mint_compat()
+    wrapped = v1_api.LedgerAPI.mint
+    assert wrapped is not plain_mint
+    install_cashu_mint_compat()
+    assert v1_api.LedgerAPI.mint is wrapped
 
 
 async def test_mint_retries_with_legacy_nut20_signature_on_old_mints(
@@ -182,3 +225,45 @@ async def test_mint_retries_with_legacy_nut20_signature_on_old_mints(
     with pytest.raises(Exception, match="20008"):
         await v1_api.LedgerAPI.mint(wallet, outputs, "q", None)
     assert seen == [None]
+
+
+@pytest.mark.parametrize(
+    "error, local, expected_calls",
+    [
+        ("Mint Error: quote not paid (Code: 20001)", "privkey", 1),
+        ("Mint Error: Signature invalid (Code: 20008)", None, 1),
+        ("Mint Error: Signature invalid (Code: 20008)", "", 1),
+        ("Mint Error: Signature invalid (Code: 20008)", "privkey", 2),
+    ],
+    ids=["other-error", "no-local-quote", "empty-privkey", "legacy-rejected"],
+)
+async def test_mint_legacy_nut20_fallback_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+    error: str,
+    local: str | None,
+    expected_calls: int,
+) -> None:
+    privkey, _ = nut20.generate_keypair()
+    outputs = [BlindedMessage(id="00", amount=1, B_=nut20.generate_keypair()[1])]
+    seen: list[str | None] = []
+
+    async def rejecting_mint(
+        self: object, outputs: list, quote: str, signature: str | None = None
+    ) -> list:
+        seen.append(signature)
+        raise Exception(error)
+
+    async def local_quote(db: object, quote: str) -> SimpleNamespace | None:
+        if local is None:
+            return None
+        return SimpleNamespace(privkey=privkey if local == "privkey" else local)
+
+    monkeypatch.setattr(v1_api.LedgerAPI, "mint", rejecting_mint)
+    monkeypatch.setattr(crud, "get_bolt11_mint_quote", local_quote)
+    install_cashu_mint_compat()
+
+    current = nut20.sign_mint_quote("q", outputs, privkey)
+    with pytest.raises(Exception) as excinfo:
+        await v1_api.LedgerAPI.mint(SimpleNamespace(db=None), outputs, "q", current)
+    assert str(excinfo.value) == error
+    assert len(seen) == expected_calls and seen[0] == current

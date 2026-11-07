@@ -13,7 +13,13 @@ release that fixes this, while litellm>=1.84 requires ``httpx>=0.28``. We bridge
 the gap by translating the keyword *inside cashu's module namespace only* --
 global httpx behaviour is untouched, and the shim is a no-op on httpx<0.28.
 
-Delete this module once cashu ships a release that passes ``proxy=``.
+``install_cashu_mint_compat`` separately bridges cashu 0.21 wallets to older
+mints (cdk-mintd 0.17, Nutshell <0.20.2); see its docstring.
+
+Removal: drop the httpx shim once cashu ships a release that passes ``proxy=``;
+drop the mint compat once every supported mint verifies the new NUT-20 message
+and sends ``method`` on quote responses (Nutshell >=0.20.2, and cdk-mintd
+releases past 0.17 that do both).
 """
 
 from typing import Any
@@ -112,7 +118,7 @@ _NUT20_SIGNATURE_INVALID = "(Code: 20008)"
 
 
 def install_cashu_mint_compat() -> None:
-    """Keep cashu 0.21 wallets working against pre-0.21 mints.
+    """Keep cashu 0.21 wallets working against older mints.
 
     Older mints (cdk-mintd 0.17, Nutshell <0.20.2) differ from cashu 0.21 in
     two ways, each of which breaks minting or melting outright:

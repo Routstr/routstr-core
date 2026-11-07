@@ -19,8 +19,8 @@ from ..mint import (
     run_mint_operation,
 )
 
-# cashu 0.21.x passes the `proxies` kwarg httpx removed in 0.28; see the module
-# docstring. Installed at import so no mint call can run before the patch.
+# cashu 0.21 compat for httpx>=0.28 and older mints; see routstr.cashu_compat.
+# Installed at import so no mint call can run before the patches.
 install_cashu_httpx_shim()
 install_cashu_mint_compat()
 
