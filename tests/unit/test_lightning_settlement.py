@@ -3,7 +3,7 @@ import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import httpx
 import pytest
@@ -157,6 +157,38 @@ async def test_invoice_mint_rejects_unrelated_concurrent_balance_growth() -> Non
 
     with pytest.raises(RuntimeError, match="quote-linked recovery returned 0"):
         await _mint_invoice_quote(wallet, invoice)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("issued", [True, False])
+async def test_invoice_mint_links_restored_outputs_only_for_an_issued_quote(
+    issued: bool,
+) -> None:
+    invoice = _invoice()
+    restored = [
+        Proof(amount=64, secret="restored-1"),
+        Proof(amount=36, secret="restored-2"),
+    ]
+    wallet = _recovery_wallet(
+        Exception("Mint Error: outputs have already been signed before (Code: 11003)"),
+        proofs_after=restored,
+    )
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[Mock]:
+        yield Mock()
+
+    wallet.db = Mock(connect=connect)
+
+    with patch("routstr.lightning.update_proof", AsyncMock()) as update_proof:
+        if issued:
+            await _mint_invoice_quote(wallet, invoice, issued=True)  # type: ignore[arg-type]
+        else:
+            with pytest.raises(RuntimeError, match="returned 0 sats"):
+                await _mint_invoice_quote(wallet, invoice)  # type: ignore[arg-type]
+
+    assert update_proof.await_count == (2 if issued else 0)
+    assert all(p.mint_id == ("quote-1" if issued else None) for p in restored)
 
 
 @pytest.mark.asyncio
@@ -314,6 +346,34 @@ async def test_ambiguous_invoice_mint_timeout_remains_recoverable() -> None:
     session.rollback.assert_not_awaited()
     # One commit closes the initial read transaction before external I/O.
     session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row_status", "recovers"), [("settlement_pending", True), ("pending", False)]
+)
+async def test_issued_quote_recovers_only_a_claimed_invoice(
+    row_status: str, recovers: bool
+) -> None:
+    _invoice_settlement_locks.clear()
+    invoice = _invoice(status=row_status)
+    session = AsyncMock()
+    issued = Mock(paid=False, state=MintQuoteState.issued)
+    wallet = Mock(get_mint_quote=AsyncMock(return_value=issued))
+    mint_quote = AsyncMock(side_effect=httpx.TimeoutException("mint still slow"))
+
+    with (
+        patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning._mint_invoice_quote", mint_quote),
+        patch("routstr.lightning._reload_invoice_view", AsyncMock()),
+    ):
+        result = await check_invoice_payment(invoice, session)  # type: ignore[arg-type]
+
+    assert result is False
+    if recovers:
+        mint_quote.assert_awaited_once_with(wallet, ANY, issued=True)
+    else:
+        mint_quote.assert_not_awaited()
 
 
 @pytest.mark.asyncio
