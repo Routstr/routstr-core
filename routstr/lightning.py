@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 from cashu.core.base import MintQuoteState
+from cashu.wallet.crud import update_proof
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm.attributes import set_committed_value
@@ -599,8 +600,13 @@ async def check_invoice_payment(
                     extra={"invoice_id": invoice.id, "error": str(error)},
                 )
                 return True
-            if not mint_status.paid:
-                return getattr(mint_status, "state", None) == MintQuoteState.unpaid
+            state = getattr(mint_status, "state", None)
+            # Only this node's own mint call can make a claimed row ISSUED.
+            if not mint_status.paid and not (
+                state == MintQuoteState.issued
+                and observed_status == "settlement_pending"
+            ):
+                return state == MintQuoteState.unpaid
             payment_confirmed = True
 
             # Fence expiry and other workers before consuming the paid quote.
@@ -645,7 +651,9 @@ async def check_invoice_payment(
 
             # Quote-linked proof verification makes an ambiguous mint response
             # retryable without crediting unrelated wallet balance growth.
-            await _mint_invoice_quote(wallet, settlement)
+            await _mint_invoice_quote(
+                wallet, settlement, issued=state == MintQuoteState.issued
+            )
             minted = True
 
             paid_at = int(time.time())
@@ -747,7 +755,10 @@ def _invoice_quote_proof_amount(wallet: Any, quote_id: str) -> int:
 
 
 async def _mint_invoice_quote(
-    wallet: Any, invoice: LightningInvoice | _InvoiceSettlement
+    wallet: Any,
+    invoice: LightningInvoice | _InvoiceSettlement,
+    *,
+    issued: bool = False,
 ) -> None:
     """Mint a paid quote, proving quote-linked outputs before DB credit."""
     mint_url = invoice.mint_url or settings.primary_mint
@@ -766,9 +777,21 @@ async def _mint_invoice_quote(
         if not _is_outputs_already_signed(error):
             raise
 
+        known = {proof.secret for proof in wallet.proofs}
         for keyset_id in wallet.keysets:
             await wallet.restore_tokens_for_keyset(keyset_id, to=1, batch=25)
         await wallet.load_proofs(reload=True)
+        # cashu restores proofs without mint_id.
+        restored = [
+            proof
+            for proof in wallet.proofs
+            if proof.secret not in known and not proof.mint_id and not proof.reserved
+        ]
+        if issued and sum(proof.amount for proof in restored) == invoice.amount_sats:
+            async with wallet.db.connect() as conn:
+                for proof in restored:
+                    proof.mint_id = invoice.payment_hash
+                    await update_proof(proof, mint_id=invoice.payment_hash, conn=conn)
         recovered = _invoice_quote_proof_amount(wallet, invoice.payment_hash)
         if recovered < invoice.amount_sats:
             raise RuntimeError(
