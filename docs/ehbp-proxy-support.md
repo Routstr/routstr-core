@@ -86,96 +86,93 @@ Cost tracking happens at the proxy level. Routstr reserves or redeems up to
 to finalize at actual token cost. If trusted usage is missing or invalid, the
 proxy releases/refunds rather than treating the authorization ceiling as usage.
 
-### Output-cap reservations (`X-Tinfoil-Max-Output-Tokens`) — scaffolded, not active
+### Output-cap reservations — scaffolded, not active
 
-A sealed body hides its `max_tokens` / `max_completion_tokens` /
-`max_output_tokens`, so a reservation normally falls back to the model's whole
-context envelope. Tinfoil's enclave also reads
-`X-Tinfoil-Max-Output-Tokens` from the *visible* request headers
-([confidential-model-router#518](https://github.com/tinfoilsh/confidential-model-router/pull/518)),
-which is the only completion ceiling a node can see without decrypting anything.
+EHBP hides the input and completion settings. The deployed router must enforce
+visible headers before Core can safely quote a smaller hold:
 
-**That header is not a request bound, so no discount is applied today.** The
-router writes the value into the body's completion cap and deletes the other
-spellings, but it forwards `n` and `best_of` untouched, and the engine applies
-the cap **per choice**. Measured against `router-0.tinfoil.sh`
-(`deepseek-v4-1-flash`, header = 8, `/v1/chat/completions`):
+- [PR518](https://github.com/tinfoilsh/confidential-model-router/pull/518)
+  applies `X-Tinfoil-Max-Output-Tokens` **per choice**, not per request.
+- [PR532](https://github.com/tinfoilsh/confidential-model-router/pull/532)
+  (merged `d7a8870`) overrides the sealed body's `n` with
+  `X-Tinfoil-Completion-Count` on **exact `/v1/chat/completions`**. Both headers
+  are positive integers. It leaves `best_of` unchanged and guarantees a single
+  model call, not a total bound across server-side loops.
 
-| request | completion tokens |
-|---|---|
-| `n` unset | 8 |
-| `n=2` | 16 |
-| `n=3` | 24 |
-| `n=2`, header = 200 | 400 |
-| `best_of=3` | 8 |
+**Neither reservation capability is enabled in production code.** Follow-up
+research verified the count override live at `inference.tinfoil.sh`: hidden
+`n=3`, visible count=1 and cap=8 yielded one choice / 8 output tokens; count=2
+yielded 16. Hidden `best_of=3` also reported 8 with count=1, which establishes
+no multiplier only for the backend and shape tested, not a universal guarantee.
 
-`n` lives inside the sealed body, so nothing server-side can bound
-`n × cap`: a direct EHBP client could send `n=1000` with header `8` and bill
-8000 completion tokens against a hold sized for 8. A client-side guard (what the
-SDK does) only protects honest clients.
+The activation blocker is now **orchestration/request-total billing**, not
+whether PR532 is deployed. Upstream `ab9edf...`, `main.go:917-953`, dispatches
+hidden tool profiles into `toolruntime/tool_loop.go:139-218`, which repeatedly
+invokes the model and aggregates usage, with a possible forced final call.
+The visible pair bounds a single call, not this accumulated bill. Router 502
+retries also exist, but there is no proof they double-bill; that remains an
+unverified risk rather than an observed multiplier. Activation needs proof that
+all accepted sealed request shapes cannot bill beyond the reservation (or an
+upstream enforced request-total budget), not an SDK guard or operator toggle.
 
-What ships in this change is therefore fail-closed scaffolding:
+Headers already forward unchanged independently of quoting (unless nominated
+hop-by-hop by `Connection`). A direct malicious EHBP caller can bypass all SDK
+checks, so Core trusts only verified enclave enforcement, never hidden body
+claims. The shipped default keeps the existing full envelope; that preserves
+the status quo rather than proving the full envelope covers arbitrary fan-out.
 
-- the header is parsed strictly and forwarded verbatim (it is not a proxy-only
-  header, so the enclave keeps enforcing it);
-- the capped worst-case math, route gate and `/v1/info` advertisement exist,
-  fully unit-tested, behind
-  `routstr.upstream.tinfoil.EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED = False`;
-- while that constant is `False`, `TinfoilUpstreamProvider.enforced_completion_cap()`
-  returns `None`, every sealed reservation keeps the full envelope, and
-  `/v1/info` **omits the `features` block entirely** so no client funds a capped
-  hold this node will not shrink.
+#### Single-choice chat scaffold and SDK contract
 
-#### Reservation shape (when activated)
+`EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ENABLED = False` is an independent
+code gate. When tested with that gate enabled, Core requires:
 
-A token is either input or output and both share the context window, so with the
-input size hidden the hold becomes the capped worst case:
+- the exact chat endpoint (version-prefix normalization is supported, trailing
+  slashes are not quoted);
+- exactly one visible canonical positive integer cap, at most `2**31 - 1`;
+- exactly one visible canonical completion count of **1**;
+- both values surviving provider preparation, proxy-header stripping, and the
+  real hop-by-hop sanitizer, including all raw `Connection` nominations.
+
+Missing, invalid, repeated, comma-joined, stripped headers or count > 1 retain
+the full envelope. Non-Tinfoil candidates never inherit the quote. Reconciliation
+and per-candidate failover reservation behavior are unchanged.
+
+Only after independently verified activation would `/v1/info` advertise:
+
+```json
+"features": {
+  "ehbp_single_choice_output_token_reservation": true,
+  "ehbp_single_choice_output_token_reservation_routes": ["chat/completions"]
+}
+```
+
+An SDK must require **both** the new feature value `=== true` and membership in
+`ehbp_single_choice_output_token_reservation_routes`, then send both cap and
+count=1. It must not rely on the legacy
+`ehbp_output_token_reservation` / `ehbp_output_token_reservation_total_cap` flags.
+Those belong to preserved, separately disabled Responses-only scaffolding
+(`EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED = False`). If both scaffolds are enabled
+in tests, each retains its own route list: legacy
+`ehbp_output_token_reservation_routes` stays `["responses"]`, while the new list
+contains only `["chat/completions"]`. No route union is advertised, so old clients
+cannot mistake chat for a legacy cap-only route. By default `/v1/info` still omits `features` entirely.
+
+#### Reservation shape (only after verified activation)
+
+Input and output share the context window. With input hidden, the hold keeps
+the worst-case input allowance, not a guessed prompt length:
 
 ```
+window = top_provider.context_length else model.context_length
 W = max((window - cap) * prompt_price + cap * completion_price,
         window * prompt_price)
 reserve = max(min_request_msat, min(max_cost_for_model, ceil(W * tol_factor)))
 ```
 
-The `window * prompt_price` term is the all-input case: with input priced above
-output the whole window can bill as unseen prompt, so the input allowance is
-never discounted. The value is node-local and re-evaluated per candidate on
-failover, so a fallback that ignores the header is re-reserved at its full
-envelope. Billing never changes — the cap would only size the hold; usage from
-`X-Tinfoil-Usage-Metrics` settles it.
-
-#### Activation precondition (upstream, not a toggle)
-
-Activation is a code change once the enclave guarantees a *request-total*
-ceiling, either by rejecting `n`/`best_of` > 1 when the header is supplied or by
-dividing the budget across choices. An operator toggle is deliberately not
-offered: it would only let a node trust a client-declared number over a sealed
-body.
-
-`/v1/responses` is the only plausible candidate route — it has neither knob and
-one probe showed an injected `n: 1000` / `best_of: 3` ignored there (one output,
-8 tokens), while the header overrides `max_output_tokens` in both directions
-(body 100 / header 8 → 8; body 8 / header 100 → 100). **That is one request
-shape, not a proof**: tool/server-side loops, multi-turn agentic runs,
-provider-side retries and knobs the probe never exercised could still multiply
-the billed output past the cap. The route stays in the gate as a candidate
-(`EHBP_OUTPUT_TOKEN_RESERVATION_ROUTES`) but its soundness is UNVERIFIED, so
-nothing is quoted anywhere while the flag is off. Chat completions must stay
-excluded until the upstream enforces a request total.
-
-When enabled, `/v1/info` gains:
-
-```json
-"features": {
-  "ehbp_output_token_reservation": true,
-  "ehbp_output_token_reservation_total_cap": true,
-  "ehbp_output_token_reservation_routes": ["responses"]
-}
-```
-
-`_routes` is authoritative for the two booleans — a client must gate its capped
-quotes on it, because the flags alone would invite a quote on a route where the
-node keeps the full envelope.
+A completion-only metadata limit is not the context window. Unknown windows or
+unusable prices keep the full envelope. The all-input term prevents discounting
+hidden input when input is more expensive. Billing still settles from trusted
+`X-Tinfoil-Usage-Metrics`, not the authorization hold.
 
 ## End-to-end flow
 
@@ -237,7 +234,7 @@ helpers in `routstr/upstream/ehbp.py` were extended to:
 See `docs/tinfoil-direct-integration.md` for the full implementation notes.
 
 The reservation discount keyed on `X-Tinfoil-Max-Output-Tokens` is described
-under [Output-cap reservations](#output-cap-reservations-x-tinfoil-max-output-tokens).
+under [Output-cap reservations](#output-cap-reservations--scaffolded-not-active).
 
 ## Verification status
 
