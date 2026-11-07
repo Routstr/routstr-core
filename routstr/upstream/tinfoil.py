@@ -478,9 +478,12 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
                     return None
             # Exercise the whole real header preparation chain as well as the
             # raw Connection fields above (a dict can collapse duplicates).
+            items = getattr(headers, "items", None)
+            if not callable(items):
+                return None
             prepared = _strip_hop_by_hop_headers(
                 _prepare_ehbp_upstream_headers(
-                    self.prepare_headers(dict(headers.items())),
+                    self.prepare_headers(dict(items())),
                     {"X-Tinfoil-Request-Usage-Metrics": "true"},
                     self.confidential_inference_profile,
                 )
