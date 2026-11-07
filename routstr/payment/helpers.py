@@ -314,6 +314,24 @@ async def calculate_discounted_max_cost(
         if estimated_completion_delta_sats > 0:
             adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
 
+        # Without a separate completion limit both discounts assume the whole
+        # context window, so together they can remove more than the request
+        # may cost. Never reserve less than the prompt plus the requested cap,
+        # bounded by a positive advertised completion limit when available.
+        # Tolerance only trims discounts; applied here it would lower the floor.
+        completion_tokens = max_tokens_int
+        if model_obj and model_obj.top_provider:
+            completion_limit = model_obj.top_provider.max_completion_tokens
+            if completion_limit is not None and completion_limit > 0:
+                completion_tokens = min(completion_tokens, completion_limit)
+        requested_sats = (
+            prompt_tokens * model_pricing.prompt
+            + completion_tokens * model_pricing.completion
+        )
+        adjusted = max(
+            adjusted, min(max_cost_for_model, math.floor(requested_sats * 1000))
+        )
+
     logger.debug(
         "Discounted max cost computed",
         extra={
