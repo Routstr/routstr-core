@@ -511,6 +511,7 @@ async def _run_ehbp_request(
     model_obj: MagicMock,
     fallback_upstream: Any = None,
     extra_headers: list[tuple[bytes, bytes]] | None = None,
+    sealed_body: bytes = b"sealed-body",
 ) -> tuple[Any, list[int], list[dict[str, str]]]:
     """Drive ``proxy.proxy`` for a sealed request.
 
@@ -534,7 +535,7 @@ async def _run_ehbp_request(
     request.method = "POST"
     request.headers = Headers(raw=raw)
     request.query_params = {}
-    request.body = AsyncMock(return_value=b"sealed-body")
+    request.body = AsyncMock(return_value=sealed_body)
 
     upstream = TinfoilUpstreamProvider(api_key="upstream-key")
     candidates = [(model_obj, upstream)]

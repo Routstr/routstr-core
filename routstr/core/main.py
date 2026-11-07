@@ -356,6 +356,8 @@ async def info() -> dict:
     from ..upstream.tinfoil import (
         EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED,
         EHBP_OUTPUT_TOKEN_RESERVATION_ROUTES,
+        EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ENABLED,
+        EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ROUTES,
     )
 
     payload: dict[str, object] = {
@@ -384,6 +386,20 @@ async def info() -> dict:
                 EHBP_OUTPUT_TOKEN_RESERVATION_ROUTES
             ),
         }
+    if EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ENABLED:
+        features = payload.get("features")
+        if not isinstance(features, dict):
+            features = {}
+            payload["features"] = features
+        features["ehbp_single_choice_output_token_reservation"] = True
+        features["ehbp_output_token_reservation_routes"] = sorted(
+            (
+                EHBP_OUTPUT_TOKEN_RESERVATION_ROUTES
+                if EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED
+                else frozenset()
+            )
+            | EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ROUTES
+        )
     return payload
 
 
