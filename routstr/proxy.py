@@ -50,6 +50,7 @@ from .payment.image_pricing import (
 )
 from .payment.models import Model, is_decision_model
 from .payment.price import sats_usd_price
+from .payment.pricing_trail import build_pricing_trail
 from .upstream import BaseUpstreamProvider
 from .upstream.cooldown import (
     candidate_model_identity,
@@ -1039,11 +1040,18 @@ async def _proxy(
     _max_cost_for_model = await get_max_cost_for_model(
         model=model_id, session=session, model_obj=model_obj
     )
+    pricing_trail = build_pricing_trail(model_obj, _max_cost_for_model)
     max_cost_for_model = await calculate_discounted_max_cost(
-        _max_cost_for_model, request_body_dict, model_obj=model_obj, path=path
+        _max_cost_for_model,
+        request_body_dict,
+        model_obj=model_obj,
+        path=path,
+        pricing_trail=pricing_trail,
     )
 
-    check_token_balance(headers, request_body_dict, max_cost_for_model)
+    check_token_balance(
+        headers, request_body_dict, max_cost_for_model, pricing=pricing_trail
+    )
 
     if x_cashu := headers.get("x-cashu", None):
         last_error = None
@@ -1126,7 +1134,13 @@ async def _proxy(
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(
-            headers, path, session, auth, max_cost_for_model, model_id
+            headers,
+            path,
+            session,
+            auth,
+            max_cost_for_model,
+            model_id,
+            pricing=pricing_trail,
         )
         mark(request, "auth")
 
@@ -1195,7 +1209,9 @@ async def _proxy(
 
     reservation_snapshot: ReservationSnapshot | None = None
     if is_ehbp or request_body_dict:
-        reservation_snapshot = await pay_for_request(key, max_cost_for_model, session)
+        reservation_snapshot = await pay_for_request(
+            key, max_cost_for_model, session, model=model_id, pricing=pricing_trail
+        )
         # pay_for_request refreshes the key after committing the reservation.
         # End that read transaction before waiting on upstream response headers.
         await _finish_read_transaction(session)
@@ -1215,8 +1231,13 @@ async def _proxy(
             candidate_max = await get_max_cost_for_model(
                 model=model_id, session=session, model_obj=model_obj
             )
+            candidate_pricing = build_pricing_trail(model_obj, candidate_max)
             candidate_max = await calculate_discounted_max_cost(
-                candidate_max, request_body_dict, model_obj=model_obj, path=path
+                candidate_max,
+                request_body_dict,
+                model_obj=model_obj,
+                path=path,
+                pricing_trail=candidate_pricing,
             )
             if candidate_max > max_cost_for_model:
                 await revert_pay_for_request(
@@ -1224,18 +1245,27 @@ async def _proxy(
                 )
                 try:
                     reservation_snapshot = await pay_for_request(
-                        key, candidate_max, session
+                        key,
+                        candidate_max,
+                        session,
+                        model=model_id,
+                        pricing=candidate_pricing,
                     )
                 except HTTPException:
                     if i == len(candidates) - 1:
                         raise
                     reservation_snapshot = await pay_for_request(
-                        key, max_cost_for_model, session
+                        key,
+                        max_cost_for_model,
+                        session,
+                        model=model_id,
+                        pricing=pricing_trail,
                     )
                     await _finish_read_transaction(session)
                     continue
                 await _finish_read_transaction(session)
                 max_cost_for_model = candidate_max
+                pricing_trail = candidate_pricing
 
         # Only once the candidate is actually tried: a fallback skipped for its
         # reservation must not take over the last attempted upstream's line.
@@ -1529,6 +1559,8 @@ async def get_bearer_token_key(
     auth: str,
     min_cost: int = 0,
     model_id: str = "unknown",
+    *,
+    pricing: dict | None = None,
 ) -> ApiKey:
     """Handle bearer token authentication proxy requests."""
     parts = auth.split()
@@ -1599,6 +1631,16 @@ async def get_bearer_token_key(
         detail: dict[str, Any] = error.detail if isinstance(error.detail, dict) else {}
         raw_error = detail.get("error")
         error_info = raw_error if isinstance(raw_error, dict) else {}
+        # This early check knows only min_cost, but the proxy already computed
+        # the request's reservation. Enrich only our local balance error.
+        if (
+            error.status_code == 402
+            and error_info.get("code") == "insufficient_balance"
+            and isinstance(error_info.get("details"), dict)
+        ):
+            error_info["details"]["model"] = model_id
+            if pricing is not None:
+                error_info["details"]["pricing"] = pricing
         logger.warning(
             "Bearer token rejected",
             extra={

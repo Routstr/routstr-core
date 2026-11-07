@@ -141,3 +141,18 @@ client = OpenAI(
     http_client=httpx.Client(mounts=proxy_mounts),
 )
 ```
+
+## Handling insufficient balance
+
+For HTTP 402, read machine-readable millisatoshis rather than parsing the message:
+
+```js
+const payload = await response.json();
+const error = payload.error ?? payload.detail?.error;
+const { required_msats, available_msats, shortfall_msats, pricing } = error.details;
+console.log({ required_msats, available_msats, shortfall_msats });
+console.log(pricing.formula); // "unavailable" when request pricing context is absent
+```
+
+Older nodes may not supply `details`; keep a legacy fallback when supporting them.
+Top-level `error` and `detail.error` are permanent compatibility aliases.
