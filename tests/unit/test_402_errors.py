@@ -1,6 +1,7 @@
 """Additive 402 contract and reservation audit (no repricing)."""
 
 import json
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -27,7 +28,7 @@ from routstr.payment.models import (
 from routstr.payment.pricing_trail import build_pricing_trail
 
 
-def _model(cl=100, mct=20, context=100):
+def _model(cl: int | None = 100, mct: int | None = 20, context: int = 100) -> Model:
     return Model(
         id="m",
         name="m",
@@ -53,7 +54,13 @@ def _model(cl=100, mct=20, context=100):
     )
 
 
-def test_serializer():
+def _raised_error(exc: HTTPException) -> dict[str, Any]:
+    """Return the canonical ``error`` object from a 402 ``HTTPException``."""
+    detail = cast(dict[str, Any], exc.detail)
+    return cast(dict[str, Any], detail["error"])
+
+
+def test_serializer() -> None:
     d = build_payment_required_error(
         code="insufficient_balance",
         message="balance",
@@ -92,7 +99,13 @@ def test_serializer():
         (None, None, 0, "flat_estimate"),
     ],
 )
-def test_pricing_formulas(monkeypatch, cl, mct, context, formula):
+def test_pricing_formulas(
+    monkeypatch: pytest.MonkeyPatch,
+    cl: int | None,
+    mct: int | None,
+    context: int,
+    formula: str,
+) -> None:
     monkeypatch.setattr(settings, "fixed_pricing", False)
     m = _model(cl, mct, context)
     trail = build_pricing_trail(m, 114000)
@@ -117,7 +130,7 @@ def test_pricing_formulas(monkeypatch, cl, mct, context, formula):
         )
 
 
-def test_fixed_fallback_and_invalid_pricing(monkeypatch):
+def test_fixed_fallback_and_invalid_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "fixed_pricing", True)
     monkeypatch.setattr(settings, "fixed_cost_per_request", 1)
     monkeypatch.setattr(settings, "min_request_msat", 2000)
@@ -130,7 +143,9 @@ def test_fixed_fallback_and_invalid_pricing(monkeypatch):
     assert build_pricing_trail(m, 2000)["formula"] == "unavailable"
 
 
-async def test_discount_trace_does_not_change_cost(monkeypatch):
+async def test_discount_trace_does_not_change_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "fixed_pricing", False)
     monkeypatch.setattr(settings, "min_request_msat", 1000)
     monkeypatch.setattr(settings, "tolerance_percentage", 5)
@@ -152,7 +167,9 @@ async def test_discount_trace_does_not_change_cost(monkeypatch):
     )
 
 
-async def test_image_trace_uses_actual_estimate_once(monkeypatch):
+async def test_image_trace_uses_actual_estimate_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "fixed_pricing", False)
     trail = build_pricing_trail(_model(), 100000)
     with patch(
@@ -169,7 +186,9 @@ async def test_image_trace_uses_actual_estimate_once(monkeypatch):
 @pytest.mark.parametrize(
     "producer", ["cashu", "bearer", "pre_reservation", "concurrent", "x_cashu"]
 )
-async def test_all_producers_mirror_contract(monkeypatch, producer):
+async def test_all_producers_mirror_contract(
+    monkeypatch: pytest.MonkeyPatch, producer: str
+) -> None:
     monkeypatch.setattr(settings, "min_request_msat", 1000)
     key = ApiKey(hashed_key="test", balance=25000, reserved_balance=4000)
     session = AsyncMock()
@@ -179,7 +198,7 @@ async def test_all_producers_mirror_contract(monkeypatch, producer):
         key.balance = 50000
         session.exec.return_value = Mock(rowcount=0)
 
-        async def refresh(k):
+        async def refresh(k: ApiKey) -> None:
             k.balance = 25000
 
         session.refresh.side_effect = refresh
@@ -232,7 +251,7 @@ async def test_all_producers_mirror_contract(monkeypatch, producer):
         assert error["available_balance"] == 21000
 
 
-async def test_proxy_auth_handoff_retains_actual_request_pricing():
+async def test_proxy_auth_handoff_retains_actual_request_pricing() -> None:
     from routstr.proxy import get_bearer_token_key
 
     key = ApiKey(hashed_key="test", balance=21000)
@@ -249,7 +268,7 @@ async def test_proxy_auth_handoff_retains_actual_request_pricing():
             "m",
             pricing=pricing,
         )
-    error = raised.value.detail["error"]
+    error = _raised_error(raised.value)
     assert error["code"] == "insufficient_balance"
     assert "for this model" in error["message"]
     assert error["details"]["model"] == "m"
@@ -257,10 +276,13 @@ async def test_proxy_auth_handoff_retains_actual_request_pricing():
     assert error["details"]["shortfall_msats"] == 7989
 
 
-async def test_image_override_resets_base_minimum_flag(monkeypatch):
+async def test_image_override_resets_base_minimum_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "fixed_pricing", False)
     monkeypatch.setattr(settings, "min_request_msat", 1000)
     m = _model()
+    assert m.sats_pricing is not None
     m.sats_pricing.max_cost = 0.1
     trail = build_pricing_trail(m, 1000)
     assert trail["min_request_applied"] is True
@@ -270,7 +292,9 @@ async def test_image_override_resets_base_minimum_flag(monkeypatch):
     assert trail["min_request_applied"] is False
 
 
-async def test_proxy_passes_calculated_trail_into_early_balance_rejection(monkeypatch):
+async def test_proxy_passes_calculated_trail_into_early_balance_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from routstr import proxy as proxy_module
 
     from .proxy_test_utils import mock_request_stream, patch_proxy_session
@@ -296,7 +320,7 @@ async def test_proxy_passes_calculated_trail_into_early_balance_rejection(monkey
     ):
         with pytest.raises(HTTPException) as raised:
             await proxy_module.proxy(request, "v1/chat/completions")
-    error = raised.value.detail["error"]
+    error = _raised_error(raised.value)
     assert raised.value.status_code == 402
     assert error["details"]["model"] == "m"
     pricing = error["details"]["pricing"]
