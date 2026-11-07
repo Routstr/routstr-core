@@ -425,12 +425,14 @@ async def refresh_model_maps_periodically() -> None:
 # under the same origin and must never be reachable through the proxy.
 #
 # Keep this table mirrored in the routstrd-remote auth proxy, which
-# re-implements it as ``AuthProxy.INFERENCE_PATHS`` in ``src/proxy.ts`` to
-# decide which routes a client API key may reach. That copy carries every POST
-# entry here; ``models`` is a public path there, and the attestation routes are
-# deliberately not exposed to client keys. Adding, removing or changing a
-# method here without updating it silently widens or narrows what client keys
-# can call.
+# re-implements it as ``AuthProxy.INFERENCE_ENDPOINTS`` in ``src/proxy.ts`` to
+# decide which routes a client API key may reach. That copy is method-aware and
+# carries every entry here except ``attestation`` and ``tee/attestation``, which
+# are forwarded unauthenticated (see ``_select_unauthenticated_get_upstreams``)
+# and are therefore out of scope for a client-key capability list. ``models`` is
+# listed there for parity even though it is also a public path. Adding,
+# removing or changing a method here without updating it silently widens or
+# narrows what client keys can call.
 _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     "chat/completions": frozenset({"POST"}),
     "completions": frozenset({"POST"}),
