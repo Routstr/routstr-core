@@ -25,6 +25,7 @@ from .ehbp import (
     _RESPONSE_USAGE_HEADER,
     ConfidentialInferenceProfile,
     EHBPForwardingTarget,
+    _prepare_ehbp_upstream_headers,
 )
 from .tinfoil_trailer import _strip_hop_by_hop_headers
 
@@ -41,6 +42,20 @@ logger = get_logger(__name__)
 # reservation than the model's whole context possible.
 _TINFOIL_MAX_OUTPUT_TOKENS_HEADER = "X-Tinfoil-Max-Output-Tokens"
 
+# PR532 overrides sealed ``n`` on exact /v1/chat/completions, but leaves
+# ``best_of`` untouched and promises one model call, not a request-total bound.
+# Keep this separate from the legacy Responses scaffold. Activation requires
+# proof for request-total billing: deployment of the n override is verified,
+# but hidden tool profiles can invoke multiple calls and aggregate usage.
+# best_of did not multiply on the tested backend; retry double billing is not
+# proven. Neither an operator nor a caller may opt into trust.
+_TINFOIL_COMPLETION_COUNT_HEADER = "X-Tinfoil-Completion-Count"
+EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ENABLED = False
+EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ROUTES = frozenset({"chat/completions"})
+
+# Legacy cap-only Responses scaffold (kept for compatibility).
+# The following observations predate PR532; the separate chat scaffold above
+# addresses n but remains disabled because request-total billing is unproven.
 # Whether a sealed request may be quoted from the enforced header at all.
 #
 # The header is not a *request* bound, so this is off. The engine applies the cap
@@ -136,6 +151,11 @@ def _header_field_values(headers: object, name: str) -> list[str]:
 
 
 def _cap_header_would_be_dropped(headers: object) -> bool:
+    """Compatibility helper for the legacy cap-only scaffold."""
+    return _header_would_be_dropped(headers, _TINFOIL_MAX_OUTPUT_TOKENS_HEADER)
+
+
+def _header_would_be_dropped(headers: object, name: str) -> bool:
     """True when the forwarding sanitizer would strip the cap header.
 
     The EHBP request is re-framed onto a new upstream connection, so
@@ -151,7 +171,7 @@ def _cap_header_would_be_dropped(headers: object) -> bool:
     its own target set (Tinfoil's adds only usage metrics); if one ever does,
     this hook has to take the merged headers instead.
     """
-    cap_name = _TINFOIL_MAX_OUTPUT_TOKENS_HEADER.lower()
+    cap_name = name.lower()
     for value in _header_field_values(headers, "Connection"):
         for token in value.split(","):
             if token.strip().lower() == cap_name:
@@ -430,20 +450,59 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
         return self.confidential_inference_profile
 
     def enforced_completion_cap(self, headers: object, path: str) -> int | None:
-        """Return the output ceiling this enclave enforces for a sealed request.
+        """Quote only independently verified, code-gated upstream bounds.
 
-        ``X-Tinfoil-Max-Output-Tokens`` is visible to the enclave while the body
-        stays sealed, and the enclave overrides the body's caps with it in both
-        directions, so the value is a per-choice output ceiling Routstr can read
-        without decrypting anything. Whether that ceiling also bounds the *whole*
-        request is UNVERIFIED (one probe suggests Responses ignores an injected
-        ``n``, but other budget paths may still multiply output), so nothing is
-        quoted while ``EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED`` is False. See
-        ``_TINFOIL_MAX_OUTPUT_TOKENS_ROUTES`` for why chat completions is not a
-        candidate. The header is forwarded regardless (it is not a proxy-only
-        header): the enclave, not this method, decides whether a value is
-        acceptable.
+        Chat requires both a per-choice cap and an enforced count of exactly one.
+        Both gates ship OFF: PR518/532 do not prove request-total billing bounds
+        for hidden best_of, retries or tool loops. Headers forward independently
+        of this quote hook; only the enclave can validate the sealed body.
         """
+        # Do not use _canonical_route here: it accepts a trailing slash,
+        # whereas PR532 applies only to the exact upstream chat endpoint.
+        route = path.split("?", 1)[0].lstrip("/").removeprefix("v1/")
+        if route in EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ROUTES:
+            if not EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ENABLED:
+                return None
+            if (
+                parse_max_output_tokens_header(
+                    _header_field_values(headers, _TINFOIL_COMPLETION_COUNT_HEADER)
+                )
+                != 1
+            ):
+                return None
+            for name in (
+                _TINFOIL_MAX_OUTPUT_TOKENS_HEADER,
+                _TINFOIL_COMPLETION_COUNT_HEADER,
+            ):
+                if _header_would_be_dropped(headers, name):
+                    return None
+            # Exercise the whole real header preparation chain as well as the
+            # raw Connection fields above (a dict can collapse duplicates).
+            items = getattr(headers, "items", None)
+            if not callable(items):
+                return None
+            prepared = _strip_hop_by_hop_headers(
+                _prepare_ehbp_upstream_headers(
+                    self.prepare_headers(dict(items())),
+                    {"X-Tinfoil-Request-Usage-Metrics": "true"},
+                    self.confidential_inference_profile,
+                )
+            )
+            if (
+                parse_max_output_tokens_header(
+                    _header_field_values(prepared, _TINFOIL_COMPLETION_COUNT_HEADER)
+                )
+                != 1
+            ):
+                return None
+            cap = parse_max_output_tokens_header(
+                _header_field_values(headers, _TINFOIL_MAX_OUTPUT_TOKENS_HEADER)
+            )
+            if cap != parse_max_output_tokens_header(
+                _header_field_values(prepared, _TINFOIL_MAX_OUTPUT_TOKENS_HEADER)
+            ):
+                return None
+            return cap
         if not EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED:
             return None
         if _canonical_route(path) not in _TINFOIL_MAX_OUTPUT_TOKENS_ROUTES:
