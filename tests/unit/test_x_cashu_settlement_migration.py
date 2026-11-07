@@ -45,23 +45,22 @@ def test_settlement_migration_leaves_existing_payments_untracked(
         )
 
     _run_alembic(root, database_url, "upgrade", "head")
-    assert {"settlement", "settlement_at", "recover_after"} <= _columns(database_path)
+    new_columns = {"settlement", "settlement_at", "recover_after", "refund_amount"}
+    assert new_columns <= _columns(database_path)
     with sqlite3.connect(database_path) as connection:
         row = connection.execute(
-            "SELECT settlement, settlement_at, recover_after FROM cashu_transactions "
-            "WHERE id = 'legacy'"
+            "SELECT settlement, settlement_at, recover_after, refund_amount "
+            "FROM cashu_transactions WHERE id = 'legacy'"
         ).fetchone()
     # Unknown outcomes stay NULL so recovery never refunds them.
-    assert row == (None, None, None)
+    assert row == (None, None, None, None)
 
     _run_alembic(root, database_url, "downgrade", PREVIOUS_HEAD)
-    assert not {"settlement", "settlement_at", "recover_after"} & _columns(
-        database_path
-    )
+    assert not new_columns & _columns(database_path)
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT token FROM cashu_transactions WHERE id = 'legacy'"
         ).fetchone() == ("cashuAold",)
 
     _run_alembic(root, database_url, "upgrade", "head")
-    assert {"settlement", "settlement_at", "recover_after"} <= _columns(database_path)
+    assert new_columns <= _columns(database_path)

@@ -62,7 +62,18 @@ def past_recovery_deadline(payment: CashuTransaction, now: float) -> bool:
     return payment.recover_after is None or payment.recover_after < now
 
 
-async def _transition(request_id: str, from_states: Iterable[str], to: str) -> bool:
+async def _transition(
+    request_id: str,
+    from_states: Iterable[str],
+    to: str,
+    refund_amount: int | None = None,
+) -> bool:
+    values: dict[str, int | str] = {
+        "settlement": to,
+        "settlement_at": int(time.time()),
+    }
+    if refund_amount is not None:
+        values["refund_amount"] = refund_amount
     async with create_session() as session:
         result = await session.exec(  # type: ignore[call-overload]
             update(CashuTransaction)
@@ -71,7 +82,7 @@ async def _transition(request_id: str, from_states: Iterable[str], to: str) -> b
                 col(CashuTransaction.request_id) == request_id,
                 col(CashuTransaction.settlement).in_(list(from_states)),
             )
-            .values(settlement=to, settlement_at=int(time.time()))
+            .values(**values)
         )
         await session.commit()
         return bool(result.rowcount)
@@ -101,11 +112,11 @@ async def _has_stored_refund(request_id: str) -> bool:
         return result.first() is not None
 
 
-async def claim_refund(request_id: str | None) -> bool:
+async def claim_refund(request_id: str | None, amount: int) -> bool:
     """Reserve the right to mint this payment's refund; at most one caller wins."""
     if request_id is None:
         return True
-    if await _transition(request_id, (PENDING,), REFUNDING):
+    if await _transition(request_id, (PENDING,), REFUNDING, amount):
         return True
     # Payments without a tracked in row keep the behaviour from before tracking.
     return await _settlement_state(request_id) is None
@@ -206,7 +217,7 @@ async def drain_settlements(timeout: float) -> None:
 async def _refund_abandoned(payment: CashuTransaction) -> bool:
     request_id = payment.request_id
     assert request_id is not None
-    if not await _transition(request_id, (PENDING,), REFUNDING):
+    if not await claim_refund(request_id, payment.amount):
         return False
     try:
         token = await send_token(
@@ -325,13 +336,27 @@ async def recover_abandoned_payments() -> int:
         result = await session.exec(
             select(CashuTransaction).where(
                 CashuTransaction.type == "in",
-                col(CashuTransaction.settlement).in_([PENDING, REFUNDING]),
-                col(CashuTransaction.settlement_at) < cutoff,
-                # A lowered request lifetime must not cut short a request
-                # accepted under the longer one.
                 or_(
-                    col(CashuTransaction.recover_after).is_(None),
-                    col(CashuTransaction.recover_after) < now,
+                    # Stored deadlines are fixed when pending payments are accepted.
+                    (
+                        (col(CashuTransaction.settlement) == PENDING)
+                        & col(CashuTransaction.recover_after).is_not(None)
+                        & (col(CashuTransaction.recover_after) < now)
+                    ),
+                    (
+                        (col(CashuTransaction.settlement) == PENDING)
+                        & col(CashuTransaction.recover_after).is_(None)
+                        & (col(CashuTransaction.settlement_at) < cutoff)
+                    ),
+                    (
+                        (col(CashuTransaction.settlement) == REFUNDING)
+                        & (col(CashuTransaction.settlement_at) < cutoff)
+                        # A lowered lifetime must not cut short an accepted payment.
+                        & or_(
+                            col(CashuTransaction.recover_after).is_(None),
+                            col(CashuTransaction.recover_after) < now,
+                        )
+                    ),
                 ),
                 col(CashuTransaction.request_id).is_not(None),
             )

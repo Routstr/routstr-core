@@ -631,6 +631,11 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
         description="Unix timestamp after which recovery may refund the payment, "
         "fixed when it was accepted so later setting changes cannot shorten it",
     )
+    refund_amount: int | None = Field(
+        default=None,
+        sa_type=BigInteger,
+        description="Outstanding refund amount in the transaction's unit",
+    )
 
 
 REFUND_OPEN_STATUSES = ("pending", "ambiguous")
@@ -1558,11 +1563,20 @@ async def list_unsettled_lightning_payouts(
 
 
 def _unsettled_x_cashu_msats(*filters: Any) -> Any:
-    """Redeemed X-Cashu payments recovery may still refund in full, in msats."""
+    """Redeemed X-Cashu payments still owed to users, in msats."""
+    amount = case(
+        (
+            col(CashuTransaction.settlement) == "pending",
+            col(CashuTransaction.amount),
+        ),
+        else_=func.coalesce(
+            col(CashuTransaction.refund_amount), col(CashuTransaction.amount)
+        ),
+    )
     amount_msats = case(
-        (col(CashuTransaction.unit) == "msat", col(CashuTransaction.amount)),
+        (col(CashuTransaction.unit) == "msat", amount),
         # Widen before multiplying: PostgreSQL overflows INTEGER * 1000.
-        else_=cast(col(CashuTransaction.amount), BigInteger) * 1000,
+        else_=cast(amount, BigInteger) * 1000,
     )
     return (
         select(func.coalesce(func.sum(amount_msats), 0))

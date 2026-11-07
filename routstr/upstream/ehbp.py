@@ -1425,7 +1425,7 @@ async def forward_ehbp_x_cashu_request(
         nonlocal refund_token_sent
         claimed = False
         try:
-            claimed = await x_cashu_settlement.claim_refund(request_id)
+            claimed = await x_cashu_settlement.claim_refund(request_id, refund_amount)
             if not claimed:
                 raise RuntimeError("The payment was already settled by another refund")
             refund_token_sent = await send_cashu_refund(

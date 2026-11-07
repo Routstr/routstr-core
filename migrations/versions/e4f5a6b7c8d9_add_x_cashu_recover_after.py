@@ -1,4 +1,4 @@
-"""add x-cashu recovery deadline to cashu_transactions
+"""add x-cashu recovery deadline and refund amount
 
 Revision ID: e4f5a6b7c8d9
 Revises: d3e4f5a6b7c8
@@ -23,15 +23,23 @@ def _columns() -> set[str]:
 
 
 def upgrade() -> None:
-    # Existing rows stay NULL and fall back to the current request lifetime.
-    if "recover_after" not in _columns():
-        with op.batch_alter_table("cashu_transactions") as batch_op:
+    columns = _columns()
+    with op.batch_alter_table("cashu_transactions") as batch_op:
+        # Existing rows stay NULL and keep their previous fallback behaviour.
+        if "recover_after" not in columns:
             batch_op.add_column(
                 sa.Column("recover_after", sa.BigInteger(), nullable=True)
+            )
+        if "refund_amount" not in columns:
+            batch_op.add_column(
+                sa.Column("refund_amount", sa.BigInteger(), nullable=True)
             )
 
 
 def downgrade() -> None:
-    if "recover_after" in _columns():
-        with op.batch_alter_table("cashu_transactions") as batch_op:
+    columns = _columns()
+    with op.batch_alter_table("cashu_transactions") as batch_op:
+        if "refund_amount" in columns:
+            batch_op.drop_column("refund_amount")
+        if "recover_after" in columns:
             batch_op.drop_column("recover_after")

@@ -318,7 +318,14 @@ async def test_failed_mint_is_terminal_and_never_retried(
     wallet.fail = True
     await _pay(api, _completion(), cost_sats=5)
 
-    assert (await _payment(integration_session)).settlement == xs.FAILED
+    payment = await _payment(integration_session)
+    assert payment.settlement == xs.FAILED
+    assert payment.refund_amount == 15
+    assert await total_user_liability(integration_session) == 15_000
+    assert (
+        await user_liability_for_mint_and_unit(integration_session, MINT, "sat")
+        == 15_000
+    )
     error = await _claim(integration_session)
     assert error.status_code == 409
     assert error.detail["error"]["code"] == "refund_unresolved"
@@ -399,6 +406,19 @@ async def test_lowered_request_lifetime_keeps_the_accepted_deadline(
     assert await xs.mark_charged("req-876")
 
 
+async def test_raised_request_lifetime_uses_the_accepted_deadline(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    # Accepted under a 30s lifetime; the operator then raises it to 1800s.
+    with patch.object(settings, "max_request_lifetime_seconds", 30):
+        await _seed(integration_session, settlement=xs.PENDING, age=200)
+    with patch.object(settings, "max_request_lifetime_seconds", 1800):
+        assert await xs.recover_abandoned_payments() == 1
+
+    assert wallet.mints == [AMOUNT]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+
+
 async def test_concurrent_recoveries_mint_once(
     wallet: FakeWallet, integration_session: AsyncSession
 ) -> None:
@@ -453,10 +473,15 @@ async def test_live_refund_loses_to_recovery_without_minting(
 def _refund_claims_fail() -> Any:
     real_transition = xs._transition
 
-    async def claim_fails(request_id: str, from_states: Any, to: str) -> bool:
+    async def claim_fails(
+        request_id: str,
+        from_states: Any,
+        to: str,
+        refund_amount: int | None = None,
+    ) -> bool:
         if to == xs.REFUNDING:
             raise RuntimeError("database unavailable")
-        return await real_transition(request_id, from_states, to)
+        return await real_transition(request_id, from_states, to, refund_amount)
 
     return patch.object(xs, "_transition", claim_fails)
 
@@ -631,12 +656,17 @@ async def test_reclaimed_refund_reopens_despite_a_transient_failure(
     real_transition = xs._transition
     failed = False
 
-    async def reopen_fails_once(request_id: str, from_states: Any, to: str) -> bool:
+    async def reopen_fails_once(
+        request_id: str,
+        from_states: Any,
+        to: str,
+        refund_amount: int | None = None,
+    ) -> bool:
         nonlocal failed
         if to == xs.PENDING and not failed:
             failed = True
             raise RuntimeError("database unavailable")
-        return await real_transition(request_id, from_states, to)
+        return await real_transition(request_id, from_states, to, refund_amount)
 
     with (
         patch.object(

@@ -56,6 +56,7 @@ def _render(element: Any, dialect: Any) -> str:
 # Columns added after the widening migration, already BIGINT in their own.
 BORN_WIDE_COLUMNS = {
     ("cashu_transactions", "recover_after"),
+    ("cashu_transactions", "refund_amount"),
     ("cashu_transactions", "settlement_at"),
 }
 # Tables created after the widening migration, whose own migration already
@@ -121,6 +122,7 @@ def test_migration_and_models_widen_the_same_columns() -> None:
         ("api_keys", "total_spent"),
         ("api_keys", "total_requests"),
         ("cashu_transactions", "amount"),
+        ("cashu_transactions", "refund_amount"),
         ("lightning_invoices", "amount_sats"),
         ("refunds", "amount_msats"),
         ("reservation_releases", "reserved_msats"),

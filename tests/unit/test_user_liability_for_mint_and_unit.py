@@ -144,6 +144,7 @@ async def _add_x_cashu_payment(
     settlement: str | None,
     unit: str = "sat",
     mint_url: str = MINT,
+    refund_amount: int | None = None,
 ) -> None:
     session.add(
         CashuTransaction(
@@ -155,6 +156,7 @@ async def _add_x_cashu_payment(
             request_id=request_id,
             collected=True,
             settlement=settlement,
+            refund_amount=refund_amount,
         )
     )
     await session.commit()
@@ -175,6 +177,25 @@ async def test_counts_unsettled_x_cashu_payments(
     assert await user_liability_for_mint_and_unit(session, MINT, "sat") == 61_000
     assert await user_liability_for_mint_and_unit(session, MINT, "msat") == 5000
     assert await total_user_liability(session) == 66_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settlement", ["refunding", "failed"])
+async def test_counts_only_the_outstanding_x_cashu_refund(
+    session: AsyncSession, settlement: str
+) -> None:
+    await _add_x_cashu_payment(session, "r1", 20, settlement, refund_amount=15)
+
+    assert await user_liability_for_mint_and_unit(session, MINT, "sat") == 15_000
+    assert await total_user_liability(session) == 15_000
+
+
+@pytest.mark.asyncio
+async def test_pending_x_cashu_payment_stays_fully_owed(session: AsyncSession) -> None:
+    await _add_x_cashu_payment(session, "r1", 20, "pending", refund_amount=15)
+
+    assert await user_liability_for_mint_and_unit(session, MINT, "sat") == 20_000
+    assert await total_user_liability(session) == 20_000
 
 
 @pytest.mark.asyncio

@@ -180,7 +180,7 @@ class _XCashuRefund:
         self, amount: int, unit: str, mint: str | None, request_id: str | None
     ) -> str:
         try:
-            self.claimed = await x_cashu_settlement.claim_refund(request_id)
+            self.claimed = await x_cashu_settlement.claim_refund(request_id, amount)
             if not self.claimed:
                 raise _XCashuRefundUnavailable(
                     "The payment was already settled by another refund"
