@@ -142,17 +142,20 @@ Only after independently verified activation would `/v1/info` advertise:
 ```json
 "features": {
   "ehbp_single_choice_output_token_reservation": true,
-  "ehbp_output_token_reservation_routes": ["chat/completions"]
+  "ehbp_single_choice_output_token_reservation_routes": ["chat/completions"]
 }
 ```
 
-An SDK must require **both** the new feature value `=== true` and route membership,
-then send both cap and count=1. It must not rely on the legacy
+An SDK must require **both** the new feature value `=== true` and membership in
+`ehbp_single_choice_output_token_reservation_routes`, then send both cap and
+count=1. It must not rely on the legacy
 `ehbp_output_token_reservation` / `ehbp_output_token_reservation_total_cap` flags.
 Those belong to preserved, separately disabled Responses-only scaffolding
 (`EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED = False`). If both scaffolds are enabled
-in tests, the route list is their union; legacy flags do not establish the new
-single-choice contract. By default `/v1/info` still omits `features` entirely.
+in tests, each retains its own route list: legacy
+`ehbp_output_token_reservation_routes` stays `["responses"]`, while the new list
+contains only `["chat/completions"]`. No route union is advertised, so old clients
+cannot mistake chat for a legacy cap-only route. By default `/v1/info` still omits `features` entirely.
 
 #### Reservation shape (only after verified activation)
 

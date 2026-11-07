@@ -198,16 +198,34 @@ async def test_chat_scaffold_reserves_per_candidate(single_enabled: None) -> Non
 
 
 @pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("single", [False, True])
 async def test_info_contract_is_separate_from_legacy_flags(
-    legacy: bool, single_enabled: None, monkeypatch: pytest.MonkeyPatch
+    legacy: bool, single: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from routstr.core.main import info
 
     monkeypatch.setattr(tinfoil, "EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED", legacy)
-    features = (await info())["features"]
-    assert features["ehbp_single_choice_output_token_reservation"] is True
-    assert "chat/completions" in features["ehbp_output_token_reservation_routes"]
-    assert features.get("ehbp_output_token_reservation_total_cap", False) is legacy
-    assert features["ehbp_output_token_reservation_routes"] == (
-        ["chat/completions", "responses"] if legacy else ["chat/completions"]
+    monkeypatch.setattr(
+        tinfoil, "EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ENABLED", single
     )
+    payload = await info()
+    if not legacy and not single:
+        assert "features" not in payload
+        return
+    features = payload["features"]
+    if single:
+        assert features["ehbp_single_choice_output_token_reservation"] is True
+        assert features["ehbp_single_choice_output_token_reservation_routes"] == [
+            "chat/completions"
+        ]
+    else:
+        assert "ehbp_single_choice_output_token_reservation" not in features
+        assert "ehbp_single_choice_output_token_reservation_routes" not in features
+    if legacy:
+        assert features["ehbp_output_token_reservation"] is True
+        assert features["ehbp_output_token_reservation_total_cap"] is True
+        assert features["ehbp_output_token_reservation_routes"] == ["responses"]
+    else:
+        assert "ehbp_output_token_reservation" not in features
+        assert "ehbp_output_token_reservation_total_cap" not in features
+        assert "ehbp_output_token_reservation_routes" not in features

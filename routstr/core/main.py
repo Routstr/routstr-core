@@ -392,13 +392,8 @@ async def info() -> dict:
             features = {}
             payload["features"] = features
         features["ehbp_single_choice_output_token_reservation"] = True
-        features["ehbp_output_token_reservation_routes"] = sorted(
-            (
-                EHBP_OUTPUT_TOKEN_RESERVATION_ROUTES
-                if EHBP_OUTPUT_TOKEN_RESERVATION_ENABLED
-                else frozenset()
-            )
-            | EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ROUTES
+        features["ehbp_single_choice_output_token_reservation_routes"] = sorted(
+            EHBP_SINGLE_CHOICE_OUTPUT_TOKEN_RESERVATION_ROUTES
         )
     return payload
 
