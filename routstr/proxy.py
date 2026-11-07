@@ -424,6 +424,16 @@ async def refresh_model_maps_periodically() -> None:
 # permission has to come from this table rather than from the client-supplied
 # path: an upstream's key-management, organization, or billing routes live
 # under the same origin and must never be reachable through the proxy.
+#
+# Keep this table mirrored in the routstrd-remote auth proxy, which
+# re-implements it as ``AuthProxy.INFERENCE_ENDPOINTS`` in ``src/proxy.ts`` to
+# decide which routes a client API key may reach. That copy is method-aware and
+# carries every entry here except ``attestation`` and ``tee/attestation``, which
+# are forwarded unauthenticated (see ``_select_unauthenticated_get_upstreams``)
+# and are therefore out of scope for a client-key capability list. ``models`` is
+# listed there for parity even though it is also a public path. Adding,
+# removing or changing a method here without updating it silently widens or
+# narrows what client keys can call.
 _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     "chat/completions": frozenset({"POST"}),
     "completions": frozenset({"POST"}),
