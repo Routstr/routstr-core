@@ -3,10 +3,12 @@ import json
 import random
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 from pydantic.v1 import BaseModel, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from ..core.compression import negotiated_json_response
 from ..core.db import ModelRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
@@ -701,13 +703,19 @@ async def update_sats_pricing() -> None:
             logger.error(f"Error updating sats pricing: {e}")
 
 
-@models_router.get("/v1/models/paths")
+# `response_model` keeps the documented response shape; the handler returns a
+# `Response` so it can negotiate gzip and the ETag (routstr.core.compression).
+@models_router.get("/v1/models/paths", response_model=dict)
 @models_router.get("/v1/models/paths/", include_in_schema=False)
-async def model_paths() -> dict:
-    """All models with every upstream provider path they are reachable through."""
+async def model_paths(request: Request) -> Response:
+    """All models with every upstream provider path they are reachable through.
+
+    Compressed and revalidatable like ``/v1/models``: this is the other catalog
+    every daemon polls, and it is larger per model than the model list itself.
+    """
     from ..upstream.model_paths import get_all_model_paths
 
-    return await get_all_model_paths()
+    return negotiated_json_response(await get_all_model_paths(), request)
 
 
 @models_router.get("/v1/models/paths/model")
@@ -730,16 +738,27 @@ async def model_paths_for_model(model_id: str) -> dict:
     return result
 
 
-@models_router.get("/v1/models")
+# `response_model` keeps the documented response shape; the handler returns a
+# `Response` so it can negotiate gzip and the ETag (routstr.core.compression).
+@models_router.get("/v1/models", response_model=dict)
 @models_router.get("/v1/models/", include_in_schema=False)
 @models_router.get("/models")
 @models_router.get("/models/", include_in_schema=False)
-async def models(session: AsyncSession = Depends(get_session)) -> dict:
-    """Get all available models from all providers with database overrides applied."""
+async def models(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> Response:
+    """Get all available models from all providers with database overrides applied.
+
+    The catalog is gzipped when the client accepts it and revalidates with an
+    ``ETag``: a node with a few hundred models returns ~670 KB of JSON, and the
+    polling clients (every routstrd daemon, every 21 minutes, on a 10 s
+    deadline) otherwise pay for all of it on each pass. See
+    ``routstr.core.compression``.
+    """
     from ..proxy import get_unique_models
 
     items = get_unique_models()
     data = []
     for model in items:
         data.append(model.dict())
-    return {"data": data}
+    return negotiated_json_response({"data": data}, request)

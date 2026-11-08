@@ -46,6 +46,24 @@ Authorization: Bearer cashuAeyJ0b2tlbiI6W3...
 - **Encoding**: UTF-8
 - **Compression**: gzip (if accepted)
 
+### Catalog Responses
+
+`/v1/models` and `/v1/models/paths` are the largest JSON bodies a node serves,
+and they are the ones clients poll on a timer (every routstrd daemon refreshes
+the catalog of every node it knows every 21 minutes). They are therefore
+compressed and revalidatable:
+
+- **gzip** whenever the request's `Accept-Encoding` allows it. A node with a
+  few hundred models is ~670 KB of JSON and ~85 KB gzipped; the polling
+  daemons give the fetch 10 seconds, so the uncompressed body is what used to
+  make a healthy node look unreachable.
+- **`ETag`** plus `Vary: Accept-Encoding` and `Cache-Control: no-cache`. Send
+  the tag back in `If-None-Match` and an unchanged catalog costs an empty
+  `304 Not Modified` instead of the body.
+- **Identity** for clients that do not accept gzip. The JSON payload is
+  byte-for-byte what it always was; only the encoding and the validators are
+  new.
+
 ## Rate Limiting
 
 Rate limits are applied per API key:
