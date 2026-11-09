@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from cashu.core.base import Proof
+from cashu.core.split import amount_split
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlmodel import col, update
@@ -230,13 +231,12 @@ async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
 
     wallet = Mock(
         proofs=[],
-        keysets={"keyset-1": Mock()},
+        keyset_id="keyset-1",
         load_proofs=AsyncMock(),
         get_mint_quote=AsyncMock(return_value=Mock(paid=True)),
-        restore_tokens_for_keyset=AsyncMock(),
     )
 
-    async def mint(amount: int, quote_id: str) -> list[Proof]:
+    async def mint(amount: int, quote_id: str, split: list[int]) -> list[Proof]:
         proofs = [Proof(amount=amount, mint_id=quote_id)]
         wallet.proofs.extend(proofs)
         return proofs
@@ -248,6 +248,10 @@ async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
         assert stored is not None
         with (
             patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+            patch(
+                "routstr.lightning.bump_secret_derivation", AsyncMock(return_value=0)
+            ),
+            patch("routstr.lightning.set_secret_derivation", AsyncMock()),
             patch(
                 "routstr.lightning._finalize_invoice_settlement",
                 AsyncMock(side_effect=Exception("db unavailable")),
@@ -277,8 +281,9 @@ async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
         assert credited is not None
         assert credited.balance == 200_000
 
-    wallet.mint.assert_awaited_once_with(100, quote_id=invoice.payment_hash)
-    wallet.restore_tokens_for_keyset.assert_not_awaited()
+    wallet.mint.assert_awaited_once_with(
+        100, quote_id=invoice.payment_hash, split=amount_split(100)
+    )
 
 
 @pytest.mark.asyncio

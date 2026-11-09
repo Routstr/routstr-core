@@ -8,12 +8,12 @@ from unittest.mock import ANY, AsyncMock, Mock, patch
 import httpx
 import pytest
 from cashu.core.base import MintQuoteState, Proof
+from cashu.core.split import amount_split
 
 from routstr.lightning import (
     INVOICE_EXPIRY_GRACE_SECONDS,
     InvoiceRecoverRequest,
     _invoice_settlement_locks,
-    _is_outputs_already_signed,
     _is_quote_not_found,
     _mint_invoice_quote,
     check_invoice_payment,
@@ -21,7 +21,6 @@ from routstr.lightning import (
     recover_invoice,
 )
 from routstr.mint import MintRateGuard
-from routstr.wallet import Wallet
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +44,9 @@ def _invoice(**overrides: object) -> SimpleNamespace:
         "validity_date": None,
         "created_at": 1,
         "expires_at": 2,
+        "mint_keyset_id": None,
+        "mint_counter": None,
+        "mint_outputs": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -54,141 +56,217 @@ def _proof(amount: int, mint_id: str, *, reserved: bool = False) -> Proof:
     return Proof(amount=amount, mint_id=mint_id, reserved=reserved)
 
 
-def _recovery_wallet(
-    error: Exception,
-    *,
-    proofs_before: list[Proof] | None = None,
-    proofs_after: list[Proof] | None = None,
-) -> Mock:
-    async def load_proofs(*, reload: bool) -> None:
-        if wallet.load_proofs.await_count >= 2 and proofs_after is not None:
-            wallet.proofs = list(proofs_after)
+class _RecoveryWallet:
+    """A wallet whose proof table is a dict, so a reload drops unwritten links.
 
-    wallet = Mock(
-        mint=AsyncMock(side_effect=error),
-        keysets={"keyset-1": Mock()},
-        restore_tokens_for_keyset=AsyncMock(),
-        load_proofs=AsyncMock(side_effect=load_proofs),
-        proofs=list(proofs_before or []),
-    )
-    return wallet
+    The mint has signed the outputs in ``signed`` (secret -> amount).
+    """
+
+    def __init__(
+        self,
+        stored: dict[str, tuple[int, str | None]],
+        signed: dict[str, int] | None = None,
+    ) -> None:
+        self.stored = dict(stored)
+        self.signed = dict(signed or {})
+        self.proofs: list[Proof] = []
+        self.keyset_id = "keyset-1"
+        self.mint = AsyncMock()
+        self.generate_secrets_from_to = AsyncMock(side_effect=self._secrets)
+        self._construct_outputs = Mock(return_value=(["blinded"], []))
+        self.restore_promises = AsyncMock(side_effect=self._restore)
+        self.invalidate = AsyncMock()
+
+        @asynccontextmanager
+        async def connect() -> AsyncIterator[Mock]:
+            yield Mock()
+
+        self.db = Mock(connect=connect)
+
+    async def _secrets(self, first: int, last: int, *, keyset_id: str):  # type: ignore[no-untyped-def]
+        indices = range(first, last + 1)
+        return (
+            [f"out-{i}" for i in indices],
+            [f"r-{i}" for i in indices],
+            [f"path-{i}" for i in indices],
+        )
+
+    async def load_proofs(self, *, reload: bool) -> None:
+        self.proofs = [
+            Proof(amount=amount, secret=secret, mint_id=mint_id)
+            for secret, (amount, mint_id) in self.stored.items()
+        ]
+
+    async def _restore(self, outputs, secrets, rs, paths):  # type: ignore[no-untyped-def]
+        restored = [
+            Proof(amount=self.signed[secret], secret=secret)
+            for secret in secrets
+            if secret in self.signed
+        ]
+        for proof in restored:
+            self.stored[proof.secret] = (proof.amount, None)
+        return len(restored), restored
 
 
-@pytest.mark.asyncio
-async def test_invoice_mint_recovers_quote_linked_outputs_already_signed() -> None:
-    invoice = _invoice()
-    wallet = _recovery_wallet(
-        Exception("Mint Error: outputs have already been signed before (Code: 11003)"),
-        proofs_after=[_proof(100, "quote-1")],
-    )
+def _linking(wallet: _RecoveryWallet, fail_first: bool = False) -> AsyncMock:
+    calls = {"n": 0}
 
-    await _mint_invoice_quote(wallet, invoice)  # type: ignore[arg-type]
+    async def update(proof: Proof, *, mint_id: str, conn: object) -> None:
+        calls["n"] += 1
+        if fail_first and calls["n"] == 1:
+            raise RuntimeError("link write failed")
+        wallet.stored[proof.secret] = (proof.amount, mint_id)
 
-    wallet.restore_tokens_for_keyset.assert_awaited_once_with(
-        "keyset-1", to=1, batch=25
-    )
-    assert wallet.load_proofs.await_count == 2
+    return AsyncMock(side_effect=update)
+
+
+def _recorded() -> SimpleNamespace:
+    return _invoice(mint_keyset_id="keyset-1", mint_counter=18, mint_outputs=2)
+
+
+def _counters(
+    reserved_at: int, high: int, log: list[str]
+) -> tuple[AsyncMock, AsyncMock]:
+    async def bump(
+        *, db: object, keyset_id: str, by: int = 1, skip: bool = False
+    ) -> int:
+        log.append("read" if skip else f"reserve {by}")
+        return high if skip else reserved_at
+
+    async def set_counter(*, db: object, keyset_id: str, counter: int) -> None:
+        log.append(f"counter {counter}")
+
+    return AsyncMock(side_effect=bump), AsyncMock(side_effect=set_counter)
 
 
 @pytest.mark.asyncio
 async def test_invoice_mint_accepts_preloaded_quote_linked_proofs() -> None:
-    invoice = _invoice()
-    wallet = _recovery_wallet(
-        Exception("must not mint"),
-        proofs_before=[_proof(64, "quote-1"), _proof(36, "quote-1")],
-    )
+    wallet = _RecoveryWallet({"a": (64, "quote-1"), "b": (36, "quote-1")})
 
-    await _mint_invoice_quote(wallet, invoice)  # type: ignore[arg-type]
+    await _mint_invoice_quote(wallet, _invoice())  # type: ignore[arg-type]
 
     wallet.mint.assert_not_awaited()
-    wallet.restore_tokens_for_keyset.assert_not_awaited()
+    wallet.restore_promises.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_invoice_mint_does_not_accept_unrelated_11003_text() -> None:
-    invoice = _invoice()
-    error = Exception("backend request 11003 failed")
-    wallet = _recovery_wallet(error)
+async def test_first_mint_reserves_and_records_its_outputs_before_sending() -> None:
+    wallet = _RecoveryWallet({})
+    log: list[str] = []
 
-    with pytest.raises(Exception) as caught:
-        await _mint_invoice_quote(wallet, invoice)  # type: ignore[arg-type]
+    async def record(*_: object) -> None:
+        log.append("record")
 
-    assert caught.value is error
-    wallet.restore_tokens_for_keyset.assert_not_awaited()
+    async def mint(*_: object, **__: object) -> None:
+        log.append("mint")
+        raise ConnectionResetError("reply lost")
 
-
-@pytest.mark.asyncio
-async def test_installed_cashu_error_shape_recognizes_realistic_11003_phrase() -> None:
-    request = httpx.Request("POST", "http://mint:3338/v1/mint/bolt11")
-    response = httpx.Response(
-        400,
-        request=request,
-        json={"detail": "outputs have already been signed before", "code": 11003},
-    )
-
-    with pytest.raises(Exception) as caught:
-        Wallet.raise_on_error_request(response)
-
-    assert _is_outputs_already_signed(caught.value)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("recovered", [0, 99])
-async def test_invoice_mint_rejects_empty_or_short_quote_recovery(
-    recovered: int,
-) -> None:
-    invoice = _invoice()
-    wallet = _recovery_wallet(
-        Exception("Mint Error: outputs already signed (Code: 11003)"),
-        proofs_after=[_proof(recovered, "quote-1")] if recovered else [],
-    )
-
-    with pytest.raises(RuntimeError, match="expected at least 100"):
-        await _mint_invoice_quote(wallet, invoice)  # type: ignore[arg-type]
-
-
-@pytest.mark.asyncio
-async def test_invoice_mint_rejects_unrelated_concurrent_balance_growth() -> None:
-    invoice = _invoice()
-    wallet = _recovery_wallet(
-        Exception("Mint Error: outputs already signed (Code: 11003)"),
-        proofs_after=[_proof(10_000, "different-quote")],
-    )
-
-    with pytest.raises(RuntimeError, match="quote-linked recovery returned 0"):
-        await _mint_invoice_quote(wallet, invoice)  # type: ignore[arg-type]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("issued", [True, False])
-async def test_invoice_mint_links_restored_outputs_only_for_an_issued_quote(
-    issued: bool,
-) -> None:
-    invoice = _invoice()
-    restored = [
-        Proof(amount=64, secret="restored-1"),
-        Proof(amount=36, secret="restored-2"),
-    ]
-    wallet = _recovery_wallet(
-        Exception("Mint Error: outputs have already been signed before (Code: 11003)"),
-        proofs_after=restored,
-    )
+    session = AsyncMock(exec=AsyncMock(side_effect=record))
+    wallet.mint = AsyncMock(side_effect=mint)
+    bump, set_counter = _counters(reserved_at=18, high=30, log=log)
 
     @asynccontextmanager
-    async def connect() -> AsyncIterator[Mock]:
-        yield Mock()
+    async def create_session() -> AsyncIterator[AsyncMock]:
+        yield session
 
-    wallet.db = Mock(connect=connect)
+    with (
+        patch("routstr.lightning.create_session", create_session),
+        patch("routstr.lightning.bump_secret_derivation", bump),
+        patch("routstr.lightning.set_secret_derivation", set_counter),
+        pytest.raises(ConnectionResetError),
+    ):
+        await _mint_invoice_quote(wallet, _invoice())  # type: ignore[arg-type]
 
-    with patch("routstr.lightning.update_proof", AsyncMock()) as update_proof:
-        if issued:
-            await _mint_invoice_quote(wallet, invoice, issued=True)  # type: ignore[arg-type]
-        else:
-            with pytest.raises(RuntimeError, match="returned 0 sats"):
-                await _mint_invoice_quote(wallet, invoice)  # type: ignore[arg-type]
+    assert log == ["reserve 3", "record", "read", "counter 18", "mint", "counter 30"]
+    params = session.exec.call_args.args[0].compile().params
+    assert (
+        params["mint_keyset_id"],
+        params["mint_counter"],
+        params["mint_outputs"],
+    ) == (
+        "keyset-1",
+        18,
+        3,
+    )
+    wallet.mint.assert_called_once_with(
+        100, quote_id="quote-1", split=amount_split(100)
+    )
+    wallet.restore_promises.assert_not_awaited()
 
-    assert update_proof.await_count == (2 if issued else 0)
-    assert all(p.mint_id == ("quote-1" if issued else None) for p in restored)
+
+@pytest.mark.asyncio
+async def test_retry_sends_the_same_recorded_outputs() -> None:
+    wallet = _RecoveryWallet({})
+    log: list[str] = []
+
+    async def mint(*_: object, **__: object) -> None:
+        log.append("mint")
+        wallet.stored.update({"out-18": (64, "quote-1"), "out-19": (36, "quote-1")})
+
+    wallet.mint = AsyncMock(side_effect=mint)
+    bump, set_counter = _counters(reserved_at=0, high=40, log=log)
+
+    with (
+        patch("routstr.lightning.bump_secret_derivation", bump),
+        patch("routstr.lightning.set_secret_derivation", set_counter),
+    ):
+        await _mint_invoice_quote(wallet, _recorded())  # type: ignore[arg-type]
+
+    assert log == ["read", "counter 18", "mint", "counter 40"]
+    wallet.restore_promises.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_issued_quote_links_its_recorded_outputs_already_in_the_wallet() -> None:
+    wallet = _RecoveryWallet(
+        {"out-18": (64, None), "out-19": (36, None), "other": (100, None)}
+    )
+
+    with patch("routstr.lightning.update_proof", _linking(wallet)):
+        await _mint_invoice_quote(wallet, _recorded(), issued=True)  # type: ignore[arg-type]
+
+    wallet.mint.assert_not_awaited()
+    wallet.restore_promises.assert_not_awaited()
+    assert wallet.stored == {
+        "out-18": (64, "quote-1"),
+        "out-19": (36, "quote-1"),
+        "other": (100, None),
+    }
+
+
+@pytest.mark.asyncio
+async def test_issued_quote_restores_exactly_its_recorded_outputs() -> None:
+    wallet = _RecoveryWallet(
+        {"other": (100, None)}, signed={"out-18": 64, "out-19": 36}
+    )
+
+    with patch("routstr.lightning.update_proof", _linking(wallet)):
+        await _mint_invoice_quote(wallet, _recorded(), issued=True)  # type: ignore[arg-type]
+
+    wallet.mint.assert_not_awaited()
+    wallet.generate_secrets_from_to.assert_awaited_once_with(
+        18, 19, keyset_id="keyset-1"
+    )
+    assert wallet.restore_promises.await_args.args[1] == ["out-18", "out-19"]
+    assert wallet.stored == {
+        "other": (100, None),
+        "out-18": (64, "quote-1"),
+        "out-19": (36, "quote-1"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_link_is_finished_by_the_next_check_without_a_restore() -> None:
+    wallet = _RecoveryWallet({}, signed={"out-18": 64, "out-19": 36})
+    update = _linking(wallet, fail_first=True)
+
+    with patch("routstr.lightning.update_proof", update):
+        with pytest.raises(RuntimeError, match="link write failed"):
+            await _mint_invoice_quote(wallet, _recorded(), issued=True)  # type: ignore[arg-type]
+        await _mint_invoice_quote(wallet, _recorded(), issued=True)  # type: ignore[arg-type]
+
+    assert wallet.restore_promises.await_count == 1
+    assert wallet.stored == {"out-18": (64, "quote-1"), "out-19": (36, "quote-1")}
 
 
 @pytest.mark.asyncio
@@ -350,13 +428,23 @@ async def test_ambiguous_invoice_mint_timeout_remains_recoverable() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("row_status", "recovers"), [("settlement_pending", True), ("pending", False)]
+    ("row_status", "counter", "recovers"),
+    [
+        ("settlement_pending", 18, True),
+        ("settlement_pending", None, False),
+        ("pending", 18, False),
+    ],
 )
-async def test_issued_quote_recovers_only_a_claimed_invoice(
-    row_status: str, recovers: bool
+async def test_issued_quote_recovers_only_a_claimed_recorded_invoice(
+    row_status: str, counter: int | None, recovers: bool
 ) -> None:
     _invoice_settlement_locks.clear()
-    invoice = _invoice(status=row_status)
+    invoice = _invoice(
+        status=row_status,
+        mint_keyset_id="keyset-1",
+        mint_counter=counter,
+        mint_outputs=2,
+    )
     session = AsyncMock()
     issued = Mock(paid=False, state=MintQuoteState.issued)
     wallet = Mock(get_mint_quote=AsyncMock(return_value=issued))

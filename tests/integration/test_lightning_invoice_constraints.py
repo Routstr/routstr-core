@@ -27,7 +27,7 @@ from routstr.lightning import _create_api_key_record
 
 def _configure_quote_proof_wallet(wallet: MagicMock) -> None:
     wallet.proofs = []
-    wallet.keysets = {}
+    wallet.keyset_id = "keyset-1"
     wallet.load_proofs = AsyncMock()
 
 
@@ -49,12 +49,16 @@ def _make_invoice(**kwargs: object) -> LightningInvoice:
 
 @pytest.fixture(autouse=True)
 def mock_wallet_mint() -> object:
-    with patch("routstr.lightning.get_wallet") as mock_get_wallet:
+    with (
+        patch("routstr.lightning.get_wallet") as mock_get_wallet,
+        patch("routstr.lightning.bump_secret_derivation", AsyncMock(return_value=0)),
+        patch("routstr.lightning.set_secret_derivation", AsyncMock()),
+    ):
         wallet = AsyncMock()
         wallet.proofs = []
         wallet.load_proofs = AsyncMock()
 
-        async def mint(amount: int, quote_id: str) -> list[Proof]:
+        async def mint(amount: int, quote_id: str, split: list[int]) -> list[Proof]:
             proofs = [Proof(amount=amount, mint_id=quote_id)]
             wallet.proofs.extend(proofs)
             return proofs
