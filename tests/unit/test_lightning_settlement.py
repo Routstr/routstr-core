@@ -247,6 +247,7 @@ async def test_issued_quote_restores_exactly_its_recorded_outputs() -> None:
     wallet.generate_secrets_from_to.assert_awaited_once_with(
         18, 19, keyset_id="keyset-1"
     )
+    assert wallet.restore_promises.await_args is not None
     assert wallet.restore_promises.await_args.args[1] == ["out-18", "out-19"]
     assert wallet.stored == {
         "other": (100, None),
