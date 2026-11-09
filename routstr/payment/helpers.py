@@ -22,6 +22,7 @@ from ..core.error_scope import (
     client_status_for_upstream_error,
     upstream_status_details,
 )
+from ..core.errors import build_payment_required_error
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..core.settings import settings
@@ -43,7 +44,9 @@ from .responses_input import (
 logger = get_logger(__name__)
 
 
-def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
+def check_token_balance(
+    headers: dict, body: dict, max_cost_for_model: int, *, pricing: dict | None = None
+) -> None:
     if x_cashu := headers.get("x-cashu", None):
         cashu_token = x_cashu
         logger.debug(
@@ -114,6 +117,14 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
         raise HTTPException(
             status_code=402,
             detail={
+                **build_payment_required_error(
+                    code="minimum_balance_required",
+                    message="Insufficient balance",
+                    required_msats=max_cost_for_model,
+                    balance_msats=amount_msat,
+                    model=body.get("model", "unknown"),
+                    pricing=pricing,
+                ),
                 "reason": "Insufficient balance",
                 "amount_required_msat": max_cost_for_model,
                 "model": body.get("model", "unknown"),
@@ -194,6 +205,8 @@ async def calculate_discounted_max_cost(
     body: dict,
     model_obj: Any | None = None,
     path: str = "",
+    *,
+    pricing_trail: dict | None = None,
 ) -> int:
     """Calculate the discounted max cost for a request using model pricing when available.
 
@@ -201,18 +214,37 @@ async def calculate_discounted_max_cost(
     ``max_tokens`` and ``max_completion_tokens`` (chat/completions) or
     ``max_output_tokens`` (responses).
     """
+
+    def finish(required: int, adjusted: int | None = None) -> int:
+        if pricing_trail is not None:
+            pricing_trail["required_msats"] = required
+            if adjusted is not None:
+                pricing_trail["min_request_applied"] = (
+                    pricing_trail.get("min_request_applied", False)
+                    or adjusted < settings.min_request_msat
+                )
+        return required
+
+    discounts = pricing_trail["discounts"] if pricing_trail is not None else {}
     if settings.fixed_pricing:
-        return max_cost_for_model
+        return finish(max_cost_for_model)
 
     model = body.get("model", "unknown")
 
     model_pricing = model_obj.sats_pricing if model_obj else None
     if not model_pricing:
-        return max_cost_for_model
+        return finish(max_cost_for_model)
 
     image_reservation = image_reservation_msats(body, model_obj, path)
     if image_reservation is not None:
-        return max(settings.min_request_msat, image_reservation)
+        if pricing_trail is not None:
+            pricing_trail["min_request_applied"] = (
+                image_reservation < settings.min_request_msat
+            )
+        discounts["image_reservation_msats"] = image_reservation
+        return finish(
+            max(settings.min_request_msat, image_reservation), image_reservation
+        )
 
     tol = settings.tolerance_percentage
     tol_factor = max(0.0, 1 - float(tol) / 100.0)
@@ -273,12 +305,20 @@ async def calculate_discounted_max_cost(
         )
         prompt_tokens += image_tokens
 
+    discounts.update(
+        prompt_tokens_estimated=prompt_tokens,
+        image_tokens_estimated=image_tokens,
+        prompt_delta_msats=0,
+        completion_delta_msats=0,
+    )
     if prompt_tokens > 0:
         estimated_prompt_delta_sats = (
             max_prompt_allowed_sats - prompt_tokens * model_pricing.prompt
         )
         if estimated_prompt_delta_sats > 0:
-            adjusted = adjusted - math.floor(estimated_prompt_delta_sats * 1000)
+            delta = math.floor(estimated_prompt_delta_sats * 1000)
+            discounts["prompt_delta_msats"] = delta
+            adjusted = adjusted - delta
 
     # Completion caps arrive under several names: ``max_tokens`` (legacy
     # chat), ``max_completion_tokens`` (modern chat) and ``max_output_tokens``
@@ -307,12 +347,15 @@ async def calculate_discounted_max_cost(
             cap_int if max_tokens_int is None else max(max_tokens_int, cap_int)
         )
 
+    discounts["completion_cap_used"] = max_tokens_int
     if max_tokens_int is not None:
         estimated_completion_delta_sats = (
             max_completion_allowed_sats - max_tokens_int * model_pricing.completion
         )
         if estimated_completion_delta_sats > 0:
-            adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
+            delta = math.floor(estimated_completion_delta_sats * 1000)
+            discounts["completion_delta_msats"] = delta
+            adjusted = adjusted - delta
 
     logger.debug(
         "Discounted max cost computed",
@@ -324,7 +367,7 @@ async def calculate_discounted_max_cost(
         },
     )
 
-    return max(settings.min_request_msat, adjusted)
+    return finish(max(settings.min_request_msat, adjusted), adjusted)
 
 
 def estimate_tokens(messages: list) -> int:
