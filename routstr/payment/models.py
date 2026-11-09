@@ -150,11 +150,11 @@ class Model(BaseModel):
         return None if parsed.is_empty() else parsed
 
     def dict(self, **kwargs: object) -> dict:
-        # Non-reasoning models omit the field entirely so the catalog stays
-        # additive: existing clients never see a new null key.
         data = super().dict(**kwargs)  # type: ignore[arg-type]
         if not data.get("usage_multipliers"):
             data.pop("usage_multipliers", None)
+        # Non-reasoning models omit the field entirely so the catalog stays
+        # additive: existing clients never see a new null key.
         reasoning = data.get("reasoning")
         if not reasoning:
             data.pop("reasoning", None)
