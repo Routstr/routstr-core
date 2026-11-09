@@ -9,12 +9,14 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 from cashu.core.base import MintQuoteState
+from cashu.core.nuts import nut20
 from cashu.core.split import amount_split
 from cashu.wallet.crud import (
     bump_secret_derivation,
-    set_secret_derivation,
+    get_bolt11_mint_quote,
     update_proof,
 )
+from cashu.wallet.v1_api import LedgerAPI
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm.attributes import set_committed_value
@@ -766,7 +768,11 @@ async def _mint_invoice_quote(
         return
     outputs = await _invoice_outputs(wallet, invoice, issued=issued)
     if issued:
-        await _link_invoice_outputs(wallet, invoice, *outputs)
+        # Proofs the wallet already spent no longer count as linked, but their
+        # signatures still prove the mint issued this quote to these outputs.
+        signed = await _link_invoice_outputs(wallet, invoice, *outputs)
+        if signed >= invoice.amount_sats:
+            return
     else:
         await _send_invoice_outputs(wallet, invoice, *outputs)
     linked = _invoice_quote_proof_amount(wallet, invoice.payment_hash)
@@ -812,24 +818,31 @@ async def _send_invoice_outputs(
     counter: int,
     count: int,
 ) -> None:
-    # cashu derives a mint call's outputs from the keyset counter.
-    high = await bump_secret_derivation(db=wallet.db, keyset_id=keyset_id, skip=True)
-    await set_secret_derivation(db=wallet.db, keyset_id=keyset_id, counter=counter)
-    try:
-        await run_mint_operation(
-            lambda: wallet.mint(
-                invoice.amount_sats,
-                quote_id=invoice.payment_hash,
-                split=amount_split(invoice.amount_sats),
-            ),
-            op_name=f"invoice_mint_{invoice.purpose}",
-            mint_url=invoice.mint_url or settings.primary_mint,
-            retry_timeouts=False,
-        )
-    finally:
-        await set_secret_derivation(
-            db=wallet.db, keyset_id=keyset_id, counter=max(high, counter + count)
-        )
+    # Build the outputs from the reserved range instead of calling wallet.mint,
+    # which derives them from the shared keyset counter.
+    secrets_, rs, paths = await wallet.generate_secrets_from_to(
+        counter, counter + count - 1, keyset_id=keyset_id
+    )
+    outputs, rs = wallet._construct_outputs(
+        amount_split(invoice.amount_sats), secrets_, rs, keyset_id=keyset_id
+    )
+    quote = await get_bolt11_mint_quote(db=wallet.db, quote=invoice.payment_hash)
+    signature = (
+        nut20.sign_mint_quote(invoice.payment_hash, outputs, quote.privkey)
+        if quote and quote.privkey
+        else None
+    )
+    promises = await run_mint_operation(
+        lambda: LedgerAPI.mint(wallet, outputs, invoice.payment_hash, signature),
+        op_name=f"invoice_mint_{invoice.purpose}",
+        mint_url=invoice.mint_url or settings.primary_mint,
+        retry_timeouts=False,
+    )
+    proofs = await wallet._construct_proofs(promises, secrets_, rs, paths)
+    async with wallet.db.connect() as conn:
+        for proof in proofs:
+            proof.mint_id = invoice.payment_hash
+            await update_proof(proof, mint_id=invoice.payment_hash, conn=conn)
     await wallet.load_proofs(reload=True)
 
 
@@ -839,12 +852,16 @@ async def _link_invoice_outputs(
     keyset_id: str,
     counter: int,
     count: int,
-) -> None:
-    """Link the quote's outputs to it, restoring any the wallet did not store."""
+) -> int:
+    """Link the quote's outputs to it, restoring any the wallet did not store.
+
+    Returns the value the mint signed across the range, spent proofs included.
+    """
     secrets_, rs, paths = await wallet.generate_secrets_from_to(
         counter, counter + count - 1, keyset_id=keyset_id
     )
-    stored = {proof.secret for proof in wallet.proofs}
+    stored = {proof.secret: proof.amount for proof in wallet.proofs}
+    signed = sum(stored.get(secret, 0) for secret in secrets_)
     unstored = [
         (secret, r, path)
         for secret, r, path in zip(secrets_, rs, paths)
@@ -864,6 +881,7 @@ async def _link_invoice_outputs(
             op_name="invoice_restore",
             mint_url=invoice.mint_url or settings.primary_mint,
         )
+        signed += sum(proof.amount for proof in restored)
         if restored:
             await wallet.invalidate(restored, check_spendable=True)
         await wallet.load_proofs(reload=True)
@@ -873,6 +891,7 @@ async def _link_invoice_outputs(
             if proof.secret in wanted and not proof.mint_id:
                 proof.mint_id = invoice.payment_hash
                 await update_proof(proof, mint_id=invoice.payment_hash, conn=conn)
+    return signed
 
 
 def _invoice_api_key_hash(invoice: LightningInvoice | _InvoiceSettlement) -> str:

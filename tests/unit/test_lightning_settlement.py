@@ -75,6 +75,7 @@ class _RecoveryWallet:
         self.generate_secrets_from_to = AsyncMock(side_effect=self._secrets)
         self._construct_outputs = Mock(return_value=(["blinded"], []))
         self.restore_promises = AsyncMock(side_effect=self._restore)
+        self._construct_proofs = AsyncMock(side_effect=self._construct)
         self.invalidate = AsyncMock()
 
         @asynccontextmanager
@@ -96,6 +97,15 @@ class _RecoveryWallet:
             Proof(amount=amount, secret=secret, mint_id=mint_id)
             for secret, (amount, mint_id) in self.stored.items()
         ]
+
+    async def _construct(self, promises, secrets, rs, paths):  # type: ignore[no-untyped-def]
+        proofs = [
+            Proof(amount=promise.amount, secret=secret)
+            for promise, secret in zip(promises, secrets)
+        ]
+        for proof in proofs:
+            self.stored[proof.secret] = (proof.amount, None)
+        return proofs
 
     async def _restore(self, outputs, secrets, rs, paths):  # type: ignore[no-untyped-def]
         restored = [
@@ -124,19 +134,26 @@ def _recorded() -> SimpleNamespace:
     return _invoice(mint_keyset_id="keyset-1", mint_counter=18, mint_outputs=2)
 
 
-def _counters(
-    reserved_at: int, high: int, log: list[str]
-) -> tuple[AsyncMock, AsyncMock]:
+def _reserve(reserved_at: int, log: list[str]) -> AsyncMock:
     async def bump(
         *, db: object, keyset_id: str, by: int = 1, skip: bool = False
     ) -> int:
         log.append("read" if skip else f"reserve {by}")
-        return high if skip else reserved_at
+        return reserved_at
 
-    async def set_counter(*, db: object, keyset_id: str, counter: int) -> None:
-        log.append(f"counter {counter}")
+    return AsyncMock(side_effect=bump)
 
-    return AsyncMock(side_effect=bump), AsyncMock(side_effect=set_counter)
+
+def _mint_call(signed: list[int] | None, log: list[str]) -> AsyncMock:
+    """The mint endpoint: signs ``signed`` amounts, or loses the reply when None."""
+
+    async def mint(wallet: object, outputs: object, quote: str, sig: object):  # type: ignore[no-untyped-def]
+        log.append("mint")
+        if signed is None:
+            raise ConnectionResetError("reply lost")
+        return [SimpleNamespace(amount=amount) for amount in signed]
+
+    return AsyncMock(side_effect=mint)
 
 
 @pytest.mark.asyncio
@@ -157,13 +174,8 @@ async def test_first_mint_reserves_and_records_its_outputs_before_sending() -> N
     async def record(*_: object) -> None:
         log.append("record")
 
-    async def mint(*_: object, **__: object) -> None:
-        log.append("mint")
-        raise ConnectionResetError("reply lost")
-
     session = AsyncMock(exec=AsyncMock(side_effect=record))
-    wallet.mint = AsyncMock(side_effect=mint)
-    bump, set_counter = _counters(reserved_at=18, high=30, log=log)
+    mint_call = _mint_call(None, log)
 
     @asynccontextmanager
     async def create_session() -> AsyncIterator[AsyncMock]:
@@ -171,13 +183,16 @@ async def test_first_mint_reserves_and_records_its_outputs_before_sending() -> N
 
     with (
         patch("routstr.lightning.create_session", create_session),
-        patch("routstr.lightning.bump_secret_derivation", bump),
-        patch("routstr.lightning.set_secret_derivation", set_counter),
+        patch("routstr.lightning.bump_secret_derivation", _reserve(18, log)),
+        patch("routstr.lightning.get_bolt11_mint_quote", AsyncMock(return_value=None)),
+        patch("routstr.lightning.LedgerAPI.mint", mint_call),
         pytest.raises(ConnectionResetError),
     ):
         await _mint_invoice_quote(wallet, _invoice())  # type: ignore[arg-type]
 
-    assert log == ["reserve 3", "record", "read", "counter 18", "mint", "counter 30"]
+    # The shared counter is only ever advanced, so a crash mid-mint cannot
+    # hand this range to another quote.
+    assert log == ["reserve 3", "record", "mint"]
     params = session.exec.call_args.args[0].compile().params
     assert (
         params["mint_keyset_id"],
@@ -188,9 +203,11 @@ async def test_first_mint_reserves_and_records_its_outputs_before_sending() -> N
         18,
         3,
     )
-    wallet.mint.assert_called_once_with(
-        100, quote_id="quote-1", split=amount_split(100)
+    wallet.generate_secrets_from_to.assert_awaited_once_with(
+        18, 20, keyset_id="keyset-1"
     )
+    assert wallet._construct_outputs.call_args.args[0] == amount_split(100)
+    mint_call.assert_awaited_once_with(wallet, ["blinded"], "quote-1", None)
     wallet.restore_promises.assert_not_awaited()
 
 
@@ -199,20 +216,19 @@ async def test_retry_sends_the_same_recorded_outputs() -> None:
     wallet = _RecoveryWallet({})
     log: list[str] = []
 
-    async def mint(*_: object, **__: object) -> None:
-        log.append("mint")
-        wallet.stored.update({"out-18": (64, "quote-1"), "out-19": (36, "quote-1")})
-
-    wallet.mint = AsyncMock(side_effect=mint)
-    bump, set_counter = _counters(reserved_at=0, high=40, log=log)
-
     with (
-        patch("routstr.lightning.bump_secret_derivation", bump),
-        patch("routstr.lightning.set_secret_derivation", set_counter),
+        patch("routstr.lightning.bump_secret_derivation", _reserve(0, log)),
+        patch("routstr.lightning.get_bolt11_mint_quote", AsyncMock(return_value=None)),
+        patch("routstr.lightning.LedgerAPI.mint", _mint_call([64, 36], log)),
+        patch("routstr.lightning.update_proof", _linking(wallet)),
     ):
         await _mint_invoice_quote(wallet, _recorded())  # type: ignore[arg-type]
 
-    assert log == ["read", "counter 18", "mint", "counter 40"]
+    assert log == ["mint"]
+    wallet.generate_secrets_from_to.assert_awaited_once_with(
+        18, 19, keyset_id="keyset-1"
+    )
+    assert wallet.stored == {"out-18": (64, "quote-1"), "out-19": (36, "quote-1")}
     wallet.restore_promises.assert_not_awaited()
 
 
@@ -268,6 +284,33 @@ async def test_failed_link_is_finished_by_the_next_check_without_a_restore() -> 
 
     assert wallet.restore_promises.await_count == 1
     assert wallet.stored == {"out-18": (64, "quote-1"), "out-19": (36, "quote-1")}
+
+
+@pytest.mark.asyncio
+async def test_issued_quote_whose_outputs_were_spent_still_settles() -> None:
+    wallet = _RecoveryWallet({}, signed={"out-18": 64, "out-19": 36})
+
+    async def spent(proofs: list[Proof], *, check_spendable: bool) -> None:
+        for proof in proofs:
+            wallet.stored.pop(proof.secret)
+
+    wallet.invalidate = AsyncMock(side_effect=spent)
+
+    with patch("routstr.lightning.update_proof", _linking(wallet)):
+        await _mint_invoice_quote(wallet, _recorded(), issued=True)  # type: ignore[arg-type]
+
+    assert wallet.stored == {}
+
+
+@pytest.mark.asyncio
+async def test_issued_quote_with_a_short_restore_is_not_credited() -> None:
+    wallet = _RecoveryWallet({}, signed={"out-18": 64})
+
+    with (
+        patch("routstr.lightning.update_proof", _linking(wallet)),
+        pytest.raises(RuntimeError, match="total 64 sats"),
+    ):
+        await _mint_invoice_quote(wallet, _recorded(), issued=True)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

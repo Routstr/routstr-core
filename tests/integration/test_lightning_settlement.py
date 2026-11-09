@@ -1,10 +1,13 @@
 import asyncio
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from cashu.core.base import Proof
+from cashu.core.base import MintQuoteState, Proof
 from cashu.core.split import amount_split
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -229,19 +232,35 @@ async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
         seed.add(invoice)
         await seed.commit()
 
-    wallet = Mock(
-        proofs=[],
-        keyset_id="keyset-1",
-        load_proofs=AsyncMock(),
-        get_mint_quote=AsyncMock(return_value=Mock(paid=True)),
-    )
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[Mock]:
+        yield Mock()
 
-    async def mint(amount: int, quote_id: str, split: list[int]) -> list[Proof]:
-        proofs = [Proof(amount=amount, mint_id=quote_id)]
+    async def secrets(first: int, last: int, *, keyset_id: str):  # type: ignore[no-untyped-def]
+        indices = range(first, last + 1)
+        return [f"out-{i}" for i in indices], [None] * len(indices), [""] * len(indices)
+
+    async def construct(promises, secrets_, rs, paths):  # type: ignore[no-untyped-def]
+        proofs = [
+            Proof(amount=promise.amount, secret=secret)
+            for promise, secret in zip(promises, secrets_)
+        ]
         wallet.proofs.extend(proofs)
         return proofs
 
-    wallet.mint = AsyncMock(side_effect=mint)
+    wallet = Mock(
+        proofs=[],
+        keyset_id="keyset-1",
+        db=Mock(connect=connect),
+        load_proofs=AsyncMock(),
+        get_mint_quote=AsyncMock(return_value=Mock(paid=True)),
+        generate_secrets_from_to=AsyncMock(side_effect=secrets),
+        _construct_outputs=Mock(return_value=(["blinded"], [])),
+        _construct_proofs=AsyncMock(side_effect=construct),
+    )
+    mint_call = AsyncMock(
+        return_value=[SimpleNamespace(amount=amount) for amount in amount_split(100)]
+    )
 
     async with AsyncSession(integration_engine, expire_on_commit=False) as failed:
         stored = await failed.get(LightningInvoice, invoice.id)
@@ -251,7 +270,11 @@ async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
             patch(
                 "routstr.lightning.bump_secret_derivation", AsyncMock(return_value=0)
             ),
-            patch("routstr.lightning.set_secret_derivation", AsyncMock()),
+            patch(
+                "routstr.lightning.get_bolt11_mint_quote", AsyncMock(return_value=None)
+            ),
+            patch("routstr.lightning.LedgerAPI.mint", mint_call),
+            patch("routstr.lightning.update_proof", AsyncMock()),
             patch(
                 "routstr.lightning._finalize_invoice_settlement",
                 AsyncMock(side_effect=Exception("db unavailable")),
@@ -267,6 +290,14 @@ async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
         assert unchanged is not None
         assert unchanged.balance == 100_000
 
+        assert (
+            pending.mint_keyset_id,
+            pending.mint_counter,
+            pending.mint_outputs,
+        ) == ("keyset-1", 0, len(amount_split(100)))
+
+    # The mint marked the quote ISSUED when it signed the outputs.
+    wallet.get_mint_quote.return_value = Mock(paid=False, state=MintQuoteState.issued)
     async with AsyncSession(integration_engine, expire_on_commit=False) as retry:
         stored = await retry.get(LightningInvoice, invoice.id)
         assert stored is not None
@@ -281,9 +312,7 @@ async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
         assert credited is not None
         assert credited.balance == 200_000
 
-    wallet.mint.assert_awaited_once_with(
-        100, quote_id=invoice.payment_hash, split=amount_split(100)
-    )
+    mint_call.assert_awaited_once_with(wallet, ["blinded"], invoice.payment_hash, None)
 
 
 @pytest.mark.asyncio
