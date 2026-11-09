@@ -79,6 +79,12 @@ def test_pair_whose_rates_scale_differently_is_rejected() -> None:
     assert derive_multipliers(endpoints, "anthropic") == {}
 
 
+def test_malformed_endpoints_are_skipped() -> None:
+    endpoints = [None, {"pricing": "x"}, *OPUS_5_5_ENDPOINTS]
+
+    assert derive_multipliers(endpoints, "anthropic") == {"speed": {"fast": 2.0}}
+
+
 class _Transport(httpx.AsyncBaseTransport):
     def __init__(self, routes: dict[str, httpx.Response]) -> None:
         self.routes = routes

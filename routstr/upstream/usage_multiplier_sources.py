@@ -60,8 +60,12 @@ def derive_multipliers(endpoints: list[dict], provider_tag: str) -> UsageMultipl
     """
     prices: dict[str, dict[str, float]] = {}
     for endpoint in endpoints:
+        if not isinstance(endpoint, dict):
+            continue
         tag = endpoint.get("tag")
-        pricing = endpoint.get("pricing") or {}
+        pricing = endpoint.get("pricing")
+        if not isinstance(pricing, dict):
+            continue
         prompt = coerce_rate(pricing.get("prompt"))
         completion = coerce_rate(pricing.get("completion"))
         if isinstance(tag, str) and prompt and completion:
