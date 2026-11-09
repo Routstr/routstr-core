@@ -61,6 +61,7 @@ from ..payment.models import (
     list_models,
 )
 from ..payment.price import sats_usd_price
+from ..payment.usage_multipliers import pricing_dimensions
 from ..wallet import (
     SPENT_TOKEN_CODES,
     classify_redemption_error,
@@ -2637,6 +2638,8 @@ class BaseUpstreamProvider:
         usage_finalized = False
         last_model_seen: str | None = None
         provider_seen: str | None = None
+        inference_geo: str | None = None
+        speed: str | None = None
 
         async def finalize_without_usage() -> bytes | None:
             nonlocal usage_finalized
@@ -2648,9 +2651,18 @@ class BaseUpstreamProvider:
                     usage_finalized = True
                     return None
                 try:
+                    billing_data = usage_estimator.response_data(last_model_seen)
+                    # The estimate still bills the variant the hold was scaled
+                    # for: what the stream reported, else what was requested.
+                    billing_data["usage"].update(
+                        pricing_dimensions(usage_estimator.body)
+                        | pricing_dimensions(
+                            {"speed": speed, "inference_geo": inference_geo}
+                        )
+                    )
                     cost_data = await adjust_payment_for_tokens(
                         fresh_key,
-                        usage_estimator.response_data(last_model_seen),
+                        billing_data,
                         new_session,
                         max_cost_for_model,
                         model_obj,
@@ -2687,14 +2699,13 @@ class BaseUpstreamProvider:
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
             nonlocal usage_finalized, last_model_seen, provider_seen
+            nonlocal inference_geo, speed
             stored_chunks: list[bytes] = []
             input_tokens: int = 0
             output_tokens: int = 0
             cache_read_input_tokens: int = 0
             cache_creation_input_tokens: int = 0
             server_tool_use: dict = {}
-            inference_geo: str | None = None
-            speed: str | None = None
             total_cost: float = 0.0
             input_cost: float = 0.0
             output_cost: float = 0.0
@@ -2990,9 +3001,13 @@ class BaseUpstreamProvider:
             elif not isinstance(response_json.get("usage"), dict):
                 usage_estimator = MissingUsageEstimator(request_body, model_obj)
                 usage_estimator.observe(response_json)
-                response_json["usage"] = usage_estimator.response_data(
-                    response_json.get("model")
-                )["usage"]
+                response_json["usage"] = {
+                    **usage_estimator.response_data(response_json.get("model"))[
+                        "usage"
+                    ],
+                    # Bill the variant the hold was scaled for.
+                    **pricing_dimensions(usage_estimator.body),
+                }
 
             cost_data = await adjust_payment_for_tokens(
                 key,
