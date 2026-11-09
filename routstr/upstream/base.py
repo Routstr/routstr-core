@@ -4514,7 +4514,7 @@ class BaseUpstreamProvider:
                     await response_handoff.close()
                 return mapped_error
 
-            if path.startswith("responses"):
+            if path.removeprefix("v1/").startswith("responses"):
                 content_type = response.headers.get("content-type", "")
                 is_streaming = "text/event-stream" in content_type
 
