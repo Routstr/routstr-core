@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from urllib.parse import quote
 
 import httpx
@@ -43,7 +43,9 @@ def _ratio(priced: dict[str, float], base: dict[str, float]) -> float | None:
     return round((low + high) / 2, 3)
 
 
-def derive_multipliers(endpoints: list[dict], provider_tag: str) -> UsageMultipliers:
+def derive_multipliers(
+    endpoints: Sequence[object], provider_tag: str
+) -> UsageMultipliers:
     """Read multipliers off OpenRouter's per-endpoint prices for one model.
 
     OpenRouter lists every priced variant of a model as its own endpoint:
