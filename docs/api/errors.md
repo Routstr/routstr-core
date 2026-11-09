@@ -175,29 +175,99 @@ Keys are node-local; an `sk-` key issued by another node is not accepted here.
 
 ### Payment Errors
 
-#### Insufficient Balance
+#### Insufficient Balance (402 Payment Required)
+
+Top-level `error` is canonical. `detail.error` is a permanent, identical
+compatibility mirror; `request_id` remains top-level.
 
 ```json
 {
   "error": {
-    "type": "insufficient_balance",
+    "type": "insufficient_quota",
+    "code": "insufficient_balance",
     "message": "Insufficient balance for request",
-    "code": "payment_required",
     "details": {
-      "balance": 100,
-      "required": 154,
-      "shortfall": 54,
-      "estimated_tokens": {
-        "prompt": 50,
-        "completion": 150
+      "unit": "msat",
+      "required_msats": 28989,
+      "available_msats": 21000,
+      "shortfall_msats": 7989,
+      "reserved_msats": 4000,
+      "model": "gpt-4o",
+      "pricing": {
+        "base_source": "unavailable",
+        "formula": "unavailable",
+        "required_msats": 28989,
+        "error": "Request pricing context was not supplied to this balance check"
       }
     }
-  }
+  },
+  "detail": {
+    "error": {
+      "type": "insufficient_quota",
+      "code": "insufficient_balance",
+      "message": "Insufficient balance for request",
+      "details": {
+        "unit": "msat",
+        "required_msats": 28989,
+        "available_msats": 21000,
+        "shortfall_msats": 7989,
+        "reserved_msats": 4000,
+        "model": "gpt-4o",
+        "pricing": {
+          "base_source": "unavailable",
+          "formula": "unavailable",
+          "required_msats": 28989,
+          "error": "Request pricing context was not supplied to this balance check"
+        }
+      }
+    }
+  },
+  "request_id": "req-example"
 }
 ```
 
-**Status:** 402  
-**Resolution:** Top up API key balance
+| `error.details` field | Meaning |
+| --- | --- |
+| `unit` | Always `msat`; numeric amounts are millisatoshis, not sats. |
+| `required_msats` | Actual request reservation requirement (integer). |
+| `available_msats` | `max(0, balance - reserved)` (integer). |
+| `shortfall_msats` | `max(0, required - available)` (integer). |
+| `reserved_msats` | Present when nonzero; in-flight reservations. |
+| `model` | Present when known. |
+| `pricing` | Reservation audit trail; see below. |
+
+X-Cashu shortfalls use `code: "minimum_balance_required"` and the same canonical
+`type`. Their original `detail.reason`, `detail.amount_required_msat`,
+`detail.model`, and `detail.type` remain. Concurrent depletion also retains
+`error.available_balance`.
+
+`pricing.base_source` is `fixed_pricing`, `fallback_fixed`,
+`model_sats_pricing`, or `unavailable`. `formula` is a convenience alias for
+`max_cost_formula` on model-priced requests:
+
+| Formula | USD ceiling from current model inputs |
+| --- | --- |
+| `context_plus_completion` | `(context - completion_limit) * prompt + completion_limit * completion` |
+| `context_le_completion` | `context * max(prompt, completion)` (unchanged pricing behavior) |
+| `context_only` | Provider context times the larger token rate |
+| `completion_only` | Provider completion limit times completion rate |
+| `model_context_only` | Model context times the larger token rate |
+| `flat_estimate` | Weighted rates; coefficients included in `max_cost_inputs` |
+| `fixed_request_cost` | Fixed sats per request, floored at the minimum |
+| `unavailable` | No request context or unusable pricing; `error` explains why |
+
+The trail records `base_max_cost_msats`, final `required_msats`, minimum floor,
+and actual `discounts` (prompt/image estimates, largest completion cap, deltas,
+or image reservation). Model trails also include `max_cost_inputs` and
+`max_cost_computed`. Cached sat pricing is authoritative: USD formula values
+are explicitly labeled as calculations from current model inputs, not a
+reconstruction of the cached reservation. The cache does not retain historical
+FX, so no current exchange rate is substituted. Direct bearer validation knows
+only the minimum cost and reports `unavailable`; the proxy enriches early balance
+rejection with the model and reservation trail it already computed.
+
+**Resolution:** Top up the API key by at least `shortfall_msats`. Do not extract
+amounts from the human-readable message when structured details are present.
 
 ### Cashu Token Redemption Errors
 

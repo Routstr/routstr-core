@@ -39,10 +39,53 @@ would genuinely conflict needs a dedicated branch here.
 """
 
 import math
+from dataclasses import dataclass
+from typing import TypedDict
 
 from pydantic.v1 import BaseModel
 
 from .usage_multipliers import pricing_dimensions
+
+
+class UsageSources(TypedDict):
+    input_source: str
+    output_source: str
+    cache_read_source: str
+    cache_creation_source: str
+
+
+@dataclass(frozen=True)
+class UsageFieldPresence:
+    """Where each canonical usage count came from: reported, estimated or missing."""
+
+    input_source: str = "missing"
+    output_source: str = "missing"
+    cache_read_source: str = "missing"
+    cache_creation_source: str = "missing"
+
+    def sources_dict(self) -> UsageSources:
+        return {
+            "input_source": self.input_source,
+            "output_source": self.output_source,
+            "cache_read_source": self.cache_read_source,
+            "cache_creation_source": self.cache_creation_source,
+        }
+
+    def merged(self, other: "UsageFieldPresence") -> "UsageFieldPresence":
+        def stronger(a: str, b: str) -> str:
+            for label in ("reported", "estimated"):
+                if label in (a, b):
+                    return label
+            return "missing"
+
+        return UsageFieldPresence(
+            input_source=stronger(self.input_source, other.input_source),
+            output_source=stronger(self.output_source, other.output_source),
+            cache_read_source=stronger(self.cache_read_source, other.cache_read_source),
+            cache_creation_source=stronger(
+                self.cache_creation_source, other.cache_creation_source
+            ),
+        )
 
 
 class NormalizedUsage(BaseModel):
@@ -52,6 +95,7 @@ class NormalizedUsage(BaseModel):
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    cache_write_1h_tokens: int = 0
     web_search_requests: int = 0
     # Price-relevant variants the response reported, e.g. {"speed": "fast"}.
     pricing_dimensions: dict[str, str] = {}
@@ -78,6 +122,69 @@ def parse_token_count(value: object) -> int:
             return 0
         return max(0, int(parsed)) if math.isfinite(parsed) else 0
     return 0
+
+
+def _is_parseable_token_count(value: object) -> bool:
+    """Return whether a value is a usable non-negative token count."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    if isinstance(value, float):
+        return math.isfinite(value) and value >= 0
+    if isinstance(value, str):
+        try:
+            parsed = float(value)
+        except ValueError:
+            return False
+        return math.isfinite(parsed) and parsed >= 0
+    return False
+
+
+def _has_parseable_field(data: object, *fields: str) -> bool:
+    if not isinstance(data, dict):
+        return False
+    return any(
+        field in data and _is_parseable_token_count(data[field]) for field in fields
+    )
+
+
+def usage_field_presence(usage_data: object) -> UsageFieldPresence:
+    """Label each raw usage count before numeric normalization.
+
+    Explicit zero is reported, while an absent or unusable value is missing.
+    """
+    if not isinstance(usage_data, dict):
+        return UsageFieldPresence()
+
+    found = "estimated" if usage_data.get("estimated") is True else "reported"
+
+    def source(present: bool) -> str:
+        return found if present else "missing"
+
+    prompt_details = usage_data.get("prompt_tokens_details")
+    input_details = usage_data.get("input_tokens_details")
+    return UsageFieldPresence(
+        input_source=source(
+            _has_parseable_field(usage_data, "prompt_tokens", "input_tokens")
+        ),
+        output_source=source(
+            _has_parseable_field(usage_data, "completion_tokens", "output_tokens")
+        ),
+        cache_read_source=source(
+            _has_parseable_field(usage_data, "cache_read_input_tokens")
+            or _has_parseable_field(prompt_details, "cached_tokens")
+            or _has_parseable_field(input_details, "cached_tokens")
+            or _has_parseable_field(usage_data, "prompt_cache_hit_tokens")
+        ),
+        cache_creation_source=source(
+            _has_parseable_field(usage_data, "cache_creation_input_tokens")
+            or _has_parseable_field(
+                prompt_details, "cache_creation_tokens", "cache_write_tokens"
+            )
+            or _has_parseable_field(input_details, "cache_write_tokens")
+        ),
+    )
 
 
 def _first_token_count(usage_data: dict, *fields: str) -> int:
@@ -166,6 +273,12 @@ def normalize_usage(usage_data: object) -> NormalizedUsage | None:
     else:
         input_tokens = parse_token_count(usage_data.get("input_tokens", 0))
 
+    cache_creation = usage_data.get("cache_creation")
+    cache_write_1h_tokens = (
+        parse_token_count(cache_creation.get("ephemeral_1h_input_tokens"))
+        if isinstance(cache_creation, dict)
+        else 0
+    )
     server_tool_use = usage_data.get("server_tool_use")
     web_search_requests = (
         parse_token_count(server_tool_use.get("web_search_requests"))
@@ -178,6 +291,7 @@ def normalize_usage(usage_data: object) -> NormalizedUsage | None:
         output_tokens=output_tokens,
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
+        cache_write_1h_tokens=cache_write_1h_tokens,
         web_search_requests=web_search_requests,
         pricing_dimensions=pricing_dimensions(usage_data),
     )

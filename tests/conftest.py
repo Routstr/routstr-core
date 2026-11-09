@@ -7,6 +7,7 @@ absent one) override this per-test via ``monkeypatch``.
 """
 
 import os
+from pathlib import Path
 from typing import Iterator
 
 import pytest
@@ -16,6 +17,16 @@ TEST_SECRET_KEY = "l_Tkp-7xmjcQ-IFhr6qhILrU8HPRbEmYMrfSbo_5srU="
 TEST_SECRET_KEY_ALT = "_Teyrky_iToeDK51Tj1FsI9MJ340_cqKGmeher-a7MQ="
 
 os.environ.setdefault("ROUTSTR_SECRET_KEY", TEST_SECRET_KEY)
+# litellm otherwise downloads its cost map on import, so upstream edits to that
+# file change the rates and context windows the tests assert on.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_terminal_loss_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TERMINAL_OUTCOME_LOSS_DIR", str(tmp_path / "terminal-losses"))
 
 
 @pytest.fixture(autouse=True)

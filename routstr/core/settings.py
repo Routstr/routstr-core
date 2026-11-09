@@ -469,6 +469,13 @@ class SettingsRow(BaseModel):
 # Single, concrete settings instance that callers import directly
 settings: Settings = resolve_bootstrap()
 
+SETTINGS_BOOTSTRAP_LOCK_KEY = 0x726F757473747222
+_SETTINGS_UPDATE_ATTEMPTS = 5
+
+
+class SettingsConflictError(RuntimeError):
+    """Concurrent workers repeatedly changed settings before this save."""
+
 
 class SettingsService:
     _current: Settings | None = None
@@ -485,6 +492,14 @@ class SettingsService:
         async with cls._lock:
             from sqlmodel import text
 
+            if db_session.get_bind().dialect.name == "postgresql":
+                # cls._lock only covers one process. Workers booting together
+                # would otherwise all see no row and race to insert id=1.
+                await db_session.exec(  # type: ignore
+                    text("SELECT pg_advisory_xact_lock(:key)").bindparams(
+                        key=SETTINGS_BOOTSTRAP_LOCK_KEY
+                    )
+                )
             await db_session.exec(  # type: ignore
                 text(
                     "CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
@@ -595,22 +610,59 @@ class SettingsService:
                 for k, v in _normalize_settings_data(partial).items()
                 if k not in FIXED_FIELDS
             }
-            candidate_dict = {**current.dict(), **sanitized_partial}
-            candidate = Settings(**candidate_dict)
             from sqlmodel import text
 
-            # Ensure primary_mint reflects candidate mints if missing
-            if not candidate.primary_mint:
-                candidate.primary_mint = _compute_primary_mint(candidate.cashu_mints)
-
-            await db_session.exec(  # type: ignore
-                text(
-                    "UPDATE settings SET data = :data, updated_at = :updated_at WHERE id = 1"
-                ).bindparams(
-                    data=json.dumps(_strip_secret_fields(candidate.dict())),
-                    updated_at=datetime.now(timezone.utc),
+            for _attempt in range(_SETTINGS_UPDATE_ATTEMPTS):
+                row = await db_session.exec(  # type: ignore
+                    text("SELECT data FROM settings WHERE id = 1")
                 )
-            )
+                row = row.first()
+                if row is None:
+                    raise RuntimeError("Settings row missing")
+                seen = row[0]
+                # Build on the saved document: another worker may have saved
+                # since this one loaded, and its choices must survive this edit.
+                stored = (
+                    _strip_secret_fields(_normalize_settings_data(json.loads(seen)))
+                    if isinstance(seen, str)
+                    else {}
+                )
+                candidate = Settings(
+                    **{**current.dict(), **stored, **sanitized_partial}
+                )
+
+                # Ensure primary_mint reflects candidate mints if missing
+                if not candidate.primary_mint:
+                    candidate.primary_mint = _compute_primary_mint(
+                        candidate.cashu_mints
+                    )
+
+                saved = await db_session.exec(  # type: ignore
+                    text(
+                        "UPDATE settings SET data = :data, updated_at = :updated_at "
+                        "WHERE id = 1 AND data = :seen"
+                    ).bindparams(
+                        data=json.dumps(_strip_secret_fields(candidate.dict())),
+                        updated_at=datetime.now(timezone.utc),
+                        seen=seen,
+                    )
+                )
+                if saved.rowcount == 1:
+                    break
+                await db_session.rollback()
+            else:
+                raise SettingsConflictError(
+                    "Settings changed concurrently; reload and retry the save"
+                )
+            if (
+                "enable_analytics_sharing" in sanitized_partial
+                and not candidate.enable_analytics_sharing
+            ):
+                # Saved with the opt-out, so a worker that read older flags
+                # cannot activate sharing after it.
+                from ..nostr.analytics_v2_delivery import fence_analytics_v2_opt_out
+
+                await fence_analytics_v2_opt_out(db_session)
             await db_session.commit()
             # Update in-place. Env-only fields (e.g. DB pool sizing) are never
             # applied here: the engine pool is already built at boot from env,
@@ -622,6 +674,27 @@ class SettingsService:
                 setattr(settings, k, v)
             cls._current = settings
             return settings
+
+    @classmethod
+    async def refresh(cls, db_session: AsyncSession, fields: tuple[str, ...]) -> None:
+        """Adopt saved fields; an update only reaches the worker that made it."""
+        from sqlmodel import text
+
+        async with cls._lock:
+            row = await db_session.exec(text("SELECT data FROM settings WHERE id = 1"))  # type: ignore
+            row = row.first()
+            if row is None:
+                return
+            data = json.loads(row[0]) if isinstance(row[0], str) else dict(row[0])
+            if not isinstance(data, dict):
+                raise ValueError("Stored settings must be an object")
+            saved = _strip_secret_fields(_normalize_settings_data(data))
+            refreshed = {name: saved[name] for name in fields if name in saved}
+            # Validate all requested values before changing any live field. In
+            # particular, a saved string "false" must never become a truthy flag.
+            candidate = Settings(**{**settings.dict(), **refreshed})
+            for name in refreshed:
+                setattr(settings, name, getattr(candidate, name))
 
     @classmethod
     async def reload_from_db(cls, db_session: AsyncSession) -> Settings:

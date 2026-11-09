@@ -1,9 +1,11 @@
 from types import TracebackType
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import httpx
 import pytest
+from fastapi import Response
 
+from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream.routstr import RoutstrUpstreamProvider
 
 
@@ -110,3 +112,62 @@ def test_supports_anthropic_messages_natively() -> None:
     """Routstr nodes serve ``/v1/messages`` directly, so the proxy must
     forward as-is instead of round-tripping through litellm."""
     assert RoutstrUpstreamProvider.supports_anthropic_messages is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_responses_through_a_routstr_upstream_are_billed(stream: bool) -> None:
+    provider = RoutstrUpstreamProvider(
+        base_url="https://node.example", api_key="sk-upstream"
+    )
+    model = Model(
+        id="gpt-test",
+        name="gpt-test",
+        created=0,
+        description="",
+        context_length=64_000,
+        architecture=Architecture(
+            modality="text->text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="Other",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.001, completion=0.002),
+        sats_pricing=Pricing(prompt=0.001, completion=0.002),
+    )
+    request = MagicMock(method="POST", query_params={})
+    request.state.request_id = None
+    upstream = httpx.Response(
+        200,
+        content=b"data: {}\n\n" if stream else b'{"object": "response"}',
+        headers={"content-type": "text/event-stream" if stream else "application/json"},
+        request=httpx.Request("POST", "https://node.example/v1/responses"),
+    )
+    handler = (
+        "handle_streaming_responses_completion"
+        if stream
+        else "handle_non_streaming_responses_completion"
+    )
+
+    with (
+        patch("httpx.AsyncClient.send", AsyncMock(return_value=upstream)),
+        patch.object(provider, handler, AsyncMock(return_value=Response())) as billed,
+        patch.object(
+            provider, "_generic_streaming_response", AsyncMock(return_value=Response())
+        ) as unbilled,
+    ):
+        await provider.forward_responses_request(
+            request,
+            "v1/responses",
+            {},
+            b"{}",
+            Mock(hashed_key="key-hash"),
+            1000,
+            AsyncMock(),
+            model,
+            reservation_snapshot=Mock(),
+        )
+
+    billed.assert_awaited_once()
+    unbilled.assert_not_awaited()
