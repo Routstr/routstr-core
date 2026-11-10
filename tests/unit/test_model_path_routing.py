@@ -15,6 +15,7 @@ from routstr.core.error_scope import (
     ERROR_SCOPE_UPSTREAM,
     UPSTREAM_UNAVAILABLE,
 )
+from routstr.payment.models import Pricing
 from routstr.upstream.model_paths import decode_model_path, encode_model_path
 
 from .proxy_test_utils import mock_request_stream, patch_proxy_session
@@ -422,7 +423,12 @@ async def test_cashu_pin_reaches_http_transport(
         return httpx.Response(status_code, json={"error": "test"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-    model = MagicMock(id=MODEL_ID, forwarded_model_id=None, canonical_slug=None)
+    model = MagicMock(
+        id=MODEL_ID,
+        forwarded_model_id=None,
+        canonical_slug=None,
+        pricing=Pricing(prompt=0.0, completion=0.0),
+    )
     request = _make_request(
         {
             "x-cashu": "test-token",
@@ -466,6 +472,7 @@ async def test_cashu_pin_reaches_http_transport(
     assert json.loads(sent[0].content)["provider"] == {
         "order": ["deepinfra/fp8"],
         "allow_fallbacks": False,
+        "max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0},
     }
     assert "x-routstr-model-path" not in sent[0].headers
     fallback.handle_x_cashu.assert_not_awaited()

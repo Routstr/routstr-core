@@ -233,9 +233,38 @@ def test_openrouter_sends_image_generations_to_its_native_images_route() -> None
     assert provider.normalize_request_path("v1/chat/completions") == "chat/completions"
 
 
-def test_openrouter_leaves_chat_routing_alone() -> None:
-    provider = OpenRouterUpstreamProvider(api_key="k")
-    body = json.dumps({"model": "test-model", "messages": []}).encode()
-    out = provider.prepare_request_body(body, CHAT_MODEL)
-    assert out is not None
-    assert "provider" not in json.loads(out)
+def test_openrouter_caps_chat_at_the_listed_price() -> None:
+    provider = OpenRouterUpstreamProvider(api_key="k", provider_fee=1.1)
+    listed = CHAT_MODEL.copy(
+        update={"pricing": Pricing(prompt=0.0699e-6 * 1.1, completion=1.4e-6 * 1.1)}
+    )
+
+    def routing(extra: dict) -> dict:
+        body = json.dumps({"model": "test-model", "messages": [], **extra}).encode()
+        out = provider.prepare_request_body(body, listed)
+        assert out is not None
+        return json.loads(out)["provider"]
+
+    cap = routing({})["max_price"]
+    assert cap == pytest.approx(
+        {"prompt": 0.0699, "completion": 1.4, "request": 0, "image": 0}, abs=1e-9
+    )
+    assert cap["prompt"] >= 0.0699 and cap["completion"] >= 1.4
+    responses = provider.prepare_responses_request_body(
+        json.dumps({"model": "test-model", "input": "hi"}).encode(), listed
+    )
+    assert responses is not None
+    assert json.loads(responses)["provider"]["max_price"] == cap
+
+    own = routing(
+        {
+            "provider": {
+                "order": ["wafer/us"],
+                "sort": "throughput",
+                "max_price": {"prompt": 0.05, "completion": 9},
+            }
+        }
+    )
+    assert own["order"] == ["wafer/us"] and own["sort"] == "throughput"
+    assert own["max_price"]["prompt"] == 0.05
+    assert own["max_price"]["completion"] == pytest.approx(1.4, abs=1e-9)
