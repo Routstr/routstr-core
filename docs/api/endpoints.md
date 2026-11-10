@@ -109,11 +109,14 @@ data: [DONE]
 ### Paid X-Cashu Settlement Failure
 
 Paid `POST /v1/chat/completions` and `POST /v1/responses` requests can return
-`503` with `error.type = "internal_error"` and
+`503` with `X-Routstr-Error-Scope: node`, a top-level `request_id`,
+`error.type = "internal_error"`, and
 `error.code = "payment_settlement_failed"` when inference succeeded but the
 node could not durably settle the payment, so the inference response is
 withheld. The original `X-Cashu` token is already spent: do not resend it.
 Keep the token and claim the stored refund with `POST /v1/balance/refund`.
+For EHBP requests, this is a plaintext router-generated response without
+`Ehbp-Response-Nonce`.
 
 ## Completions (Coming Soon)
 
