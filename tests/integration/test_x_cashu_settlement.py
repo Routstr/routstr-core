@@ -293,6 +293,31 @@ async def test_cancelled_request_refunds_in_full_before_reraising(
     assert (await _claim(integration_session))["sats"] == str(AMOUNT)
 
 
+async def test_cancellation_during_pending_write_keeps_refund_claimable(
+    wallet: FakeWallet, integration_session: AsyncSession, api: str
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_store(**kwargs: Any) -> bool:
+        started.set()
+        await release.wait()
+        return await store_cashu_transaction(**kwargs)
+
+    with patch("routstr.upstream.base.store_cashu_transaction", delayed_store):
+        task = asyncio.create_task(_pay(api, _completion()))
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert wallet.mints == [AMOUNT]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+    assert (await _claim(integration_session))["sats"] == str(AMOUNT)
+
+
 async def test_cancellation_during_refund_mint_never_mints_twice(
     wallet: FakeWallet, integration_session: AsyncSession, api: str
 ) -> None:
@@ -725,6 +750,39 @@ async def test_failed_recovery_mint_is_terminal(
     assert wallet.mints == [AMOUNT]
 
 
+async def test_live_refund_repairs_stale_closure_race(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    await _seed(integration_session, settlement=xs.REFUNDING, age=STALE)
+    checked = asyncio.Event()
+    release = asyncio.Event()
+    real_has_stored_refund = xs._has_stored_refund
+
+    async def stale_check(request_id: str) -> bool:
+        stored = await real_has_stored_refund(request_id)
+        checked.set()
+        await release.wait()
+        return stored
+
+    with patch.object(xs, "_has_stored_refund", stale_check):
+        closing = asyncio.create_task(
+            xs._close_stale_refund(await _payment(integration_session))
+        )
+        await asyncio.wait_for(checked.wait(), 5)
+        await store_cashu_transaction(
+            token="cashuBlive", amount=15, unit="sat", typ="out", request_id="req-876"
+        )
+        release.set()
+        await closing
+
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    await xs.finish_refund("req-876", refunded=True)
+
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+    assert await total_user_liability(integration_session) == 0
+    assert (await _claim(integration_session))["token"] == "cashuBlive"
+
+
 @pytest.mark.parametrize("stored", [False, True])
 async def test_interrupted_refund_is_never_minted_again(
     wallet: FakeWallet, integration_session: AsyncSession, stored: bool
@@ -975,3 +1033,28 @@ async def test_ehbp_cancellation_refunds_in_full(
 
     assert wallet.mints == [AMOUNT]
     assert (await _payment(integration_session)).settlement == xs.REFUNDED
+
+
+async def test_ehbp_cancellation_during_pending_write_keeps_refund_claimable(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_store(**kwargs: Any) -> bool:
+        started.set()
+        await release.wait()
+        return await store_cashu_transaction(**kwargs)
+
+    with patch.object(ehbp_module, "store_cashu_transaction", delayed_store):
+        task = asyncio.create_task(_ehbp_pay(AsyncMock(return_value=_ehbp_ok()), 5000))
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert wallet.mints == [AMOUNT]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+    assert (await _claim(integration_session))["sats"] == str(AMOUNT)

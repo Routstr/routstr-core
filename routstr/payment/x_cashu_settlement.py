@@ -126,7 +126,8 @@ async def finish_refund(request_id: str | None, refunded: bool) -> None:
     if request_id is None:
         return
     try:
-        await _transition(request_id, (REFUNDING,), REFUNDED if refunded else FAILED)
+        from_states = (REFUNDING, FAILED) if refunded else (REFUNDING,)
+        await _transition(request_id, from_states, REFUNDED if refunded else FAILED)
     except Exception:
         # Recovery resolves a stale refunding row without minting again.
         logger.exception(
@@ -179,6 +180,25 @@ def run_to_completion(work: Awaitable[T]) -> asyncio.Future[T]:
     # A cancelled caller may never read the outcome; the failure is logged.
     task.add_done_callback(lambda t: t.cancelled() or t.exception())
     return task
+
+
+async def await_to_completion(work: Awaitable[T]) -> T:
+    """Finish critical settlement work before propagating caller cancellation."""
+    task = run_to_completion(work)
+    cancelled = False
+    while not task.done():
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        else:
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 def payment_started() -> None:

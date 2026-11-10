@@ -230,10 +230,11 @@ class _XCashuRefund:
     async def settle_cancelled(
         self, amount: int, unit: str, mint: str | None, request_id: str | None
     ) -> None:
-        """Refund a cancelled request in full: no response reached the client.
+        """Settle a cancelled request without minting twice.
 
-        Every X-Cashu path settles before the response starts. A refund that
-        already started is awaited instead of minting a second one.
+        Refund the payment in full unless a change refund was already minting.
+        In that case, await that refund and let the charge stand because
+        inference already completed.
         """
         try:
             await self.send(amount, unit, mint, request_id=request_id)
@@ -5790,15 +5791,17 @@ class BaseUpstreamProvider:
             headers = self.prepare_headers(dict(request.headers))
 
             request_id = getattr(request.state, "request_id", None)
-            await store_cashu_transaction(
-                token=x_cashu_token,
-                amount=amount,
-                unit=unit,
-                mint_url=mint,
-                typ="in",
-                request_id=request_id,
-                collected=True,
-                settlement=x_cashu_settlement.PENDING if request_id else None,
+            await x_cashu_settlement.await_to_completion(
+                store_cashu_transaction(
+                    token=x_cashu_token,
+                    amount=amount,
+                    unit=unit,
+                    mint_url=mint,
+                    typ="in",
+                    request_id=request_id,
+                    collected=True,
+                    settlement=x_cashu_settlement.PENDING if request_id else None,
+                )
             )
 
             logger.info(
@@ -6610,15 +6613,17 @@ class BaseUpstreamProvider:
             headers = self.prepare_headers(dict(request.headers))
 
             request_id = getattr(request.state, "request_id", None)
-            await store_cashu_transaction(
-                token=x_cashu_token,
-                amount=amount,
-                unit=unit,
-                mint_url=mint,
-                typ="in",
-                request_id=request_id,
-                collected=True,
-                settlement=x_cashu_settlement.PENDING if request_id else None,
+            await x_cashu_settlement.await_to_completion(
+                store_cashu_transaction(
+                    token=x_cashu_token,
+                    amount=amount,
+                    unit=unit,
+                    mint_url=mint,
+                    typ="in",
+                    request_id=request_id,
+                    collected=True,
+                    settlement=x_cashu_settlement.PENDING if request_id else None,
+                )
             )
 
             logger.info(

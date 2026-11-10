@@ -1452,15 +1452,17 @@ async def forward_ehbp_x_cashu_request(
     try:
         amount, unit, mint = await recieve_token(x_cashu_token)
         redeemed = True
-        await store_cashu_transaction(
-            token=x_cashu_token,
-            amount=amount,
-            unit=unit,
-            mint_url=mint,
-            typ="in",
-            request_id=request_id,
-            collected=True,
-            settlement=x_cashu_settlement.PENDING if request_id else None,
+        await x_cashu_settlement.await_to_completion(
+            store_cashu_transaction(
+                token=x_cashu_token,
+                amount=amount,
+                unit=unit,
+                mint_url=mint,
+                typ="in",
+                request_id=request_id,
+                collected=True,
+                settlement=x_cashu_settlement.PENDING if request_id else None,
+            )
         )
 
         headers = upstream.prepare_headers(dict(request.headers))  # type: ignore[attr-defined]

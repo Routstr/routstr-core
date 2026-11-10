@@ -57,6 +57,25 @@ legacy status behavior.
 | 502 | Bad Gateway | Gateway-level failure |
 | 503 | Service Unavailable | Temporary outage |
 
+### Paid inference settlement failure
+
+For paid `POST /v1/chat/completions` and `POST /v1/responses` requests, this
+specific `503` is not safe to retry with the same payment:
+
+```json
+{
+  "error": {
+    "type": "internal_error",
+    "message": "The payment could not be settled, so the response was withheld. Claim the refund at /v1/balance/refund with the original X-Cashu token.",
+    "code": "payment_settlement_failed"
+  }
+}
+```
+
+The original `X-Cashu` token was already spent. Do not resend it. Retain it and
+claim the refund with `POST /v1/balance/refund`; the original token identifies
+the stored refund.
+
 ### Upstream attribution (424 Failed Dependency)
 
 When an upstream provider fails, this node is still healthy, so the failure is
