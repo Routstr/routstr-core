@@ -193,6 +193,8 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
 
     if isinstance(detail, dict) and "error" in detail:
         content = {"detail": detail, "error": detail["error"]}
+        if "payment_request_id" in detail:
+            content["payment_request_id"] = detail["payment_request_id"]
     else:
         content = {"detail": detail}
     content["request_id"] = request_id
