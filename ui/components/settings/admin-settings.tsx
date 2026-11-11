@@ -100,14 +100,14 @@ export function AdminSettings() {
     loadSettings();
   }, []);
 
-  // A paused publisher only logs once per cause, so poll its state here.
+  const loadAnalyticsStatus = () =>
+    AdminService.getAnalyticsSharingStatus()
+      .then(setAnalyticsStatus)
+      .catch(() => setAnalyticsStatus(null));
+
   useEffect(() => {
-    const loadStatus = () =>
-      AdminService.getAnalyticsSharingStatus()
-        .then(setAnalyticsStatus)
-        .catch(() => setAnalyticsStatus(null));
-    loadStatus();
-    const interval = setInterval(loadStatus, 15_000);
+    loadAnalyticsStatus();
+    const interval = setInterval(loadAnalyticsStatus, 15_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -156,6 +156,8 @@ export function AdminSettings() {
       )) as SettingsData;
       setSettings(updatedData);
       setInitialSettings(updatedData);
+      setAnalyticsStatus(null);
+      loadAnalyticsStatus();
       toast.success('Settings saved successfully');
     } catch (err) {
       const message =
@@ -416,6 +418,7 @@ export function AdminSettings() {
   const cashuMintsChanged = hasFieldChanged('cashu_mints');
   const relaysChanged = hasFieldChanged('relays');
   const analyticsSharingChanged = hasFieldChanged('enable_analytics_sharing');
+  const shownAnalyticsStatus = analyticsSharingChanged ? null : analyticsStatus;
   const payoutChanged = PAYOUT_KEYS.some(hasFieldChanged);
   const advancedKeys = Object.keys(settings).filter(
     (key) => !HANDLED_KEYS.includes(key) && !IGNORED_KEYS.includes(key)
@@ -884,20 +887,22 @@ export function AdminSettings() {
                 }
               />
             </div>
-            {analyticsStatus?.state === 'publishing' ? (
+            {shownAnalyticsStatus?.state === 'publishing' ? (
               <p className='text-muted-foreground pt-2 text-sm'>
                 Publishing as{' '}
-                <span className='font-mono'>{analyticsStatus.provider_id}</span>
+                <span className='font-mono'>
+                  {shownAnalyticsStatus.provider_id}
+                </span>
               </p>
             ) : null}
-            {analyticsStatus?.state === 'paused' ||
-            analyticsStatus?.state === 'no_identity' ? (
+            {shownAnalyticsStatus?.state === 'paused' ||
+            shownAnalyticsStatus?.state === 'no_identity' ? (
               <Alert variant='destructive' className='mt-3'>
                 <AlertCircle className='h-4 w-4' />
                 <AlertDescription>
-                  Stats publishing is paused: {analyticsStatus.reason}
-                  {analyticsStatus.retry_in_seconds
-                    ? ` (retrying in ${analyticsStatus.retry_in_seconds}s)`
+                  Stats publishing is paused: {shownAnalyticsStatus.reason}
+                  {shownAnalyticsStatus.retry_in_seconds
+                    ? ` (retrying in ${shownAnalyticsStatus.retry_in_seconds}s)`
                     : ''}
                 </AlertDescription>
               </Alert>

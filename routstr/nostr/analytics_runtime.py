@@ -222,6 +222,7 @@ class AnalyticsCoordinator:
         except Exception:
             await self._stop_public(disable=False)
             self._retry_at = time.monotonic() + 60
+            self._paused_reason = "Stats publisher failed to start; see node logs"
             raise
 
     async def _pause(self, reason: str, *, disable: bool) -> None:
@@ -233,11 +234,6 @@ class AnalyticsCoordinator:
             logger.warning("Stats sharing paused", extra={"reason": reason})
 
     def status(self) -> dict[str, object]:
-        """Report why stats are or are not publishing, for the admin UI.
-
-        The pause reason is otherwise logged only once per cause, so an
-        operator cannot tell a stuck publisher from a healthy one.
-        """
         state: str
         reason: str | None = None
         if not settings.enable_analytics_sharing:

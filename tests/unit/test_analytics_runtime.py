@@ -891,6 +891,27 @@ async def test_status_reports_why_stats_are_not_publishing(
 
 
 @pytest.mark.asyncio
+async def test_status_reports_publisher_start_failure_as_paused(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fail(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("activation failed")
+
+    await node.coordinator.prepare_startup()
+    monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
+    monkeypatch.setattr(runtime.settings, "provider_id", "stats-test-node")
+    assert node.coordinator.status()["state"] == "starting"
+
+    monkeypatch.setattr(runtime, "activate_analytics_v2_sharing", fail)
+    with pytest.raises(RuntimeError):
+        await node.coordinator.sync_once()
+    status = node.coordinator.status()
+    assert status["state"] == "paused"
+    assert "failed to start" in str(status["reason"])
+    assert isinstance(status["retry_in_seconds"], int)
+
+
+@pytest.mark.asyncio
 async def test_admin_status_endpoint_exposes_pause_reason(
     node: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
