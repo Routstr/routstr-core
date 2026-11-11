@@ -82,24 +82,24 @@ class Settings(BaseSettings):
     confidential_sidecar_token: str = Field(
         default="", env="CONFIDENTIAL_SIDECAR_TOKEN"
     )
-    # Denial-of-service limit: confidential sessions per client address (an
-    # IPv6 address by its /64) that have not been used yet (from the setup's
-    # reservation until the credential record is written). Pre-warmed
-    # sessions count; connections still waiting for their setup are limited
-    # separately. 0 disables the limit.
+    # Denial-of-service limit: confidential connections per client address
+    # (an IPv6 address by its /64) that have not been used yet (from the
+    # setup until the connection's first request is written to the provider
+    # in full). Pre-warmed connections count; sockets still waiting for
+    # their setup are limited separately. 0 disables the limit.
     confidential_max_unused_per_ip: int = Field(
         default=12, env="CONFIDENTIAL_MAX_UNUSED_PER_IP"
     )
-    # Pricing of confidential sessions (all off by default). A session moves
-    # ~22 MB of 2PC data and costs the node ~0.5 s of CPU before the provider
-    # sees anything. The session fee is added to a completed request and is
-    # the whole charge for a provider refusal (401/402/403/429/503); the
-    # abandon fee (never below the session fee, defaulting to it) is charged
-    # instead for any other 4xx and when a session the sidecar accepted ends
-    # without a request reaching the provider (anti-DoS for armed, pre-warmed
-    # sessions). Any other 5xx is charged the full reservation. The surcharge
-    # raises the per-token rates of the signed offer. All are published in
-    # the signed offer.
+    # Pricing of confidential connections (fees off by default). A connection
+    # moves ~16 MB of 2PC data and costs the node CPU before the provider
+    # sees anything. The session fee is charged once per connection, with its
+    # first settlement: added to a completed request, and the whole charge
+    # for a provider refusal (401/402/403/429/503). The abandon fee (never
+    # below the session fee, defaulting to it) is charged instead for any
+    # other 4xx and when a request the sidecar accepted is dropped before the
+    # provider had it. Any other 5xx is charged the full reservation. The
+    # surcharge raises the per-token rates of the signed offer. All are
+    # published in the signed offer.
     confidential_session_fee_msat: int = Field(
         default=0, ge=0, env="CONFIDENTIAL_SESSION_FEE_MSAT"
     )
@@ -118,21 +118,22 @@ class Settings(BaseSettings):
     confidential_reserve_margin_tokens: int = Field(
         default=16, ge=0, env="CONFIDENTIAL_RESERVE_MARGIN_TOKENS"
     )
-    # ``http: 2`` connections (one two-party handshake, many requests). Opening
-    # one costs the node the same ~22 MB of garbled circuits as a session, so
-    # the setup reserves a deposit: released when the connection's first
-    # request reaches settlement, charged when the connection ends without one
+    # Connections (protocol v3: one two-party handshake per connection, one
+    # request on framing "1.1", many on framing "2"). Opening one costs the
+    # node ~16 MB of garbled circuits before any request exists, so the setup
+    # reserves a deposit: released when the connection's first request
+    # reaches settlement, charged when the connection ends without one
     # (unless the node, the sidecar or the provider failed first). -1 (the
-    # default) uses the abandon fee, which is the price this node already puts
-    # on a handshake nobody used; 0 means no deposit. The node closes a
-    # connection that had no request in flight for the idle timeout (never
-    # longer than the sidecar's own ``h2.idle_secs``). Both are published in
-    # the signed offer's ``h2`` block.
-    confidential_h2_connection_deposit_msat: int = Field(
-        default=-1, ge=-1, env="CONFIDENTIAL_H2_CONNECTION_DEPOSIT_MSAT"
+    # default) uses the larger of the abandon fee, the session fee and
+    # 1000 msat; 0 means no deposit. The node closes a framing-"2" connection
+    # that had no request in flight for the idle timeout (never longer than
+    # the sidecar's own ``h2.idle_secs``). Both are top-level fields of the
+    # signed offer.
+    confidential_connection_deposit_msat: int = Field(
+        default=-1, ge=-1, env="CONFIDENTIAL_CONNECTION_DEPOSIT_MSAT"
     )
-    confidential_h2_idle_timeout_s: int = Field(
-        default=120, ge=10, env="CONFIDENTIAL_H2_IDLE_TIMEOUT_S"
+    confidential_idle_timeout_s: int = Field(
+        default=120, ge=10, env="CONFIDENTIAL_IDLE_TIMEOUT_S"
     )
     # Peers (reverse proxies) whose client-address header is believed. Any
     # other peer is identified by its own address. Empty by default: a peer
