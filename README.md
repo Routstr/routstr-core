@@ -23,8 +23,7 @@ If you are a user/developer, you just point an OpenAI-compatible SDK at a Routst
 Choose a node from the [provider directory](https://routstr.com/providers). Replace
 `https://provider.example` below with that node's URL; it is a placeholder, not a
 hosted endpoint. Append `/v1` for the OpenAI-compatible base URL. Check the node's
-`/v1/models` endpoint before sending payment. `api.routstr.com` is currently
-unavailable and should not be used as a default.
+`/v1/models` endpoint before sending payment.
 
 For the runnable Python scripts, follow the [examples setup](examples/README.md)
 and set `API_URL` explicitly.
