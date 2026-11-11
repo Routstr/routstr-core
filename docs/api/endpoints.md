@@ -8,11 +8,16 @@ Routstr provides OpenAI-compatible endpoints with Bitcoin/eCash payment integrat
 
 ### Base URL
 
-All endpoints use the base URL:
+Choose a node from the [provider directory](https://routstr.com/providers) and
+append `/v1` to its URL for the OpenAI-compatible base URL:
 
 ```text
-https://api.routstr.com/v1
+https://provider.example/v1
 ```
+
+`https://provider.example` is a placeholder; replace it with your chosen node's URL.
+Check `/v1/models` before sending payment. `api.routstr.com` is currently unavailable,
+not a default endpoint.
 
 ### Authentication
 

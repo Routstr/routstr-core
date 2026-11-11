@@ -17,7 +17,11 @@ Cashu ([cashu.me](https://cashu.me)) or Lightning ([Strike](https://strike.me), 
 
 ### 🌐 Provider
 
-A Routstr node, e.g. `https://api.routstr.com`
+Choose a Routstr node from the [provider directory](https://routstr.com/providers).
+Replace `https://provider.example` in this guide with your chosen node's URL;
+it is a placeholder, not a hosted endpoint. Check the node's `/v1/models` endpoint
+before sending payment. `api.routstr.com` is currently unavailable and should not
+be used as a default.
 
 ### 🤖 Client
 
@@ -69,13 +73,13 @@ Everything is priced in **millisatoshis**.
 You need an `api_key` with a balance.
 
 **Easiest: Use the Web UI**
-Visit the node's root page (e.g., [api.routstr.com](https://api.routstr.com)) or [chat.routstr.com](https://chat.routstr.com) → Settings to create a key visually with Lightning.
+Visit your chosen node's root page or [chat.routstr.com](https://chat.routstr.com) → Settings to create a key visually with Lightning.
 
 **Option A: Lightning Invoice (CLI)**
 Generate an invoice and pay it with any Lightning wallet.
 
 ```bash
-curl -X POST https://api.routstr.com/v2/lightning/invoice \
+curl -X POST https://provider.example/v2/lightning/invoice \
   -H 'Content-Type: application/json' \
   -d '{"amount_sats": 1000, "purpose": "create"}'
 ```
@@ -89,7 +93,7 @@ If you have a Cashu wallet, you can copy a token string (`cashuA...`) and use it
 - **Import**: Or exchange it for a standard `sk-...` key:
 
 ```bash
-curl "https://api.routstr.com/v1/balance/create?initial_balance_token=cashuA..."
+curl "https://provider.example/v1/balance/create?initial_balance_token=cashuA..."
 ```
 
 *Returns your `api_key` immediately.*
@@ -102,7 +106,7 @@ Use the standard OpenAI SDK, just changing the `base_url` and `api_key`.
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://api.routstr.com/v1",
+    base_url="https://provider.example/v1",
     api_key="sk-7f8e9d..."  # The key from Step 1
 )
 ```
@@ -121,7 +125,7 @@ response = client.chat.completions.create(
 When you are done, get your change back as a Cashu token.
 
 ```bash
-curl -X POST https://api.routstr.com/v1/balance/refund \
+curl -X POST https://provider.example/v1/balance/refund \
   -H "Authorization: Bearer sk-7f8e9d..."
 ```
 

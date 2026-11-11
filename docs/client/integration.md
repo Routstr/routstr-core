@@ -3,9 +3,14 @@
 Routstr is **OpenAI-compatible**. Almost any AI application, SDK, or tool that supports custom endpoints will work out of the box. Just change two things:
 
 ```
-BASE_URL  →  https://api.routstr.com/v1
+BASE_URL  →  https://provider.example/v1
 API_KEY   →  sk-... or cashuA...
 ```
+
+Choose a node from the [provider directory](https://routstr.com/providers).
+`https://provider.example` is a placeholder in all examples below: replace it with
+your chosen node's URL and check `/v1/models` before sending payment.
+`api.routstr.com` is currently unavailable and is not a default endpoint.
 
 **Both work as API keys:**
 - `sk-7f8e9d...` — Session key (from Lightning invoice or Cashu import)
@@ -20,13 +25,13 @@ If the app lets you set a base URL and API key, you're good to go.
 ### OpenAI SDK (Python/JS)
 
 ```python
-client = OpenAI(base_url="https://api.routstr.com/v1", api_key="sk-...")  # or any provider's URL
+client = OpenAI(base_url="https://provider.example/v1", api_key="sk-...")
 ```
 
 ### Claude Code
 
 ```bash
-export ANTHROPIC_BASE_URL=https://api.routstr.com/v1
+export ANTHROPIC_BASE_URL=https://provider.example/v1
 export ANTHROPIC_AUTH_TOKEN=sk-...
 ```
 
@@ -45,7 +50,7 @@ from openai import OpenAI
 
 # 1. Initialize with Routstr URL and your funded key
 client = OpenAI(
-    base_url="https://api.routstr.com/v1",
+    base_url="https://provider.example/v1",
     api_key="sk-7f8e9d..." 
 )
 
@@ -68,7 +73,7 @@ import OpenAI from 'openai';
 
 // You can use a session key OR a raw Cashu token directly
 const openai = new OpenAI({
-  baseURL: 'https://api.routstr.com/v1',
+  baseURL: 'https://provider.example/v1',
   apiKey: 'cashuA3s8jKx9...', // or 'sk-7f8e9d...'
 });
 
@@ -88,7 +93,7 @@ main();
 
 ```bash
 # Works with session key or raw Cashu token
-curl https://api.routstr.com/v1/chat/completions \
+curl https://provider.example/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer cashuA3s8jKx9..." \
   -d '{
