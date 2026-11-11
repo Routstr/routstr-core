@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +14,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 import routstr.auth as auth_module
 from routstr.auth import ReservationSnapshot, get_reservation_snapshot, pay_for_request
 from routstr.core.db import ApiKey, ReservationRelease
+from routstr.core.settings import settings
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream.base import BaseUpstreamProvider
 
@@ -462,6 +463,64 @@ async def test_reply_with_no_output_and_no_usage_is_free(
 
     balance, spent, reserved, _ = await _ledger(engine, snapshot)
     assert (balance, spent, reserved) == (BALANCE, 0, 0)
+    await engine.dispose()
+
+
+class _StallAfter(httpx.AsyncByteStream):
+    def __init__(self, first: bytes) -> None:
+        self.first = first
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield self.first
+        await asyncio.sleep(10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "body", "first"),
+    [
+        (
+            "v1/chat/completions",
+            CHAT_BODY,
+            b'data: {"id": "c1", "object": "chat.completion.chunk", "choices": '
+            b'[{"index": 0, "delta": {"role": "assistant", "content": ""}}]}\n\n',
+        ),
+        (
+            "v1/responses",
+            {"model": MODEL.id, "input": "hi"},
+            b'data: {"type": "response.created", "response": {"id": "resp_1"}}\n\n',
+        ),
+        (
+            "v1/messages",
+            MESSAGES_BODY,
+            b'event: message_start\ndata: {"type": "message_start", '
+            b'"message": {"id": "m", "content": []}}\n\n',
+        ),
+    ],
+)
+async def test_stall_with_no_output_still_pays_the_prompt(
+    monkeypatch: pytest.MonkeyPatch, path: str, body: dict, first: bytes
+) -> None:
+    """The node's idle timeout cut the upstream off after it read the prompt."""
+    monkeypatch.setattr(settings, "upstream_stream_idle_timeout_seconds", 0.05)
+    engine = await _engine()
+    upstream = httpx.Response(
+        200,
+        stream=_StallAfter(first),
+        headers={"content-type": "text/event-stream"},
+        request=httpx.Request("POST", "http://upstream"),
+    )
+    _, snapshot, _ = await _forward(
+        engine,
+        path,
+        {**body, "stream": True},
+        upstream,
+        native_messages=path.endswith("messages"),
+    )
+
+    balance, spent, reserved, _ = await _ledger(engine, snapshot)
+    assert 0 < spent < RESERVED
+    assert (balance + spent, reserved) == (BALANCE, 0)
     await engine.dispose()
 
 

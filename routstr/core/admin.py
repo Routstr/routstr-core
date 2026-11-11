@@ -52,6 +52,7 @@ from .ledger_analytics import get_ledger_usage_dashboard
 from .log_manager import log_manager
 from .logging import get_logger
 from .provider_slugs import allocate_unique_provider_slug
+from .redaction import SECRET_PLACEHOLDER
 from .settings import (
     SettingsConflictError,
     SettingsService,
@@ -500,6 +501,8 @@ async def withdraw(
             withdraw_request.amount, withdraw_request.unit, effective_mint
         )
     except ValueError as error:
+        if str(error).startswith("Too many small coins"):
+            raise HTTPException(status_code=400, detail=str(error)) from error
         if not str(error).startswith("No trusted mint has "):
             raise
         raise HTTPException(
@@ -937,7 +940,7 @@ def _serialize_provider(
         "slug": provider.slug,
         "provider_type": provider.provider_type,
         "base_url": provider.base_url,
-        "api_key": "[REDACTED]"
+        "api_key": SECRET_PLACEHOLDER
         if (redact_api_key and provider.api_key)
         else provider.api_key
         if not redact_api_key
@@ -1066,7 +1069,7 @@ async def _apply_provider_update(
         provider.provider_type = payload.provider_type
     if payload.base_url is not None:
         provider.base_url = payload.base_url
-    if payload.api_key is not None:
+    if payload.api_key is not None and payload.api_key != SECRET_PLACEHOLDER:
         provider.api_key = payload.api_key
     if payload.api_version is not None:
         provider.api_version = payload.api_version

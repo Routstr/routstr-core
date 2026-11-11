@@ -20,6 +20,7 @@ from .core.db import (
     accumulate_routstr_fee,
     create_session,
 )
+from .core.errors import build_payment_required_error
 from .core.settings import settings
 from .core.terminal_outcomes import (
     TerminalOutcomeContext,
@@ -68,17 +69,20 @@ def _format_msat_amount(amount: int) -> str:
     return f"{sats} sats ({amount} msats)"
 
 
-def _model_balance_error(required: int, available: int) -> dict[str, dict[str, str]]:
-    return {
-        "error": {
-            "message": (
-                f"Insufficient balance: {_format_msat_amount(required)} required "
-                f"for this model; {_format_msat_amount(available)} available."
-            ),
-            "type": "insufficient_quota",
-            "code": "insufficient_balance",
-        }
-    }
+def _model_balance_error(
+    required: int, available: int, *, reserved_msats: int = 0
+) -> dict:
+    """Compatibility wrapper for callers without request pricing context."""
+    return build_payment_required_error(
+        code="insufficient_balance",
+        message=(
+            f"Insufficient balance: {_format_msat_amount(required)} required "
+            f"for this model; {_format_msat_amount(available)} available."
+        ),
+        required_msats=required,
+        balance_msats=available + reserved_msats,
+        reserved_msats=reserved_msats,
+    )
 
 
 @dataclass(frozen=True)
@@ -226,7 +230,11 @@ def _validate_existing_cashu_key(
     if min_cost > 0 and existing_key.total_balance < min_cost:
         raise HTTPException(
             status_code=402,
-            detail=_model_balance_error(min_cost, existing_key.total_balance),
+            detail=_model_balance_error(
+                min_cost,
+                existing_key.total_balance,
+                reserved_msats=existing_key.reserved_balance,
+            ),
         )
 
     return existing_key
@@ -355,7 +363,11 @@ async def _validate_bearer_key_locked(
                 )
                 raise HTTPException(
                     status_code=402,
-                    detail=_model_balance_error(min_cost, existing_key.total_balance),
+                    detail=_model_balance_error(
+                        min_cost,
+                        existing_key.total_balance,
+                        reserved_msats=existing_key.reserved_balance,
+                    ),
                 )
 
             return existing_key
@@ -583,7 +595,12 @@ async def _validate_bearer_key_locked(
 
 
 async def pay_for_request(
-    key: ApiKey, cost_per_request: int, session: AsyncSession
+    key: ApiKey,
+    cost_per_request: int,
+    session: AsyncSession,
+    *,
+    model: str | None = None,
+    pricing: dict | None = None,
 ) -> ReservationSnapshot:
     """Reserve funds and return the durable identity for this request."""
     # Ensure cost_per_request is at least the minimum allowed request cost
@@ -617,13 +634,15 @@ async def pay_for_request(
 
         raise HTTPException(
             status_code=402,
-            detail={
-                "error": {
-                    "message": f"Insufficient balance: {cost_per_request} mSats required. {billing_key.total_balance} available. (reserved: {billing_key.reserved_balance})",
-                    "type": "insufficient_quota",
-                    "code": "insufficient_balance",
-                }
-            },
+            detail=build_payment_required_error(
+                code="insufficient_balance",
+                message=f"Insufficient balance: {cost_per_request} mSats required. {billing_key.total_balance} available. (reserved: {billing_key.reserved_balance})",
+                required_msats=cost_per_request,
+                balance_msats=billing_key.balance,
+                reserved_msats=billing_key.reserved_balance,
+                model=model,
+                pricing=pricing,
+            ),
         )
 
     # Check validity date
@@ -707,17 +726,18 @@ async def pay_for_request(
             },
         )
 
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "error": {
-                    "message": f"Insufficient balance: {cost_per_request} mSats required. {available_balance} available.",
-                    "type": "insufficient_quota",
-                    "code": "insufficient_balance",
-                    "available_balance": available_balance,
-                }
-            },
+        detail = build_payment_required_error(
+            code="insufficient_balance",
+            message=f"Insufficient balance: {cost_per_request} mSats required. {available_balance} available.",
+            required_msats=cost_per_request,
+            balance_msats=total_balance,
+            reserved_msats=reserved_balance,
+            model=model,
+            pricing=pricing,
         )
+        # Preserve the original alias at error.available_balance.
+        detail["error"]["available_balance"] = available_balance
+        raise HTTPException(status_code=402, detail=detail)
 
     session.add(
         ReservationRelease(

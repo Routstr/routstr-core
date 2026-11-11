@@ -216,10 +216,12 @@ def test_no_column_that_holds_money_or_time_is_int4(migrated_postgres: str) -> N
             await engine.dispose()
 
     narrow = set(asyncio.run(widths()))
-    # Surrogate keys, foreign keys and a bounded model attribute.
+    # Surrogate keys, foreign keys and bounded magnitudes.
     allowed = {
         "analytics_v2_delivery_state.id",
         "analytics_v2_outbox.kind",
+        "lightning_invoices.mint_counter",
+        "lightning_invoices.mint_outputs",
         "model_paths.id",
         "model_paths.upstream_provider_id",
         "models.context_length",

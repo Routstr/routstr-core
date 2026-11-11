@@ -14,6 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from cashu.core.base import MeltQuote, Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
+from cashu.core.settings import settings as cashu_settings
 from cashu.wallet.crud import get_keysets as get_cashu_keysets
 from cashu.wallet.crud import get_proofs as get_cashu_proofs
 from cashu.wallet.helpers import deserialize_token_from_string
@@ -650,6 +651,41 @@ async def _recieve_token_locked(
     return amount, unit, mint_url
 
 
+def _largest_proofs_first(
+    wallet: Wallet, proofs: list[Proof], amount: int
+) -> list[Proof]:
+    """Try exact coins first, then a largest-first candidate covering the swap fee."""
+    eligible = sorted(
+        wallet.active_proofs(proofs), key=lambda p: p.amount, reverse=True
+    )
+    limit = cashu_settings.mint_max_request_length
+    selected: list[Proof] = []
+    remaining = amount
+    # Binary denominations admit greedy exact selection; custom amounts may miss
+    # an exact combination and fall through to the swap candidate below.
+    for proof in eligible:
+        if len(selected) >= limit:
+            break
+        if proof.amount <= remaining:
+            selected.append(proof)
+            remaining -= proof.amount
+            if remaining == 0:
+                return selected
+
+    selected = []
+    total = 0
+    for proof in eligible[:limit]:
+        selected.append(proof)
+        total += proof.amount
+        if total == amount or total >= amount + wallet.get_fees_for_proofs(selected):
+            return selected
+    raise ValueError(
+        "Too many small coins: selected proofs cover "
+        f"{total - wallet.get_fees_for_proofs(selected)} {wallet.unit.name} "
+        "after swap fees"
+    )
+
+
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
     """Create a token from the preferred mint or another funded trusted mint."""
     async with wallet_operation_guard():
@@ -704,9 +740,16 @@ async def _send_locked(
     # Reserve proofs only after serialization succeeds — if serialize_proofs or
     # swap_to_send fails mid-way, proofs stay unreserved so dashboard balance
     # doesn't go negative.
-    send_proofs, _ = await wallet.select_to_send(
-        proofs, amount, set_reserved=False, include_fees=False
-    )
+    try:
+        send_proofs, _ = await wallet.select_to_send(
+            proofs, amount, set_reserved=False, include_fees=False
+        )
+    except RecursionError:
+        # cashu's coinselect recurses once per coin it picks, so a large send
+        # from thousands of small coins overflows the stack before any swap.
+        send_proofs = _largest_proofs_first(wallet, proofs, amount)
+        if sum(proof.amount for proof in send_proofs) != amount:
+            _, send_proofs = await wallet.split(send_proofs, amount)
     try:
         token = await wallet.serialize_proofs(
             send_proofs, include_dleq=False, legacy=False, memo=None

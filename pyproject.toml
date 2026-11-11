@@ -1,6 +1,6 @@
 [project]
 name = "routstr"
-version = "0.5.0"
+version = "0.5.1"
 description = "Payment proxy for your LLM endpoint using cashu and nostr."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,7 +22,7 @@ dependencies = [
     "mdurl==0.1.2",
     "pillow>=13.0.0",
     "openai>=1.98.0",
-    "litellm>=1.101.2,<1.102",
+    "litellm>=1.101.3,<1.102",
     "backoff>=2.2",  # litellm's native Anthropic-messages streaming (e.g. deepseek/) imports litellm.proxy, which needs it
     "orjson>=3.10",
 ]
@@ -120,6 +120,7 @@ override-dependencies = [
 # it. Constraints raise the floor without bypassing any upstream pin.
 constraint-dependencies = [
     "certifi>=2026.10.19",
+    "dnspython>=2.9.0",
     "aiohttp>=3.14.4",
     "brotli>=1.2.1",
     "filelock>=4.2.1",
