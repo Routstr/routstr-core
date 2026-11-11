@@ -396,6 +396,9 @@ class SessionState:
         # A failure of the node, the sidecar or the provider that ended the
         # connection before the client could get a request through.
         self.h2_fault: str | None = None
+        # The outcome of a deposit released because the setup failed after
+        # it was reserved (no slot, the sidecar unreachable).
+        self.h2_setup_deposit: dict[str, Any] | None = None
         # The sidecar's socket ended (as opposed to the client's).
         self.h2_sidecar_gone = False
         # The node's own last frame after a failure of its own (a settlement
@@ -830,7 +833,13 @@ async def _open_session(
     except SetupError as exc:
         logger.warning("confidential ws: rejecting session: %s", exc)
         await _finalize(state)
-        await _send_error(websocket, exc.status, str(exc), exc.detail)
+        # A deposit that was reserved and released again (the sidecar could
+        # not be dialed): the refusal says so, signed.
+        frame = _error_frame(exc.status, str(exc), exc.detail)
+        try:
+            await websocket.send_text(_with_deposit(frame, state.h2_setup_deposit))
+        except Exception:
+            pass
         await _close(websocket, 1008, str(exc))
         return None
 
@@ -1363,7 +1372,9 @@ async def _open_h2_session(
     except SetupError:
         # No slot, or the sidecar is unreachable: the node's side, and no
         # circuit was garbled.
-        await _h2_finish_deposit(state, charge=False, reason="not_started")
+        state.h2_setup_deposit = await _h2_finish_deposit(
+            state, charge=False, reason="not_started"
+        )
         raise
     if deposit is not None:
         logger.info(
@@ -1763,7 +1774,7 @@ async def _run_h2_session(
                     # end. Nothing is held, except the deposit of a
                     # connection that never carried a request.
                     logger.info(
-                        "confidential ws: http 2 connection idle, closing",
+                        "confidential ws: connection idle, closing",
                         extra={"sid": _short(state.sid), "requests": state.h2_n},
                     )
                     ended = "idle"
@@ -1805,9 +1816,10 @@ async def _run_h2_session(
         await _close(upstream, 1000)
         await _close(websocket, 1000)
         logger.info(
-            "confidential ws: http 2 connection ended",
+            "confidential ws: connection ended",
             extra={
                 "sid": _short(state.sid),
+                "http": state.framing,
                 "requests": state.h2_n,
                 "settled": state.h2_settled,
             },
