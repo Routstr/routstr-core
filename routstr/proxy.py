@@ -1698,9 +1698,8 @@ def extract_model_from_responses_request(request_body_dict: dict[str, Any]) -> s
 def parse_request_body_json(
     request_body: bytes, path: str, content_type: str = ""
 ) -> dict[str, Any]:
-    # Every proxied route takes a JSON body. A multipart upload (the OpenAI
-    # SDK's images.edit) carries raw file bytes that json.loads cannot even
-    # decode, so it is refused by name instead of failing as a server error.
+    # Multipart uploads (OpenAI images.edit) are not JSON; refuse them by name
+    # rather than letting json.loads fail as a 500.
     if request_body and content_type.lower().startswith("multipart/"):
         raise HTTPException(
             status_code=415,
@@ -1748,7 +1747,6 @@ def parse_request_body_json(
                     "model": request_body_dict.get("model", "not_specified"),
                 },
             )
-        # Bytes that are not UTF-8 fail before JSON parsing begins.
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.error(
                 "Invalid JSON in request body",

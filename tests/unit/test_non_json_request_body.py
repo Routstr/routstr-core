@@ -7,8 +7,6 @@ from fastapi.testclient import TestClient
 from routstr.core.main import app
 from routstr.proxy import parse_request_body_json
 
-# What the OpenAI SDK's images.edit sends: a multipart form carrying PNG bytes,
-# which are not valid UTF-8.
 BOUNDARY = "routstr-test"
 MULTIPART_BODY = (
     (
@@ -63,6 +61,6 @@ def test_multipart_image_edit_is_refused_with_cors_headers() -> None:
     )
 
     assert response.status_code == 415
-    # A 500 from the outermost error handler carries no CORS headers, so a
-    # browser only sees "Failed to fetch".
+    # A 500 from the outer error handler has no CORS headers; browsers then
+    # report only "Failed to fetch".
     assert "access-control-allow-origin" in response.headers
