@@ -20,13 +20,21 @@ This repo contains Routstr Core: a FastAPI-based reverse proxy that sits in fron
 
 If you are a user/developer, you just point an OpenAI-compatible SDK at a Routstr node and pay with a Cashu token.
 
+Choose a node from the [provider directory](https://routstr.com/providers). Replace
+`https://provider.example` below with that node's URL; it is a placeholder, not a
+hosted endpoint. Append `/v1` for the OpenAI-compatible base URL. Check the node's
+`/v1/models` endpoint before sending payment.
+
+For the runnable Python scripts, follow the [examples setup](examples/README.md)
+and set `API_URL` explicitly.
+
 ### OpenAI SDK
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://api.routstr.com/v1",
+    base_url="https://provider.example/v1",
     api_key="cashuBo2FteCJodHRwczovL21...",
 )
 
@@ -41,7 +49,7 @@ print(response.choices[0].message.content)
 ### cURL
 
 ```bash
-curl https://api.routstr.com/v1/chat/completions \
+curl https://provider.example/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "x-cashu: cashuBo2FteCJodHRwczovL21..." \
   -d '{
