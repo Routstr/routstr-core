@@ -1091,9 +1091,7 @@ class AnalyticsV2Delivery:
             raise AnalyticsV2DeliveryError("At least one analytics relay is required")
         self._targets = tuple(RelayTarget(url) for url in sorted(relays))
         self._quorum = min(ANALYTICS_RELAY_QUORUM, len(self._targets))
-        self._frame_limit_relays = min(
-            ANALYTICS_FRAME_LIMIT_RELAYS, len(self._targets)
-        )
+        self._frame_limit_relays = min(ANALYTICS_FRAME_LIMIT_RELAYS, len(self._targets))
         self._retry_ms = int(retry_seconds * 1000)
         self._timeout_seconds = timeout_seconds
         self._sender = sender or self._send_to_relay
