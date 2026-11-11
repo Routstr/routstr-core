@@ -61,8 +61,12 @@ identity with `AUTO_GENERATE_NSEC=true` (see above).
 If not configured, Routstr publishes to:
 
 - `wss://relay.damus.io`
-- `wss://relay.nostr.band`
+- `wss://relay.routstr.com`
 - `wss://nos.lol`
+
+A relay belongs in this list only while it completes reads. `relay.nostr.band`
+was dropped because it accepted subscriptions without ever sending `EOSE` or an
+event, which made every bounded read time out.
 
 ---
 

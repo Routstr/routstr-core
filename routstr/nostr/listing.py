@@ -319,8 +319,18 @@ DISABLED_POLL_SECONDS = 60
 # newly saved identity is announced promptly instead of up to 24h later.
 IDENTITY_POLL_SECONDS = 30
 
+# Relays discovered by default when the operator sets no RELAYS. Every module
+# that needs a fallback imports this one list, so a relay that stops answering
+# is retired in one place instead of drifting between call sites.
+#
+# wss://relay.nostr.band was removed: it still accepts a REQ and the TCP/TLS
+# handshake, but never sends EOSE or any EVENT, so every bounded read burns the
+# full timeout and returns FAILED. Because provider-id discovery treats a failed
+# relay as ambiguous identity history (see resolve_provider_id_strict), that one
+# silent relay was enough to stall stats publication on nodes that left
+# PROVIDER_ID unset. A relay that cannot complete a read is not a safe default
+# for a coordinator that must distinguish "no events" from "could not ask".
 DEFAULT_RELAY_URLS = [
-    "wss://relay.nostr.band",
     "wss://relay.damus.io",
     "wss://relay.routstr.com",
     "wss://nos.lol",
