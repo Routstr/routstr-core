@@ -12,8 +12,7 @@ https://provider.example/v1
 ```
 
 `https://provider.example` is a placeholder; replace it with your chosen node's URL.
-Check `/v1/models` before sending payment. `api.routstr.com` is currently unavailable,
-not a default endpoint. Other APIs can use different prefixes, such as
+Check `/v1/models` before sending payment. Other APIs can use different prefixes, such as
 `/v2/lightning/invoice`.
 
 ## Authentication
