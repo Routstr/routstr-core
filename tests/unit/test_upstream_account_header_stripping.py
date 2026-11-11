@@ -13,6 +13,9 @@ UPSTREAM_HEADERS = {
     "anthropic-workspace-id": "wrkspc_secret",
     "anthropic-organization-id": "00000000-0000-0000-0000-000000000000",
     "request-id": "req_011",
+    "x-venice-balance-usd": "25.01157703",
+    "X-Venice-Balance-Diem": "3.5",
+    "x-venice-model-id": "qwen-edit-uncensored",
 }
 
 
@@ -54,10 +57,15 @@ def test_upstream_account_headers_are_stripped(client: TestClient, path: str) ->
     assert "anthropic-workspace-id" not in response.headers
     assert "anthropic-organization-id" not in response.headers
     assert "wrkspc_" not in str(response.headers)
+    assert not any(
+        name.lower().startswith("x-venice-balance-") for name in response.headers
+    )
+    assert "25.01157703" not in str(response.headers)
 
 
 def test_other_upstream_headers_are_kept(client: TestClient) -> None:
     response = client.post("/v1/messages")
 
     assert response.headers["request-id"] == "req_011"
+    assert response.headers["x-venice-model-id"] == "qwen-edit-uncensored"
     assert "x-routstr-request-id" in response.headers
