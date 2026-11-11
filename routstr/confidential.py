@@ -840,6 +840,16 @@ def sidecar_protocol_version(side: dict[str, Any]) -> int:
         return 0
 
 
+def h2_block(side: dict[str, Any]) -> dict[str, Any] | None:
+    """The sidecar offer's ``h2`` block when it serves ``http: 2`` sessions
+    (protocol v3, option A: many sequential requests on one HTTP/2
+    connection), else ``None``."""
+    http, block = side.get("http"), side.get("h2")
+    if isinstance(http, list) and "2" in http and isinstance(block, dict):
+        return block
+    return None
+
+
 def signed_offer_terms(sig: str) -> OfferTerms | None:
     """The terms of an offer this node signed recently."""
     found = _SIGNED_OFFERS.get(sig)
@@ -914,6 +924,13 @@ async def build_offer() -> dict[str, Any]:
         # the sidecar renders it from this block and checked it at startup;
         # clients render the same bytes from the signed copy.
         offer["chat"] = chat
+    h2 = h2_block(side)
+    if h2 is not None:
+        # ``http: 2`` sessions: both fields are the sidecar's, unchanged.
+        # Absent without them (``http`` then means ["1.1"]), so a node whose
+        # sidecar serves only HTTP/1.1 signs what it signed before.
+        offer["http"] = side["http"]
+        offer["h2"] = h2
     if margin > 0:
         offer["reserve_margin_tokens"] = margin
     if images is not None:
@@ -1181,6 +1198,41 @@ def _refuse_fixed_pricing_setup() -> None:
         refuse_fixed_pricing()
     except FixedPricingRefused as exc:
         raise BillingError(str(exc), 503) from exc
+
+
+async def check_credential(auth: str, offer_sig: str) -> str:
+    """The setup check of an ``http: 2`` session, which reserves nothing: the
+    offer the client verified is one this node signed recently, and the
+    bearer is valid with an available balance of at least the node's minimum
+    request cost and that offer's fees. Returns the key's hash.
+
+    A Cashu token is redeemed here, as by any first use. The money is
+    reserved per ``request`` (``reserve``), which checks the credential again.
+    """
+    from .auth import validate_bearer_key
+    from .core.db import create_session
+
+    _refuse_fixed_pricing_setup()
+    terms = signed_offer_terms(offer_sig)
+    if terms is None:
+        message = (
+            "the signed offer is unknown or expired; refetch /v1/confidential/offer"
+        )
+        raise BillingError(
+            message, 409, {"error": {"type": "offer_expired", "message": message}}
+        )
+    floor = max(
+        1,
+        int(settings.min_request_msat),
+        terms.session_fee_msat,
+        terms.abandon_fee_msat,
+    )
+    async with create_session() as session:
+        try:
+            key = await validate_bearer_key(auth, session, min_cost=floor)
+        except HTTPException as exc:
+            raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
+        return str(key.hashed_key)
 
 
 async def reserve(

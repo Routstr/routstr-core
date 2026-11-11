@@ -236,6 +236,49 @@ session slot only once its setup is reserved: before that it is pending
   (`routstr-confidential-<uid>/` in `$XDG_RUNTIME_DIR` or the temporary
   directory; the directory must be this user's, mode 0700).
 
+## HTTP/2 sessions (`http: 2`, prototype)
+
+When the sidecar's offer lists `"http": ["1.1", "2"]` with an `h2` block, the
+node's signed offer carries both, and a client may open a session with
+`"http": 2` in its `setup`. Such a session is one provider connection (one
+two-party handshake) that serves many sequential requests. Sessions without
+`http` are unchanged.
+
+- **Setup.** It names no model, no `max_tokens` and no fees, and **reserves
+  nothing**. The node checks that `offer_sig` names an offer it signed
+  recently and that the credential (`auth`) is valid with an available balance
+  of at least the minimum request cost and that offer's fees (402 otherwise),
+  then dials the sidecar. A client without funds gets no session.
+- **Requests.** Each `request` frame carries what a v2 setup carries: `n`,
+  `model`, `max_tokens`, `body_len`, `auth`, `offer_sig` and the accepted
+  fees. The node validates it, freezes that offer's rates and reserves exactly
+  as for a v2 setup, then forwards it to the sidecar without the credential,
+  the offer signature or the fees. A request may name another credential than
+  the previous one. A request the node refuses (unknown model, 402, an expired
+  offer) reserves nothing and ends the connection.
+- **Settlement.** That request's `body_released`, `attestation` and `usage`
+  are handled as for a v2 session; the signed receipt also carries `http: 2`
+  and the request number `n`. The connection is then idle and accepts the
+  next request.
+- **Aborts.** A connection that ends between requests costs nothing. One that
+  ends during a request finalizes that request's reservation by the v2 rules:
+  released before `body_released` (less the abandon fee once the sidecar
+  accepted the request, less the session fee if the provider answered and
+  closed first), charged in full after it.
+- **Limits.** The connection holds one of the 32 session slots for its whole
+  life. It counts as unused (`CONFIDENTIAL_MAX_UNUSED_PER_IP`) until its first
+  request is released to the provider, since it holds no reservation before.
+  Time limits: 10 minutes to `head_written`; idle, the sidecar's
+  `h2.idle_secs` (the node cuts the connection 15 s later if the sidecar did
+  not); per request, the two 10-minute phases of a v2 session, counted from
+  the `request`.
+- **Not covered yet.** A connection that is opened and never used costs the
+  client nothing, also with an abandon fee configured (nothing is reserved
+  that the fee could be kept from). The session fee is charged per request.
+
+The wire format is in `PROTOCOL-V3-DESIGN.md` (A.11, "Through a node") of the
+routstr-confidential repository.
+
 ## Configuration
 
 | Env | Meaning | Default |
@@ -265,7 +308,7 @@ for 10 minutes after it was last served) keep its terms.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/unit/test_confidential.py -q
+.venv/bin/python -m pytest tests/unit/test_confidential.py tests/unit/test_confidential_http2.py -q
 ```
 
 ## Client addresses
