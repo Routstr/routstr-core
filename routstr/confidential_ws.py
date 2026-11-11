@@ -26,14 +26,19 @@
 
   An ``http: 2`` setup (protocol v3, option A; offered only when the sidecar
   offers it) opens one provider connection for many sequential requests. It
-  names no model and reserves nothing: the node checks the offer signature
-  and that the credential has funds, then dials the sidecar. Each ``request``
+  names no model: the node checks the offer signature and that the
+  credential has funds, reserves the offer's connection deposit (released
+  when the connection's first request reaches settlement, charged when the
+  connection ends without one unless the node, the sidecar or the provider
+  failed; ``_h2_deposit_verdict``), then dials the sidecar. It closes a
+  connection with no request in flight for the offer's ``idle_timeout_s``.
+  Each ``request``
   frame then carries what a v2 setup carries (``auth``, ``offer_sig``, the
   fees, model, ``max_tokens``); the node validates it, freezes the rates and
   reserves as for a v2 setup, and forwards it without the credential. That
   request's ``body_released``, ``attestation`` and ``usage`` are handled as
   above, the receipt names the request (``n``), and the connection is idle
-  again. A connection that ends between requests costs nothing; one that ends
+  again. A connection that ends between requests costs nothing more; one that ends
   during a request finalizes that request's reservation by the rules above.
   A request the node refuses ends the connection.
 
@@ -79,11 +84,13 @@ from .confidential import (
     charge_reservation,
     check_credential,
     h2_block,
+    h2_idle_timeout_s,
     images_endpoint,
     node_pubkey_hex,
     pricing_fields,
     release,
     reserve,
+    reserve_deposit,
     reserve_image,
     settle,
     settle_flat,
@@ -173,8 +180,11 @@ _H2_SETUP_FORBIDDEN = (
     "abandon_fee_msat",
 )
 _H2_REQUEST_FIELDS = ("type", "n", "kind", "model", "max_tokens", "body_len", "suffix")
-H2_IDLE_GRACE_S = 15.0
 H2_CONN_MAX_S = 3600.0
+# Why a connection's deposit was released although no request of it reached
+# the provider: the failure was the node's, the sidecar's or the provider's.
+# The sidecar names its own in an ``error`` frame's ``fault``.
+_H2_SIDECAR_FAULTS = {"upstream": "provider_unreachable", "node": "sidecar_failure"}
 
 _active_sessions = 0
 _active_zk = 0
@@ -355,6 +365,25 @@ class SessionState:
         # Set by the sidecar pump when the session's deadline moved
         # (``head_written``, ``body_released``, a settlement).
         self.h2_moved = asyncio.Event()
+        # Seconds without a request in flight after which the node closes the
+        # connection (the signed offer's ``h2.idle_timeout_s``).
+        self.h2_idle_timeout = 120.0
+        # The connection deposit: reserved at the setup, released when the
+        # first request reaches settlement, charged if the connection ends
+        # without one (``_h2_deposit_verdict``). ``None`` once finalized, or
+        # when the offer asks for none.
+        self.h2_deposit: Billing | None = None
+        self.h2_deposit_msat = 0
+        # The sidecar accepted the setup (``ready``): the node garbles from here.
+        self.h2_ready = False
+        # The sidecar's last frame was ``error`` or ``closed`` (an end it
+        # explained), and the reason of a ``closed``.
+        self.h2_terminal = False
+        self.h2_closed_reason: str | None = None
+        self.h2_last_frame: dict[str, Any] | None = None
+        # A failure of the node, the sidecar or the provider that ended the
+        # connection before the client could get a request through.
+        self.h2_fault: str | None = None
 
 
 class SetupError(Exception):
@@ -364,20 +393,20 @@ class SetupError(Exception):
         self.detail = detail if detail is not None else reason
 
 
+def _error_frame(status: int, reason: str, detail: Any = None) -> dict[str, Any]:
+    return {
+        "type": "error",
+        "status": status,
+        "reason": reason,
+        "detail": detail if detail is not None else reason,
+    }
+
+
 async def _send_error(
     websocket: WebSocket, status: int, reason: str, detail: Any = None
 ) -> None:
     try:
-        await websocket.send_text(
-            json.dumps(
-                {
-                    "type": "error",
-                    "status": status,
-                    "reason": reason,
-                    "detail": detail if detail is not None else reason,
-                }
-            )
-        )
+        await websocket.send_text(json.dumps(_error_frame(status, reason, detail)))
     except Exception:
         pass
 
@@ -974,8 +1003,11 @@ def _is_setup(text: str) -> bool:
 
 
 async def _sidecar_to_client(
-    websocket: WebSocket, upstream: Any, state: SessionState
+    websocket: WebSocket, upstream: Any, state: SessionState, close_client: bool = True
 ) -> None:
+    """Relay the sidecar's frames to the client. ``close_client`` False leaves
+    the client's socket open when the sidecar's ends (an ``http: 2`` session
+    still has its last frames to send)."""
     try:
         async for frame in upstream:
             if isinstance(frame, bytes):
@@ -987,7 +1019,8 @@ async def _sidecar_to_client(
     except (websockets.ConnectionClosed, RuntimeError):
         pass
     finally:
-        await _close(websocket, 1000)
+        if close_client:
+            await _close(websocket, 1000)
 
 
 async def _on_sidecar_text(
@@ -1007,14 +1040,18 @@ async def _on_sidecar_text(
             # connections (opened with this sid) are admitted.
             _live_sids.setdefault(state.sid, state)
         msg.pop("offer", None)
+        if state.http2:
+            state.h2_ready = True
+            # What the setup reserved (the signed offer's deposit).
+            msg["deposit_msat"] = state.h2_deposit_msat
         msg["zk_token"] = state.zk_token
         msg["pubkey"] = node_pubkey_hex()
         msg["sig_scheme"] = "schnorr-secp256k1"
         return json.dumps(msg)
     if kind == "head_written":
         if state.http2:
-            # The connection is open and idle. Nothing is reserved yet, so it
-            # stays "unused" until its first request reaches the provider.
+            # The connection is open and idle. No request is reserved yet, so
+            # it stays "unused" until its first request reaches the provider.
             state.h2_idle_since = asyncio.get_running_loop().time()
             state.h2_moved.set()
             return frame
@@ -1022,6 +1059,23 @@ async def _on_sidecar_text(
         # in use and no longer counts against the unused limit.
         _mark_used(state)
         return frame
+    if state.http2 and kind in ("error", "closed"):
+        state.h2_terminal = True
+        if kind == "closed":
+            reason = msg.get("reason")
+            state.h2_closed_reason = reason if isinstance(reason, str) else "closed"
+            if reason == "upstream_closed" and state.billing is None:
+                # The provider closed an idle connection: not the client's doing.
+                state.h2_fault = state.h2_fault or "provider_closed"
+        else:
+            fault = _H2_SIDECAR_FAULTS.get(str(msg.get("fault")))
+            if fault is not None:
+                state.h2_fault = state.h2_fault or fault
+        # Held back: the session task sends it as the connection's last
+        # frame, with the deposit's outcome.
+        state.h2_last_frame = msg
+        state.h2_moved.set()
+        return None
     if state.http2 and kind in ("request_ok", "body_released", "attestation", "usage"):
         n = msg["a"].get("n") if isinstance(msg.get("a"), dict) else msg.get("n")
         if state.billing is None or n != state.h2_n:
@@ -1224,6 +1278,7 @@ async def _settle(
                 extra={"sid": _short(state.sid), "model": billing.model_id},
             )
             outcome = await _finalize_unsettled(state)
+            state.h2_fault = state.h2_fault or "node_failure"
             await _send_error(
                 websocket,
                 500,
@@ -1263,6 +1318,14 @@ async def _settle(
         receipt["http"] = 2
         receipt["n"] = state.h2_n
         log_extra["n"] = state.h2_n
+        if state.h2_deposit is not None:
+            # The connection's first settled request: the deposit goes back,
+            # and this receipt says so.
+            back = await _h2_finish_deposit(
+                state, charge=False, reason="request_settled"
+            )
+            if back is not None:
+                receipt["deposit_released_msat"] = back["msat"]
         # Idle again before the client can see the receipt and send the next
         # request.
         _h2_request_done(state)
@@ -1296,6 +1359,7 @@ async def _refuse_unattested(websocket: WebSocket, state: SessionState) -> None:
     full and tell the client the request was not settled."""
     billing = state.billing
     outcome: str | None = None
+    state.h2_fault = state.h2_fault or "node_failure"
     async with state.lock:
         if state.finalized or billing is None:
             return
@@ -1372,37 +1436,158 @@ async def _finalize(state: SessionState) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _h2_deposit_lifetime(idle_s: float) -> RequestLifetime:
+    """The lifetime the deposit's reservation lease is derived from: the
+    longest a connection can hold it (the setup phase, one idle period, a
+    first request's two phases) plus the settlement grace."""
+    seconds = max(
+        float(settings.max_request_lifetime_seconds),
+        2 * SESSION_TIMEOUT_S + idle_s + POST_RELEASE_TIMEOUT_S + SETTLE_GRACE_S,
+    )
+    return RequestLifetime(deadline=asyncio.get_running_loop().time() + seconds)
+
+
 async def _open_h2_session(
     session_id: str, state: SessionState, msg: Any, side: dict[str, Any]
 ) -> Any:
     """The setup of an ``http: 2`` session: check the offer signature and the
-    credential, reserve nothing, dial the sidecar. Raises ``SetupError``."""
+    credential, reserve the connection deposit, dial the sidecar. Raises
+    ``SetupError``; the deposit is then released (nothing was garbled)."""
     block = h2_block(side)
     if block is None:
         raise SetupError(400, "this node does not serve http: 2 sessions")
     validate_h2_setup(msg)
+    auth = msg.get("auth", "") or ""
+    state.h2_idle_timeout = float(h2_idle_timeout_s(block))
+    # The deposit's lease covers the connection up to its first settlement.
+    request_lifetime.set(_h2_deposit_lifetime(state.h2_idle_timeout))
     try:
-        await check_credential(msg.get("auth", "") or "", msg["offer_sig"])
+        await check_credential(auth, msg["offer_sig"])
+        deposit = await reserve_deposit(auth, msg["offer_sig"])
     except BillingError as exc:
         raise SetupError(exc.status, str(exc), exc.detail) from exc
     except Exception as exc:
         logger.exception("confidential ws: credential check failed")
         raise SetupError(500, "credential check failed") from exc
     state.http2 = True
+    state.h2_deposit = deposit
+    state.h2_deposit_msat = deposit.reserved_msats if deposit is not None else 0
     idle = block.get("idle_secs")
     if _is_int(idle) and idle > 0:
         state.h2_idle_secs = float(idle)
-    _claim_slot(state)
-    # The sidecar binds the sid to this value; with no reservation to name,
-    # it is a fresh random id.
+    # The sidecar binds the sid to this value: the deposit's reservation id,
+    # or a fresh random id when the offer asks for no deposit.
+    escrow = (
+        deposit.snapshot.release_id if deposit is not None else secrets.token_hex(16)
+    )
     setup = {
         "type": "setup",
         "http": 2,
         "nonce_c": msg["nonce_c"],
         "armed": msg.get("armed", False),
-        "escrow": f"h2-{secrets.token_hex(16)}",
+        "escrow": f"h2-{escrow}",
     }
-    return await _dial_sidecar(session_id, setup)
+    try:
+        _claim_slot(state)
+        upstream = await _dial_sidecar(session_id, setup)
+    except SetupError:
+        # No slot, or the sidecar is unreachable: the node's side, and no
+        # circuit was garbled.
+        await _h2_finish_deposit(state, charge=False, reason="not_started")
+        raise
+    if deposit is not None:
+        logger.info(
+            "confidential ws: connection deposit reserved",
+            extra={"deposit_msat": state.h2_deposit_msat},
+        )
+    return upstream
+
+
+def _h2_deposit_verdict(state: SessionState, ended: str) -> tuple[bool, str]:
+    """Whether the deposit of a connection that is ending is charged, and why.
+
+    Released: a request of the connection reached settlement or the provider
+    (``request_settled``, ``request_received``, ``provider_refused``); the
+    node, the sidecar or the provider failed before the client could get a
+    request through (``state.h2_fault``); the sidecar never accepted the
+    setup (``not_started``). Charged otherwise: the node garbled a key
+    schedule for a connection that carried no request (``ended`` says how it
+    ended: ``unused``, ``idle``, ``setup_timeout``, ``request_refused``), or
+    whose only request was abandoned before the provider had it
+    (``request_abandoned``)."""
+    if state.h2_settled > 0:
+        return False, "request_settled"
+    if state.h2_fault is not None:
+        return False, state.h2_fault
+    if not state.h2_ready:
+        return False, "not_started"
+    if state.billing is not None:
+        if state.finalized:
+            # Finalized without a receipt: only a failed settlement does that.
+            return False, "node_failure"
+        if state.body_released:
+            return False, "request_received"
+        if state.upstream_refused:
+            return False, "provider_refused"
+        return True, "request_abandoned"
+    return True, ended
+
+
+async def _h2_finish_deposit(
+    state: SessionState, charge: bool, reason: str
+) -> dict[str, Any] | None:
+    """Charge or release the connection deposit, once. Returns the outcome
+    for the client (``{"msat", "outcome", "reason", …}``), or ``None`` when
+    no deposit was held or it could not be finalized."""
+    async with state.lock:
+        deposit, state.h2_deposit = state.h2_deposit, None
+        if deposit is None:
+            return None
+        try:
+            if charge:
+                balance = await charge_reservation(deposit)
+            else:
+                balance = await release(deposit)
+        except Exception:
+            # The reservation stays active; its lease ends with this task and
+            # the stale-reservation sweeper releases it.
+            logger.exception(
+                "confidential ws: could not finalize the connection deposit",
+                extra={"sid": _short(state.sid), "charge": charge},
+            )
+            return None
+    outcome = "charged" if charge else "released"
+    logger.info(
+        f"confidential ws: connection deposit {outcome}",
+        extra={
+            "sid": _short(state.sid),
+            "deposit_msat": deposit.reserved_msats,
+            "reason": reason,
+        },
+    )
+    return {
+        "sid": state.sid,
+        "msat": deposit.reserved_msats,
+        "outcome": outcome,
+        "reason": reason,
+        "cost_msats": deposit.reserved_msats if charge else 0,
+        "balance_msats": balance,
+        "time": int(time.time()),
+    }
+
+
+def _with_deposit(frame: dict[str, Any], deposit: dict[str, Any] | None) -> str:
+    """``frame`` (the connection's last: ``closed`` or ``error``) as text,
+    carrying the deposit's outcome signed like a receipt."""
+    if deposit is not None:
+        frame = {
+            **frame,
+            "deposit": deposit,
+            "deposit_json": canonical_json(deposit).decode("utf-8"),
+            "deposit_sig": sign_payload(deposit),
+            "sig_scheme": "schnorr-secp256k1",
+        }
+    return json.dumps(frame)
 
 
 def _h2_request_done(state: SessionState) -> None:
@@ -1423,8 +1608,9 @@ def _h2_request_done(state: SessionState) -> None:
 def _h2_deadline(state: SessionState, started: float) -> float:
     """Loop time at which an ``http: 2`` session is cut off. With a request
     in flight, v2's limits counted from the request; before the connection
-    head is written, v2's setup-phase limit; idle, the sidecar's idle limit
-    plus a grace (the sidecar normally closes first, with ``closed``)."""
+    head is written, v2's setup-phase limit; idle (no request in flight since
+    ``head_written`` or the last settlement), the offer's ``idle_timeout_s``,
+    which is never longer than the sidecar's own idle limit."""
     if state.billing is not None:
         if state.released_at is None:
             return state.h2_request_at + SESSION_TIMEOUT_S
@@ -1434,7 +1620,7 @@ def _h2_deadline(state: SessionState, started: float) -> float:
         return deadline
     if state.h2_idle_since is None:
         return started + SESSION_TIMEOUT_S
-    return state.h2_idle_since + state.h2_idle_secs + H2_IDLE_GRACE_S
+    return state.h2_idle_since + min(state.h2_idle_timeout, state.h2_idle_secs)
 
 
 async def _h2_reserve(msg: Any, state: SessionState) -> str:
@@ -1545,10 +1731,16 @@ async def _run_h2_session(
     task lives), one per ``request``."""
     loop = asyncio.get_running_loop()
     client_pump = asyncio.create_task(_h2_client_to_sidecar(websocket, upstream, state))
-    sidecar_pump = asyncio.create_task(_sidecar_to_client(websocket, upstream, state))
+    sidecar_pump = asyncio.create_task(
+        _sidecar_to_client(websocket, upstream, state, close_client=False)
+    )
     next_request: asyncio.Future[Any] | None = None
     moved: asyncio.Future[Any] | None = None
     cut = False
+    # How a connection that carried no request ended (the deposit's reason),
+    # and the node's own last frame, when it is the one ending the connection.
+    ended = "unused"
+    last: dict[str, Any] | None = None
     try:
         while True:
             if next_request is None:
@@ -1562,11 +1754,19 @@ async def _run_h2_session(
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if client_pump in done or sidecar_pump in done:
+                if client_pump not in done and not state.h2_terminal:
+                    # The sidecar's socket ended with no ``error`` or
+                    # ``closed`` while the client was still there.
+                    state.h2_fault = state.h2_fault or "sidecar_failure"
+                    last = _error_frame(502, "confidential sidecar connection lost")
                 break
             if moved in done:
                 # The deadline moved: wait again on the new one.
                 state.h2_moved.clear()
                 moved = None
+                if state.h2_terminal:
+                    # The sidecar's last word: the session is over.
+                    break
             if next_request in done:
                 msg, reply = next_request.result()
                 next_request = None
@@ -1577,18 +1777,33 @@ async def _run_h2_session(
                     # already have sent its records, which the sidecar could
                     # not place.
                     logger.warning("confidential ws: rejecting request: %s", exc)
-                    await _send_error(websocket, exc.status, str(exc), exc.detail)
+                    if exc.status >= 500:
+                        state.h2_fault = state.h2_fault or "node_failure"
+                    ended = "request_refused"
+                    last = _error_frame(exc.status, str(exc), exc.detail)
                     reply.set_result(None)
                     cut = True
                     break
                 reply.set_result(forward)
                 continue
             if loop.time() >= _h2_deadline(state, started):
-                logger.warning(
-                    "confidential ws: session time limit reached",
-                    extra={"sid": _short(state.sid), "n": state.h2_n},
-                )
-                await _send_error(websocket, 408, "session time limit reached")
+                if state.billing is None and state.h2_idle_since is not None:
+                    # No request in flight for ``idle_timeout_s``: an orderly
+                    # end. Nothing is held, except the deposit of a
+                    # connection that never carried a request.
+                    logger.info(
+                        "confidential ws: http 2 connection idle, closing",
+                        extra={"sid": _short(state.sid), "requests": state.h2_n},
+                    )
+                    ended = "idle"
+                    last = {"type": "closed", "reason": "idle"}
+                else:
+                    logger.warning(
+                        "confidential ws: session time limit reached",
+                        extra={"sid": _short(state.sid), "n": state.h2_n},
+                    )
+                    ended = "setup_timeout"
+                    last = _error_frame(408, "session time limit reached")
                 cut = True
                 break
         if cut:
@@ -1596,13 +1811,25 @@ async def _run_h2_session(
             # last frames before the money decision.
             client_pump.cancel()
             await _drain_sidecar(upstream, sidecar_pump, SIDECAR_DRAIN_S)
-        else:
+        elif not state.h2_terminal:
             remaining = _h2_deadline(state, started) - loop.time()
             await asyncio.wait({sidecar_pump}, timeout=min(10.0, max(remaining, 0)))
     finally:
         for task in (client_pump, sidecar_pump, next_request, moved):
             if task is not None and not task.done():
                 task.cancel()
+        deposit = await _h2_end_deposit(state, ended)
+        # The connection's last frame: the node's own, else the sidecar's
+        # (``error`` or ``closed``), with the deposit's outcome.
+        if last is None:
+            last = state.h2_last_frame
+        if last is None and deposit is not None:
+            last = {"type": "closed", "reason": "ended"}
+        if last is not None:
+            try:
+                await websocket.send_text(_with_deposit(last, deposit))
+            except Exception:
+                pass
         await _finalize(state)
         await _close(upstream, 1000)
         await _close(websocket, 1000)
@@ -1614,6 +1841,20 @@ async def _run_h2_session(
                 "settled": state.h2_settled,
             },
         )
+
+
+async def _h2_end_deposit(state: SessionState, ended: str) -> dict[str, Any] | None:
+    """The connection is ending: charge or release a deposit still held
+    (``_h2_deposit_verdict``) and return its outcome. When it is charged for
+    a request the client abandoned, that request's reservation is released in
+    full: the deposit is the price of the unused handshake, and the abandon
+    fee would be the same price a second time."""
+    if state.h2_deposit is None:
+        return None
+    charge, reason = _h2_deposit_verdict(state, ended)
+    if charge and state.billing is not None:
+        state.engaged = False
+    return await _h2_finish_deposit(state, charge, reason)
 
 
 # ---------------------------------------------------------------------------

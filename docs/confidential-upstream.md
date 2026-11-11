@@ -244,11 +244,46 @@ node's signed offer carries both, and a client may open a session with
 two-party handshake) that serves many sequential requests. Sessions without
 `http` are unchanged.
 
-- **Setup.** It names no model, no `max_tokens` and no fees, and **reserves
-  nothing**. The node checks that `offer_sig` names an offer it signed
-  recently and that the credential (`auth`) is valid with an available balance
-  of at least the minimum request cost and that offer's fees (402 otherwise),
-  then dials the sidecar. A client without funds gets no session.
+- **Setup.** It names no model, no `max_tokens` and no fees. The node checks
+  that `offer_sig` names an offer it signed recently and that the credential
+  (`auth`) is valid with an available balance of at least the minimum request
+  cost and that offer's fees (402 otherwise), reserves the **connection
+  deposit** (below), then dials the sidecar. A client without funds gets no
+  session. `ready` carries `deposit_msat`, what was reserved.
+- **Connection deposit.** Opening a connection makes the node garble a key
+  schedule (~22 MB), so the setup reserves
+  `CONFIDENTIAL_H2_CONNECTION_DEPOSIT_MSAT` (default: the abandon fee; the
+  signed offer's `h2.connection_deposit_msat`) through the node's ordinary
+  reservation. A balance that does not cover it is refused with 402
+  (`connection_deposit_unfunded`) before the sidecar is dialed. The deposit
+  is **released when the connection's first request reaches settlement**
+  (usage or error head; its receipt carries `deposit_released_msat`). When
+  the connection ends with no settled request:
+
+  | The connection ended… | Deposit | Reason logged and sent |
+  |---|---|---|
+  | before the sidecar accepted the setup (no slot, sidecar unreachable or refusing) | released | `not_started` |
+  | because the sidecar could not reach the provider, or failed itself (`error` with `fault`), or its socket dropped | released | `provider_unreachable`, `sidecar_failure` |
+  | because the provider closed the idle connection before any request | released | `provider_closed` |
+  | with its first request refused by the node with a 5xx, or its settlement failing on the node | released | `node_failure` |
+  | with its first request released to the provider and never settled (that request's reservation is charged) | released | `request_received` |
+  | with the provider answering the first request and closing before its body was complete | released | `provider_refused` |
+  | with the client leaving, or any other error, before a request (a failed proof or handshake included) | **charged** | `unused` |
+  | at the idle timeout, or the 10-minute setup limit, with no request | **charged** | `idle`, `setup_timeout` |
+  | with its first request refused by the node with a 4xx (402, an expired offer, a model it does not serve) | **charged** | `request_refused` |
+  | with its first request abandoned before the provider had it (a failed π_WIN, the client leaving) | **charged**; that request's reservation is released in full, no abandon fee on top | `request_abandoned` |
+
+  The connection's last frame (`closed`, or `error`) carries the outcome as
+  `deposit` (`{sid, msat, outcome, reason, cost_msats, balance_msats, time}`)
+  with `deposit_json` and `deposit_sig` (the node's key, as for a receipt).
+  If the node process dies, the reservation's lease lapses and the stale
+  reservation sweeper releases it.
+- **Idle.** The node closes a connection that had no request in flight for
+  `CONFIDENTIAL_H2_IDLE_TIMEOUT_S` (default 120 s, never more than the
+  sidecar's `h2.idle_secs`; the signed offer's `h2.idle_timeout_s`), counted
+  from `head_written` or the last settlement, with
+  `{"type":"closed","reason":"idle"}`. After its first settled request an
+  idle connection holds no reservation.
 - **Requests.** Each `request` frame carries what a v2 setup carries: `n`,
   `model`, `max_tokens`, `body_len`, `auth`, `offer_sig` and the accepted
   fees. The node validates it, freezes that offer's rates and reserves exactly
@@ -260,7 +295,8 @@ two-party handshake) that serves many sequential requests. Sessions without
   are handled as for a v2 session; the signed receipt also carries `http: 2`
   and the request number `n`. The connection is then idle and accepts the
   next request.
-- **Aborts.** A connection that ends between requests costs nothing. One that
+- **Aborts.** A connection that ends between requests costs nothing (after
+  its first settled request; before it, the deposit). One that
   ends during a request finalizes that request's reservation by the v2 rules:
   released before `body_released` (less the abandon fee once the sidecar
   accepted the request, less the session fee if the provider answered and
@@ -268,13 +304,15 @@ two-party handshake) that serves many sequential requests. Sessions without
 - **Limits.** The connection holds one of the 32 session slots for its whole
   life. It counts as unused (`CONFIDENTIAL_MAX_UNUSED_PER_IP`) until its first
   request is released to the provider, since it holds no reservation before.
-  Time limits: 10 minutes to `head_written`; idle, the sidecar's
-  `h2.idle_secs` (the node cuts the connection 15 s later if the sidecar did
-  not); per request, the two 10-minute phases of a v2 session, counted from
+  Time limits: 10 minutes to `head_written`; idle, the idle timeout above;
+  per request, the two 10-minute phases of a v2 session, counted from
   the `request`.
-- **Not covered yet.** A connection that is opened and never used costs the
-  client nothing, also with an abandon fee configured (nothing is reserved
-  that the fee could be kept from). The session fee is charged per request.
+- **Not covered yet.** The session fee is charged per request. With the
+  default settings (no abandon fee) the deposit is 0 and an unused connection
+  is free: set `CONFIDENTIAL_ABANDON_FEE_MSAT` or
+  `CONFIDENTIAL_H2_CONNECTION_DEPOSIT_MSAT`. A first request the node refuses
+  for lack of funds costs the deposit, because a refused request ends the
+  connection.
 
 The wire format is in `PROTOCOL-V3-DESIGN.md` (A.11, "Through a node") of the
 routstr-confidential repository.
@@ -289,6 +327,8 @@ routstr-confidential repository.
 | `CONFIDENTIAL_TRUSTED_PROXIES` | comma-separated peers whose client-address header is believed (e.g. `127.0.0.1,::1` for nginx on the same host); `self` adds the node's own addresses (where a rootless container port forwarder connects from; enable only behind a reverse proxy that always sets the header) | empty (no peer is trusted) |
 | `CONFIDENTIAL_SESSION_FEE_MSAT` | fee (msat) on top of the usage of a completed confidential request, and the charge for a provider refusal (4xx/503); published in the signed offer; clients must accept it at setup | `0` (off) |
 | `CONFIDENTIAL_ABANDON_FEE_MSAT` | fee (msat) for a session the sidecar accepted that ends without a request reaching the provider (armed and never used, aborted, client gone): the anti-DoS deposit, reserved at setup; never below the session fee (0 = equal to it) | `0` (off) |
+| `CONFIDENTIAL_H2_CONNECTION_DEPOSIT_MSAT` | deposit (msat) reserved when an `http: 2` connection is opened, released with its first settled request, charged when it ends without one (see HTTP/2 sessions); `-1` uses the abandon fee, `0` takes none; published in the signed offer's `h2` block | `-1` (the abandon fee) |
+| `CONFIDENTIAL_H2_IDLE_TIMEOUT_S` | seconds without a request in flight after which the node closes an `http: 2` connection (at least 10, never more than the sidecar's `h2.idle_secs`); published in the signed offer's `h2` block | `120` |
 | `CONFIDENTIAL_RATE_SURCHARGE_PCT` | percentage added to the per-token rates of confidential sessions; the signed offer's `price_list` carries the surcharged rates | `0` (off) |
 | `CONFIDENTIAL_RESERVE_MARGIN_TOKENS` | completion tokens reserved beyond the pinned `max_tokens` (a provider may bill a few more than the cap, and the charge never exceeds the reservation); only the hold grows, the charge is the reported usage; a usage with more completion tokens than `max_tokens` plus this is logged as a warning; published in the signed offer as `reserve_margin_tokens` | `16` |
 | `CONFIDENTIAL_CLIENT_IP_HEADER` | header a trusted proxy puts the client address in; for `X-Forwarded-For` the rightmost entry over all its header lines is used (a proxy may append to the client's line or add its own); another header is read from its last line | `x-forwarded-for` |
