@@ -887,18 +887,36 @@ def h2_block(side: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def h2_offer_block(side: dict[str, Any]) -> dict[str, Any] | None:
+def h2_kinds(block: dict[str, Any], images_offered: bool) -> list[str]:
+    """The request kinds an ``http: 2`` connection serves: the sidecar's
+    ``kinds`` (chat only when it names none), with ``images`` only when this
+    node's offer also carries the ``images`` block (priced variants)."""
+    kinds = block.get("kinds")
+    if not isinstance(kinds, list) or "chat" not in kinds:
+        return ["chat"]
+    return ["chat", "images"] if "images" in kinds and images_offered else ["chat"]
+
+
+def h2_offer_block(
+    side: dict[str, Any], images_offered: bool = False
+) -> dict[str, Any] | None:
     """The ``h2`` block of the signed offer: the sidecar's block and the two
     terms the node adds, ``connection_deposit_msat`` (reserved at the setup)
-    and ``idle_timeout_s`` (the node closes a connection idle that long)."""
+    and ``idle_timeout_s`` (the node closes a connection idle that long).
+    ``kinds`` is kept only when the connection serves more than chat, so a
+    chat-only block is signed as before."""
     block = h2_block(side)
     if block is None:
         return None
-    return {
-        **block,
+    out = {
+        **{k: v for k, v in block.items() if k != "kinds"},
         "connection_deposit_msat": h2_connection_deposit_msat(),
         "idle_timeout_s": h2_idle_timeout_s(block),
     }
+    kinds = h2_kinds(block, images_offered)
+    if kinds != ["chat"]:
+        out["kinds"] = kinds
+    return out
 
 
 def signed_offer_terms(sig: str) -> OfferTerms | None:
@@ -950,7 +968,7 @@ async def build_offer() -> dict[str, Any]:
     }
     margin = reserve_margin_tokens()
     images = images_offer_block(side, pct)
-    h2 = h2_offer_block(side)
+    h2 = h2_offer_block(side, images is not None)
     terms = OfferTerms(prices, fee, pct, abandon, margin, images, h2)
     offer: dict[str, Any] = {
         # Protocol v2 (the two-party handshake) only; v1 is retired.

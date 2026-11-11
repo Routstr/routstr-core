@@ -85,6 +85,7 @@ from .confidential import (
     check_credential,
     h2_block,
     h2_idle_timeout_s,
+    h2_kinds,
     images_endpoint,
     node_pubkey_hex,
     pricing_fields,
@@ -180,6 +181,9 @@ _H2_SETUP_FORBIDDEN = (
     "abandon_fee_msat",
 )
 _H2_REQUEST_FIELDS = ("type", "n", "kind", "model", "max_tokens", "body_len", "suffix")
+# An image request: the sidecar gets the count and the suffix the node
+# rendered from its own signed offer (never one the client sent).
+_H2_IMAGE_REQUEST_FIELDS = ("type", "n", "model", "body_len")
 H2_CONN_MAX_S = 3600.0
 # Why a connection's deposit was released although no request of it reached
 # the provider: the failure was the node's, the sidecar's or the provider's.
@@ -528,16 +532,32 @@ def validate_h2_request(msg: Any, max_tokens_cap: int, expected_n: int) -> None:
     n = msg.get("n")
     if not _is_int(n) or n != expected_n:
         raise SetupError(400, f"request.n must be {expected_n}")
-    if msg.get("kind", "chat") != "chat":
-        raise SetupError(400, "an http: 2 session serves chat requests only")
+    kind = msg.get("kind", "chat")
+    if kind not in _SETUP_KINDS:
+        raise SetupError(400, "request.kind must be chat or images")
     model = msg.get("model")
     if not isinstance(model, str) or not model:
         raise SetupError(400, "request.model must be a non-empty string")
-    max_tokens = msg.get("max_tokens")
-    if not _is_int(max_tokens) or not 1 <= max_tokens <= max_tokens_cap:
-        raise SetupError(
-            400, f"request.max_tokens must be an integer in [1, {max_tokens_cap}]"
-        )
+    if kind == "images":
+        variant = msg.get("variant")
+        if not isinstance(variant, str) or not variant:
+            raise SetupError(400, "request.variant must be a non-empty string")
+        count = msg.get("count")
+        if not _is_int(count) or not 1 <= count <= IMAGE_MAX_COUNT:
+            raise SetupError(
+                400, f"request.count must be an integer in [1, {IMAGE_MAX_COUNT}]"
+            )
+        if "max_tokens" in msg:
+            raise SetupError(400, "an image request takes no max_tokens")
+    else:
+        max_tokens = msg.get("max_tokens")
+        if not _is_int(max_tokens) or not 1 <= max_tokens <= max_tokens_cap:
+            raise SetupError(
+                400,
+                f"request.max_tokens must be an integer in [1, {max_tokens_cap}]",
+            )
+        if "variant" in msg or "count" in msg:
+            raise SetupError(400, "a chat request takes no variant or count")
     length = msg.get("body_len")
     if not _is_int(length) or not 1 <= length <= MAX_BODY_LEN:
         raise SetupError(
@@ -1638,18 +1658,37 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
         logger.warning("confidential ws: sidecar offer unavailable: %s", exc)
         raise SetupError(503, "confidential sidecar unavailable") from exc
     validate_h2_request(msg, cap, state.h2_n + 1)
+    images = msg.get("kind") == "images"
+    if images:
+        block = h2_block(side)
+        served = images_endpoint(side) is not None and block is not None
+        if not served or "images" not in h2_kinds(block or {}, True):
+            raise SetupError(
+                400, "this node serves no confidential images over http: 2"
+            )
     # The reservation's lease runs from this request, not from the connection.
     lifetime = _session_lifetime()
     request_lifetime.set(lifetime)
     try:
-        billing = await reserve(
-            msg.get("auth", "") or "",
-            msg["model"],
-            msg["max_tokens"],
-            msg["offer_sig"],
-            accepted_fee_msat=msg.get("session_fee_msat"),
-            accepted_abandon_fee_msat=msg.get("abandon_fee_msat"),
-        )
+        if images:
+            billing = await reserve_image(
+                msg.get("auth", "") or "",
+                msg["model"],
+                msg["variant"],
+                msg["count"],
+                msg["offer_sig"],
+                accepted_fee_msat=msg.get("session_fee_msat"),
+                accepted_abandon_fee_msat=msg.get("abandon_fee_msat"),
+            )
+        else:
+            billing = await reserve(
+                msg.get("auth", "") or "",
+                msg["model"],
+                msg["max_tokens"],
+                msg["offer_sig"],
+                accepted_fee_msat=msg.get("session_fee_msat"),
+                accepted_abandon_fee_msat=msg.get("abandon_fee_msat"),
+            )
     except BillingError as exc:
         raise SetupError(exc.status, str(exc), exc.detail) from exc
     except Exception as exc:
@@ -1670,10 +1709,20 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
         extra={
             "sid": _short(state.sid),
             "n": state.h2_n,
+            "kind": getattr(billing, "kind", "chat"),
             "model": billing.model_id,
             "reserved_msats": billing.reserved_msats,
         },
     )
+    if images:
+        return json.dumps(
+            {
+                **{k: msg[k] for k in _H2_IMAGE_REQUEST_FIELDS if k in msg},
+                "kind": "images",
+                "count": billing.count,
+                "suffix": billing.suffix,
+            }
+        )
     return json.dumps({k: msg[k] for k in _H2_REQUEST_FIELDS if k in msg})
 
 
