@@ -116,6 +116,10 @@ override-dependencies = [
     "breez-sdk-spark>=0.17.0",
 ]
 
+# cashu 0.21 declares ecdsa but never imports it. ecdsa has an unpatched P-256
+# timing advisory (GHSA-wj6h-64fc-37mp), so keep it out of the tree entirely.
+exclude-dependencies = ["ecdsa"]
+
 # Transitive deps whose dependents allow the patched version but don't require
 # it. Constraints raise the floor without bypassing any upstream pin.
 constraint-dependencies = [

@@ -252,7 +252,14 @@ async def _determine_provider_id(public_key_hex: str, relay_urls: list[str]) -> 
 
 
 async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str]) -> str:
-    """Require a configured or unambiguous signed coordinate for durable stats."""
+    """Resolve the coordinate durable stats are published under.
+
+    Order: explicit ``PROVIDER_ID``, else the one signed listing ``d`` tag the
+    reachable relays agree on, else ``pubkey_hex[:12]``, the same fallback the
+    listing publisher announces. Real ambiguity (two coordinates, or a
+    truncated page that could hide one) pauses stats for an operator choice;
+    no reachable relay pauses until one answers.
+    """
     explicit = settings.provider_id
     if explicit:
         if len(explicit) > 64 or any(
@@ -265,15 +272,13 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
         return_exceptions=True,
     )
     candidates: set[str] = set()
+    reachable = 0
     for result in results:
-        if isinstance(result, BaseException):
-            raise ValueError(
-                "Configure PROVIDER_ID while listing relays are unavailable"
-            )
-        if result.status == QueryStatus.FAILED:
-            raise ValueError(
-                "Configure PROVIDER_ID while listing relays are unavailable"
-            )
+        # An unreachable relay is skipped, as the listing publisher does; a
+        # dead relay in the list must not disable public stats.
+        if isinstance(result, BaseException) or result.status == QueryStatus.FAILED:
+            continue
+        reachable += 1
         if result.status == QueryStatus.TRUNCATED or len(result.events) >= 10:
             raise ValueError("Configure PROVIDER_ID when listing history is incomplete")
         for event in result.events:
@@ -286,11 +291,19 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
                     candidates.add(values[0])
             except Exception:
                 continue
-    if len(candidates) != 1:
+    if len(candidates) > 1:
         raise ValueError(
             "Configure PROVIDER_ID to select one provider for public stats"
         )
-    return next(iter(candidates))
+    if candidates:
+        return next(iter(candidates))
+    if relay_urls and not reachable:
+        # The claimed coordinate is reused without re-resolution, so a total
+        # outage must not lock in the fallback over a listing it could not see.
+        raise ValueError("Configure PROVIDER_ID while listing relays are unavailable")
+    fallback = public_key_hex[:12]
+    logger.info(f"No listing provider_id found for stats; using fallback: {fallback}")
+    return fallback
 
 
 async def publish_to_relay(
@@ -319,8 +332,10 @@ DISABLED_POLL_SECONDS = 60
 # newly saved identity is announced promptly instead of up to 24h later.
 IDENTITY_POLL_SECONDS = 30
 
+# Shared fallback when RELAYS is unset. Every default must complete reads:
+# resolve_provider_id_strict treats one FAILED relay as ambiguous identity
+# history, so a relay that never sends EOSE stalls stats publication.
 DEFAULT_RELAY_URLS = [
-    "wss://relay.nostr.band",
     "wss://relay.damus.io",
     "wss://relay.routstr.com",
     "wss://nos.lol",
