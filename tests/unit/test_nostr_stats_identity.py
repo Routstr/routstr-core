@@ -19,22 +19,47 @@ async def test_explicit_identity_works_without_relay_reads(monkeypatch: Any) -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "scenario", ["outage", "empty", "ambiguous", "invalid", "truncated"]
-)
+@pytest.mark.parametrize("scenario", ["outage", "empty", "invalid", "raised"])
+async def test_no_visible_listing_falls_back_to_pubkey_prefix(
+    monkeypatch: Any, scenario: str
+) -> None:
+    first = listing.create_listing_event(KEY, "one", ["https://node.example"])
+    forged = {**first, "sig": "00" * 64}
+
+    async def query(*args: object) -> listing.EventQueryResult:
+        if scenario == "raised":
+            raise OSError("relay unreachable")
+        return {
+            "outage": listing.EventQueryResult([], listing.QueryStatus.FAILED),
+            "empty": listing.EventQueryResult([], listing.QueryStatus.COMPLETE),
+            "invalid": listing.EventQueryResult([forged], listing.QueryStatus.COMPLETE),
+        }[scenario]
+
+    monkeypatch.setattr(listing.settings, "provider_id", "")
+    monkeypatch.setattr(listing, "query_listing_events", query)
+    assert (
+        await listing.resolve_provider_id_strict(PUBKEY, ["wss://relay.example"])
+        == PUBKEY[:12]
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_relays_falls_back_to_pubkey_prefix(monkeypatch: Any) -> None:
+    monkeypatch.setattr(listing.settings, "provider_id", "")
+    assert await listing.resolve_provider_id_strict(PUBKEY, []) == PUBKEY[:12]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["ambiguous", "truncated"])
 async def test_unsafe_identity_history_requires_operator_choice(
     monkeypatch: Any, scenario: str
 ) -> None:
     first = listing.create_listing_event(KEY, "one", ["https://node.example"])
     second = listing.create_listing_event(KEY, "two", ["https://node.example"])
-    forged = {**first, "sig": "00" * 64}
     result = {
-        "outage": listing.EventQueryResult([], listing.QueryStatus.FAILED),
-        "empty": listing.EventQueryResult([], listing.QueryStatus.COMPLETE),
         "ambiguous": listing.EventQueryResult(
             [first, second], listing.QueryStatus.COMPLETE
         ),
-        "invalid": listing.EventQueryResult([forged], listing.QueryStatus.COMPLETE),
         "truncated": listing.EventQueryResult(
             [first] * 10, listing.QueryStatus.TRUNCATED
         ),
@@ -92,7 +117,7 @@ async def test_provider_filter_does_not_hide_truncation(monkeypatch: Any) -> Non
     assert result.status == listing.QueryStatus.TRUNCATED
 
 
-async def test_partial_relay_failure_prevents_strict_identity_resolution(
+async def test_partial_relay_failure_does_not_block_identity_resolution(
     monkeypatch: Any,
 ) -> None:
     import asyncio
@@ -130,10 +155,12 @@ async def test_partial_relay_failure_prevents_strict_identity_resolution(
             f"ws://127.0.0.1:{next(iter(server.sockets)).getsockname()[1]}"
             for server in (good, bad)
         ]
-        with pytest.raises(ValueError, match="unavailable"):
+        assert (
             await asyncio.wait_for(
                 listing.resolve_provider_id_strict(PUBKEY, urls), timeout=2
             )
+            == "one"
+        )
 
 
 @pytest.mark.parametrize(

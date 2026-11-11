@@ -252,7 +252,13 @@ async def _determine_provider_id(public_key_hex: str, relay_urls: list[str]) -> 
 
 
 async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str]) -> str:
-    """Require a configured or unambiguous signed coordinate for durable stats."""
+    """Resolve the coordinate durable stats are published under.
+
+    Order: explicit ``PROVIDER_ID``, else the one signed listing ``d`` tag the
+    reachable relays agree on, else ``pubkey_hex[:12]``, the same fallback the
+    listing publisher announces. Only real ambiguity (two coordinates, or a
+    truncated page that could hide one) pauses stats for an operator choice.
+    """
     explicit = settings.provider_id
     if explicit:
         if len(explicit) > 64 or any(
@@ -266,14 +272,10 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
     )
     candidates: set[str] = set()
     for result in results:
-        if isinstance(result, BaseException):
-            raise ValueError(
-                "Configure PROVIDER_ID while listing relays are unavailable"
-            )
-        if result.status == QueryStatus.FAILED:
-            raise ValueError(
-                "Configure PROVIDER_ID while listing relays are unavailable"
-            )
+        # An unreachable relay is skipped, as the listing publisher does; a
+        # dead relay in the list must not disable public stats.
+        if isinstance(result, BaseException) or result.status == QueryStatus.FAILED:
+            continue
         if result.status == QueryStatus.TRUNCATED or len(result.events) >= 10:
             raise ValueError("Configure PROVIDER_ID when listing history is incomplete")
         for event in result.events:
@@ -286,11 +288,15 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
                     candidates.add(values[0])
             except Exception:
                 continue
-    if len(candidates) != 1:
+    if len(candidates) > 1:
         raise ValueError(
             "Configure PROVIDER_ID to select one provider for public stats"
         )
-    return next(iter(candidates))
+    if candidates:
+        return next(iter(candidates))
+    fallback = public_key_hex[:12]
+    logger.info(f"No listing provider_id found for stats; using fallback: {fallback}")
+    return fallback
 
 
 async def publish_to_relay(
