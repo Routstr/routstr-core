@@ -68,7 +68,8 @@ SIG = "ab" * 64
 
 _SETUP = {
     "type": "setup",
-    "http": 2,
+    "v": 3,
+    "http": "2",
     "nonce_c": "aa" * 32,
     "auth": "sk-client-key",
     "offer_sig": SIG,
@@ -78,9 +79,9 @@ _READY = {
     "sid": SID,
     "pubkey": "cc" * 32,
     "head_len": 170,
-    "http": 2,
+    "http": "2",
     "h2": H2,
-    "v": 2,
+    "v": 3,
 }
 
 
@@ -117,7 +118,7 @@ def _usage(n: int, **over: Any) -> dict[str, Any]:
     return {
         "type": "usage",
         "sid": SID,
-        "http": 2,
+        "http": "2",
         "n": n,
         "model": "test-model",
         "usage": {
@@ -132,7 +133,7 @@ def _attest(n: int) -> dict[str, Any]:
     return {
         "type": "attestation",
         "n": n,
-        "a": {"sid": SID, "http": 2, "n": n, "stream": 2 * n + 1},
+        "a": {"sid": SID, "http": "2", "n": n, "stream": 2 * n + 1},
         "sig": "dd" * 64,
     }
 
@@ -290,6 +291,7 @@ class _Ledger:
             if offer is not None:
                 return offer
             return {
+                "v": 3,
                 "upstream_host": "api.venice.ai",
                 "max_tokens_cap": 4096,
                 "http": ["1.1", "2"],
@@ -383,6 +385,8 @@ class _Conn:
 async def _offer(monkeypatch: pytest.MonkeyPatch, extra: dict[str, Any]) -> Any:
     async def sidecar_offer() -> dict[str, Any]:
         return {
+            "v": 3,
+            "twopc": "split-public-1",
             "upstream_host": "api.venice.ai",
             "head_template": "POST /api/v1/chat/completions HTTP/1.1\r\n\r\n",
             "key_length": 42,
@@ -421,17 +425,17 @@ async def test_offer_names_the_deposit_and_the_idle_timeout(
     offer = await _offer(monkeypatch, {"http": ["1.1", "2"], "h2": H2})
     assert offer["h2"]["connection_deposit_msat"] == 7000
     # Set: that value, at least the node's minimum reservation; 0 is off.
-    monkeypatch.setattr(settings, "confidential_h2_connection_deposit_msat", 2500)
+    monkeypatch.setattr(settings, "confidential_connection_deposit_msat", 2500)
     offer = await _offer(monkeypatch, {"http": ["1.1", "2"], "h2": H2})
     assert offer["h2"]["connection_deposit_msat"] == 2500
     monkeypatch.setattr(settings, "min_request_msat", 4000)
-    assert conf.h2_connection_deposit_msat() == 4000
-    monkeypatch.setattr(settings, "confidential_h2_connection_deposit_msat", 0)
-    assert conf.h2_connection_deposit_msat() == 0
+    assert conf.connection_deposit_msat() == 4000
+    monkeypatch.setattr(settings, "confidential_connection_deposit_msat", 0)
+    assert conf.connection_deposit_msat() == 0
     # The idle timeout is the setting, never above the sidecar's own limit.
-    monkeypatch.setattr(settings, "confidential_h2_idle_timeout_s", 90)
+    monkeypatch.setattr(settings, "confidential_idle_timeout_s", 90)
     assert conf.h2_idle_timeout_s(H2) == 90
-    monkeypatch.setattr(settings, "confidential_h2_idle_timeout_s", 900)
+    monkeypatch.setattr(settings, "confidential_idle_timeout_s", 900)
     assert conf.h2_idle_timeout_s(H2) == 300
     assert conf.h2_idle_timeout_s({**H2, "idle_secs": 45}) == 45
 
@@ -464,7 +468,7 @@ async def test_offer_without_http2_is_the_v2_offer(
 def test_setup_http_selects_the_mode() -> None:
     assert cws.setup_http({}) == 1
     assert cws.setup_http({"http": "1.1"}) == 1 and cws.setup_http({"http": 1.1}) == 1
-    assert cws.setup_http({"http": 2}) == 2 and cws.setup_http({"http": "2"}) == 2
+    assert cws.setup_http({"http": "2"}) == 2 and cws.setup_http({"http": "2"}) == 2
     for bad in (3, "h2", True, 1, [2], {"v": 2}):
         with pytest.raises(cws.SetupError):
             cws.setup_http({"http": bad})
@@ -542,10 +546,10 @@ def test_setup_reserves_nothing_and_each_request_settles(
         assert ledger.calls == ["check"]
         assert ledger.checked == [("sk-client-key", SIG)]
         setup = conn.holder["setup"]
-        assert setup["http"] == 2 and setup["nonce_c"] == "aa" * 32
+        assert setup["http"] == "2" and setup["nonce_c"] == "aa" * 32
         assert "auth" not in setup and "offer_sig" not in setup
-        assert setup["escrow"].startswith("h2-")
-        assert ready["pubkey"] == pub_hex and ready["http"] == 2 and ready["h2"] == H2
+        assert setup["escrow"].startswith("conn-")
+        assert ready["pubkey"] == pub_hex and ready["http"] == "2" and ready["h2"] == H2
         assert len(ready["zk_token"]) == 64
 
         receipts = []
@@ -563,7 +567,7 @@ def test_setup_reserves_nothing_and_each_request_settles(
             assert _verify_schnorr(att["a_json"], att["sig"], pub_hex)
             assert att["sidecar_sig"] == "dd" * 64
             receipt = receipt_msg["receipt"]
-            assert receipt["http"] == 2 and receipt["n"] == n and receipt["sid"] == SID
+            assert receipt["http"] == "2" and receipt["n"] == n and receipt["sid"] == SID
             assert receipt["cost_msats"] == 12 and receipt["reserved_msats"] == 9000
             assert (
                 receipt["attestation_hash"]
@@ -1154,7 +1158,7 @@ def test_setup_reserves_the_deposit_and_the_first_settlement_releases_it(
         assert ledger.deposits == [("sk-client-key", SIG)]
         assert ready["deposit_msat"] == DEP
         # The sid is bound to the deposit's reservation.
-        assert conn.holder["setup"]["escrow"] == "h2-dep"
+        assert conn.holder["setup"]["escrow"] == "conn-dep"
         conn.send(_request(1))
         *_rest, receipt_msg = conn.recv(4)
         # The first settlement releases the deposit; its signed receipt says so.
@@ -1544,7 +1548,7 @@ def test_a_chat_request_and_an_image_request_share_a_connection(
         ok, released, att, receipt_msg = conn.recv(4)
         assert ok["suffix"] == IMAGE_SUFFIX and released["n"] == 2
         receipt = receipt_msg["receipt"]
-        assert receipt["http"] == 2 and receipt["n"] == 2 and receipt["sid"] == SID
+        assert receipt["http"] == "2" and receipt["n"] == 2 and receipt["sid"] == SID
         assert receipt["kind"] == "images" and receipt["model"] == "z-image-turbo"
         assert receipt["variant"] == "webp" and receipt["count"] == 1
         assert receipt["msat_per_image"] == 10350 and receipt["cost_msats"] == 10350
