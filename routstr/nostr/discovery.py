@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..core.logging import get_logger
 from ..core.settings import settings
+from .listing import DEFAULT_RELAY_URLS
 
 logger = get_logger(__name__)
 
@@ -201,12 +202,7 @@ def _get_discovery_relays() -> list[str]:
     except Exception:
         relays = []
     if not relays:
-        relays = [
-            "wss://relay.nostr.band",
-            "wss://relay.damus.io",
-            "wss://relay.routstr.com",
-            "wss://nos.lol",
-        ]
+        relays = list(DEFAULT_RELAY_URLS)
     return relays
 
 

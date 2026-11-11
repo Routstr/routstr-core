@@ -319,8 +319,10 @@ DISABLED_POLL_SECONDS = 60
 # newly saved identity is announced promptly instead of up to 24h later.
 IDENTITY_POLL_SECONDS = 30
 
+# Shared fallback when RELAYS is unset. Every default must complete reads:
+# resolve_provider_id_strict treats one FAILED relay as ambiguous identity
+# history, so a relay that never sends EOSE stalls stats publication.
 DEFAULT_RELAY_URLS = [
-    "wss://relay.nostr.band",
     "wss://relay.damus.io",
     "wss://relay.routstr.com",
     "wss://nos.lol",
