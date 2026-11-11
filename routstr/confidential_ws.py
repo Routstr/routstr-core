@@ -24,6 +24,19 @@
   for free: the node did the 2PC work either way. Every refusal or failure is reported as
   ``{"type": "error", "status", "reason", "detail"}`` before the socket closes.
 
+  An ``http: 2`` setup (protocol v3, option A; offered only when the sidecar
+  offers it) opens one provider connection for many sequential requests. It
+  names no model and reserves nothing: the node checks the offer signature
+  and that the credential has funds, then dials the sidecar. Each ``request``
+  frame then carries what a v2 setup carries (``auth``, ``offer_sig``, the
+  fees, model, ``max_tokens``); the node validates it, freezes the rates and
+  reserves as for a v2 setup, and forwards it without the credential. That
+  request's ``body_released``, ``attestation`` and ``usage`` are handled as
+  above, the receipt names the request (``n``), and the connection is idle
+  again. A connection that ends between requests costs nothing; one that ends
+  during a request finalizes that request's reservation by the rules above.
+  A request the node refuses ends the connection.
+
 * ``GET /v1/confidential/zk?proof=<pi_*>&session_id=<sid>&zk_token=<token>``: a byte proxy for
   one ZK proof (``twopc``: the two-party handshake; ``zkchan``: the
   session's long-lived proof channel, which carries π_NK, π_C2S and π_C3S
@@ -64,6 +77,8 @@ from .confidential import (
     canonical_json,
     charge_fee,
     charge_reservation,
+    check_credential,
+    h2_block,
     images_endpoint,
     node_pubkey_hex,
     pricing_fields,
@@ -91,7 +106,8 @@ _UUID_RE = re.compile(
 _SID_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 # Protocol v2 only (v1's pi_c1/pi_n/pi_c2/pi_c3 are retired).
-_PROOF_RE = re.compile(r"^(twopc|zkchan|pi_nk|pi_c2s|pi_c3s)$")
+# ``pi_win`` proves the client's records of an ``http: 2`` session.
+_PROOF_RE = re.compile(r"^(twopc|zkchan|pi_nk|pi_c2s|pi_c3s|pi_win)$")
 # The proof/2PC channel carries mux frames of at most 1 MiB; the session
 # channel carries TLS records (≤ 16.6 KiB each), which a client may batch, at
 # most a whole declared body (8 MiB).
@@ -140,6 +156,25 @@ _ZK_PROXY_CAP_S = SESSION_TIMEOUT_S + POST_RELEASE_TIMEOUT_S + SETTLE_GRACE_S
 # image session also ``kind``, ``count`` and the node-rendered ``suffix``).
 _SIDECAR_SETUP_FIELDS = ("type", "nonce_c", "model", "max_tokens", "len", "armed")
 _SETUP_KINDS = ("chat", "images")
+# ``http: 2`` sessions (protocol v3, option A). What a setup must not name
+# (it belongs to the requests), what of a ``request`` the sidecar is sent,
+# how long past the sidecar's own idle limit the node waits before it ends an
+# idle connection itself, and the sidecar's limit on a connection's age (a
+# backstop for the connection's proof channels here).
+_H2_SETUP_FORBIDDEN = (
+    "kind",
+    "model",
+    "max_tokens",
+    "len",
+    "suffix",
+    "count",
+    "variant",
+    "session_fee_msat",
+    "abandon_fee_msat",
+)
+_H2_REQUEST_FIELDS = ("type", "n", "kind", "model", "max_tokens", "body_len", "suffix")
+H2_IDLE_GRACE_S = 15.0
+H2_CONN_MAX_S = 3600.0
 
 _active_sessions = 0
 _active_zk = 0
@@ -294,6 +329,32 @@ class SessionState:
         self.zk_token = secrets.token_hex(32)
         # Open /zk proxies of this session (``MAX_ZK_CONNS_PER_SESSION``).
         self.zk_open = 0
+        # An ``http: 2`` session: one connection, sequential requests. The
+        # fields above that describe a reservation (``billing``,
+        # ``body_released``, ``released_at``, ``engaged``, ``upstream_refused``,
+        # ``finalized``, ``attestation_hash``) then describe the request in
+        # flight, and ``billing`` is ``None`` between requests.
+        self.http2 = False
+        # Number of the last request forwarded to the sidecar, and how many
+        # were settled with a receipt.
+        self.h2_n = 0
+        self.h2_settled = 0
+        # ``request`` frames from the client pump, each with the future that
+        # receives the frame to forward (``None``: refused).
+        self.h2_requests: asyncio.Queue[tuple[Any, asyncio.Future[str | None]]] = (
+            asyncio.Queue()
+        )
+        # Loop times: the request in flight was reserved; the connection
+        # became idle (``head_written`` or the last settlement).
+        self.h2_request_at = 0.0
+        self.h2_idle_since: float | None = None
+        # The sidecar's idle limit for the connection (the offer's ``h2`` block).
+        self.h2_idle_secs = 300.0
+        # The lifetime the request in flight's reservation lease was taken on.
+        self.h2_lifetime: RequestLifetime | None = None
+        # Set by the sidecar pump when the session's deadline moved
+        # (``head_written``, ``body_released``, a settlement).
+        self.h2_moved = asyncio.Event()
 
 
 class SetupError(Exception):
@@ -383,6 +444,79 @@ def validate_setup(msg: Any, max_tokens_cap: int) -> None:
             raise SetupError(400, f"setup.{name} must be a non-negative integer")
     if not isinstance(msg.get("armed", False), bool):
         raise SetupError(400, "setup.armed must be a boolean")
+
+
+def setup_http(msg: Any) -> int:
+    """1 for a v2 setup (``http`` absent or 1.1), 2 for an ``http: 2`` one."""
+    http = msg.get("http") if isinstance(msg, dict) else None
+    if http is None or (not isinstance(http, bool) and http in (1.1, "1.1")):
+        return 1
+    if not isinstance(http, bool) and http in (2, "2"):
+        return 2
+    raise SetupError(400, "setup.http must be 1.1 or 2")
+
+
+def _validate_billing_fields(msg: dict[str, Any], what: str) -> None:
+    """``offer_sig``, ``auth`` and the accepted fees of a setup or request."""
+    offer_sig = msg.get("offer_sig")
+    if not isinstance(offer_sig, str) or not _HEX_RE.fullmatch(offer_sig):
+        raise SetupError(
+            400, f"{what}.offer_sig must be the hex signature of the verified offer"
+        )
+    if not isinstance(msg.get("auth", ""), str):
+        raise SetupError(400, f"{what}.auth must be a string")
+    for name in ("session_fee_msat", "abandon_fee_msat"):
+        fee = msg.get(name)
+        if fee is not None and (not _is_int(fee) or fee < 0):
+            raise SetupError(400, f"{what}.{name} must be a non-negative integer")
+
+
+def validate_h2_setup(msg: Any) -> None:
+    """Shape checks on an ``http: 2`` setup: the connection only, no request
+    terms and no fees (both belong to its requests)."""
+    if not isinstance(msg, dict) or msg.get("type") != "setup":
+        raise SetupError(400, "the first frame must be setup")
+    named = [k for k in _H2_SETUP_FORBIDDEN if k in msg]
+    if named:
+        raise SetupError(
+            400,
+            f"an http: 2 setup names no {', '.join(named)}: "
+            "request terms belong to its requests",
+        )
+    nonce_c = msg.get("nonce_c")
+    if not isinstance(nonce_c, str) or not _SID_RE.fullmatch(nonce_c):
+        raise SetupError(400, "setup.nonce_c must be 64 hex characters")
+    _validate_billing_fields(msg, "setup")
+    if not isinstance(msg.get("armed", False), bool):
+        raise SetupError(400, "setup.armed must be a boolean")
+
+
+def validate_h2_request(msg: Any, max_tokens_cap: int, expected_n: int) -> None:
+    """Shape and range checks on a ``request`` of an ``http: 2`` session,
+    before anything is reserved."""
+    if not isinstance(msg, dict) or msg.get("type") != "request":
+        raise SetupError(400, "not a request")
+    n = msg.get("n")
+    if not _is_int(n) or n != expected_n:
+        raise SetupError(400, f"request.n must be {expected_n}")
+    if msg.get("kind", "chat") != "chat":
+        raise SetupError(400, "an http: 2 session serves chat requests only")
+    model = msg.get("model")
+    if not isinstance(model, str) or not model:
+        raise SetupError(400, "request.model must be a non-empty string")
+    max_tokens = msg.get("max_tokens")
+    if not _is_int(max_tokens) or not 1 <= max_tokens <= max_tokens_cap:
+        raise SetupError(
+            400, f"request.max_tokens must be an integer in [1, {max_tokens_cap}]"
+        )
+    length = msg.get("body_len")
+    if not _is_int(length) or not 1 <= length <= MAX_BODY_LEN:
+        raise SetupError(
+            400, f"request.body_len must be an integer in [1, {MAX_BODY_LEN}]"
+        )
+    if not isinstance(msg.get("suffix", ""), str):
+        raise SetupError(400, "request.suffix must be a string")
+    _validate_billing_fields(msg, "request")
 
 
 def sidecar_setup(
@@ -631,6 +765,9 @@ async def _run_session(
     upstream = await _open_session(websocket, session_id, state)
     if upstream is None:
         return
+    if state.http2:
+        await _run_h2_session(websocket, upstream, state, started)
+        return
 
     client_pump = asyncio.create_task(_client_to_sidecar(websocket, upstream, state))
     sidecar_pump = asyncio.create_task(_sidecar_to_client(websocket, upstream, state))
@@ -727,6 +864,8 @@ async def _open_session(
         except Exception as exc:
             logger.warning("confidential ws: sidecar offer unavailable: %s", exc)
             raise SetupError(503, "confidential sidecar unavailable") from exc
+        if setup_http(msg) == 2:
+            return await _open_h2_session(session_id, state, msg, side)
         validate_setup(msg, cap)
         images = msg.get("kind") == "images"
         if images and images_endpoint(side) is None:
@@ -770,21 +909,7 @@ async def _open_session(
         # protocol sid also admits /zk proof channels while the session is
         # live, so it is only logged shortened (``_short``, SecurityFilter).
         msg = sidecar_setup(msg, state.billing.snapshot.release_id, state.billing)
-        try:
-            upstream = await websockets.connect(
-                _sidecar_ws_url("/session", f"session_id={session_id}"),
-                extra_headers=sidecar_headers(),
-                max_size=_SESSION_WS_MAX_SIZE,
-                open_timeout=10,
-            )
-        except Exception as exc:
-            raise SetupError(502, "confidential sidecar unreachable") from exc
-        try:
-            await upstream.send(json.dumps(msg))
-        except Exception as exc:
-            await _close(upstream, 1011)
-            raise SetupError(502, "confidential sidecar unreachable") from exc
-        return upstream
+        return await _dial_sidecar(session_id, msg)
     except (WebSocketDisconnect, RuntimeError):
         await _finalize(state)
         return None
@@ -794,6 +919,25 @@ async def _open_session(
         await _send_error(websocket, exc.status, str(exc), exc.detail)
         await _close(websocket, 1008, str(exc))
         return None
+
+
+async def _dial_sidecar(session_id: str, setup: dict[str, Any]) -> Any:
+    """Open the sidecar's session socket and send it ``setup``."""
+    try:
+        upstream = await websockets.connect(
+            _sidecar_ws_url("/session", f"session_id={session_id}"),
+            extra_headers=sidecar_headers(),
+            max_size=_SESSION_WS_MAX_SIZE,
+            open_timeout=10,
+        )
+    except Exception as exc:
+        raise SetupError(502, "confidential sidecar unreachable") from exc
+    try:
+        await upstream.send(json.dumps(setup))
+    except Exception as exc:
+        await _close(upstream, 1011)
+        raise SetupError(502, "confidential sidecar unreachable") from exc
+    return upstream
 
 
 async def _client_to_sidecar(
@@ -868,10 +1012,30 @@ async def _on_sidecar_text(
         msg["sig_scheme"] = "schnorr-secp256k1"
         return json.dumps(msg)
     if kind == "head_written":
+        if state.http2:
+            # The connection is open and idle. Nothing is reserved yet, so it
+            # stays "unused" until its first request reaches the provider.
+            state.h2_idle_since = asyncio.get_running_loop().time()
+            state.h2_moved.set()
+            return frame
         # The credential record is on its way to the provider: the session is
         # in use and no longer counts against the unused limit.
         _mark_used(state)
         return frame
+    if state.http2 and kind in ("request_ok", "body_released", "attestation", "usage"):
+        n = msg["a"].get("n") if isinstance(msg.get("a"), dict) else msg.get("n")
+        if state.billing is None or n != state.h2_n:
+            # Not about the request in flight: nothing to bill or sign.
+            logger.warning(
+                "confidential ws: dropping a frame for another request",
+                extra={"sid": _short(state.sid), "frame": kind},
+            )
+            return None
+        if kind == "request_ok":
+            # The sidecar accepted the request: from here an abandoned
+            # request keeps its fee, as a v2 session does after ``ready``.
+            state.engaged = True
+            return frame
     if kind == "upstream_closed_early":
         # The provider closed before the final body record was released. With
         # response bytes it answered first (a refusal from the head alone,
@@ -892,6 +1056,10 @@ async def _on_sidecar_text(
         state.body_released = True
         if state.released_at is None:
             state.released_at = asyncio.get_running_loop().time()
+        if state.http2:
+            # The connection's first complete request: it is in use.
+            _mark_used(state)
+            state.h2_moved.set()
         return frame
     if kind == "attestation" and msg.get("a") is not None:
         a = msg["a"]
@@ -918,6 +1086,10 @@ async def _on_sidecar_text(
             return None
         # Shielded: a client disconnect must not cancel settlement halfway.
         await asyncio.shield(_settle(msg, websocket, state))
+        if state.http2 and state.billing is not None:
+            # No receipt was signed (the settlement failed or was refused):
+            # the connection ends, and ``_finalize`` sees what is left.
+            await _close(websocket, 1011, "settlement failed")
         return None
     return frame
 
@@ -1086,6 +1258,14 @@ async def _settle(
         )
     else:
         receipt["rates"] = billing.rates
+    log_extra: dict[str, Any] = {}
+    if state.http2:
+        receipt["http"] = 2
+        receipt["n"] = state.h2_n
+        log_extra["n"] = state.h2_n
+        # Idle again before the client can see the receipt and send the next
+        # request.
+        _h2_request_done(state)
     try:
         await websocket.send_text(
             json.dumps(
@@ -1102,7 +1282,12 @@ async def _settle(
         pass
     logger.info(
         "confidential ws: settled",
-        extra={"sid": _short(state.sid), "model": billing.model_id, "cost_msats": cost},
+        extra={
+            "sid": _short(state.sid),
+            "model": billing.model_id,
+            "cost_msats": cost,
+            **log_extra,
+        },
     )
 
 
@@ -1183,6 +1368,255 @@ async def _finalize(state: SessionState) -> None:
 
 
 # ---------------------------------------------------------------------------
+# http: 2 sessions (protocol v3, option A)
+# ---------------------------------------------------------------------------
+
+
+async def _open_h2_session(
+    session_id: str, state: SessionState, msg: Any, side: dict[str, Any]
+) -> Any:
+    """The setup of an ``http: 2`` session: check the offer signature and the
+    credential, reserve nothing, dial the sidecar. Raises ``SetupError``."""
+    block = h2_block(side)
+    if block is None:
+        raise SetupError(400, "this node does not serve http: 2 sessions")
+    validate_h2_setup(msg)
+    try:
+        await check_credential(msg.get("auth", "") or "", msg["offer_sig"])
+    except BillingError as exc:
+        raise SetupError(exc.status, str(exc), exc.detail) from exc
+    except Exception as exc:
+        logger.exception("confidential ws: credential check failed")
+        raise SetupError(500, "credential check failed") from exc
+    state.http2 = True
+    idle = block.get("idle_secs")
+    if _is_int(idle) and idle > 0:
+        state.h2_idle_secs = float(idle)
+    _claim_slot(state)
+    # The sidecar binds the sid to this value; with no reservation to name,
+    # it is a fresh random id.
+    setup = {
+        "type": "setup",
+        "http": 2,
+        "nonce_c": msg["nonce_c"],
+        "armed": msg.get("armed", False),
+        "escrow": f"h2-{secrets.token_hex(16)}",
+    }
+    return await _dial_sidecar(session_id, setup)
+
+
+def _h2_request_done(state: SessionState) -> None:
+    """The request in flight is finalized with a receipt: idle again."""
+    state.billing = None
+    state.body_released = False
+    state.released_at = None
+    state.engaged = False
+    state.upstream_refused = False
+    state.finalized = False
+    state.attestation_hash = ""
+    state.h2_lifetime = None
+    state.h2_settled += 1
+    state.h2_idle_since = asyncio.get_running_loop().time()
+    state.h2_moved.set()
+
+
+def _h2_deadline(state: SessionState, started: float) -> float:
+    """Loop time at which an ``http: 2`` session is cut off. With a request
+    in flight, v2's limits counted from the request; before the connection
+    head is written, v2's setup-phase limit; idle, the sidecar's idle limit
+    plus a grace (the sidecar normally closes first, with ``closed``)."""
+    if state.billing is not None:
+        if state.released_at is None:
+            return state.h2_request_at + SESSION_TIMEOUT_S
+        deadline = state.released_at + POST_RELEASE_TIMEOUT_S
+        if state.h2_lifetime is not None:
+            deadline = min(deadline, state.h2_lifetime.deadline - SETTLE_GRACE_S)
+        return deadline
+    if state.h2_idle_since is None:
+        return started + SESSION_TIMEOUT_S
+    return state.h2_idle_since + state.h2_idle_secs + H2_IDLE_GRACE_S
+
+
+async def _h2_reserve(msg: Any, state: SessionState) -> str:
+    """Validate a ``request``, freeze its offer's rates and reserve, exactly
+    as a v2 setup does. Returns the frame for the sidecar (no credential, no
+    offer signature, no fees). Raises ``SetupError``; nothing is held then."""
+    if state.billing is not None:
+        raise SetupError(
+            409, "a request is already in flight (requests are sequential)"
+        )
+    try:
+        side = await cached_sidecar_offer()
+        cap = int(side.get("max_tokens_cap", 4096))
+    except Exception as exc:
+        logger.warning("confidential ws: sidecar offer unavailable: %s", exc)
+        raise SetupError(503, "confidential sidecar unavailable") from exc
+    validate_h2_request(msg, cap, state.h2_n + 1)
+    # The reservation's lease runs from this request, not from the connection.
+    lifetime = _session_lifetime()
+    request_lifetime.set(lifetime)
+    try:
+        billing = await reserve(
+            msg.get("auth", "") or "",
+            msg["model"],
+            msg["max_tokens"],
+            msg["offer_sig"],
+            accepted_fee_msat=msg.get("session_fee_msat"),
+            accepted_abandon_fee_msat=msg.get("abandon_fee_msat"),
+        )
+    except BillingError as exc:
+        raise SetupError(exc.status, str(exc), exc.detail) from exc
+    except Exception as exc:
+        logger.exception("confidential ws: reservation failed")
+        raise SetupError(500, "reservation failed") from exc
+    state.billing = billing
+    state.finalized = False
+    state.body_released = False
+    state.released_at = None
+    state.engaged = False
+    state.upstream_refused = False
+    state.attestation_hash = ""
+    state.h2_n = msg["n"]
+    state.h2_request_at = asyncio.get_running_loop().time()
+    state.h2_lifetime = lifetime
+    logger.info(
+        "confidential ws: request reserved",
+        extra={
+            "sid": _short(state.sid),
+            "n": state.h2_n,
+            "model": billing.model_id,
+            "reserved_msats": billing.reserved_msats,
+        },
+    )
+    return json.dumps({k: msg[k] for k in _H2_REQUEST_FIELDS if k in msg})
+
+
+async def _h2_client_to_sidecar(
+    websocket: WebSocket, upstream: Any, state: SessionState
+) -> None:
+    """The client pump of an ``http: 2`` session: as v2's, except that a
+    ``request`` frame goes to the session task (which reserves) and only its
+    credential-free copy reaches the sidecar. Nothing later is forwarded
+    until that is decided, so the request's records follow its ``request``."""
+    loop = asyncio.get_running_loop()
+    try:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            if message.get("bytes") is not None:
+                await upstream.send(message["bytes"])
+                continue
+            text = message.get("text")
+            if text is None:
+                continue
+            try:
+                msg = json.loads(text)
+            except json.JSONDecodeError:
+                msg = None
+            kind = msg.get("type") if isinstance(msg, dict) else None
+            if kind == "setup":
+                await _send_error(websocket, 400, "duplicate setup")
+                await _close(websocket, 1008, "duplicate setup")
+                break
+            if kind == "request":
+                if len(text) > MAX_SETUP_TEXT:
+                    await _send_error(websocket, 413, "request frame too large")
+                    break
+                reply: asyncio.Future[str | None] = loop.create_future()
+                state.h2_requests.put_nowait((msg, reply))
+                forward = await reply
+                if forward is None:
+                    break
+                await upstream.send(forward)
+                continue
+            await upstream.send(text)
+    except (WebSocketDisconnect, RuntimeError, websockets.ConnectionClosed):
+        pass
+    finally:
+        await _close(upstream, 1000)
+
+
+async def _run_h2_session(
+    websocket: WebSocket, upstream: Any, state: SessionState, started: float
+) -> None:
+    """Relay an ``http: 2`` session. Reservations are made here, in the
+    session's own task (the reservation's lease is renewed while its owner
+    task lives), one per ``request``."""
+    loop = asyncio.get_running_loop()
+    client_pump = asyncio.create_task(_h2_client_to_sidecar(websocket, upstream, state))
+    sidecar_pump = asyncio.create_task(_sidecar_to_client(websocket, upstream, state))
+    next_request: asyncio.Future[Any] | None = None
+    moved: asyncio.Future[Any] | None = None
+    cut = False
+    try:
+        while True:
+            if next_request is None:
+                next_request = asyncio.ensure_future(state.h2_requests.get())
+            if moved is None:
+                moved = asyncio.ensure_future(state.h2_moved.wait())
+            remaining = _h2_deadline(state, started) - loop.time()
+            done, _ = await asyncio.wait(
+                {client_pump, sidecar_pump, next_request, moved},
+                timeout=max(remaining, 0.0),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if client_pump in done or sidecar_pump in done:
+                break
+            if moved in done:
+                # The deadline moved: wait again on the new one.
+                state.h2_moved.clear()
+                moved = None
+            if next_request in done:
+                msg, reply = next_request.result()
+                next_request = None
+                try:
+                    forward = await _h2_reserve(msg, state)
+                except SetupError as exc:
+                    # A refused request ends the connection: the client may
+                    # already have sent its records, which the sidecar could
+                    # not place.
+                    logger.warning("confidential ws: rejecting request: %s", exc)
+                    await _send_error(websocket, exc.status, str(exc), exc.detail)
+                    reply.set_result(None)
+                    cut = True
+                    break
+                reply.set_result(forward)
+                continue
+            if loop.time() >= _h2_deadline(state, started):
+                logger.warning(
+                    "confidential ws: session time limit reached",
+                    extra={"sid": _short(state.sid), "n": state.h2_n},
+                )
+                await _send_error(websocket, 408, "session time limit reached")
+                cut = True
+                break
+        if cut:
+            # As for v2's time limit: end the sidecar session, then hear its
+            # last frames before the money decision.
+            client_pump.cancel()
+            await _drain_sidecar(upstream, sidecar_pump, SIDECAR_DRAIN_S)
+        else:
+            remaining = _h2_deadline(state, started) - loop.time()
+            await asyncio.wait({sidecar_pump}, timeout=min(10.0, max(remaining, 0)))
+    finally:
+        for task in (client_pump, sidecar_pump, next_request, moved):
+            if task is not None and not task.done():
+                task.cancel()
+        await _finalize(state)
+        await _close(upstream, 1000)
+        await _close(websocket, 1000)
+        logger.info(
+            "confidential ws: http 2 connection ended",
+            extra={
+                "sid": _short(state.sid),
+                "requests": state.h2_n,
+                "settled": state.h2_settled,
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
 # /zk
 # ---------------------------------------------------------------------------
 
@@ -1211,14 +1645,19 @@ async def confidential_zk_proxy(
     _active_zk += 1
     state.zk_open += 1
     try:
-        await _zk_proxy(websocket, proof, session_id, state.ended)
+        cap = _ZK_PROXY_CAP_S + (H2_CONN_MAX_S if state.http2 else 0.0)
+        await _zk_proxy(websocket, proof, session_id, state.ended, cap)
     finally:
         _active_zk -= 1
         state.zk_open -= 1
 
 
 async def _zk_proxy(
-    websocket: WebSocket, proof: str, session_id: str, ended: asyncio.Event
+    websocket: WebSocket,
+    proof: str,
+    session_id: str,
+    ended: asyncio.Event,
+    cap: float = _ZK_PROXY_CAP_S,
 ) -> None:
     try:
         # No keepalive pings on this loopback hop: while the client's link is
@@ -1280,7 +1719,7 @@ async def _zk_proxy(
     session_end = asyncio.create_task(ended.wait())
     await asyncio.wait(
         {both, session_end},
-        timeout=_ZK_PROXY_CAP_S,
+        timeout=cap,
         return_when=asyncio.FIRST_COMPLETED,
     )
     for task in (*tasks, both, session_end):
