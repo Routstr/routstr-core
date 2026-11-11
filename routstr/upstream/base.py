@@ -2512,9 +2512,8 @@ class BaseUpstreamProvider:
             )
             raise
         content_type = response.headers.get("content-type")
-        usage = read_image_response(
-            content, _is_json_content_type(content_type) if content_type else True
-        )
+        is_json = _is_json_content_type(content_type) if content_type else True
+        usage = read_image_response(content, is_json)
         body = parse_json_body(request_body)
         total_sats = settle_image_sats(model_obj, body, usage, path)
 
@@ -2593,6 +2592,19 @@ class BaseUpstreamProvider:
             not in {"content-length", "content-encoding", "transfer-encoding"}
         }
         _inject_cost_response_headers(headers, cost_data)
+        # The body is relayed as the upstream sent it, often raw image bytes,
+        # so the provider and image count that chat responses carry in JSON
+        # are given as headers instead.
+        attribution: dict[str, Any] = {}
+        if is_json:
+            reported = _reported_provider(parse_json_body(content))
+            if reported:
+                attribution["provider"] = reported
+        self._apply_provider_field(attribution)
+        headers["X-Routstr-Provider"] = str(attribution["provider"])
+        if attribution.get("provider_url"):
+            headers["X-Routstr-Provider-Url"] = str(attribution["provider_url"])
+        headers["X-Routstr-Image-Count"] = str(usage.image_count)
 
         return Response(
             content=content,

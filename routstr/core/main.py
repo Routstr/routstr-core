@@ -369,6 +369,10 @@ app.add_middleware(
         "x-routstr-input-cost-msats",
         "x-routstr-output-cost-msats",
         "x-routstr-refund-error",
+        # Image responses relay raw bytes, so attribution travels as headers.
+        "x-routstr-provider",
+        "x-routstr-provider-url",
+        "x-routstr-image-count",
         # EHBP (Tinfoil) protocol headers must be exposed so browser clients
         # can detect and decrypt encrypted responses. Without these, the
         # browser hides them via CORS and the SDK treats the response as a

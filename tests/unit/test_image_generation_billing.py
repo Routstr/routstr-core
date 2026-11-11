@@ -111,6 +111,21 @@ async def _forward(
     provider: BaseUpstreamProvider | None = None,
     send: AsyncMock | None = None,
 ) -> tuple[bytes, ReservationSnapshot]:
+    _, out, snapshot = await _forward_response(
+        engine, path, upstream, model, body, provider, send
+    )
+    return out, snapshot
+
+
+async def _forward_response(
+    engine: AsyncEngine,
+    path: str,
+    upstream: httpx.Response,
+    model: Model = IMAGE_MODEL,
+    body: dict | None = None,
+    provider: BaseUpstreamProvider | None = None,
+    send: AsyncMock | None = None,
+) -> tuple[Any, bytes, ReservationSnapshot]:
     provider = provider or BaseUpstreamProvider(
         base_url="http://upstream", api_key="k", provider_fee=1.0
     )
@@ -149,7 +164,7 @@ async def _forward(
                 snapshot,
             )
             out = await _drain(response)
-    return out, snapshot
+    return response, out, snapshot
 
 
 async def _ledger(
@@ -251,6 +266,38 @@ async def test_binary_image_response_counts_as_one_image() -> None:
     _, spent, reserved, _ = await _ledger(engine, snapshot)
     assert spent == int(SATS_PER_IMAGE * 1000)
     assert reserved == 0
+
+
+@pytest.mark.asyncio
+async def test_binary_image_response_names_provider_and_count() -> None:
+    engine = await _engine()
+    provider = VeniceUpstreamProvider(api_key="k")
+    response, _, _ = await _forward_response(
+        engine,
+        "v1/image/edit",
+        _upstream(b"\x89PNG\r\n", "image/png"),
+        provider=provider,
+    )
+
+    assert response.headers["x-routstr-provider"] == "venice"
+    assert response.headers["x-routstr-provider-url"] == "https://api.venice.ai/api/v1"
+    assert response.headers["x-routstr-image-count"] == "1"
+    assert response.headers["x-routstr-cost-msats"] == str(int(SATS_PER_IMAGE * 1000))
+
+
+@pytest.mark.asyncio
+async def test_json_image_response_keeps_the_upstream_reported_provider() -> None:
+    engine = await _engine()
+    payload = {"provider": "Fireworks", "data": [{"b64_json": "a"}]}
+    response, out, _ = await _forward_response(
+        engine,
+        "v1/images/generations",
+        _upstream(json.dumps(payload).encode(), "application/json"),
+    )
+
+    assert json.loads(out) == payload
+    assert response.headers["x-routstr-provider"] == "base:Fireworks"
+    assert response.headers["x-routstr-image-count"] == "1"
 
 
 @pytest.mark.asyncio
