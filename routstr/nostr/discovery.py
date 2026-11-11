@@ -3,6 +3,7 @@ import json
 import random
 import string
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import websockets
@@ -10,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..core.logging import get_logger
 from ..core.settings import settings
+from ..payment.helpers import _validated_fetch_target
 
 logger = get_logger(__name__)
 
@@ -317,7 +319,7 @@ async def fetch_provider_health(endpoint_url: str) -> dict[str, Any]:
     """Fetch provider health and info, preferring /v1/info for models and pricing."""
     try:
         # Determine if we need Tor proxy based on .onion domain
-        is_onion = ".onion" in endpoint_url
+        is_onion = (urlsplit(endpoint_url).hostname or "").endswith(".onion")
 
         # Set up client arguments conditionally
         proxy: str | None = None
@@ -328,10 +330,14 @@ async def fetch_provider_health(endpoint_url: str) -> dict[str, Any]:
                 tor_proxy = "socks5://127.0.0.1:9050"
             proxy = tor_proxy
 
+        async def refuse_internal(request: httpx.Request) -> None:
+            await _validated_fetch_target(str(request.url))
+
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
             follow_redirects=True,
             proxy=proxy,
+            event_hooks={} if is_onion else {"request": [refuse_internal]},
         ) as client:
             # Prefer provider's /v1/info for full details
             info_url = f"{endpoint_url.rstrip('/')}/v1/info"
