@@ -10,12 +10,16 @@ import os
 import random
 import time
 import unicodedata
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from typing import Any, cast
 
 from nostr_sdk import Event
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
-from ..core.settings import settings
+from ..core.db import create_session
+from ..core.settings import SettingsService, settings
 from .sdk import (
     EventQueryResult,
     QueryStatus,
@@ -252,7 +256,15 @@ async def _determine_provider_id(public_key_hex: str, relay_urls: list[str]) -> 
 
 
 async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str]) -> str:
-    """Resolve the coordinate durable stats are published under.
+    """Resolve the coordinate durable stats are published under."""
+    provider_id, _confirmed = await _resolve_provider_id(public_key_hex, relay_urls)
+    return provider_id
+
+
+async def _resolve_provider_id(
+    public_key_hex: str, relay_urls: list[str]
+) -> tuple[str, bool]:
+    """Return the coordinate and whether a relay answer backs it.
 
     Order: explicit ``PROVIDER_ID``, else the one signed listing ``d`` tag the
     reachable relays agree on, else ``pubkey_hex[:12]``, the same fallback the
@@ -265,17 +277,19 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
             unicodedata.category(char) in ("Cc", "Cs") for char in explicit
         ):
             raise ValueError("PROVIDER_ID must contain 1 to 64 printable characters")
-        return explicit
+        return explicit, True
     results = await asyncio.gather(
         *(query_listing_events(url, public_key_hex) for url in relay_urls),
         return_exceptions=True,
     )
     candidates: set[str] = set()
+    answered = False
     for result in results:
         # An unreachable relay is skipped, as the listing publisher does; a
         # dead relay in the list must not disable public stats.
         if isinstance(result, BaseException) or result.status == QueryStatus.FAILED:
             continue
+        answered = True
         if result.status == QueryStatus.TRUNCATED or len(result.events) >= 10:
             raise ValueError("Configure PROVIDER_ID when listing history is incomplete")
         for event in result.events:
@@ -293,10 +307,49 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
             "Configure PROVIDER_ID to select one provider for public stats"
         )
     if candidates:
-        return next(iter(candidates))
+        return next(iter(candidates)), True
     fallback = public_key_hex[:12]
     logger.info(f"No listing provider_id found for stats; using fallback: {fallback}")
-    return fallback
+    return fallback, answered
+
+
+async def ensure_provider_id(
+    public_key_hex: str,
+    relay_urls: list[str],
+    session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]]
+    | None = None,
+) -> str:
+    """Resolve the provider coordinate once and save it to settings.
+
+    Like ``AUTO_GENERATE_NSEC`` saving the generated key, the first confirmed
+    answer becomes ``settings.provider_id``. The listing and the stats then
+    read one saved value and never re-discover it from relays. An answer no
+    relay backed (every relay down) is used but not saved, so a transient
+    outage cannot freeze a guess. Saving is best effort: a database error
+    never stops the listing or the stats from using the resolved value.
+    """
+    sessions = session_factory or create_session
+    if not settings.provider_id:
+        try:
+            async with sessions() as session:
+                await SettingsService.refresh(session, ("provider_id",))
+        except Exception as error:
+            logger.debug(f"Could not refresh saved provider_id: {error}")
+    provider_id, confirmed = await _resolve_provider_id(public_key_hex, relay_urls)
+    if settings.provider_id or not confirmed:
+        return provider_id
+    try:
+        async with sessions() as session:
+            await SettingsService.refresh(session, ("provider_id",))
+            if settings.provider_id:
+                # Another worker saved first; adopt its choice.
+                return settings.provider_id
+            await SettingsService.update({"provider_id": provider_id}, session)
+    except Exception as error:
+        logger.warning(f"Could not save provider_id {provider_id}: {error}")
+        return provider_id
+    logger.info(f"Saved provider_id to settings: {provider_id}")
+    return provider_id
 
 
 async def publish_to_relay(
@@ -495,7 +548,14 @@ async def announce_provider() -> None:
             relay_urls = _resolve_relay_urls()
 
             if provider_id is None:
-                provider_id = await _determine_provider_id(public_key_hex, relay_urls)
+                try:
+                    provider_id = await ensure_provider_id(public_key_hex, relay_urls)
+                except ValueError:
+                    # Ambiguous history: keep announcing under the newest
+                    # coordinate, but leave the choice to the operator.
+                    provider_id = await _determine_provider_id(
+                        public_key_hex, relay_urls
+                    )
                 logger.info(f"Using provider_id: {provider_id}")
 
             metadata = {
