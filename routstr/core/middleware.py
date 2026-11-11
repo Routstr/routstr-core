@@ -72,6 +72,17 @@ _UPSTREAM_ACCOUNT_HEADERS: tuple[str, ...] = (
     "anthropic-workspace-id",
     "anthropic-organization-id",
 )
+# Venice reports the operator's remaining account balance on every response
+# (x-venice-balance-usd, -diem, -vcu), so the whole family is matched by prefix.
+_UPSTREAM_ACCOUNT_HEADER_PREFIXES: tuple[str, ...] = ("x-venice-balance-",)
+
+
+def _strip_upstream_account_headers(headers: MutableHeaders) -> None:
+    for header in _UPSTREAM_ACCOUNT_HEADERS:
+        del headers[header]
+    for name in {key.lower() for key in headers.keys()}:
+        if name.startswith(_UPSTREAM_ACCOUNT_HEADER_PREFIXES):
+            del headers[name]
 
 
 def client_app_from_headers(headers: Headers) -> str:
@@ -303,8 +314,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             headers_duration = time.monotonic() - stage_start
 
             if hasattr(response, "headers"):
-                for header in _UPSTREAM_ACCOUNT_HEADERS:
-                    del response.headers[header]
+                _strip_upstream_account_headers(response.headers)
                 response.headers["x-routstr-request-id"] = request_id
                 # Headers are already on the wire before a streamed body ends,
                 # so this can only ever be time-to-headers.
