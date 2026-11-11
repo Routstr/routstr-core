@@ -2,7 +2,10 @@
 
 import * as React from 'react';
 import { useState, useEffect } from 'react';
-import { AdminService } from '@/lib/api/services/admin';
+import {
+  AdminService,
+  type AnalyticsSharingStatus,
+} from '@/lib/api/services/admin';
 import {
   Card,
   CardContent,
@@ -90,9 +93,22 @@ export function AdminSettings() {
   });
   const [passwordError, setPasswordError] = useState<string>('');
   const [passwordSaving, setPasswordSaving] = useState(false);
+  const [analyticsStatus, setAnalyticsStatus] =
+    useState<AnalyticsSharingStatus | null>(null);
 
   useEffect(() => {
     loadSettings();
+  }, []);
+
+  // A paused publisher only logs once per cause, so poll its state here.
+  useEffect(() => {
+    const loadStatus = () =>
+      AdminService.getAnalyticsSharingStatus()
+        .then(setAnalyticsStatus)
+        .catch(() => setAnalyticsStatus(null));
+    loadStatus();
+    const interval = setInterval(loadStatus, 15_000);
+    return () => clearInterval(interval);
   }, []);
 
   const loadSettings = async () => {
@@ -868,6 +884,24 @@ export function AdminSettings() {
                 }
               />
             </div>
+            {analyticsStatus?.state === 'publishing' ? (
+              <p className='text-muted-foreground pt-2 text-sm'>
+                Publishing as{' '}
+                <span className='font-mono'>{analyticsStatus.provider_id}</span>
+              </p>
+            ) : null}
+            {analyticsStatus?.state === 'paused' ||
+            analyticsStatus?.state === 'no_identity' ? (
+              <Alert variant='destructive' className='mt-3'>
+                <AlertCircle className='h-4 w-4' />
+                <AlertDescription>
+                  Stats publishing is paused: {analyticsStatus.reason}
+                  {analyticsStatus.retry_in_seconds
+                    ? ` (retrying in ${analyticsStatus.retry_in_seconds}s)`
+                    : ''}
+                </AlertDescription>
+              </Alert>
+            ) : null}
           </CardContent>
           {analyticsSharingChanged ? (
             <CardFooter className='justify-start'>

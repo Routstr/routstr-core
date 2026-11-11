@@ -851,3 +851,76 @@ async def test_identity_cache_rejects_missing_ciphertext_and_reloads_after_row_r
     assert node.coordinator._secret_snapshot is None
     assert node.coordinator._secret_identity is None
     assert node.coordinator._signing_keypair() == runtime.nsec_to_keypair("22" * 32)
+
+
+@pytest.mark.asyncio
+async def test_status_reports_why_stats_are_not_publishing(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def unlisted(*args: object) -> str:
+        if runtime.settings.provider_id:
+            return runtime.settings.provider_id
+        raise ValueError(
+            "Configure PROVIDER_ID to select one provider for public stats"
+        )
+
+    await node.coordinator.prepare_startup()
+    assert node.coordinator.status()["state"] == "off"
+
+    monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
+    monkeypatch.setattr(runtime.settings, "provider_id", "")
+    monkeypatch.setattr(runtime, "resolve_provider_id_strict", unlisted)
+    await node.coordinator.sync_once()
+    paused = node.coordinator.status()
+    assert paused["state"] == "paused"
+    assert "PROVIDER_ID" in str(paused["reason"])
+    assert isinstance(paused["retry_in_seconds"], int)
+    assert 0 < paused["retry_in_seconds"] <= 60
+
+    monkeypatch.setattr(runtime.settings, "provider_id", "stats-test-node")
+    node.coordinator._retry_at = 0
+    await node.coordinator.sync_once()
+    publishing = node.coordinator.status()
+    assert publishing["state"] == "publishing"
+    assert publishing["reason"] is None
+    assert publishing["provider_id"] == "stats-test-node"
+    assert publishing["relays"] == ["wss://relay.example.com"]
+
+    monkeypatch.setattr(runtime.settings, "nsec", "")
+    assert node.coordinator.status()["state"] == "no_identity"
+
+
+@pytest.mark.asyncio
+async def test_admin_status_endpoint_exposes_pause_reason(
+    node: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def unavailable(*args: object) -> str:
+        raise ValueError("Configure PROVIDER_ID while listing relays are unavailable")
+
+    monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
+    monkeypatch.setattr(runtime.settings, "provider_id", "")
+    monkeypatch.setattr(runtime, "resolve_provider_id_strict", unavailable)
+    monkeypatch.setattr(runtime, "_coordinator", node.coordinator)
+    await node.coordinator.prepare_startup()
+    await node.coordinator.sync_once()
+
+    token = "stats-status-test"
+    monkeypatch.setitem(admin.admin_sessions, token, int(time.time()) + 60)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        denied = await client.get("/admin/api/analytics-sharing/status")
+        assert denied.status_code in (401, 403)
+        response = await client.get(
+            "/admin/api/analytics-sharing/status",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"] == "paused"
+    assert "unavailable" in body["reason"]
+
+
+def test_status_without_a_running_coordinator(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime, "_coordinator", None)
+    assert runtime.analytics_status()["state"] == "stopped"

@@ -232,6 +232,37 @@ class AnalyticsCoordinator:
             self._paused_reason = reason
             logger.warning("Stats sharing paused", extra={"reason": reason})
 
+    def status(self) -> dict[str, object]:
+        """Report why stats are or are not publishing, for the admin UI.
+
+        The pause reason is otherwise logged only once per cause, so an
+        operator cannot tell a stuck publisher from a healthy one.
+        """
+        state: str
+        reason: str | None = None
+        if not settings.enable_analytics_sharing:
+            state = "off"
+        elif self._signing_keypair() is None:
+            state = "no_identity"
+            reason = "Set a Nostr NSEC to publish stats"
+        elif self._task is not None and not self._task.done():
+            state = "publishing"
+        elif self._paused_reason is not None:
+            state = "paused"
+            reason = self._paused_reason
+        else:
+            state = "starting"
+        retry_in = self._retry_at - time.monotonic()
+        return {
+            "state": state,
+            "reason": reason,
+            "provider_id": self._identity[2] if self._identity else None,
+            "relays": list(self._relays),
+            "retry_in_seconds": (
+                int(retry_in) + 1 if state == "paused" and retry_in > 0 else None
+            ),
+        }
+
     async def _stop_task(self) -> None:
         task, self._task = self._task, None
         if task is not None:
@@ -291,6 +322,19 @@ def _get_coordinator() -> AnalyticsCoordinator:
     if _coordinator is None or _coordinator._closed:
         _coordinator = AnalyticsCoordinator()
     return _coordinator
+
+
+def analytics_status() -> dict[str, object]:
+    coordinator = _coordinator
+    if coordinator is None or coordinator._closed:
+        return {
+            "state": "stopped",
+            "reason": None,
+            "provider_id": None,
+            "relays": [],
+            "retry_in_seconds": None,
+        }
+    return coordinator.status()
 
 
 async def prepare_analytics() -> None:
