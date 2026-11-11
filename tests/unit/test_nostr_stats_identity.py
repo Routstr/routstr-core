@@ -19,28 +19,45 @@ async def test_explicit_identity_works_without_relay_reads(monkeypatch: Any) -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["outage", "empty", "invalid", "raised"])
+@pytest.mark.parametrize("scenario", ["empty", "invalid"])
 async def test_no_visible_listing_falls_back_to_pubkey_prefix(
     monkeypatch: Any, scenario: str
 ) -> None:
     first = listing.create_listing_event(KEY, "one", ["https://node.example"])
     forged = {**first, "sig": "00" * 64}
 
-    async def query(*args: object) -> listing.EventQueryResult:
-        if scenario == "raised":
+    async def query(url: str, *args: object) -> listing.EventQueryResult:
+        if url == "wss://down.example":
             raise OSError("relay unreachable")
+        if url == "wss://failed.example":
+            return listing.EventQueryResult([], listing.QueryStatus.FAILED)
         return {
-            "outage": listing.EventQueryResult([], listing.QueryStatus.FAILED),
             "empty": listing.EventQueryResult([], listing.QueryStatus.COMPLETE),
             "invalid": listing.EventQueryResult([forged], listing.QueryStatus.COMPLETE),
         }[scenario]
 
     monkeypatch.setattr(listing.settings, "provider_id", "")
     monkeypatch.setattr(listing, "query_listing_events", query)
-    assert (
-        await listing.resolve_provider_id_strict(PUBKEY, ["wss://relay.example"])
-        == PUBKEY[:12]
-    )
+    relays = ["wss://down.example", "wss://failed.example", "wss://relay.example"]
+    assert await listing.resolve_provider_id_strict(PUBKEY, relays) == PUBKEY[:12]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["outage", "raised"])
+async def test_total_relay_outage_does_not_claim_fallback(
+    monkeypatch: Any, scenario: str
+) -> None:
+    async def query(*args: object) -> listing.EventQueryResult:
+        if scenario == "raised":
+            raise OSError("relay unreachable")
+        return listing.EventQueryResult([], listing.QueryStatus.FAILED)
+
+    monkeypatch.setattr(listing.settings, "provider_id", "")
+    monkeypatch.setattr(listing, "query_listing_events", query)
+    with pytest.raises(ValueError, match="unavailable"):
+        await listing.resolve_provider_id_strict(
+            PUBKEY, ["wss://one.example", "wss://two.example"]
+        )
 
 
 @pytest.mark.asyncio

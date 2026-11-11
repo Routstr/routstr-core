@@ -256,8 +256,9 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
 
     Order: explicit ``PROVIDER_ID``, else the one signed listing ``d`` tag the
     reachable relays agree on, else ``pubkey_hex[:12]``, the same fallback the
-    listing publisher announces. Only real ambiguity (two coordinates, or a
-    truncated page that could hide one) pauses stats for an operator choice.
+    listing publisher announces. Real ambiguity (two coordinates, or a
+    truncated page that could hide one) pauses stats for an operator choice;
+    no reachable relay pauses until one answers.
     """
     explicit = settings.provider_id
     if explicit:
@@ -271,11 +272,13 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
         return_exceptions=True,
     )
     candidates: set[str] = set()
+    reachable = 0
     for result in results:
         # An unreachable relay is skipped, as the listing publisher does; a
         # dead relay in the list must not disable public stats.
         if isinstance(result, BaseException) or result.status == QueryStatus.FAILED:
             continue
+        reachable += 1
         if result.status == QueryStatus.TRUNCATED or len(result.events) >= 10:
             raise ValueError("Configure PROVIDER_ID when listing history is incomplete")
         for event in result.events:
@@ -294,6 +297,10 @@ async def resolve_provider_id_strict(public_key_hex: str, relay_urls: list[str])
         )
     if candidates:
         return next(iter(candidates))
+    if relay_urls and not reachable:
+        # The claimed coordinate is reused without re-resolution, so a total
+        # outage must not lock in the fallback over a listing it could not see.
+        raise ValueError("Configure PROVIDER_ID while listing relays are unavailable")
     fallback = public_key_hex[:12]
     logger.info(f"No listing provider_id found for stats; using fallback: {fallback}")
     return fallback
