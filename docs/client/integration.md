@@ -10,7 +10,6 @@ API_KEY   →  sk-... or cashuA...
 Choose a node from the [provider directory](https://routstr.com/providers).
 `https://provider.example` is a placeholder in all examples below: replace it with
 your chosen node's URL and check `/v1/models` before sending payment.
-`api.routstr.com` is currently unavailable and is not a default endpoint.
 
 **Both work as API keys:**
 - `sk-7f8e9d...` — Session key (from Lightning invoice or Cashu import)
