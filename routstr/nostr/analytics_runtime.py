@@ -28,7 +28,7 @@ from .analytics_v2_delivery import (
     run_analytics_v2_publisher,
     transition_analytics_v2_sharing,
 )
-from .listing import DEFAULT_RELAY_URLS, nsec_to_keypair, resolve_provider_id_strict
+from .listing import DEFAULT_RELAY_URLS, ensure_provider_id, nsec_to_keypair
 
 logger = get_logger(__name__)
 
@@ -155,7 +155,9 @@ class AnalyticsCoordinator:
             provider_d = state.provider_d
         else:
             try:
-                provider_d = await resolve_provider_id_strict(pubkey, list(relays))
+                provider_d = await ensure_provider_id(
+                    pubkey, list(relays), session_factory=create_session
+                )
             except ValueError as error:
                 await self._pause(str(error), disable=False)
                 return

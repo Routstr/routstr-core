@@ -316,10 +316,10 @@ async def test_identity_change_fences_siblings_even_if_setup_fails(
     monkeypatch.setattr(runtime.settings, "nsec", "22" * 32)
     if failure == "discovery":
 
-        async def unavailable(*args: object) -> str:
+        async def unavailable(*args: object, **kwargs: object) -> str:
             raise ValueError("provider discovery unavailable")
 
-        monkeypatch.setattr(runtime, "resolve_provider_id_strict", unavailable)
+        monkeypatch.setattr(runtime, "ensure_provider_id", unavailable)
     else:
         monkeypatch.setattr(runtime.settings, "relays", ["ws://public.example.com"])
     await node.coordinator.sync_once()
@@ -441,14 +441,14 @@ async def test_relays_without_a_public_target_never_activate_sharing(
 async def test_missing_provider_identity_warns_once(
     node: Any, monkeypatch: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async def unlisted(*args: object) -> str:
+    async def unlisted(*args: object, **kwargs: object) -> str:
         raise ValueError(
             "Configure PROVIDER_ID to select one provider for public stats"
         )
 
     monkeypatch.setattr(runtime.settings, "enable_analytics_sharing", True)
     monkeypatch.setattr(runtime.settings, "provider_id", "")
-    monkeypatch.setattr(runtime, "resolve_provider_id_strict", unlisted)
+    monkeypatch.setattr(runtime, "ensure_provider_id", unlisted)
     runtime_logger = logging.getLogger(runtime.__name__)
     runtime_logger.addHandler(caplog.handler)
     try:

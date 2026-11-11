@@ -195,3 +195,138 @@ async def test_best_effort_listing_discovery_ignores_failed_partial_pages(
     assert await listing._determine_provider_id(PUBKEY, ["wss://relay.example"]) == (
         PUBKEY[:12] if status == listing.QueryStatus.FAILED else "one"
     )
+
+
+def _settings_store(with_table: bool = True) -> Any:
+    import json
+    from contextlib import asynccontextmanager
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlmodel.ext.asyncio.session import AsyncSession
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+    @asynccontextmanager
+    async def sessions() -> Any:
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            yield session
+
+    async def setup() -> None:
+        if not with_table:
+            return
+        async with engine.begin() as connection:
+            await connection.exec_driver_sql(
+                "CREATE TABLE settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL, "
+                "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            )
+            await connection.exec_driver_sql(
+                "INSERT INTO settings (id, data) VALUES (1, ?)",
+                (json.dumps({"provider_id": ""}),),
+            )
+
+    async def saved() -> str | None:
+        async with engine.connect() as connection:
+            row = (
+                await connection.exec_driver_sql("SELECT data FROM settings")
+            ).first()
+        return json.loads(row[0]).get("provider_id") if row else None
+
+    return sessions, setup, saved, engine
+
+
+@pytest.fixture
+def unsaved_identity(monkeypatch: Any) -> None:
+    from routstr.core.settings import SettingsService
+
+    for key in ("provider_id", "nsec", "npub"):
+        monkeypatch.setattr(listing.settings, key, getattr(listing.settings, key))
+    monkeypatch.setattr(listing.settings, "provider_id", "")
+    monkeypatch.setattr(SettingsService, "_current", listing.settings)
+
+
+@pytest.mark.usefixtures("unsaved_identity")
+@pytest.mark.parametrize(
+    ("status", "saved_as"),
+    [
+        (listing.QueryStatus.COMPLETE, PUBKEY[:12]),
+        (listing.QueryStatus.FAILED, ""),
+    ],
+)
+async def test_confirmed_provider_id_is_saved_once(
+    monkeypatch: Any, status: listing.QueryStatus, saved_as: str
+) -> None:
+    sessions, setup, saved, engine = _settings_store()
+    await setup()
+    calls = 0
+
+    async def query(*args: object) -> listing.EventQueryResult:
+        nonlocal calls
+        calls += 1
+        return listing.EventQueryResult([], status)
+
+    monkeypatch.setattr(listing, "query_listing_events", query)
+    try:
+        first = await listing.ensure_provider_id(
+            PUBKEY, ["wss://relay.example"], session_factory=sessions
+        )
+        assert first == PUBKEY[:12]
+        # Unconfirmed answers (every relay down) are used, never frozen.
+        assert await saved() == saved_as
+        assert listing.settings.provider_id == saved_as
+        if saved_as:
+            again = await listing.ensure_provider_id(
+                PUBKEY, ["wss://relay.example"], session_factory=sessions
+            )
+            assert again == saved_as
+            assert calls == 1, "a saved provider_id must not re-query relays"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.usefixtures("unsaved_identity")
+async def test_provider_id_saved_by_another_worker_is_adopted(
+    monkeypatch: Any,
+) -> None:
+    import json
+
+    sessions, setup, saved, engine = _settings_store()
+    await setup()
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql(
+            "UPDATE settings SET data = ?", (json.dumps({"provider_id": "other"}),)
+        )
+
+    async def query(*args: object) -> listing.EventQueryResult:
+        raise AssertionError("relays must not be queried")
+
+    monkeypatch.setattr(listing, "query_listing_events", query)
+    try:
+        assert (
+            await listing.ensure_provider_id(
+                PUBKEY, ["wss://relay.example"], session_factory=sessions
+            )
+            == "other"
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.usefixtures("unsaved_identity")
+async def test_save_failure_still_returns_the_resolved_provider_id(
+    monkeypatch: Any,
+) -> None:
+    sessions, _setup, _saved, engine = _settings_store(with_table=False)
+
+    async def query(*args: object) -> listing.EventQueryResult:
+        return listing.EventQueryResult([], listing.QueryStatus.COMPLETE)
+
+    monkeypatch.setattr(listing, "query_listing_events", query)
+    try:
+        assert (
+            await listing.ensure_provider_id(
+                PUBKEY, ["wss://relay.example"], session_factory=sessions
+            )
+            == PUBKEY[:12]
+        )
+    finally:
+        await engine.dispose()
