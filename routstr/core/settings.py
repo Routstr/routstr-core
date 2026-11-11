@@ -118,6 +118,22 @@ class Settings(BaseSettings):
     confidential_reserve_margin_tokens: int = Field(
         default=16, ge=0, env="CONFIDENTIAL_RESERVE_MARGIN_TOKENS"
     )
+    # ``http: 2`` connections (one two-party handshake, many requests). Opening
+    # one costs the node the same ~22 MB of garbled circuits as a session, so
+    # the setup reserves a deposit: released when the connection's first
+    # request reaches settlement, charged when the connection ends without one
+    # (unless the node, the sidecar or the provider failed first). -1 (the
+    # default) uses the abandon fee, which is the price this node already puts
+    # on a handshake nobody used; 0 means no deposit. The node closes a
+    # connection that had no request in flight for the idle timeout (never
+    # longer than the sidecar's own ``h2.idle_secs``). Both are published in
+    # the signed offer's ``h2`` block.
+    confidential_h2_connection_deposit_msat: int = Field(
+        default=-1, ge=-1, env="CONFIDENTIAL_H2_CONNECTION_DEPOSIT_MSAT"
+    )
+    confidential_h2_idle_timeout_s: int = Field(
+        default=120, ge=10, env="CONFIDENTIAL_H2_IDLE_TIMEOUT_S"
+    )
     # Peers (reverse proxies) whose client-address header is believed. Any
     # other peer is identified by its own address. Empty by default: a peer
     # listed here can name any client address, so list only a proxy that

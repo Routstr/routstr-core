@@ -81,6 +81,11 @@ IMAGE_IDLE_RANGE = (30, 600)
 IMAGE_FORMAT = "webp"
 DEFAULT_IMAGE_COUNT_KEY = "variants"
 
+# ``http: 2`` connections: the idle timeout when the setting is unusable, and
+# the name a connection deposit is booked under (it is not a model).
+H2_DEFAULT_IDLE_TIMEOUT_S = 120
+H2_DEPOSIT_MODEL_ID = "confidential-h2-connection"
+
 # Upstream HTTP errors answered before any inference starts, so the request
 # itself is not billed once the error head is disclosed under π_C3S.
 UNBILLED_ERROR_STATUSES = frozenset(range(400, 500)) | {503}
@@ -125,6 +130,35 @@ def abandon_fee_msat() -> int:
     except (TypeError, ValueError):
         fee = 0
     return max(fee, session_fee_msat())
+
+
+def h2_connection_deposit_msat() -> int:
+    """The deposit (msat, ≥ 0) reserved when an ``http: 2`` connection is
+    opened: the configured value, or the abandon fee when it is unset (-1).
+    A deposit above zero is at least the node's minimum reservation."""
+    try:
+        deposit = int(settings.confidential_h2_connection_deposit_msat)
+    except (TypeError, ValueError):
+        deposit = -1
+    if deposit < 0:
+        deposit = abandon_fee_msat()
+    if deposit <= 0:
+        return 0
+    return max(deposit, int(settings.min_request_msat))
+
+
+def h2_idle_timeout_s(block: dict[str, Any]) -> int:
+    """Seconds without a request in flight after which the node closes an
+    ``http: 2`` connection: the configured value, never above the sidecar's
+    own idle limit (``block`` is its ``h2`` block)."""
+    try:
+        idle = max(10, int(settings.confidential_h2_idle_timeout_s))
+    except (TypeError, ValueError):
+        idle = H2_DEFAULT_IDLE_TIMEOUT_S
+    side_idle = block.get("idle_secs")
+    if isinstance(side_idle, int) and not isinstance(side_idle, bool) and side_idle > 0:
+        idle = min(idle, side_idle)
+    return idle
 
 
 def reserve_margin_tokens() -> int:
@@ -810,6 +844,9 @@ class OfferTerms:
     reserve_margin_tokens: int = 0
     # The signed ``images`` block (variants and prices), when images are offered.
     images: dict[str, Any] | None = None
+    # The signed ``h2`` block (the sidecar's, plus the connection deposit and
+    # the idle timeout), when ``http: 2`` sessions are offered.
+    h2: dict[str, Any] | None = None
 
 
 # sig -> (monotonic time last served, terms), oldest first.
@@ -848,6 +885,20 @@ def h2_block(side: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(http, list) and "2" in http and isinstance(block, dict):
         return block
     return None
+
+
+def h2_offer_block(side: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``h2`` block of the signed offer: the sidecar's block and the two
+    terms the node adds, ``connection_deposit_msat`` (reserved at the setup)
+    and ``idle_timeout_s`` (the node closes a connection idle that long)."""
+    block = h2_block(side)
+    if block is None:
+        return None
+    return {
+        **block,
+        "connection_deposit_msat": h2_connection_deposit_msat(),
+        "idle_timeout_s": h2_idle_timeout_s(block),
+    }
 
 
 def signed_offer_terms(sig: str) -> OfferTerms | None:
@@ -899,7 +950,8 @@ async def build_offer() -> dict[str, Any]:
     }
     margin = reserve_margin_tokens()
     images = images_offer_block(side, pct)
-    terms = OfferTerms(prices, fee, pct, abandon, margin, images)
+    h2 = h2_offer_block(side)
+    terms = OfferTerms(prices, fee, pct, abandon, margin, images, h2)
     offer: dict[str, Any] = {
         # Protocol v2 (the two-party handshake) only; v1 is retired.
         "v": CONFIDENTIAL_VERSION,
@@ -924,9 +976,9 @@ async def build_offer() -> dict[str, Any]:
         # the sidecar renders it from this block and checked it at startup;
         # clients render the same bytes from the signed copy.
         offer["chat"] = chat
-    h2 = h2_block(side)
     if h2 is not None:
-        # ``http: 2`` sessions: both fields are the sidecar's, unchanged.
+        # ``http: 2`` sessions: ``http`` and the block are the sidecar's; the
+        # node adds its connection deposit and idle timeout to the block.
         # Absent without them (``http`` then means ["1.1"]), so a node whose
         # sidecar serves only HTTP/1.1 signs what it signed before.
         offer["http"] = side["http"]
@@ -1002,7 +1054,7 @@ class Billing:
 
     key_hash: str
     model_id: str
-    candidate: Candidate
+    candidate: Candidate | None
     reserved_msats: int
     snapshot: Any  # auth.ReservationSnapshot
     # Frozen at setup: msats per 1k tokens ({"in", "cached_in", "cache_write",
@@ -1024,6 +1076,8 @@ class Billing:
     # Chat sessions: the pinned cap and the offer's completion margin.
     max_tokens: int = 0
     reserve_margin_tokens: int = 0
+    # ``kind == "deposit"``: the reservation is an ``http: 2`` connection's
+    # deposit (no model, no rates); ``candidate`` is then ``None``.
 
 
 class BillingError(Exception):
@@ -1201,7 +1255,8 @@ def _refuse_fixed_pricing_setup() -> None:
 
 
 async def check_credential(auth: str, offer_sig: str) -> str:
-    """The setup check of an ``http: 2`` session, which reserves nothing: the
+    """The credential check of an ``http: 2`` setup (``reserve_deposit``
+    then reserves the connection deposit, no request yet): the
     offer the client verified is one this node signed recently, and the
     bearer is valid with an available balance of at least the node's minimum
     request cost and that offer's fees. Returns the key's hash.
@@ -1233,6 +1288,79 @@ async def check_credential(auth: str, offer_sig: str) -> str:
         except HTTPException as exc:
             raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
         return str(key.hashed_key)
+
+
+async def reserve_deposit(auth: str, offer_sig: str) -> Billing | None:
+    """Reserve the connection deposit of an ``http: 2`` setup, through the
+    node's ordinary reservation (``pay_for_request``).
+
+    The amount is the one in the signed offer ``offer_sig`` names (its ``h2``
+    block): the client verified that offer and names it in its setup, which
+    is its acceptance. Returns ``None`` when that offer asks for no deposit. A balance that does not cover it is
+    refused with 402 and ``connection_deposit_unfunded``: the caller has not
+    dialed the sidecar yet, so nothing is garbled for such a client.
+    """
+    from .auth import pay_for_request, validate_bearer_key
+    from .core.db import create_session
+
+    terms = signed_offer_terms(offer_sig)
+    if terms is None or terms.h2 is None:
+        message = (
+            "the signed offer is unknown or expired, or offers no http: 2 "
+            "sessions; refetch /v1/confidential/offer"
+        )
+        raise BillingError(
+            message, 409, {"error": {"type": "offer_expired", "message": message}}
+        )
+    raw = terms.h2.get("connection_deposit_msat", 0)
+    deposit = raw if _is_int(raw) and raw > 0 else 0
+    if deposit == 0:
+        return None
+    async with create_session() as session:
+        try:
+            key = await validate_bearer_key(auth, session, min_cost=deposit)
+            snapshot = await pay_for_request(key, deposit, session)
+        except HTTPException as exc:
+            if exc.status_code != 402:
+                raise BillingError(
+                    str(exc.detail), exc.status_code, exc.detail
+                ) from exc
+            message = (
+                f"the balance does not cover the connection deposit of {deposit} "
+                "msat (released after the connection's first request)"
+            )
+            detail: Any = exc.detail
+            inner = detail.get("error") if isinstance(detail, dict) else None
+            if isinstance(inner, dict):
+                # The node's usual 402 body (so a client's top-up handling
+                # applies), marked as the deposit's.
+                detail = {
+                    **detail,
+                    "error": {
+                        **inner,
+                        "type": "connection_deposit_unfunded",
+                        "message": message,
+                        "connection_deposit_msat": deposit,
+                    },
+                }
+            else:
+                detail = {
+                    "error": {
+                        "type": "connection_deposit_unfunded",
+                        "message": message,
+                        "connection_deposit_msat": deposit,
+                    }
+                }
+            raise BillingError(message, 402, detail) from exc
+        return Billing(
+            key.hashed_key,
+            H2_DEPOSIT_MODEL_ID,
+            None,
+            snapshot.reserved_msats,
+            snapshot,
+            {},
+            kind="deposit",
+        )
 
 
 async def reserve(
