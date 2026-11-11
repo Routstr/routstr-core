@@ -44,7 +44,7 @@
 
 * ``GET /v1/confidential/zk?proof=<pi_*>&session_id=<sid>&zk_token=<token>``: a byte proxy for
   one ZK proof (``twopc``: the two-party handshake; ``zkchan``: the
-  session's long-lived proof channel, which carries π_NK, π_C2S and π_C3S
+  session's long-lived proof channel, which carries π_NK, π_WIN and π_C3S
   over correlations set up while the session is armed). Only the sid of a
   live session on this process (announced by the sidecar's ``ready``), with
   the token the node added to that ``ready``, is admitted, so the node must run as a single worker process.
@@ -71,11 +71,11 @@ import websockets
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from .confidential import (
-    CONFIDENTIAL_MAX_V,
-    CONFIDENTIAL_MIN_V,
+    FRAMINGS,
     IMAGE_MAX_COUNT,
     PROVIDER_REFUSAL_STATUSES,
     UNBILLED_ERROR_STATUSES,
+    UPGRADE_REQUIRED,
     Billing,
     BillingError,
     cached_sidecar_offer,
@@ -83,11 +83,12 @@ from .confidential import (
     charge_fee,
     charge_reservation,
     check_credential,
+    check_request_offer,
     h2_block,
-    h2_idle_timeout_s,
     h2_kinds,
     images_endpoint,
     node_pubkey_hex,
+    pin_offer,
     pricing_fields,
     release,
     reserve,
@@ -95,9 +96,11 @@ from .confidential import (
     reserve_image,
     settle,
     settle_flat,
+    sidecar_framings,
     sidecar_headers,
     sign_payload,
     to_ws_url,
+    unpin_offer,
 )
 from .core import get_logger
 from .core.lifecycle import RequestLifetime, request_lifetime
@@ -115,7 +118,7 @@ _SID_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 # Protocol v2 only (v1's pi_c1/pi_n/pi_c2/pi_c3 are retired).
 # ``pi_win`` proves the client's records of an ``http: 2`` session.
-_PROOF_RE = re.compile(r"^(twopc|zkchan|pi_nk|pi_c2s|pi_c3s|pi_win)$")
+_PROOF_RE = re.compile(r"^(twopc|zkchan|pi_nk|pi_c3s|pi_win)$")
 # The proof/2PC channel carries mux frames of at most 1 MiB; the session
 # channel carries TLS records (≤ 16.6 KiB each), which a client may batch, at
 # most a whole declared body (8 MiB).
@@ -162,7 +165,6 @@ MAX_ZK_CONNS = MAX_SESSIONS * MAX_ZK_CONNS_PER_SESSION
 _ZK_PROXY_CAP_S = SESSION_TIMEOUT_S + POST_RELEASE_TIMEOUT_S + SETTLE_GRACE_S
 # The setup fields the sidecar is sent (``escrow`` is set by the node; for an
 # image session also ``kind``, ``count`` and the node-rendered ``suffix``).
-_SIDECAR_SETUP_FIELDS = ("type", "nonce_c", "model", "max_tokens", "len", "armed")
 _SETUP_KINDS = ("chat", "images")
 # ``http: 2`` sessions (protocol v3, option A). What a setup must not name
 # (it belongs to the requests), what of a ``request`` the sidecar is sent,
@@ -174,6 +176,7 @@ _H2_SETUP_FORBIDDEN = (
     "model",
     "max_tokens",
     "len",
+    "body_len",
     "suffix",
     "count",
     "variant",
@@ -348,7 +351,13 @@ class SessionState:
         # ``body_released``, ``released_at``, ``engaged``, ``upstream_refused``,
         # ``finalized``, ``attestation_hash``) then describe the request in
         # flight, and ``billing`` is ``None`` between requests.
-        self.http2 = False
+        self.http2 = True
+        # The framing of the inner connection (``setup.http``): "2" or "1.1".
+        self.framing = "2"
+        # The signed offer the connection was opened on (kept remembered
+        # while the connection lives), and its terms.
+        self.offer_sig: str | None = None
+        self.offer_terms: Any = None
         # Number of the last request forwarded to the sidecar, and how many
         # were settled with a receipt.
         self.h2_n = 0
@@ -391,10 +400,21 @@ class SessionState:
 
 
 class SetupError(Exception):
+    # A refused ``request`` leaves the connection usable (``request_refused``)
+    # unless it is a protocol violation (``fatal``).
+    fatal = False
+
     def __init__(self, status: int, reason: str, detail: Any = None) -> None:
         super().__init__(reason)
         self.status = status
         self.detail = detail if detail is not None else reason
+
+
+class ProtocolError(SetupError):
+    """A ``request`` that breaks the protocol (a wrong ``n``, a second request
+    in flight): it ends the connection."""
+
+    fatal = True
 
 
 def _error_frame(status: int, reason: str, detail: Any = None) -> dict[str, Any]:
@@ -415,6 +435,14 @@ async def _send_error(
         pass
 
 
+async def _upgrade_required(websocket: WebSocket) -> None:
+    try:
+        await websocket.send_text(json.dumps(UPGRADE_REQUIRED))
+    except Exception:
+        pass
+    await _close(websocket, 1008, "upgrade_required")
+
+
 async def _close(ws: Any, code: int = 1008, reason: str = "") -> None:
     try:
         await ws.close(code=code, reason=reason[:120])
@@ -424,69 +452,6 @@ async def _close(ws: Any, code: int = 1008, reason: str = "") -> None:
 
 def _is_int(value: Any) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-def validate_setup(msg: Any, max_tokens_cap: int) -> None:
-    """Shape and range checks on a client ``setup`` before anything is reserved."""
-    if not isinstance(msg, dict) or msg.get("type") != "setup":
-        raise SetupError(400, "the first frame must be setup")
-    model = msg.get("model")
-    if not isinstance(model, str) or not model:
-        raise SetupError(400, "setup.model must be a non-empty string")
-    kind = msg.get("kind", "chat")
-    if kind not in _SETUP_KINDS:
-        raise SetupError(400, "setup.kind must be chat or images")
-    if kind == "images":
-        variant = msg.get("variant")
-        if not isinstance(variant, str) or not variant:
-            raise SetupError(400, "setup.variant must be a non-empty string")
-        count = msg.get("count")
-        if not _is_int(count) or not 1 <= count <= IMAGE_MAX_COUNT:
-            raise SetupError(
-                400, f"setup.count must be an integer in [1, {IMAGE_MAX_COUNT}]"
-            )
-        if "max_tokens" in msg:
-            raise SetupError(400, "an image setup takes no max_tokens")
-        if msg.get("armed", False) is not False:
-            # Image requests are on demand only: never pre-armed.
-            raise SetupError(400, "an image session cannot be armed")
-    else:
-        max_tokens = msg.get("max_tokens")
-        if not _is_int(max_tokens) or not 1 <= max_tokens <= max_tokens_cap:
-            raise SetupError(
-                400, f"setup.max_tokens must be an integer in [1, {max_tokens_cap}]"
-            )
-    length = msg.get("len")
-    if not _is_int(length) or not 1 <= length <= MAX_BODY_LEN:
-        raise SetupError(400, f"setup.len must be an integer in [1, {MAX_BODY_LEN}]")
-    nonce_c = msg.get("nonce_c")
-    if not isinstance(nonce_c, str) or not _SID_RE.fullmatch(nonce_c):
-        raise SetupError(400, "setup.nonce_c must be 64 hex characters")
-    # The session is billed at the rates of the signed offer the client
-    # verified, never at whatever the node's settings are at setup time.
-    offer_sig = msg.get("offer_sig")
-    if not isinstance(offer_sig, str) or not _HEX_RE.fullmatch(offer_sig):
-        raise SetupError(
-            400, "setup.offer_sig must be the hex signature of the verified offer"
-        )
-    if not isinstance(msg.get("auth", ""), str):
-        raise SetupError(400, "setup.auth must be a string")
-    for name in ("session_fee_msat", "abandon_fee_msat"):
-        fee = msg.get(name)
-        if fee is not None and (not _is_int(fee) or fee < 0):
-            raise SetupError(400, f"setup.{name} must be a non-negative integer")
-    if not isinstance(msg.get("armed", False), bool):
-        raise SetupError(400, "setup.armed must be a boolean")
-
-
-def setup_http(msg: Any) -> int:
-    """1 for a v2 setup (``http`` absent or 1.1), 2 for an ``http: 2`` one."""
-    http = msg.get("http") if isinstance(msg, dict) else None
-    if http is None or (not isinstance(http, bool) and http in (1.1, "1.1")):
-        return 1
-    if not isinstance(http, bool) and http in (2, "2"):
-        return 2
-    raise SetupError(400, "setup.http must be 1.1 or 2")
 
 
 def _validate_billing_fields(msg: dict[str, Any], what: str) -> None:
@@ -505,15 +470,18 @@ def _validate_billing_fields(msg: dict[str, Any], what: str) -> None:
 
 
 def validate_h2_setup(msg: Any) -> None:
-    """Shape checks on an ``http: 2`` setup: the connection only, no request
-    terms and no fees (both belong to its requests)."""
+    """Shape checks on a setup: the connection only (``v``, the framing), no
+    request terms and no fees (both belong to its requests)."""
     if not isinstance(msg, dict) or msg.get("type") != "setup":
         raise SetupError(400, "the first frame must be setup")
+    http = msg.get("http")
+    if not isinstance(http, str) or http not in FRAMINGS:
+        raise SetupError(400, 'setup.http must be "2" or "1.1"')
     named = [k for k in _H2_SETUP_FORBIDDEN if k in msg]
     if named:
         raise SetupError(
             400,
-            f"an http: 2 setup names no {', '.join(named)}: "
+            f"a setup names no {', '.join(named)}: "
             "request terms belong to its requests",
         )
     nonce_c = msg.get("nonce_c")
@@ -531,7 +499,7 @@ def validate_h2_request(msg: Any, max_tokens_cap: int, expected_n: int) -> None:
         raise SetupError(400, "not a request")
     n = msg.get("n")
     if not _is_int(n) or n != expected_n:
-        raise SetupError(400, f"request.n must be {expected_n}")
+        raise ProtocolError(400, f"request.n must be {expected_n}")
     kind = msg.get("kind", "chat")
     if kind not in _SETUP_KINDS:
         raise SetupError(400, "request.kind must be chat or images")
@@ -568,24 +536,6 @@ def validate_h2_request(msg: Any, max_tokens_cap: int, expected_n: int) -> None:
     _validate_billing_fields(msg, "request")
 
 
-def sidecar_setup(
-    msg: dict[str, Any], escrow: str, billing: Billing | None = None
-) -> dict[str, Any]:
-    """The setup forwarded to the sidecar: the known fields only, never the
-    credential, the offer signature or the fees, plus the node's escrow id.
-
-    An image session adds ``kind``, ``count`` and the suffix the node rendered
-    from its own signed offer (never one the client sent)."""
-    out = {k: msg[k] for k in _SIDECAR_SETUP_FIELDS if k in msg}
-    out["escrow"] = escrow
-    if billing is not None and getattr(billing, "kind", "chat") == "images":
-        out.pop("max_tokens", None)
-        out["kind"] = "images"
-        out["count"] = billing.count
-        out["suffix"] = billing.suffix
-    return out
-
-
 def _session_lifetime() -> RequestLifetime:
     """The lifetime the session's reservation lease is derived from: both
     session phases plus the settlement grace, never shorter than the HTTP
@@ -597,47 +547,20 @@ def _session_lifetime() -> RequestLifetime:
     return RequestLifetime(deadline=asyncio.get_running_loop().time() + seconds)
 
 
-def _session_deadline(state: "SessionState", started: float) -> float:
-    """Loop time at which the session is cut off: SESSION_TIMEOUT_S after the
-    accept until the final body record is released; then POST_RELEASE_TIMEOUT_S
-    after the release (the provider has the request; the response and the
-    disclosure need time), within the reservation lease less SETTLE_GRACE_S."""
-    if state.released_at is None:
-        return started + SESSION_TIMEOUT_S
-    deadline = state.released_at + POST_RELEASE_TIMEOUT_S
-    lifetime = request_lifetime.get()
-    if lifetime is not None:
-        deadline = min(deadline, lifetime.deadline - SETTLE_GRACE_S)
-    return deadline
-
-
-# ---------------------------------------------------------------------------
-# /ws
-# ---------------------------------------------------------------------------
-
-
 @confidential_ws_router.websocket("/v1/confidential/ws")
 async def confidential_session_proxy(
     websocket: WebSocket, session_id: str = "", v: str = ""
 ) -> None:
     global _active_sessions
     await websocket.accept()
-    try:
-        version = int(v or CONFIDENTIAL_MIN_V)
-    except ValueError:
-        version = -1
+    if v != "3":
+        # A v2 (or unversioned) client: told to upgrade, in a frame it can
+        # show, then closed (``PROTOCOL-V3.md`` §11).
+        await _upgrade_required(websocket)
+        return
     if not _UUID_RE.fullmatch(session_id or ""):
         await websocket.close(code=1008, reason="invalid session_id")
         return
-    if not CONFIDENTIAL_MIN_V <= version <= CONFIDENTIAL_MAX_V:
-        # A v1 client (protocol v1 is retired) or an unknown version.
-        await websocket.close(
-            code=1008,
-            reason=f"unsupported protocol version {v}; this node speaks only v{CONFIDENTIAL_MAX_V}",
-        )
-        return
-    # The sidecar's own version needs no check here: ``fetch_sidecar_offer``
-    # refuses a sidecar that does not speak v2.
     if not node_pubkey_hex():
         await websocket.close(code=1011, reason="node has no signing identity")
         return
@@ -814,50 +737,12 @@ async def _run_session(
     upstream = await _open_session(websocket, session_id, state)
     if upstream is None:
         return
-    if state.http2:
-        await _run_h2_session(websocket, upstream, state, started)
-        return
-
-    client_pump = asyncio.create_task(_client_to_sidecar(websocket, upstream, state))
-    sidecar_pump = asyncio.create_task(_sidecar_to_client(websocket, upstream, state))
     try:
-        # The deadline moves once the body is released (``_session_deadline``):
-        # a released request is not cut off at the setup-phase limit, and its
-        # reservation is charged only if no disclosure arrives in its window.
-        while True:
-            remaining = _session_deadline(state, started) - loop.time()
-            done, _ = await asyncio.wait(
-                {client_pump, sidecar_pump},
-                timeout=max(remaining, 0.0),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if done or loop.time() >= _session_deadline(state, started):
-                break
-        if not done:
-            logger.warning(
-                "confidential ws: session time limit reached",
-                extra={"sid": _short(state.sid)},
-            )
-            await _send_error(websocket, 408, "session time limit reached")
-            # End the sidecar session, then hear its last frames: a π_C2S that
-            # completed just now may already have released the body, and a
-            # finalization that missed its ``body_released`` would release a
-            # reservation the provider is working on.
-            client_pump.cancel()
-            await _drain_sidecar(upstream, sidecar_pump, SIDECAR_DRAIN_S)
-        else:
-            # If the client left, the sidecar session is closing: let its pump
-            # drain frames already in flight (body_released, usage) so the
-            # money decision below sees the sidecar's real final state.
-            remaining = _session_deadline(state, started) - loop.time()
-            await asyncio.wait({sidecar_pump}, timeout=min(10.0, max(remaining, 0)))
+        await _run_h2_session(websocket, upstream, state, started)
     finally:
-        for task in (client_pump, sidecar_pump):
-            if not task.done():
-                task.cancel()
-        await _finalize(state)
-        await _close(upstream, 1000)
-        await _close(websocket, 1000)
+        if state.offer_sig is not None:
+            unpin_offer(state.offer_sig)
+            state.offer_sig = None
 
 
 async def _drain_sidecar(upstream: Any, sidecar_pump: Any, timeout: float) -> None:
@@ -907,64 +792,27 @@ async def _open_session(
             msg = json.loads(text)
         except json.JSONDecodeError:
             msg = None
+        if isinstance(msg, dict) and msg.get("type") == "setup":
+            v = msg.get("v")
+            if isinstance(v, bool) or v != 3:
+                # A v2-shaped setup on a socket that claimed v3.
+                await _upgrade_required(websocket)
+                return None
         try:
             side = await cached_sidecar_offer()
-            cap = int(side.get("max_tokens_cap", 4096))
         except Exception as exc:
             logger.warning("confidential ws: sidecar offer unavailable: %s", exc)
             raise SetupError(503, "confidential sidecar unavailable") from exc
-        if setup_http(msg) == 2:
-            return await _open_h2_session(session_id, state, msg, side)
-        validate_setup(msg, cap)
-        images = msg.get("kind") == "images"
-        if images and images_endpoint(side) is None:
-            raise SetupError(400, "this node does not serve confidential images")
-        auth = msg.pop("auth", "") or ""
-        offer_sig = msg.pop("offer_sig")
-        accepted_fee = msg.pop("session_fee_msat", None)
-        accepted_abandon = msg.pop("abandon_fee_msat", None)
-        try:
-            if images:
-                state.billing = await reserve_image(
-                    auth,
-                    msg["model"],
-                    msg["variant"],
-                    msg["count"],
-                    offer_sig,
-                    accepted_fee_msat=accepted_fee,
-                    accepted_abandon_fee_msat=accepted_abandon,
-                )
-            else:
-                state.billing = await reserve(
-                    auth,
-                    msg["model"],
-                    msg["max_tokens"],
-                    offer_sig,
-                    accepted_fee_msat=accepted_fee,
-                    accepted_abandon_fee_msat=accepted_abandon,
-                )
-        except BillingError as exc:
-            # Same status codes as the normal proxy (e.g. 402 insufficient
-            # balance), so the client's existing top-up/retry handling applies.
-            raise SetupError(exc.status, str(exc), exc.detail) from exc
-        except Exception as exc:
-            logger.exception("confidential ws: reservation failed")
-            raise SetupError(500, "reservation failed") from exc
-        # Only now does the session take a slot; a refusal here releases the
-        # reservation in full (``_finalize``: the sidecar was never dialed, so
-        # no abandon fee applies).
-        _claim_slot(state)
-        # The sidecar binds sid to this value. It is unique; the derived
-        # protocol sid also admits /zk proof channels while the session is
-        # live, so it is only logged shortened (``_short``, SecurityFilter).
-        msg = sidecar_setup(msg, state.billing.snapshot.release_id, state.billing)
-        return await _dial_sidecar(session_id, msg)
+        return await _open_h2_session(session_id, state, msg, side)
     except (WebSocketDisconnect, RuntimeError):
         await _finalize(state)
         return None
     except SetupError as exc:
         logger.warning("confidential ws: rejecting session: %s", exc)
         await _finalize(state)
+        if state.offer_sig is not None:
+            unpin_offer(state.offer_sig)
+            state.offer_sig = None
         await _send_error(websocket, exc.status, str(exc), exc.detail)
         await _close(websocket, 1008, str(exc))
         return None
@@ -987,39 +835,6 @@ async def _dial_sidecar(session_id: str, setup: dict[str, Any]) -> Any:
         await _close(upstream, 1011)
         raise SetupError(502, "confidential sidecar unreachable") from exc
     return upstream
-
-
-async def _client_to_sidecar(
-    websocket: WebSocket, upstream: Any, state: SessionState
-) -> None:
-    try:
-        while True:
-            message = await websocket.receive()
-            if message["type"] == "websocket.disconnect":
-                break
-            if message.get("bytes") is not None:
-                await upstream.send(message["bytes"])
-                continue
-            text = message.get("text")
-            if text is None:
-                continue
-            if _is_setup(text):
-                await _send_error(websocket, 400, "duplicate setup")
-                await _close(websocket, 1008, "duplicate setup")
-                break
-            await upstream.send(text)
-    except (WebSocketDisconnect, RuntimeError, websockets.ConnectionClosed):
-        pass
-    finally:
-        await _close(upstream, 1000)
-
-
-def _is_setup(text: str) -> bool:
-    try:
-        msg = json.loads(text)
-    except json.JSONDecodeError:
-        return False
-    return isinstance(msg, dict) and msg.get("type") == "setup"
 
 
 async def _sidecar_to_client(
@@ -1060,10 +875,9 @@ async def _on_sidecar_text(
             # connections (opened with this sid) are admitted.
             _live_sids.setdefault(state.sid, state)
         msg.pop("offer", None)
-        if state.http2:
-            state.h2_ready = True
-            # What the setup reserved (the signed offer's deposit).
-            msg["deposit_msat"] = state.h2_deposit_msat
+        state.h2_ready = True
+        # What the setup reserved (the signed offer's deposit).
+        msg["deposit_msat"] = state.h2_deposit_msat
         msg["zk_token"] = state.zk_token
         msg["pubkey"] = node_pubkey_hex()
         msg["sig_scheme"] = "schnorr-secp256k1"
@@ -1096,6 +910,13 @@ async def _on_sidecar_text(
         state.h2_last_frame = msg
         state.h2_moved.set()
         return None
+    if kind == "request_refused":
+        # The sidecar does not serve the request's terms: the reservation is
+        # released in full, the client is told, the connection stays.
+        if state.billing is None or msg.get("n") != state.h2_n:
+            return None
+        await asyncio.shield(_h2_request_refused(state))
+        return frame
     if state.http2 and kind in ("request_ok", "body_released", "attestation", "usage"):
         n = msg["a"].get("n") if isinstance(msg.get("a"), dict) else msg.get("n")
         if state.billing is None or n != state.h2_n:
@@ -1222,7 +1043,7 @@ async def _apply_settlement(
         # Image sessions settle flat or on an error head, never on token
         # usage: anything else is a protocol breach.
         return billing.reserved_msats, await charge_reservation(billing)
-    # π_C2S proved the request names the pinned model, so a usage event that
+    # π_WIN proved the request names the pinned model, so a usage event that
     # spells it differently (an alias, a canonical id, a case change) is
     # still that request: it is settled at the pinned model's frozen rates.
     reported = reported_model if reported_model is not None else usage.get("model")
@@ -1335,7 +1156,7 @@ async def _settle(
         receipt["rates"] = billing.rates
     log_extra: dict[str, Any] = {}
     if state.http2:
-        receipt["http"] = 2
+        receipt["http"] = state.framing
         receipt["n"] = state.h2_n
         log_extra["n"] = state.h2_n
         if state.h2_deposit is not None:
@@ -1418,14 +1239,14 @@ async def _finalize_unsettled(state: SessionState) -> str | None:
             cost, _ = await _release_keeping_fee(billing, "session_fee_msat")
             outcome = f"charged_session_fee:{cost}" if cost else "released"
         elif state.engaged and _fee(billing, "abandon_fee_msat") > 0:
-            # π_C2S never verified, so the upstream never received a complete
+            # π_WIN never verified, so the upstream never received a complete
             # request, but the sidecar ran the session (armed and never used,
             # aborted, client gone): the abandon fee is charged, the rest of
             # the reservation is released.
             cost, _ = await _release_keeping_fee(billing, "abandon_fee_msat")
             outcome = f"charged_abandon_fee:{cost}"
         else:
-            # π_C2S never verified: the upstream never received a complete request.
+            # π_WIN never verified: the upstream never received a complete request.
             await release(billing)
             outcome = "released"
     except Exception:
@@ -1473,12 +1294,20 @@ async def _open_h2_session(
     """The setup of an ``http: 2`` session: check the offer signature and the
     credential, reserve the connection deposit, dial the sidecar. Raises
     ``SetupError``; the deposit is then released (nothing was garbled)."""
-    block = h2_block(side)
-    if block is None:
-        raise SetupError(400, "this node does not serve http: 2 sessions")
     validate_h2_setup(msg)
+    framing = msg["http"]
+    if framing not in sidecar_framings(side):
+        raise SetupError(400, f'this node does not serve framing "{framing}" now')
+    block = h2_block(side) if framing == "2" else None
     auth = msg.get("auth", "") or ""
-    state.h2_idle_timeout = float(h2_idle_timeout_s(block))
+    # The offer the connection is opened on stays remembered while it lives;
+    # its deposit and idle timeout are the connection's.
+    terms = pin_offer(msg["offer_sig"])
+    if terms is not None:
+        state.offer_sig = msg["offer_sig"]
+        state.offer_terms = terms
+        state.h2_idle_timeout = float(terms.idle_timeout_s)
+    state.framing = framing
     # The deposit's lease covers the connection up to its first settlement.
     request_lifetime.set(_h2_deposit_lifetime(state.h2_idle_timeout))
     try:
@@ -1492,7 +1321,7 @@ async def _open_h2_session(
     state.http2 = True
     state.h2_deposit = deposit
     state.h2_deposit_msat = deposit.reserved_msats if deposit is not None else 0
-    idle = block.get("idle_secs")
+    idle = block.get("idle_secs") if block is not None else None
     if _is_int(idle) and idle > 0:
         state.h2_idle_secs = float(idle)
     # The sidecar binds the sid to this value: the deposit's reservation id,
@@ -1502,10 +1331,11 @@ async def _open_h2_session(
     )
     setup = {
         "type": "setup",
-        "http": 2,
+        "v": 3,
+        "http": framing,
         "nonce_c": msg["nonce_c"],
         "armed": msg.get("armed", False),
-        "escrow": f"h2-{escrow}",
+        "escrow": f"conn-{escrow}",
     }
     try:
         _claim_slot(state)
@@ -1610,6 +1440,24 @@ def _with_deposit(frame: dict[str, Any], deposit: dict[str, Any] | None) -> str:
     return json.dumps(frame)
 
 
+async def _h2_request_refused(state: SessionState) -> None:
+    """The sidecar refused the request in flight before any of its records
+    existed: release its reservation in full and free its number."""
+    state.engaged = False
+    await _finalize(state)
+    state.billing = None
+    state.body_released = False
+    state.released_at = None
+    state.upstream_refused = False
+    state.finalized = False
+    state.attestation_hash = ""
+    state.h2_lifetime = None
+    state.h2_n -= 1
+    if state.h2_idle_since is not None:
+        state.h2_idle_since = asyncio.get_running_loop().time()
+    state.h2_moved.set()
+
+
 def _h2_request_done(state: SessionState) -> None:
     """The request in flight is finalized with a receipt: idle again."""
     state.billing = None
@@ -1648,9 +1496,11 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
     as a v2 setup does. Returns the frame for the sidecar (no credential, no
     offer signature, no fees). Raises ``SetupError``; nothing is held then."""
     if state.billing is not None:
-        raise SetupError(
+        raise ProtocolError(
             409, "a request is already in flight (requests are sequential)"
         )
+    if state.framing == "1.1" and state.h2_n >= 1:
+        raise ProtocolError(409, 'a framing "1.1" connection carries one request')
     try:
         side = await cached_sidecar_offer()
         cap = int(side.get("max_tokens_cap", 4096))
@@ -1660,12 +1510,22 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
     validate_h2_request(msg, cap, state.h2_n + 1)
     images = msg.get("kind") == "images"
     if images:
-        block = h2_block(side)
-        served = images_endpoint(side) is not None and block is not None
-        if not served or "images" not in h2_kinds(block or {}, True):
+        served = images_endpoint(side) is not None
+        if served and state.framing == "2":
+            block = h2_block(side)
+            served = block is not None and "images" in h2_kinds(block, True)
+        if not served:
             raise SetupError(
-                400, "this node serves no confidential images over http: 2"
+                400, "this connection serves no confidential image requests"
             )
+    if state.offer_terms is not None:
+        try:
+            check_request_offer(msg["offer_sig"], state.offer_terms, state.framing)
+        except BillingError as exc:
+            raise SetupError(exc.status, str(exc), exc.detail) from exc
+    # The session fee pays for the handshake: due until the connection's
+    # first settlement.
+    fee_due = state.h2_settled == 0
     # The reservation's lease runs from this request, not from the connection.
     lifetime = _session_lifetime()
     request_lifetime.set(lifetime)
@@ -1679,6 +1539,7 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
                 msg["offer_sig"],
                 accepted_fee_msat=msg.get("session_fee_msat"),
                 accepted_abandon_fee_msat=msg.get("abandon_fee_msat"),
+                session_fee_due=fee_due,
             )
         else:
             billing = await reserve(
@@ -1688,6 +1549,7 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
                 msg["offer_sig"],
                 accepted_fee_msat=msg.get("session_fee_msat"),
                 accepted_abandon_fee_msat=msg.get("abandon_fee_msat"),
+                session_fee_due=fee_due,
             )
     except BillingError as exc:
         raise SetupError(exc.status, str(exc), exc.detail) from exc
@@ -1763,7 +1625,10 @@ async def _h2_client_to_sidecar(
                 forward = await reply
                 if forward is None:
                     break
-                await upstream.send(forward)
+                if forward:
+                    await upstream.send(forward)
+                # An empty string: the node refused the request and told the
+                # client; the connection goes on.
                 continue
             await upstream.send(text)
     except (WebSocketDisconnect, RuntimeError, websockets.ConnectionClosed):
@@ -1822,17 +1687,36 @@ async def _run_h2_session(
                 try:
                     forward = await _h2_reserve(msg, state)
                 except SetupError as exc:
-                    # A refused request ends the connection: the client may
-                    # already have sent its records, which the sidecar could
-                    # not place.
                     logger.warning("confidential ws: rejecting request: %s", exc)
                     if exc.status >= 500:
+                        # The node's own failure: a connection that then ends
+                        # without a settlement gets its deposit back.
                         state.h2_fault = state.h2_fault or "node_failure"
-                    ended = "request_refused"
-                    last = _error_frame(exc.status, str(exc), exc.detail)
-                    reply.set_result(None)
-                    cut = True
-                    break
+                    if exc.fatal:
+                        last = _error_frame(exc.status, str(exc), exc.detail)
+                        reply.set_result(None)
+                        cut = True
+                        break
+                    # Refused before any of its records were sent (the client
+                    # waits for ``request_ok``): nothing is held, the
+                    # connection stays, and the request's number is free.
+                    refused = {
+                        "type": "request_refused",
+                        "n": msg.get("n") if isinstance(msg, dict) else None,
+                        "status": exc.status,
+                        "reason": str(exc),
+                    }
+                    if exc.detail is not None:
+                        refused["detail"] = exc.detail
+                    try:
+                        await websocket.send_text(json.dumps(refused))
+                    except Exception:
+                        reply.set_result(None)
+                        break
+                    if state.h2_idle_since is not None:
+                        state.h2_idle_since = loop.time()
+                    reply.set_result("")
+                    continue
                 reply.set_result(forward)
                 continue
             if loop.time() >= _h2_deadline(state, started):

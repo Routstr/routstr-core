@@ -1,40 +1,49 @@
-"""Confidential-upstream mode: the node's offer and billing glue.
+"""Confidential-upstream mode (protocol v3): the node's offer and billing glue.
 
 In this mode the client is the TLS 1.3 client of the upstream provider through
 the node: a separate cu-sidecar relays the TLS records, writes the one record
 that carries the provider API key and verifies the zero-knowledge proofs. The
 node never sees the prompt or the response.
 
-Billing reuses the node's normal path, like the EHBP/Tinfoil opaque-body flow:
-the client authenticates with an ordinary bearer (``sk-`` key or Cashu token),
-the node reserves the full-context prompt plus the pinned completion cap with
-``pay_for_request``, charges the π_C3S-verified usage at the rates frozen at
-setup (the signed offer's) and releases the reservation when the upstream
-never ran. Refunds of unused balance are the existing ``/v1/wallet/refund``.
+The unit is a **connection** (one two-party handshake) that carries
+**requests**: one on framing ``"1.1"`` (HTTP/1.1 to the provider), many
+sequential ones on framing ``"2"`` (HTTP/2). The signed offer lists the
+framings the sidecar serves (``http``).
 
-Optional pricing for the node's own work (all off by default):
+Billing reuses the node's normal path, like the EHBP/Tinfoil opaque-body flow:
+the client authenticates with an ordinary bearer (``sk-`` key or Cashu token).
+The setup reserves the offer's connection deposit (``reserve_deposit``); each
+request reserves the full-context prompt plus the pinned completion cap with
+``pay_for_request`` (``reserve``), is charged the π_C3S-verified usage at the
+rates frozen from the signed offer it names, and is released when the
+upstream never ran. Refunds of unused balance are the existing
+``/v1/wallet/refund``.
+
+Pricing of the node's own work:
 ``CONFIDENTIAL_RATE_SURCHARGE_PCT`` raises the per-token rates of the signed
-offer; ``CONFIDENTIAL_SESSION_FEE_MSAT`` is a flat fee charged on top of the
-usage of a completed request, and alone for a provider refusal caused by the
-provider's or the node's own state (401/402/403/429/503);
+offer; ``CONFIDENTIAL_SESSION_FEE_MSAT`` is a flat fee charged once per
+connection, with its first settlement: on top of the usage of a completed
+request, and alone for a provider refusal caused by the provider's or the
+node's own state (401/402/403/429/503);
 ``CONFIDENTIAL_ABANDON_FEE_MSAT`` (≥ the session fee, defaulting to it) is
-charged instead for any other 4xx (a request the provider rejected) and when a
-session the sidecar accepted ends without a request reaching the provider (an
-armed, pre-warmed session never used, an abort before the body, a client
-gone); any other 5xx (500/502/504 …) is charged the full reservation, since
-the provider may have billed work. The abandon fee is the anti-DoS price of the
-~22 MB / ~0.5 s CPU the node spends per session. The reservation includes the
-larger of the two. A client accepts both by echoing the signed offer's
-``session_fee_msat`` and ``abandon_fee_msat`` in its setup; a setup that does
-not is refused, so an older client is never charged a fee it does not check.
+charged instead for any other 4xx (a request the provider rejected) and when
+a request the sidecar accepted is dropped before the provider had it; any
+other 5xx (500/502/504 …) is charged the full reservation, since the provider
+may have billed work. A request's reservation includes the larger of the two.
+A client accepts both by echoing the signed offer's ``session_fee_msat`` and
+``abandon_fee_msat`` in each request; a request that does not is refused.
+``CONFIDENTIAL_CONNECTION_DEPOSIT_MSAT`` (default: the larger of the abandon
+fee, the session fee and 1000 msat; 0 = none) is the deposit a setup reserves:
+released by the connection's first settlement, charged when the connection
+ends without one unless the node, the sidecar or the provider failed.
 
 Image generation (``kind: "images"``) is offered when the sidecar's offer has
 an ``endpoints.images`` block: the signed offer lists, per image model, the
 variants it can price (pinned tier and format) at a flat msat per image. The
-client's suffix pins model, count and variant, π_C2S proves it, and the charge
-is that flat price × count plus the session fee, fixed at setup. A success
-needs no disclosure (the sidecar reports ``usage.flat``); a provider error
-uses the same error-head disclosure as chat.
+request's suffix pins model, count and variant, π_WIN proves it, and the
+charge is that flat price × count plus the session fee if still due. A
+success needs no disclosure (the sidecar reports ``usage.flat``); a provider
+error uses the same error-head disclosure as chat.
 
 ``CONFIDENTIAL_RESERVE_MARGIN_TOKENS`` (default 16) completion tokens are
 reserved beyond the pinned cap, because a provider may bill a few more than
@@ -68,11 +77,18 @@ from .core.settings import settings
 
 logger = get_logger(__name__)
 
-# Wire-protocol version; the offer's min_v/max_v is the only negotiation. Only
-# protocol v2 (the two-party handshake) is supported: v1 is retired.
-CONFIDENTIAL_VERSION = 2
-CONFIDENTIAL_MIN_V = 2
-CONFIDENTIAL_MAX_V = 2
+# Wire-protocol version. Exactly this one is spoken: an older client is told
+# to upgrade (``UPGRADE_REQUIRED``), an older sidecar gets no offer.
+CONFIDENTIAL_VERSION = 3
+UPGRADE_REQUIRED = {
+    "type": "error",
+    "status": 426,
+    "reason": "upgrade_required",
+    "min_v": CONFIDENTIAL_VERSION,
+    "detail": "this node speaks routstr-confidential v3; update your client",
+}
+# The framings of the inner connection to the provider (always these strings).
+FRAMINGS = ("2", "1.1")
 
 # Images per confidential image request (the count the suffix pins), and the
 # only output format offered: WebP is the smallest response.
@@ -81,10 +97,14 @@ IMAGE_IDLE_RANGE = (30, 600)
 IMAGE_FORMAT = "webp"
 DEFAULT_IMAGE_COUNT_KEY = "variants"
 
-# ``http: 2`` connections: the idle timeout when the setting is unusable, and
-# the name a connection deposit is booked under (it is not a model).
-H2_DEFAULT_IDLE_TIMEOUT_S = 120
-H2_DEPOSIT_MODEL_ID = "confidential-h2-connection"
+# Connections: the idle timeout when the setting is unusable, the sidecar's
+# idle limit when its ``h2`` block names none, the smallest default deposit,
+# and the name a charged connection deposit is booked under (it is not a
+# model).
+DEFAULT_IDLE_TIMEOUT_S = 120
+DEFAULT_SIDECAR_IDLE_S = 300
+MIN_DEFAULT_DEPOSIT_MSAT = 1000
+DEPOSIT_MODEL_ID = "confidential-connection"
 
 # Upstream HTTP errors answered before any inference starts, so the request
 # itself is not billed once the error head is disclosed under π_C3S.
@@ -114,7 +134,7 @@ _SIDECAR_FAILURE_TTL_S = 10.0
 
 
 def session_fee_msat() -> int:
-    """The configured flat fee per confidential session (msat, ≥ 0)."""
+    """The configured flat fee per confidential connection (msat, ≥ 0)."""
     try:
         return max(0, int(settings.confidential_session_fee_msat or 0))
     except (TypeError, ValueError):
@@ -132,32 +152,36 @@ def abandon_fee_msat() -> int:
     return max(fee, session_fee_msat())
 
 
-def h2_connection_deposit_msat() -> int:
-    """The deposit (msat, ≥ 0) reserved when an ``http: 2`` connection is
-    opened: the configured value, or the abandon fee when it is unset (-1).
-    A deposit above zero is at least the node's minimum reservation."""
+def connection_deposit_msat() -> int:
+    """The deposit (msat, ≥ 0) reserved when a connection is opened: the
+    configured value (0 = no deposit), or, when it is unset (-1), the largest
+    of the abandon fee, the session fee and 1000 msat. A deposit above zero
+    is at least the node's minimum reservation."""
     try:
-        deposit = int(settings.confidential_h2_connection_deposit_msat)
+        deposit = int(settings.confidential_connection_deposit_msat)
     except (TypeError, ValueError):
         deposit = -1
     if deposit < 0:
-        deposit = abandon_fee_msat()
+        deposit = max(abandon_fee_msat(), session_fee_msat(), MIN_DEFAULT_DEPOSIT_MSAT)
     if deposit <= 0:
         return 0
     return max(deposit, int(settings.min_request_msat))
 
 
-def h2_idle_timeout_s(block: dict[str, Any]) -> int:
-    """Seconds without a request in flight after which the node closes an
-    ``http: 2`` connection: the configured value, never above the sidecar's
-    own idle limit (``block`` is its ``h2`` block)."""
+def idle_timeout_s(side: dict[str, Any]) -> int:
+    """Seconds without a request in flight after which the node closes a
+    framing-``"2"`` connection: the configured value (at least 10), never
+    above the sidecar's own idle limit when it offers that framing
+    (``side`` is the sidecar offer)."""
     try:
-        idle = max(10, int(settings.confidential_h2_idle_timeout_s))
+        idle = max(10, int(settings.confidential_idle_timeout_s))
     except (TypeError, ValueError):
-        idle = H2_DEFAULT_IDLE_TIMEOUT_S
-    side_idle = block.get("idle_secs")
-    if isinstance(side_idle, int) and not isinstance(side_idle, bool) and side_idle > 0:
-        idle = min(idle, side_idle)
+        idle = DEFAULT_IDLE_TIMEOUT_S
+    block = h2_block(side)
+    if block is not None:
+        side_idle = block.get("idle_secs", DEFAULT_SIDECAR_IDLE_S)
+        if _is_int(side_idle) and side_idle > 0:
+            idle = max(10, min(idle, side_idle))
     return idle
 
 
@@ -199,8 +223,9 @@ def pricing_fields(fee_msat: int, abandon_msat: int, pct: float) -> dict[str, An
     return out
 
 
-# A signed offer stays valid for setup (``offer_sig``) this long after it was
-# last served (not after it was signed); at most this many are kept.
+# A signed offer stays valid (``offer_sig`` of a setup or request) this long
+# after it was last served (not after it was signed), and while a connection
+# opened on it is alive; at most this many unpinned ones are kept.
 SIGNED_OFFER_TTL_S = 600.0
 SIGNED_OFFER_MAX = 512
 
@@ -325,6 +350,7 @@ def validate_sidecar_offer(data: Any) -> None:
     if not _is_int(key_length) or key_length < 0:
         raise OfferRefused("sidecar offer is malformed: key_length")
     model_allowlist(data)  # raises OfferRefused when malformed
+    sidecar_framings(data)
 
 
 async def fetch_sidecar_offer() -> dict[str, Any]:
@@ -338,11 +364,11 @@ async def fetch_sidecar_offer() -> dict[str, Any]:
     validate_sidecar_offer(data)
     version = sidecar_protocol_version(data)
     if version != CONFIDENTIAL_VERSION:
-        # A sidecar running the retired protocol v1: offering it would hand
-        # clients a version they refuse (and this node no longer relays).
+        # A sidecar of another protocol version: offering it would hand
+        # clients a protocol this node does not relay.
         logger.error(
-            "confidential: the sidecar speaks protocol v%s; only v%s is supported "
-            "(v1 is retired); confidential mode is disabled",
+            "confidential: the sidecar speaks protocol v%s; only v%s is supported; "
+            "confidential mode is disabled",
             version,
             CONFIDENTIAL_VERSION,
         )
@@ -350,13 +376,15 @@ async def fetch_sidecar_offer() -> dict[str, Any]:
             f"the confidential sidecar speaks protocol v{version}; "
             f"this node supports only v{CONFIDENTIAL_VERSION}"
         )
+    if not isinstance(data.get("twopc"), str) or not data["twopc"]:
+        raise OfferRefused("sidecar offer is malformed: twopc")
     if data.get("node_settles") is not True:
         # The sidecar would sign stub receipts itself and never send the
         # ``usage`` frame this node settles on: every session would end
         # "released, no disclosure" and be charged its full reservation.
-        # Refuse to offer confidential mode rather than take that money. Every
-        # sidecar that speaks protocol v2 and settles through the node says
-        # so explicitly; anything but ``true`` is refused.
+        # Refuse to offer confidential mode rather than take that money. A
+        # sidecar that settles through the node says so explicitly; anything
+        # but ``true`` is refused.
         logger.error(
             "confidential: the sidecar runs without --node-settles; "
             "confidential mode is disabled until it does"
@@ -844,14 +872,70 @@ class OfferTerms:
     reserve_margin_tokens: int = 0
     # The signed ``images`` block (variants and prices), when images are offered.
     images: dict[str, Any] | None = None
-    # The signed ``h2`` block (the sidecar's, plus the connection deposit and
-    # the idle timeout), when ``http: 2`` sessions are offered.
+    # The signed ``h2`` block (the sidecar's), when framing "2" is offered.
     h2: dict[str, Any] | None = None
+    # The framings the offer lists, in the sidecar's order.
+    http: tuple[str, ...] = ("1.1",)
+    # What a setup naming this offer reserves, and when the node closes an
+    # idle framing-"2" connection opened on it.
+    connection_deposit_msat: int = 0
+    idle_timeout_s: int = DEFAULT_IDLE_TIMEOUT_S
+    # The offer's connection-level fields (``connection_fields``), canonical
+    # JSON: a request may name another offer only when these are equal.
+    connection: str = ""
 
 
 # sig -> (monotonic time last served, terms), oldest first.
 _SIGNED_OFFERS: OrderedDict[str, tuple[float, OfferTerms]] = OrderedDict()
+# sig -> [live connections opened on that offer, its terms]: such an offer is
+# remembered whatever its age.
+_PINNED_OFFERS: dict[str, list[Any]] = {}
 _LAST_OFFER: dict[str, Any] = {"payload": None, "offer": None}
+
+# The fields of an offer that describe the connection rather than a request
+# (PROTOCOL-V3 §12.1), plus the ``images`` block without its prices.
+CONNECTION_FIELDS = (
+    "v",
+    "twopc",
+    "upstream_host",
+    "head_template",
+    "chat",
+    "h2",
+    "connection_deposit_msat",
+    "idle_timeout_s",
+)
+
+
+def connection_fields(offer: dict[str, Any]) -> str:
+    """The connection-level fields of ``offer`` as canonical JSON."""
+    out: dict[str, Any] = {k: offer[k] for k in CONNECTION_FIELDS if k in offer}
+    images = offer.get("images")
+    if isinstance(images, dict):
+        out["images"] = {k: v for k, v in images.items() if k != "price_list"}
+    return canonical_json(out).decode("utf-8")
+
+
+def pin_offer(sig: str) -> OfferTerms | None:
+    """A connection was opened on the offer ``sig``: keep it remembered until
+    ``unpin_offer``. Returns its terms, or ``None`` when it is not known."""
+    terms = signed_offer_terms(sig)
+    if terms is None:
+        return None
+    entry = _PINNED_OFFERS.setdefault(sig, [0, terms])
+    entry[0] += 1
+    return terms
+
+
+def unpin_offer(sig: str) -> None:
+    """A connection opened on the offer ``sig`` ended. The offer then stays
+    for the usual time, counted from now."""
+    entry = _PINNED_OFFERS.get(sig)
+    if entry is None:
+        return
+    entry[0] -= 1
+    if entry[0] <= 0:
+        del _PINNED_OFFERS[sig]
+        _remember_offer(sig, entry[1])
 
 
 def _remember_offer(sig: str, terms: OfferTerms | dict[str, Any]) -> None:
@@ -869,18 +953,33 @@ def _remember_offer(sig: str, terms: OfferTerms | dict[str, Any]) -> None:
 
 
 def sidecar_protocol_version(side: dict[str, Any]) -> int:
-    """The protocol version the sidecar's offer names (1, the retired v1, if it
-    names none; 0 if it is not an integer)."""
-    try:
-        return int(side.get("v", 1))
-    except (TypeError, ValueError):
-        return 0
+    """The protocol version the sidecar's offer names (1 if it names none;
+    0 if it is not an integer)."""
+    version = side.get("v", 1)
+    return version if _is_int(version) else 0
+
+
+def sidecar_framings(side: dict[str, Any]) -> list[str]:
+    """The framings the sidecar serves right now, in the operator's order of
+    preference (``["1.1"]`` when it names none). It leaves ``"2"`` out while
+    it has withdrawn it. Raises ``OfferRefused`` on anything but a non-empty
+    list of distinct known framings, or ``"2"`` without an ``h2`` block."""
+    http = side.get("http", ["1.1"])
+    if (
+        not isinstance(http, list)
+        or not http
+        or len(set(map(str, http))) != len(http)
+        or not all(isinstance(f, str) and f in FRAMINGS for f in http)
+    ):
+        raise OfferRefused("sidecar offer is malformed: http")
+    if "2" in http and not isinstance(side.get("h2"), dict):
+        raise OfferRefused("sidecar offer is malformed: http lists 2 without h2")
+    return list(http)
 
 
 def h2_block(side: dict[str, Any]) -> dict[str, Any] | None:
-    """The sidecar offer's ``h2`` block when it serves ``http: 2`` sessions
-    (protocol v3, option A: many sequential requests on one HTTP/2
-    connection), else ``None``."""
+    """The sidecar offer's ``h2`` block while it serves framing ``"2"`` (many
+    sequential requests on one HTTP/2 connection), else ``None``."""
     http, block = side.get("http"), side.get("h2")
     if isinstance(http, list) and "2" in http and isinstance(block, dict):
         return block
@@ -888,7 +987,7 @@ def h2_block(side: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def h2_kinds(block: dict[str, Any], images_offered: bool) -> list[str]:
-    """The request kinds an ``http: 2`` connection serves: the sidecar's
+    """The request kinds a framing-``"2"`` connection serves: the sidecar's
     ``kinds`` (chat only when it names none), with ``images`` only when this
     node's offer also carries the ``images`` block (priced variants)."""
     kinds = block.get("kinds")
@@ -900,19 +999,13 @@ def h2_kinds(block: dict[str, Any], images_offered: bool) -> list[str]:
 def h2_offer_block(
     side: dict[str, Any], images_offered: bool = False
 ) -> dict[str, Any] | None:
-    """The ``h2`` block of the signed offer: the sidecar's block and the two
-    terms the node adds, ``connection_deposit_msat`` (reserved at the setup)
-    and ``idle_timeout_s`` (the node closes a connection idle that long).
-    ``kinds`` is kept only when the connection serves more than chat, so a
-    chat-only block is signed as before."""
+    """The ``h2`` block of the signed offer: the sidecar's block, present only
+    while it serves framing ``"2"``. ``kinds`` is kept only when a connection
+    serves more than chat (the default is not serialized)."""
     block = h2_block(side)
     if block is None:
         return None
-    out = {
-        **{k: v for k, v in block.items() if k != "kinds"},
-        "connection_deposit_msat": h2_connection_deposit_msat(),
-        "idle_timeout_s": h2_idle_timeout_s(block),
-    }
+    out = {k: v for k, v in block.items() if k != "kinds"}
     kinds = h2_kinds(block, images_offered)
     if kinds != ["chat"]:
         out["kinds"] = kinds
@@ -920,7 +1013,11 @@ def h2_offer_block(
 
 
 def signed_offer_terms(sig: str) -> OfferTerms | None:
-    """The terms of an offer this node signed recently."""
+    """The terms of an offer this node signed recently, or on which a
+    connection is still open."""
+    pinned = _PINNED_OFFERS.get(sig)
+    if pinned is not None:
+        return pinned[1]
     found = _SIGNED_OFFERS.get(sig)
     if found is None or time.monotonic() - found[0] >= SIGNED_OFFER_TTL_S:
         return None
@@ -951,17 +1048,24 @@ def signed_image_variant(
 async def build_offer() -> dict[str, Any]:
     """The node's offer, signed with its Nostr key.
 
-    The price list is a signed rate snapshot: a session whose setup names this
+    The price list is a signed rate snapshot: a request that names this
     offer's ``sig`` is billed at exactly these rates, and the client checks that
     the receipt never charges more than its usage at them. An unchanged offer
     is served again with the same signature.
 
     With a rate surcharge the price list already carries the surcharged rates
-    (the ones billed), so a client's rate check needs no change; the session
-    fee and the surcharge are listed beside it (only when set).
+    (the ones billed), so a client's rate check needs no change; the fees and
+    the surcharge are listed beside it (only when set).
     """
     refuse_fixed_pricing()
     side = await cached_sidecar_offer()
+    version = sidecar_protocol_version(side)
+    if version != CONFIDENTIAL_VERSION or not isinstance(side.get("twopc"), str):
+        raise OfferRefused(
+            f"the confidential sidecar speaks protocol v{version}; "
+            f"this node supports only v{CONFIDENTIAL_VERSION}"
+        )
+    framings = sidecar_framings(side)
     fee, abandon, pct = session_fee_msat(), abandon_fee_msat(), rate_surcharge_pct()
     prices = {
         mid: surcharged(entry, pct) for mid, (_c, entry) in priced_models(side).items()
@@ -969,12 +1073,18 @@ async def build_offer() -> dict[str, Any]:
     margin = reserve_margin_tokens()
     images = images_offer_block(side, pct)
     h2 = h2_offer_block(side, images is not None)
-    terms = OfferTerms(prices, fee, pct, abandon, margin, images, h2)
+    deposit, idle = connection_deposit_msat(), idle_timeout_s(side)
     offer: dict[str, Any] = {
-        # Protocol v2 (the two-party handshake) only; v1 is retired.
+        # Exactly this version: there is no list and no fallback.
         "v": CONFIDENTIAL_VERSION,
-        "min_v": CONFIDENTIAL_MIN_V,
-        "max_v": CONFIDENTIAL_MAX_V,
+        # The framings of the connection to the provider, in the sidecar
+        # operator's order of preference, and the key-schedule protocol.
+        "http": framings,
+        "twopc": side["twopc"],
+        # Reserved by a setup (0 = nothing), and how long a framing-"2"
+        # connection may have no request in flight.
+        "connection_deposit_msat": deposit,
+        "idle_timeout_s": idle,
         "upstream_host": str(side.get("upstream_host", "")),
         "ws": confidential_ws_public_url(),
         "notary_pubkey": node_pubkey_hex() or "",
@@ -995,18 +1105,27 @@ async def build_offer() -> dict[str, Any]:
         # clients render the same bytes from the signed copy.
         offer["chat"] = chat
     if h2 is not None:
-        # ``http: 2`` sessions: ``http`` and the block are the sidecar's; the
-        # node adds its connection deposit and idle timeout to the block.
-        # Absent without them (``http`` then means ["1.1"]), so a node whose
-        # sidecar serves only HTTP/1.1 signs what it signed before.
-        offer["http"] = side["http"]
+        # Only while the sidecar serves framing "2".
         offer["h2"] = h2
     if margin > 0:
         offer["reserve_margin_tokens"] = margin
     if images is not None:
-        # Absent without images, so a chat-only node signs what it signed before.
+        # Absent without images.
         offer["capabilities"] = ["chat", "images"]
         offer["images"] = images
+    terms = OfferTerms(
+        prices,
+        fee,
+        pct,
+        abandon,
+        margin,
+        images,
+        h2,
+        tuple(framings),
+        deposit,
+        idle,
+        connection_fields(offer),
+    )
     payload = canonical_json(offer).decode("utf-8")
     last = _LAST_OFFER["offer"]
     if last is not None and _LAST_OFFER["payload"] == payload:
@@ -1068,7 +1187,8 @@ async def models_fields() -> dict[str, dict[str, Any]]:
 
 @dataclass
 class Billing:
-    """One session's reservation against the client's ordinary API key."""
+    """One reservation (a request's, or a connection's deposit) against the
+    client's ordinary API key."""
 
     key_hash: str
     model_id: str
@@ -1079,9 +1199,12 @@ class Billing:
     # "out"}; offers signed before cache writes were priced lack "cache_write"),
     # surcharge included.
     rates: dict[str, float]
-    # Frozen at setup from the same offer; the larger fee is part of
-    # ``reserved_msats``.
+    # Frozen from the same offer; the larger fee is part of
+    # ``reserved_msats``. ``session_fee_msat`` is what this request owes: the
+    # offer's fee (``offer_session_fee_msat``) while the connection has no
+    # settlement yet, 0 afterwards.
     session_fee_msat: int = 0
+    offer_session_fee_msat: int = 0
     rate_surcharge_pct: float = 0.0
     abandon_fee_msat: int = 0
     # Image sessions: the frozen variant, the count and the rendered suffix;
@@ -1094,12 +1217,13 @@ class Billing:
     # Chat sessions: the pinned cap and the offer's completion margin.
     max_tokens: int = 0
     reserve_margin_tokens: int = 0
-    # ``kind == "deposit"``: the reservation is an ``http: 2`` connection's
-    # deposit (no model, no rates); ``candidate`` is then ``None``.
+    # ``kind == "deposit"``: the reservation is a connection's deposit (no
+    # model, no rates); ``candidate`` is then ``None``.
 
 
 class BillingError(Exception):
-    """Setup refused (unknown model, insufficient balance, bad credential)."""
+    """A setup or request refused (unknown model, insufficient balance, bad
+    credential)."""
 
     def __init__(self, message: str, status: int = 400, detail: Any = None) -> None:
         super().__init__(message)
@@ -1246,8 +1370,8 @@ def _offer_expired(model_id: str) -> BillingError:
 
 def _fee_not_accepted(fee: int, abandon: int) -> BillingError:
     message = (
-        f"this node charges confidential session fees (session {fee} msat, "
-        f"abandoned session {abandon} msat); the setup must accept them "
+        f"this node charges confidential fees (session {fee} msat, "
+        f"abandoned request {abandon} msat); the request must accept them "
         "(session_fee_msat and abandon_fee_msat from the signed offer). "
         "Update the client."
     )
@@ -1265,6 +1389,33 @@ def _fee_not_accepted(fee: int, abandon: int) -> BillingError:
     )
 
 
+def check_request_offer(offer_sig: str, opened_on: OfferTerms, framing: str) -> None:
+    """A request on a connection opened on the offer ``opened_on`` names the
+    offer ``offer_sig``: its connection-level fields must be the same and it
+    must still list the connection's framing. Raises ``BillingError`` (409):
+    ``offer_expired`` for an offer this node does not remember,
+    ``offer_changed`` otherwise (the client opens a new connection)."""
+    terms = signed_offer_terms(offer_sig)
+    if terms is None:
+        message = (
+            "the signed offer is unknown or expired; refetch /v1/confidential/offer"
+        )
+        raise BillingError(
+            message, 409, {"error": {"type": "offer_expired", "message": message}}
+        )
+    if terms is opened_on:
+        return
+    if terms.connection != opened_on.connection or framing not in terms.http:
+        message = (
+            "the offer this request names differs, in what describes the "
+            "connection, from the one the connection was opened on; open a "
+            "new connection"
+        )
+        raise BillingError(
+            message, 409, {"error": {"type": "offer_changed", "message": message}}
+        )
+
+
 def _refuse_fixed_pricing_setup() -> None:
     try:
         refuse_fixed_pricing()
@@ -1273,8 +1424,8 @@ def _refuse_fixed_pricing_setup() -> None:
 
 
 async def check_credential(auth: str, offer_sig: str) -> str:
-    """The credential check of an ``http: 2`` setup (``reserve_deposit``
-    then reserves the connection deposit, no request yet): the
+    """The credential check of a setup (``reserve_deposit`` then reserves
+    the connection deposit, no request yet): the
     offer the client verified is one this node signed recently, and the
     bearer is valid with an available balance of at least the node's minimum
     request cost and that offer's fees. Returns the key's hash.
@@ -1309,12 +1460,12 @@ async def check_credential(auth: str, offer_sig: str) -> str:
 
 
 async def reserve_deposit(auth: str, offer_sig: str) -> Billing | None:
-    """Reserve the connection deposit of an ``http: 2`` setup, through the
-    node's ordinary reservation (``pay_for_request``).
+    """Reserve the connection deposit of a setup, through the node's
+    ordinary reservation (``pay_for_request``).
 
-    The amount is the one in the signed offer ``offer_sig`` names (its ``h2``
-    block): the client verified that offer and names it in its setup, which
-    is its acceptance. Returns ``None`` when that offer asks for no deposit. A balance that does not cover it is
+    The amount is the one in the signed offer ``offer_sig`` names
+    (``connection_deposit_msat``): the client verified that offer and names
+    it in its setup, which is its acceptance. Returns ``None`` when that offer asks for no deposit. A balance that does not cover it is
     refused with 402 and ``connection_deposit_unfunded``: the caller has not
     dialed the sidecar yet, so nothing is garbled for such a client.
     """
@@ -1322,15 +1473,14 @@ async def reserve_deposit(auth: str, offer_sig: str) -> Billing | None:
     from .core.db import create_session
 
     terms = signed_offer_terms(offer_sig)
-    if terms is None or terms.h2 is None:
+    if terms is None:
         message = (
-            "the signed offer is unknown or expired, or offers no http: 2 "
-            "sessions; refetch /v1/confidential/offer"
+            "the signed offer is unknown or expired; refetch /v1/confidential/offer"
         )
         raise BillingError(
             message, 409, {"error": {"type": "offer_expired", "message": message}}
         )
-    raw = terms.h2.get("connection_deposit_msat", 0)
+    raw = terms.connection_deposit_msat
     deposit = raw if _is_int(raw) and raw > 0 else 0
     if deposit == 0:
         return None
@@ -1345,7 +1495,7 @@ async def reserve_deposit(auth: str, offer_sig: str) -> Billing | None:
                 ) from exc
             message = (
                 f"the balance does not cover the connection deposit of {deposit} "
-                "msat (released after the connection's first request)"
+                "msat (released by the connection's first settled request)"
             )
             detail: Any = exc.detail
             inner = detail.get("error") if isinstance(detail, dict) else None
@@ -1372,7 +1522,7 @@ async def reserve_deposit(auth: str, offer_sig: str) -> Billing | None:
             raise BillingError(message, 402, detail) from exc
         return Billing(
             key.hashed_key,
-            H2_DEPOSIT_MODEL_ID,
+            DEPOSIT_MODEL_ID,
             None,
             snapshot.reserved_msats,
             snapshot,
@@ -1388,11 +1538,15 @@ async def reserve(
     offer_sig: str,
     accepted_fee_msat: int | None = None,
     accepted_abandon_fee_msat: int | None = None,
+    session_fee_due: bool = True,
 ) -> Billing:
     """Validate the bearer, freeze the rates and reserve the worst case.
 
+    ``session_fee_due`` is False once the connection had a settlement: the
+    request then owes no session fee (the client still echoes the offer's).
+
     The prompt is opaque to the node, so the reservation covers the model's
-    full context length plus the pinned ``max_tokens`` (which π_C2S enforces
+    full context length plus the pinned ``max_tokens`` (which π_WIN enforces
     before the upstream starts) and the offer's completion margin (a provider
     may bill slightly past the cap), at the frozen rates. Without a known
     context length it is the model's undiscounted maximum cost (no tolerance
@@ -1469,7 +1623,8 @@ async def reserve(
             snapshot.reserved_msats,
             snapshot,
             rates,
-            session_fee_msat=fee,
+            session_fee_msat=fee if session_fee_due else 0,
+            offer_session_fee_msat=fee,
             rate_surcharge_pct=pct,
             abandon_fee_msat=abandon,
             max_tokens=max_tokens,
@@ -1500,7 +1655,8 @@ def _warn_completion_overshoot(billing: Billing, usage: Any) -> None:
 
 
 async def settle(billing: Billing, usage_event: dict[str, Any]) -> dict[str, Any]:
-    """Charge the π_C3S-verified usage at the frozen rates, plus the session fee.
+    """Charge the π_C3S-verified usage at the frozen rates, plus the session
+    fee the request owes (0 after the connection's first settlement).
 
     Returns ``{"cost_msats", "balance_msats"}``. The cost is capped at the
     reservation (which includes the fee). A usage event without token counts
@@ -1527,6 +1683,7 @@ async def reserve_image(
     offer_sig: str,
     accepted_fee_msat: int | None = None,
     accepted_abandon_fee_msat: int | None = None,
+    session_fee_due: bool = True,
 ) -> Billing:
     """Validate the bearer and reserve a flat-priced image request.
 
@@ -1589,7 +1746,8 @@ async def reserve_image(
             snapshot.reserved_msats,
             snapshot,
             {},
-            session_fee_msat=fee,
+            session_fee_msat=fee if session_fee_due else 0,
+            offer_session_fee_msat=fee,
             rate_surcharge_pct=terms.rate_surcharge_pct,
             abandon_fee_msat=abandon,
             kind="images",
@@ -1602,7 +1760,7 @@ async def reserve_image(
 
 async def settle_flat(billing: Billing) -> dict[str, Any]:
     """Charge a flat image request: the frozen price × count plus the session
-    fee, capped at the reservation. Returns ``{"cost_msats", "balance_msats"}``."""
+    fee the request owes, capped at the reservation. Returns ``{"cost_msats", "balance_msats"}``."""
     cost = min(
         billing.msat_per_image * billing.count + billing.session_fee_msat,
         billing.reserved_msats,
