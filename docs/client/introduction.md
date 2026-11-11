@@ -20,8 +20,7 @@ Cashu ([cashu.me](https://cashu.me)) or Lightning ([Strike](https://strike.me), 
 Choose a Routstr node from the [provider directory](https://routstr.com/providers).
 Replace `https://provider.example` in this guide with your chosen node's URL;
 it is a placeholder, not a hosted endpoint. Check the node's `/v1/models` endpoint
-before sending payment. `api.routstr.com` is currently unavailable and should not
-be used as a default.
+before sending payment.
 
 ### 🤖 Client
 
