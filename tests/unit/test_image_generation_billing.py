@@ -301,6 +301,64 @@ async def test_json_image_response_keeps_the_upstream_reported_provider() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reported", "expected"),
+    [
+        ("火", "base"),
+        ("Fire火works", "base:Fireworks"),
+        ("Fireworks\r\nSet-Cookie: x=1", "base:FireworksSet-Cookie: x=1"),
+        ("F" * 500, "base:" + "F" * 123),
+    ],
+    ids=["non-latin-1", "mixed", "crlf", "overlong"],
+)
+async def test_unsafe_reported_provider_still_returns_the_billed_images(
+    reported: str, expected: str
+) -> None:
+    engine = await _engine()
+    payload = {"provider": reported, "data": [{"b64_json": "a"}]}
+    response, out, snapshot = await _forward_response(
+        engine,
+        "v1/images/generations",
+        _upstream(json.dumps(payload).encode(), "application/json"),
+    )
+
+    assert json.loads(out) == payload
+    assert response.status_code == 200
+    assert response.headers["x-routstr-provider"] == expected
+    _, spent, reserved, status = await _ledger(engine, snapshot)
+    assert spent == int(SATS_PER_IMAGE * 1000)
+    assert reserved == 0
+    assert status == "charged"
+
+
+@pytest.mark.asyncio
+async def test_upstream_cannot_spoof_routstr_headers() -> None:
+    engine = await _engine()
+    payload = {"data": [{"b64_json": "a"}]}
+    upstream = httpx.Response(
+        200,
+        content=json.dumps(payload).encode(),
+        headers={
+            "content-type": "application/json",
+            "x-routstr-provider": "spoofed",
+            "X-Routstr-Provider-Url": "http://spoofed",
+            "x-routstr-image-count": "99",
+            "x-routstr-cost-msats": "0",
+        },
+        request=httpx.Request("POST", "http://upstream"),
+    )
+    response, _, _ = await _forward_response(engine, "v1/images/generations", upstream)
+
+    raw: dict[bytes, list[bytes]] = {}
+    for name, value in response.raw_headers:
+        raw.setdefault(name, []).append(value)
+    assert raw[b"x-routstr-provider"] == [b"base"]
+    assert raw[b"x-routstr-provider-url"] == [b"http://upstream"]
+    assert raw[b"x-routstr-image-count"] == [b"1"]
+    assert raw[b"x-routstr-cost-msats"] == [str(int(SATS_PER_IMAGE * 1000)).encode()]
+
+
+@pytest.mark.asyncio
 async def test_empty_image_response_is_not_charged() -> None:
     engine = await _engine()
     _, snapshot = await _forward(

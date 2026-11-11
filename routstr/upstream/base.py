@@ -436,6 +436,12 @@ def _reported_provider(payload: dict) -> str | None:
     return None
 
 
+def _header_safe(value: str, limit: int = 128) -> str:
+    """``value`` reduced to bounded printable ASCII so it cannot break the
+    response once billing has already settled."""
+    return "".join(c for c in value if " " <= c <= "~").strip()[:limit]
+
+
 def _render_sse_event(field_lines: list[str], data: str) -> str:
     """Re-frame one parsed event, re-prefixing every line of a multi-line data."""
     body = "".join(f"{line}\n" for line in field_lines)
@@ -2584,12 +2590,14 @@ class BaseUpstreamProvider:
         )
 
         # httpx already decoded the body, so the upstream's framing headers no
-        # longer describe it.
+        # longer describe it. X-Routstr-* headers are Routstr's own and set
+        # below; an upstream copy would shadow them.
         headers = {
             name: value
             for name, value in response.headers.items()
             if name.lower()
             not in {"content-length", "content-encoding", "transfer-encoding"}
+            and not name.lower().startswith("x-routstr-")
         }
         _inject_cost_response_headers(headers, cost_data)
         # The body is relayed as the upstream sent it, often raw image bytes,
@@ -2597,13 +2605,14 @@ class BaseUpstreamProvider:
         # are given as headers instead.
         attribution: dict[str, Any] = {}
         if is_json:
-            reported = _reported_provider(parse_json_body(content))
+            reported = _header_safe(_reported_provider(parse_json_body(content)) or "")
             if reported:
                 attribution["provider"] = reported
         self._apply_provider_field(attribution)
-        headers["X-Routstr-Provider"] = str(attribution["provider"])
-        if attribution.get("provider_url"):
-            headers["X-Routstr-Provider-Url"] = str(attribution["provider_url"])
+        headers["X-Routstr-Provider"] = _header_safe(str(attribution["provider"]))
+        provider_url = _header_safe(str(attribution.get("provider_url") or ""), 2048)
+        if provider_url:
+            headers["X-Routstr-Provider-Url"] = provider_url
         headers["X-Routstr-Image-Count"] = str(usage.image_count)
 
         return Response(
