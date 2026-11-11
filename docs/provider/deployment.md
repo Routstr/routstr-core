@@ -38,8 +38,8 @@ the node.
 git clone https://github.com/Routstr/routstr-core.git
 cd routstr-core
 
-# Check out a release (v0.4.7 is current — see the releases page for the newest tag)
-git checkout v0.4.7
+# Check out a release (v0.5.1 is current — see the releases page for the newest tag)
+git checkout v0.5.1
 
 # Compose reads its configuration from .env
 cp .env.example .env
@@ -89,7 +89,7 @@ an HTTPS origin to `127.0.0.1:8000`; `--private` opts out.
 ```bash
 git clone https://github.com/Routstr/routstr-core.git
 cd routstr-core
-git checkout v0.4.7   # or the reviewed release tag you are deploying
+git checkout v0.5.1   # or the reviewed release tag you are deploying
 
 # Public (default): pre-flights DNS/TLS/proxy, then publishes on first boot
 python3 scripts/node_setup.py start \
@@ -653,7 +653,7 @@ how your node runs:
 
 ```bash
 git fetch --tags
-git checkout v0.4.7   # or the tag you are moving to
+git checkout v0.5.1   # or the tag you are moving to
 ```
 
 - **Standard stack, or any node on PostgreSQL** (`COMPOSE_FILE` set in `.env`, see
