@@ -98,6 +98,21 @@ def _request(n: int, **over: Any) -> dict[str, Any]:
     }
 
 
+def _image_request(n: int, **over: Any) -> dict[str, Any]:
+    return {
+        "type": "request",
+        "n": n,
+        "kind": "images",
+        "model": "z-image-turbo",
+        "variant": "webp",
+        "count": 1,
+        "body_len": 150,
+        "auth": "sk-client-key",
+        "offer_sig": SIG,
+        **over,
+    }
+
+
 def _usage(n: int, **over: Any) -> dict[str, Any]:
     return {
         "type": "usage",
@@ -137,7 +152,16 @@ class _Snapshot:
         self.release_id = f"rel-{n}"
 
 
+IMAGE_SUFFIX = ',"model":"z-image-turbo","variants":1,"format":"webp"}'
+
+
 class _Billing:
+    kind = "chat"
+    variant: str | None = None
+    count = 1
+    msat_per_image = 0
+    suffix = ""
+
     def __init__(self, n: int, auth: str) -> None:
         self.key_hash = f"k-{auth}"
         self.model_id = "test-model"
@@ -158,6 +182,7 @@ class _Ledger:
         offer: dict[str, Any] | None = None,
         deposit: int = 0,
         deposit_error: Any = None,
+        images: bool = False,
     ) -> None:
         self.calls: list[str] = []
         self.deposits: list[tuple[str, str]] = []
@@ -209,9 +234,49 @@ class _Ledger:
                 raise reserve_error
             return _Billing(len(self.reserved), auth)
 
+        async def reserve_image(
+            auth: str,
+            model: str,
+            variant: str,
+            count: int,
+            offer_sig: str | None = None,
+            accepted_fee_msat: int | None = None,
+            accepted_abandon_fee_msat: int | None = None,
+        ) -> Any:
+            self.calls.append("reserve_image")
+            self.reserved.append(
+                {
+                    "auth": auth,
+                    "model": model,
+                    "variant": variant,
+                    "count": count,
+                    "offer_sig": offer_sig,
+                    "fee": accepted_fee_msat,
+                    "abandon": accepted_abandon_fee_msat,
+                }
+            )
+            if reserve_error_at == len(self.reserved):
+                raise reserve_error
+            billing = _Billing(len(self.reserved), auth)
+            billing.kind = "images"
+            billing.model_id = model
+            billing.variant = variant
+            billing.count = count
+            billing.msat_per_image = 10350
+            billing.suffix = IMAGE_SUFFIX
+            billing.reserved_msats = 10350 * count
+            return billing
+
         async def settle(billing: Any, usage: dict[str, Any]) -> dict[str, Any]:
             self.calls.append(f"settle:{billing.snapshot.release_id}")
             return {"cost_msats": 12, "balance_msats": 88000}
+
+        async def settle_flat(billing: Any) -> dict[str, Any]:
+            self.calls.append(f"flat:{billing.snapshot.release_id}")
+            return {
+                "cost_msats": billing.msat_per_image * billing.count,
+                "balance_msats": 77000,
+            }
 
         async def release(billing: Any) -> int:
             self.calls.append(f"release:{billing.snapshot.release_id}")
@@ -228,12 +293,17 @@ class _Ledger:
                 "upstream_host": "api.venice.ai",
                 "max_tokens_cap": 4096,
                 "http": ["1.1", "2"],
-                "h2": H2,
+                "h2": {**H2, "kinds": ["chat", "images"]} if images else H2,
             }
 
         monkeypatch.setattr(cws, "check_credential", check_credential)
         monkeypatch.setattr(cws, "reserve", reserve)
         monkeypatch.setattr(cws, "settle", settle)
+        monkeypatch.setattr(cws, "reserve_image", reserve_image)
+        monkeypatch.setattr(cws, "settle_flat", settle_flat)
+        monkeypatch.setattr(
+            cws, "images_endpoint", lambda side: {"x": 1} if images else None
+        )
         monkeypatch.setattr(cws, "release", release)
         monkeypatch.setattr(cws, "charge_reservation", charge)
         monkeypatch.setattr(cws, "cached_sidecar_offer", sidecar_offer)
@@ -432,6 +502,9 @@ def test_h2_setup_shape(change: dict[str, Any]) -> None:
         {"n": True},
         {"n": "1"},
         {"kind": "images"},
+        {"kind": "video"},
+        {"variant": "webp"},
+        {"count": 1},
         {"model": ""},
         {"max_tokens": 0},
         {"max_tokens": 4097},
@@ -706,6 +779,8 @@ def test_a_refused_request_reserves_nothing_and_ends_the_connection(
         (_request(2), 400),  # out of order
         ({**_request(1), "max_tokens": 0}, 400),
         ({**_request(1), "kind": "images"}, 400),
+        # An image request on a connection whose sidecar serves chat only.
+        (_image_request(1), 400),
         ({k: v for k, v in _request(1).items() if k != "offer_sig"}, 400),
     ],
 )
@@ -1399,3 +1474,229 @@ async def test_reserve_deposit(monkeypatch: pytest.MonkeyPatch) -> None:
     assert error["type"] == "connection_deposit_unfunded"
     assert error["code"] == "insufficient_balance"
     assert error["connection_deposit_msat"] == 700
+
+
+# ---------------------------------------------------------------------------
+# image requests on a connection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"variant": ""},
+        {"variant": 5},
+        {"count": 0},
+        {"count": conf.IMAGE_MAX_COUNT + 1},
+        {"count": True},
+        {"max_tokens": 5},
+        {"body_len": 0},
+        {"offer_sig": "xyz"},
+    ],
+)
+def test_h2_image_request_shape(change: dict[str, Any]) -> None:
+    cws.validate_h2_request(_image_request(1), 4096, 1)
+    cws.validate_h2_request(_image_request(2, count=conf.IMAGE_MAX_COUNT), 4096, 2)
+    with pytest.raises(cws.SetupError):
+        cws.validate_h2_request({**_image_request(1), **change}, 4096, 1)
+    without = {k: v for k, v in _image_request(1).items() if k != "variant"}
+    with pytest.raises(cws.SetupError):
+        cws.validate_h2_request(without, 4096, 1)
+
+
+def _image_settled(n: int) -> list[dict[str, Any]]:
+    """What the sidecar sends for an image request that the client accepts."""
+    flat = {"flat": True, "kind": "images", "count": 1}
+    return [
+        {
+            "type": "request_ok",
+            "sid": SID,
+            "n": n,
+            "stream": 2 * n + 1,
+            "suffix": IMAGE_SUFFIX,
+        },
+        {"type": "body_released", "n": n},
+        _attest(n),
+        _usage(n, model="z-image-turbo", usage=flat),
+    ]
+
+
+def test_a_chat_request_and_an_image_request_share_a_connection(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Request 1 is chat, request 2 an image: reserved by ``reserve_image``,
+    forwarded with the node's own suffix, settled flat on the sidecar's flat
+    usage, with a receipt that names the variant, the count and the price."""
+    _secret, pub_hex = node_identity
+    ledger = _Ledger(monkeypatch, images=True, deposit=DEP)
+
+    def per_request(n: int) -> list[dict[str, Any]]:
+        return _image_settled(n) if n == 2 else _settled(n)
+
+    with _Conn(monkeypatch, per_request) as conn:
+        _open_with_deposit(conn)
+        conn.send(_request(1))
+        chat = conn.recv(4)[-1]["receipt"]
+        assert "kind" not in chat and chat["deposit_released_msat"] == DEP
+        # The client names its own suffix: it never reaches the sidecar.
+        conn.send(_image_request(2, suffix=',"model":"dear","variants":4}', count=1))
+        conn.send({"type": "accept", "n": 2, "server_records": 9})
+        ok, released, att, receipt_msg = conn.recv(4)
+        assert ok["suffix"] == IMAGE_SUFFIX and released["n"] == 2
+        receipt = receipt_msg["receipt"]
+        assert receipt["http"] == 2 and receipt["n"] == 2 and receipt["sid"] == SID
+        assert receipt["kind"] == "images" and receipt["model"] == "z-image-turbo"
+        assert receipt["variant"] == "webp" and receipt["count"] == 1
+        assert receipt["msat_per_image"] == 10350 and receipt["cost_msats"] == 10350
+        assert receipt["usage"] == {"flat": True, "kind": "images", "count": 1}
+        assert "rates" not in receipt and "deposit_released_msat" not in receipt
+        assert (
+            receipt["attestation_hash"]
+            == hashlib.sha256(att["a_json"].encode()).hexdigest()
+        )
+        assert _verify_schnorr(receipt_msg["receipt_json"], receipt_msg["sig"], pub_hex)
+        # The connection takes another chat request afterwards.
+        conn.send(_request(3))
+        assert conn.recv(4)[-1]["receipt"]["n"] == 3
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "settle:rel-1",
+        "release:dep",
+        "reserve_image",
+        "flat:rel-2",
+        "reserve",
+        "settle:rel-3",
+    ]
+    assert ledger.reserved[1] == {
+        "auth": "sk-client-key",
+        "model": "z-image-turbo",
+        "variant": "webp",
+        "count": 1,
+        "offer_sig": SIG,
+        "fee": None,
+        "abandon": None,
+    }
+    # The sidecar saw the node's rendering of the suffix and the count, no
+    # variant, no credential; and the client's accept, unchanged.
+    assert conn.holder["requests"][1] == {
+        "type": "request",
+        "n": 2,
+        "kind": "images",
+        "model": "z-image-turbo",
+        "count": 1,
+        "body_len": 150,
+        "suffix": IMAGE_SUFFIX,
+    }
+    assert {"type": "accept", "n": 2, "server_records": 9} in conn.holder["other"]
+
+
+def test_an_image_request_as_the_first_request_returns_the_deposit(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch, images=True, deposit=DEP)
+    with _Conn(monkeypatch, _image_settled) as conn:
+        _open_with_deposit(conn)
+        conn.send(_image_request(1))
+        receipt = conn.recv(4)[-1]["receipt"]
+        assert receipt["kind"] == "images" and receipt["deposit_released_msat"] == DEP
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve_image",
+        "flat:rel-1",
+        "release:dep",
+    ]
+
+
+@pytest.mark.parametrize(
+    "usage,expected",
+    [
+        # An error head: v2's image error rules (a 400 keeps at most a fee).
+        ({"error_status": 400, "choices": []}, "release:rel-1"),
+        # Token usage for an image request is a protocol breach.
+        ({"usage": {"prompt_tokens": 1, "completion_tokens": 1}}, "charge:rel-1"),
+    ],
+)
+def test_an_image_request_settles_flat_or_on_an_error_head_only(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    usage: dict[str, Any],
+    expected: str,
+) -> None:
+    ledger = _Ledger(monkeypatch, images=True)
+
+    def per_request(n: int) -> list[dict[str, Any]]:
+        frames = _image_settled(n)
+        frames[-1] = _usage(n, model="z-image-turbo", usage=usage)
+        return frames
+
+    with _Conn(monkeypatch, per_request) as conn:
+        conn.open()
+        conn.send(_image_request(1))
+        receipt = conn.recv(4)[-1]["receipt"]
+        assert receipt["kind"] == "images" and receipt["variant"] == "webp"
+    assert ledger.calls == ["check", "reserve_image", expected]
+
+
+def test_a_flat_usage_does_not_settle_a_chat_request(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """A sidecar that reports a flat charge for a chat request (the request
+    reached the provider unpriced): the reservation is charged."""
+    ledger = _Ledger(monkeypatch, images=True)
+
+    def per_request(n: int) -> list[dict[str, Any]]:
+        frames = _settled(n)
+        frames[-1] = _usage(n, usage={"flat": True, "kind": "images", "count": 1})
+        return frames
+
+    with _Conn(monkeypatch, per_request) as conn:
+        conn.open()
+        conn.send(_request(1))
+        receipt = conn.recv(4)[-1]["receipt"]
+        assert receipt["cost_msats"] == receipt["reserved_msats"] == 9000
+    assert ledger.calls == ["check", "reserve", "charge:rel-1"]
+
+
+def test_an_abandoned_image_request_is_released(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """A tampered suffix fails π_WIN: the provider never has the request, its
+    reservation is released; after ``body_released`` with no accept it is
+    charged."""
+    for frames, expected in ((1, "release:rel-1"), (2, "charge:rel-1")):
+        ledger = _Ledger(monkeypatch, images=True)
+
+        def per_request(n: int, frames: int = frames) -> list[dict[str, Any]]:
+            return _image_settled(n)[:frames] + [
+                {"type": "error", "reason": "proof pi_win failed"}
+            ]
+
+        with _Conn(monkeypatch, per_request) as conn:
+            conn.open()
+            conn.send(_image_request(1))
+            assert conn.recv(frames + 1)[-1]["type"] == "error"
+        assert ledger.calls == ["check", "reserve_image", expected]
+
+
+async def test_offer_lists_images_over_http2_only_with_an_images_block(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    side_h2 = {**H2, "kinds": ["chat", "images"]}
+    # The sidecar serves images over http 2, the node prices none: chat only,
+    # and the block is the one a chat-only sidecar gives.
+    offer = await _offer(monkeypatch, {"http": ["1.1", "2"], "h2": side_h2})
+    assert "kinds" not in offer["h2"] and "images" not in offer
+    # With priced image variants the signed block lists both kinds.
+    block = {"head_template": "POST /api/v1/image/generate HTTP/1.1\r\n\r\n"}
+    monkeypatch.setattr(conf, "images_offer_block", lambda side, pct: block)
+    offer = await _offer(monkeypatch, {"http": ["1.1", "2"], "h2": side_h2})
+    assert offer["h2"]["kinds"] == ["chat", "images"] and offer["images"] == block
+    assert json.loads(offer["sig_payload"])["h2"]["kinds"] == ["chat", "images"]
+    # A sidecar that keeps images on the v2 flow: the node does not add them.
+    offer = await _offer(monkeypatch, {"http": ["1.1", "2"], "h2": H2})
+    assert "kinds" not in offer["h2"] and offer["images"] == block
+    assert conf.h2_kinds({"kinds": ["images"]}, True) == ["chat"]
+    assert conf.h2_kinds({"kinds": "chat,images"}, True) == ["chat"]

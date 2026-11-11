@@ -291,6 +291,14 @@ two-party handshake) that serves many sequential requests. Sessions without
   the offer signature or the fees. A request may name another credential than
   the previous one. A request the node refuses (unknown model, 402, an expired
   offer) reserves nothing and ends the connection.
+- **Image requests.** When the sidecar's `h2` block lists `"images"` in
+  `kinds` (and it has an images endpoint) and the node prices image variants,
+  the signed `h2.kinds` is `["chat", "images"]` and a `request` may be
+  `{"kind": "images", "model", "variant", "count", "body_len", …}`: reserved by
+  the image rule (`msat_per_image × count` plus the larger fee), forwarded
+  with the node's own rendering of the suffix, and settled flat when the
+  client accepts the response (`settle_flat`), or by its error head. Chat and
+  image requests share a connection in any order.
 - **Settlement.** That request's `body_released`, `attestation` and `usage`
   are handled as for a v2 session; the signed receipt also carries `http: 2`
   and the request number `n`. The connection is then idle and accepts the
