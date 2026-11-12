@@ -1126,6 +1126,11 @@ async def _release_keeping_fee(billing: Billing, name: str) -> tuple[int, int | 
     return fee, await charge_fee(billing, fee)
 
 
+def _pinned(billing: Any) -> str:
+    """The model id the request's suffix pinned (the provider's)."""
+    return getattr(billing, "pinned_model", None) or billing.model_id
+
+
 async def _apply_settlement(
     billing: Billing,
     usage: dict[str, Any],
@@ -1142,7 +1147,7 @@ async def _apply_settlement(
     images = getattr(billing, "kind", "chat") == "images"
     if usage.get("flat") is True:
         reported = usage.get("model", model)
-        if not images or (reported is not None and reported != billing.model_id):
+        if not images or (reported is not None and reported != _pinned(billing)):
             # A flat settlement on a chat session (or for another model) is a
             # protocol breach: the request reached the provider unpriced.
             return billing.reserved_msats, await charge_reservation(billing)
@@ -1168,12 +1173,13 @@ async def _apply_settlement(
     # spells it differently (an alias, a canonical id, a case change) is
     # still that request: it is settled at the pinned model's frozen rates.
     reported = reported_model if reported_model is not None else usage.get("model")
-    if reported != billing.model_id:
+    if reported != _pinned(billing):
         logger.warning(
             "confidential ws: provider reported another model than the pinned "
             "one; settling at the pinned model's rates",
             extra={
                 "model": billing.model_id,
+                "pinned_model": _pinned(billing),
                 "reported_model": str(reported)[:200],
             },
         )
@@ -1275,6 +1281,9 @@ async def _settle(
         )
     else:
         receipt["rates"] = billing.rates
+        if _pinned(billing) != billing.model_id:
+            # The id the suffix pinned (the offer's `upstream_models`).
+            receipt["upstream_model"] = _pinned(billing)
     receipt["http"] = state.framing
     receipt["n"] = state.h2_n
     log_extra: dict[str, Any] = {"n": state.h2_n, "http": state.framing}
@@ -1742,7 +1751,11 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
                 "suffix": billing.suffix,
             }
         )
-    return json.dumps({k: msg[k] for k in _H2_REQUEST_FIELDS if k in msg})
+    # The sidecar renders (and π_WIN binds) the suffix with the id the
+    # provider is sent; the client named the public id.
+    forward = {k: msg[k] for k in _H2_REQUEST_FIELDS if k in msg}
+    forward["model"] = _pinned(billing)
+    return json.dumps(forward)
 
 
 async def _h2_client_to_sidecar(

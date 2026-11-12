@@ -66,6 +66,7 @@ import math
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -453,10 +454,14 @@ def model_allowed(model: str, allowlist: set[str]) -> bool:
 
 @dataclass(frozen=True)
 class Candidate:
-    """The (model, provider) pair that serves ``model_id`` via the sidecar host."""
+    """The (model, provider) pair that serves ``model_id`` via the sidecar host.
+
+    ``provider_model`` (set by ``offered_models``) is the id the provider is
+    sent: the pinned ``model`` of the chat suffix."""
 
     model: Any
     upstream: Any
+    provider_model: str | None = None
 
 
 def candidate_for(model_id: str, host: str) -> Candidate | None:
@@ -502,35 +507,52 @@ def provider_model_id(cand: Candidate) -> str | None:
 
 
 def offered_models(side_offer: dict[str, Any]) -> dict[str, Candidate]:
-    """Models the node serves confidentially: chat models on the sidecar host,
-    within the allowlist, whose public id is the provider's own id.
+    """Models the node serves confidentially, by public id: chat models on the
+    sidecar host whose provider id is within the allowlist.
 
-    The pinned chat suffix sends the offered (public) id to the provider as
-    is, and the node prices under it: a model whose public id differs from
-    the one the provider serves it under (a lower-cased or prefix-stripped
-    id, an operator alias) is not offered, since every request for it would
-    be refused upstream or settled against another spelling."""
+    The client names the public id (``/v1/models``, ``price_list``); the
+    pinned chat suffix carries the id the provider is sent
+    (``Candidate.provider_model``: the plain path's ``transform_model_name``
+    of the candidate's own id, e.g. ``moonshotai/kimi-k3.1-pro`` for the public
+    ``kimi-k3.1-pro``). Where the two differ the signed offer lists the pair
+    in ``upstream_models``, so the client renders the same suffix. The
+    allowlist is matched against the provider id: it is what the sidecar sees
+    and checks."""
     from .proxy import get_unique_models
 
     host = str(side_offer.get("upstream_host", ""))
     allowlist = model_allowlist(side_offer)
     out: dict[str, Candidate] = {}
     for model in get_unique_models():
-        if not model_allowed(model.id, allowlist) or not produces_text(model):
+        if not produces_text(model):
             continue
         cand = candidate_for(model.id, host)
         if cand is None:
             continue
         provider_id = provider_model_id(cand)
-        if provider_id != model.id:
-            logger.debug(
-                "confidential: not offering a model whose public id is not "
-                "the provider's",
-                extra={"model": model.id, "provider_model": provider_id},
-            )
+        if provider_id is None or not model_allowed(provider_id, allowlist):
             continue
-        out[model.id] = cand
+        out[model.id] = Candidate(cand.model, cand.upstream, provider_id)
     return out
+
+
+def upstream_models_block(
+    priced: dict[str, tuple[Candidate, dict[str, float]]],
+) -> dict[str, str]:
+    """The signed offer's ``upstream_models``: public id -> the id the suffix
+    pins, for the priced models whose two ids differ (empty for a provider
+    whose ids are the public ones, such as Venice)."""
+    out: dict[str, str] = {}
+    for mid, (cand, _entry) in sorted(priced.items()):
+        pinned = getattr(cand, "provider_model", None)
+        if isinstance(pinned, str) and pinned and pinned != mid:
+            out[mid] = pinned
+    return out
+
+
+def pinned_model(terms: "OfferTerms", model_id: str) -> str:
+    """The id the chat suffix pins for ``model_id`` under a signed offer."""
+    return terms.upstream_models.get(model_id, model_id)
 
 
 def compact_json(value: Any) -> str:
@@ -883,6 +905,8 @@ class OfferTerms:
     # The offer's connection-level fields (``connection_fields``), canonical
     # JSON: a request may name another offer only when these are equal.
     connection: str = ""
+    # Public id -> the provider's id the chat suffix pins, where they differ.
+    upstream_models: dict[str, str] = dc_field(default_factory=dict)
 
 
 # sig -> (monotonic time last served, terms), oldest first.
@@ -1079,9 +1103,9 @@ async def build_offer() -> dict[str, Any]:
         )
     framings = sidecar_framings(side)
     fee, abandon, pct = session_fee_msat(), abandon_fee_msat(), rate_surcharge_pct()
-    prices = {
-        mid: surcharged(entry, pct) for mid, (_c, entry) in priced_models(side).items()
-    }
+    priced = priced_models(side)
+    prices = {mid: surcharged(entry, pct) for mid, (_c, entry) in priced.items()}
+    upstream_models = upstream_models_block(priced)
     margin = reserve_margin_tokens()
     images = images_offer_block(side, pct)
     h2 = h2_offer_block(side, images is not None)
@@ -1121,6 +1145,11 @@ async def build_offer() -> dict[str, Any]:
         offer["h2"] = h2
     if margin > 0:
         offer["reserve_margin_tokens"] = margin
+    if upstream_models:
+        # The provider's own id per public id where they differ (an `org/`
+        # prefix): the chat suffix pins it. Absent when every id is the
+        # provider's own, so such an offer is unchanged.
+        offer["upstream_models"] = upstream_models
     if images is not None:
         # Absent without images.
         offer["capabilities"] = ["chat", "images"]
@@ -1137,6 +1166,7 @@ async def build_offer() -> dict[str, Any]:
         deposit,
         idle,
         connection_fields(offer),
+        upstream_models,
     )
     payload = canonical_json(offer).decode("utf-8")
     last = _LAST_OFFER["offer"]
@@ -1231,6 +1261,13 @@ class Billing:
     reserve_margin_tokens: int = 0
     # ``kind == "deposit"``: the reservation is a connection's deposit (no
     # model, no rates); ``candidate`` is then ``None``.
+    # The id the request's suffix pins (the provider's; ``model_id`` when they
+    # are the same, and always for images, whose offer is keyed by it).
+    upstream_model: str = ""
+
+    @property
+    def pinned_model(self) -> str:
+        return self.upstream_model or self.model_id
 
 
 class BillingError(Exception):
@@ -1633,6 +1670,12 @@ async def reserve(
     rates = signed_offer_rates(offer_sig, model_id)
     if terms is None or rates is None:
         raise _offer_expired(model_id)
+    # The suffix pins the provider's id as the named offer lists it (the
+    # client rendered it from there). Should the provider id have changed
+    # since, the client must refetch: the sidecar renders the current one.
+    upstream_model = pinned_model(terms, model_id)
+    if upstream_model != (getattr(cand, "provider_model", None) or model_id):
+        raise _offer_expired(model_id)
     fee, pct = terms.session_fee_msat, terms.rate_surcharge_pct
     abandon = max(terms.abandon_fee_msat, fee)
     margin = terms.reserve_margin_tokens
@@ -1693,6 +1736,7 @@ async def reserve(
             abandon_fee_msat=abandon,
             max_tokens=max_tokens,
             reserve_margin_tokens=margin,
+            upstream_model=upstream_model,
         )
 
 
