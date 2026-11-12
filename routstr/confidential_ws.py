@@ -1806,12 +1806,14 @@ async def _run_h2_session(
             last = state.h2_last_frame
         if last is None and deposit is not None:
             last = {"type": "closed", "reason": "ended"}
+        # The money first: the client may be gone, and telling it must not
+        # stand between a reservation and its end.
+        await _finalize(state)
         if last is not None:
             try:
                 await websocket.send_text(_with_deposit(last, deposit))
             except Exception:
                 pass
-        await _finalize(state)
         await _close(upstream, 1000)
         await _close(websocket, 1000)
         logger.info(
