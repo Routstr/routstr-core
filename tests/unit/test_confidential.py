@@ -55,6 +55,8 @@ def _fresh_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cws, "_pending", {})
     monkeypatch.setattr(cws, "_pending_by_addr", {})
     monkeypatch.setattr(cws, "_unused_by_ip", {})
+    monkeypatch.setattr(cws, "_active_by_ip", {}, raising=False)
+    monkeypatch.setattr(cws, "_slot_holders", {}, raising=False)
 
 
 @pytest.fixture()

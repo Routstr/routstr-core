@@ -90,6 +90,16 @@ class Settings(BaseSettings):
     confidential_max_unused_per_ip: int = Field(
         default=12, env="CONFIDENTIAL_MAX_UNUSED_PER_IP"
     )
+    # Confidential connections per client address bucket in total, used or
+    # not, from the setup's reservation to the connection's end. Under this
+    # limit, and when all session slots are taken, a new setup closes the
+    # longest-idle used connection (one that settled a request and has none
+    # in flight; ``closed`` reason ``evicted``) rather than being refused.
+    # 0 disables the per-address limit (the eviction under global pressure
+    # stays).
+    confidential_max_active_per_ip: int = Field(
+        default=16, ge=0, env="CONFIDENTIAL_MAX_ACTIVE_PER_IP"
+    )
     # Pricing of confidential connections (fees off by default). A connection
     # moves ~16 MB of 2PC data and costs the node CPU before the provider
     # sees anything. The session fee is charged once per connection, with its
