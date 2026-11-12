@@ -1488,8 +1488,9 @@ async def _h2_request_refused(state: SessionState) -> None:
     state.attestation_hash = ""
     state.h2_lifetime = None
     state.h2_n -= 1
-    if state.h2_idle_since is not None:
-        state.h2_idle_since = asyncio.get_running_loop().time()
+    # The idle time still counts from ``head_written`` or the last
+    # settlement: refused requests must not keep an unused connection (and
+    # its session slot) alive past the deposit's lease.
     state.h2_moved.set()
 
 
@@ -1766,8 +1767,8 @@ async def _run_h2_session(
                     except Exception:
                         reply.set_result(None)
                         break
-                    if state.h2_idle_since is not None:
-                        state.h2_idle_since = loop.time()
+                    # (The idle time is not restarted: it counts from
+                    # ``head_written`` or the last settlement.)
                     reply.set_result("")
                     continue
                 reply.set_result(forward)

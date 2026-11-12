@@ -1532,6 +1532,39 @@ async def test_idle_connection_that_never_carried_a_request_loses_its_deposit(
     assert _verify_schnorr(closed["deposit_json"], closed["deposit_sig"], pub_hex)
 
 
+def test_refused_requests_do_not_restart_the_idle_time(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Idle counts from ``head_written`` or the last settlement (§8.2). A
+    client must not keep an unused connection, its session slot and its
+    deposit's lease alive with requests that are refused."""
+    ledger = _Ledger(
+        monkeypatch,
+        deposit=DEP,
+        reserve_errors={1: conf.BillingError("model 'x' is not served confidentially")},
+    )
+    refusal = {"type": "request_refused", "n": 1, "status": 400, "reason": "no"}
+    with _Conn(monkeypatch, lambda n: [refusal], "2") as conn:
+        conn.open()
+        state = cws._live_sids[SID]
+        since = state.h2_idle_since
+        assert since is not None
+        time.sleep(0.05)
+        conn.send(_request(model="x"))  # refused by the node
+        assert conn.recv1()["status"] == 400
+        conn.send(_request())  # refused by the sidecar
+        assert conn.recv1() == refusal
+        assert state.h2_idle_since == since and state.billing is None
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "reserve",
+        "release:rel-2",
+        "charge:dep",
+    ]
+
+
 async def test_the_idle_time_never_exceeds_the_sidecars(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
