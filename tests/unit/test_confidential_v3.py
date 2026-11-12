@@ -869,6 +869,63 @@ def test_a_client_that_leaves_while_the_sidecar_is_sending_is_not_a_sidecar_fail
     assert ledger.calls == ["deposit", "charge:dep"]
 
 
+async def test_which_socket_ended_decides_between_unused_and_sidecar_failure(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The client pump closes the sidecar's socket on its way out, and the
+    sidecar pump may see that end first: the client's departure is recorded
+    before the close, so it never reads as the sidecar's failure. A sidecar
+    socket that ends under a frame the client sent is the sidecar's."""
+
+    class _Upstream(_QueueSidecar):
+        def __init__(self, die_on_send: bool) -> None:
+            super().__init__([_ready("2"), _HEAD], [])
+            self.die_on_send = die_on_send
+
+        async def send(self, data: Any) -> None:
+            if self.die_on_send:
+                self.queue.put_nowait(None)  # the socket ends, no last frame
+                raise cws.websockets.ConnectionClosedError(None, None)
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            if not self.closed:
+                self.closed = True
+                self.queue.put_nowait(None)
+                await asyncio.sleep(0.2)  # the close handshake outlasts the pump
+
+    class _Client(_IdleClient):
+        def __init__(self, frame: dict[str, Any]) -> None:
+            super().__init__()
+            self.frames = [frame]
+
+        async def receive(self) -> dict[str, Any]:
+            await asyncio.sleep(0.05)
+            if self.frames:
+                return self.frames.pop()
+            await asyncio.Event().wait()
+            return {}
+
+    async def run(frame: dict[str, Any], die_on_send: bool) -> tuple[Any, list[str]]:
+        ledger = _Ledger(monkeypatch, deposit=DEP)
+        state = cws.SessionState()
+        state.framing, state.sid = "2", SID
+        state.h2_deposit = await cws.reserve_deposit("sk-client-key", SIG)
+        client = _Client(frame)
+        loop = asyncio.get_running_loop()
+        await cws._run_h2_session(client, _Upstream(die_on_send), state, loop.time())  # type: ignore[arg-type]
+        return state, ledger.calls
+
+    # The client disconnects: the deposit is charged.
+    state, calls = await run({"type": "websocket.disconnect"}, False)
+    assert state.h2_client_gone and state.h2_fault is None
+    assert calls == ["deposit", "charge:dep"]
+    # The sidecar dies while the client is there: released.
+    text = json.dumps({"type": "settings_seen", "header_table_size": None})
+    state, calls = await run({"type": "websocket.receive", "text": text}, True)
+    assert not state.h2_client_gone and state.h2_fault == "sidecar_failure"
+    assert calls == ["deposit", "release:dep"]
+
+
 @pytest.mark.parametrize(
     "last,reason",
     [
