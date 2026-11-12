@@ -404,8 +404,11 @@ class SessionState:
         # The outcome of a deposit released because the setup failed after
         # it was reserved (no slot, the sidecar unreachable).
         self.h2_setup_deposit: dict[str, Any] | None = None
-        # The sidecar's socket ended (as opposed to the client's).
+        # The sidecar's socket ended (as opposed to the client's), and the
+        # client pump ended (the client left or was cut off; it closes the
+        # sidecar's socket on its way out).
         self.h2_sidecar_gone = False
+        self.h2_client_gone = False
         # The node's own last frame after a failure of its own (a settlement
         # that could not be written): the session task sends it, with the
         # deposit's outcome, and ends the connection.
@@ -1671,7 +1674,14 @@ async def _h2_client_to_sidecar(
                 # client; the connection goes on.
                 continue
             await upstream.send(text)
-    except (WebSocketDisconnect, RuntimeError, websockets.ConnectionClosed):
+        # The client left (or the node ended the connection). Said before
+        # the sidecar's socket is closed below: its end from here on is this
+        # pump's doing, not a failure of the sidecar.
+        state.h2_client_gone = True
+    except (WebSocketDisconnect, RuntimeError):
+        state.h2_client_gone = True
+    except websockets.ConnectionClosed:
+        # The sidecar's socket ended under a frame being forwarded to it.
         pass
     finally:
         await _close(upstream, 1000)
@@ -1710,7 +1720,7 @@ async def _run_h2_session(
             if client_pump in done or sidecar_pump in done:
                 if (
                     sidecar_pump in done
-                    and client_pump not in done
+                    and not state.h2_client_gone
                     and state.h2_sidecar_gone
                     and not state.h2_terminal
                     and state.h2_node_error is None
