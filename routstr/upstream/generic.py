@@ -15,7 +15,6 @@ from .pricing_resolver import (
 )
 
 if TYPE_CHECKING:
-    from ..core.db import UpstreamProviderRow
     from ..payment.models import Model
 
 from ..core.logging import get_logger
@@ -94,16 +93,6 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
     def adapt_messages_request(self, body: dict, model_obj: Model) -> str:
         _join_system_text_blocks(body)
         return super().adapt_messages_request(body, model_obj)
-
-    @classmethod
-    def _build_from_row(
-        cls, provider_row: "UpstreamProviderRow"
-    ) -> "GenericUpstreamProvider":
-        return cls(
-            base_url=provider_row.base_url,
-            api_key=provider_row.api_key,
-            provider_fee=provider_row.provider_fee,
-        )
 
     @classmethod
     def get_provider_metadata(cls) -> dict[str, object]:
