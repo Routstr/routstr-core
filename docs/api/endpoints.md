@@ -111,6 +111,18 @@ data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288
 data: [DONE]
 ```
 
+### Paid X-Cashu Settlement Failure
+
+Paid `POST /v1/chat/completions` and `POST /v1/responses` requests can return
+`503` with `X-Routstr-Error-Scope: node`, a top-level `request_id`,
+`error.type = "internal_error"`, and
+`error.code = "payment_settlement_failed"` when inference succeeded but the
+node could not durably settle the payment, so the inference response is
+withheld. The original `X-Cashu` token is already spent: do not resend it.
+Keep the token and claim the stored refund with `POST /v1/balance/refund`.
+For EHBP requests, this is a plaintext router-generated response without
+`Ehbp-Response-Nonce`.
+
 ## Completions (Coming Soon)
 
 ### Create Completion
@@ -702,7 +714,18 @@ POST /v1/balance/refund
 X-Cashu: cashuAeyJ0...
 ```
 
-Returns the change token in the body and in an `X-Cashu` response header. `404` if no matching request exists, `425` while the change is still being minted, `410` if it was swept.
+Returns the change token in the body and in an `X-Cashu` response header. Other answers:
+
+| Status | Meaning |
+|--------|---------|
+| `404` | No request was paid with this token. |
+| `425` | The request is still in flight, or its refund is being minted. Retry after `Retry-After` seconds. |
+| `409` `token_already_spent` / `payment_fully_charged` | The request used the whole payment; no change is owed. Drop the token. |
+| `409` `refund_failed` / `refund_unresolved` | Minting the refund failed. Contact the operator with the `payment_request_id` from the body (the paid request's id, not this call's `request_id`). |
+| `409` `refund_unavailable` / `refund_not_recorded` | Paid before this node recorded refund outcomes; contact the operator with the `payment_request_id` from the body if change is owed. |
+| `410` | The change was swept after going unclaimed. |
+
+If the node stops while a paid request is in flight and before its charge is settled, the payment is refunded in full, less the mint's input fee for redeeming it: at once on a graceful shutdown, otherwise once the request lifetime the node had when the payment was accepted (`MAX_REQUEST_LIFETIME_SECONDS` plus `REQUEST_CLEANUP_TIMEOUT_SECONDS` and a minute) has passed. Until then the endpoint answers `425`. If a change refund was already minting after inference completed, that refund is awaited and the charge stands; a second refund is never minted. If the mint's outcome is unknown, the refund is not retried and the endpoint answers `409` `refund_unresolved` for manual reconciliation.
 
 ## Provider Discovery
 

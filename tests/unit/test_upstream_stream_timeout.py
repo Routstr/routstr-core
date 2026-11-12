@@ -251,7 +251,7 @@ def test_cooldown_opens_after_allowed_fails_and_expires(
     assert is_cooling_down("https://b.example", "m") is False
     assert is_cooling_down("https://a.example", "other") is False
 
-    with patch("routstr.upstream.cooldown.time.monotonic", return_value=1e6):
+    with patch("routstr.upstream.cooldown.time.monotonic", return_value=float("inf")):
         assert is_cooling_down("https://a.example", "m") is False
 
 
@@ -381,7 +381,7 @@ async def test_cooling_down_candidate_is_skipped_then_recovers(
     assert await _run_proxy(candidates, AsyncMock()) is healthy_response
     sick.forward_request.assert_not_awaited()
 
-    with patch("routstr.upstream.cooldown.time.monotonic", return_value=1e6):
+    with patch("routstr.upstream.cooldown.time.monotonic", return_value=float("inf")):
         assert await _run_proxy(candidates, AsyncMock()) is sick_response
 
 

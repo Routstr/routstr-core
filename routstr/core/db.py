@@ -8,7 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import date
 from enum import Enum
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from alembic import command
 from alembic.config import Config
@@ -22,6 +22,7 @@ from sqlalchemy import (
     LargeBinary,
     UniqueConstraint,
     case,
+    cast,
     delete,
     event,
     or_,
@@ -586,6 +587,9 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
 
 class CashuTransaction(SQLModel, table=True):  # type: ignore
     __tablename__ = "cashu_transactions"
+    __table_args__ = (
+        Index("ix_cashu_transactions_settlement", "settlement", "settlement_at"),
+    )
 
     id: str = Field(
         primary_key=True,
@@ -620,12 +624,48 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
         index=True,
         description="Associated API key hash for wallet history",
     )
+    settlement: str | None = Field(
+        default=None,
+        description="X-Cashu payment state on the in row: pending, refunding, "
+        "refunded, charged or failed; null for rows written before tracking",
+    )
+    settlement_at: int | None = Field(
+        default=None,
+        sa_type=BigInteger,
+        description="Unix timestamp of the last settlement state change",
+    )
+    recover_after: int | None = Field(
+        default=None,
+        sa_type=BigInteger,
+        description="Unix timestamp after which recovery may refund the payment, "
+        "fixed when it was accepted so later setting changes cannot shorten it",
+    )
+    refund_amount: int | None = Field(
+        default=None,
+        sa_type=BigInteger,
+        description="Outstanding refund amount in the transaction's unit",
+    )
 
 
 REFUND_OPEN_STATUSES = ("pending", "ambiguous")
 
 # Debited from the key but neither paid out nor restored, so still owed.
 REFUND_UNRESOLVED_STATUSES = ("pending", "ambiguous", "stuck")
+# X-Cashu payments still owed to the payer: refundable in full, or failed and
+# awaiting manual reconciliation.
+X_CASHU_UNSETTLED_STATES = ("pending", "refunding", "failed")
+# Slack past the request deadline and its cleanup window before an X-Cashu
+# payment is treated as abandoned.
+X_CASHU_RECOVERY_MARGIN_SECONDS = 60
+
+
+def x_cashu_abandoned_after_seconds() -> float:
+    return (
+        settings.max_request_lifetime_seconds
+        + settings.request_cleanup_timeout_seconds
+        + X_CASHU_RECOVERY_MARGIN_SECONDS
+    )
+
 
 _REFUND_OPEN_PREDICATE = "status IN ('pending', 'ambiguous')"
 
@@ -755,9 +795,11 @@ async def store_cashu_transaction(
     api_key_hashed_key: str | None = None,
     transaction_id: str | None = None,
     log_failure: bool = True,
+    settlement: str | None = None,
 ) -> bool:
     try:
         async with create_session() as session:
+            created_at = created_at or int(time.time())
             tx = CashuTransaction(
                 id=transaction_id or uuid.uuid4().hex,
                 token=token,
@@ -767,9 +809,16 @@ async def store_cashu_transaction(
                 type=typ,
                 request_id=request_id,
                 collected=collected,
-                created_at=created_at or int(time.time()),
+                created_at=created_at,
                 source=source,
                 api_key_hashed_key=api_key_hashed_key,
+                settlement=settlement,
+                settlement_at=created_at if settlement is not None else None,
+                recover_after=(
+                    created_at + int(x_cashu_abandoned_after_seconds())
+                    if settlement is not None
+                    else None
+                ),
             )
             session.add(tx)
             await session.commit()
@@ -801,6 +850,7 @@ async def store_cashu_transaction_with_retry(
     source: str = "x-cashu",
     api_key_hashed_key: str | None = None,
     max_attempts: int = 3,
+    settlement: str | None = None,
 ) -> bool:
     """Retry a critical Cashu transaction write with bounded backoff."""
     transaction_id = hashlib.sha256(f"{typ}\0{token}".encode()).hexdigest()
@@ -820,6 +870,7 @@ async def store_cashu_transaction_with_retry(
                 api_key_hashed_key=api_key_hashed_key,
                 transaction_id=transaction_id,
                 log_failure=False,
+                settlement=settlement,
             )
         except IntegrityError as error:
             try:
@@ -1520,11 +1571,39 @@ async def list_unsettled_lightning_payouts(
     return list(result.all())
 
 
+def _unsettled_x_cashu_msats(*filters: Any) -> Any:
+    """Redeemed X-Cashu payments still owed to users, in msats."""
+    amount = case(
+        (
+            col(CashuTransaction.settlement) == "pending",
+            col(CashuTransaction.amount),
+        ),
+        else_=func.coalesce(
+            col(CashuTransaction.refund_amount), col(CashuTransaction.amount)
+        ),
+    )
+    amount_msats = case(
+        (col(CashuTransaction.unit) == "msat", amount),
+        # Widen before multiplying: PostgreSQL overflows INTEGER * 1000.
+        else_=cast(amount, BigInteger) * 1000,
+    )
+    return (
+        select(func.coalesce(func.sum(amount_msats), 0))
+        .where(
+            col(CashuTransaction.type) == "in",
+            col(CashuTransaction.settlement).in_(X_CASHU_UNSETTLED_STATES),
+            *filters,
+        )
+        .scalar_subquery()
+    )
+
+
 async def total_user_liability(db_session: AsyncSession) -> int:
     """Return all outstanding user funds in millisatoshis.
 
-    Key balances and unresolved refunds are summed in one statement so a
-    claim opened between two reads cannot be missed by both.
+    Key balances, unresolved refunds and unsettled X-Cashu payments are summed
+    in one statement so a claim opened between two reads cannot be missed by
+    both.
     """
     key_balances = select(func.coalesce(func.sum(ApiKey.balance), 0)).scalar_subquery()
     unresolved_refunds = (
@@ -1532,7 +1611,9 @@ async def total_user_liability(db_session: AsyncSession) -> int:
         .where(col(Refund.status).in_(REFUND_UNRESOLVED_STATUSES))
         .scalar_subquery()
     )
-    result = await db_session.exec(select(key_balances + unresolved_refunds))
+    result = await db_session.exec(
+        select(key_balances + unresolved_refunds + _unsettled_x_cashu_msats())
+    )
     return int(result.one() or 0)
 
 
@@ -1560,7 +1641,16 @@ async def user_liability_for_mint_and_unit(
         )
         .scalar_subquery()
     )
-    result = await db_session.exec(select(key_balances + unresolved_refunds))
+    result = await db_session.exec(
+        select(
+            key_balances
+            + unresolved_refunds
+            + _unsettled_x_cashu_msats(
+                col(CashuTransaction.mint_url) == mint_url,
+                col(CashuTransaction.unit) == unit,
+            )
+        )
+    )
     return int(result.one() or 0)
 
 

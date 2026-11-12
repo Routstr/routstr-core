@@ -57,6 +57,31 @@ legacy status behavior.
 | 502 | Bad Gateway | Gateway-level failure |
 | 503 | Service Unavailable | Temporary outage |
 
+### Paid inference settlement failure
+
+For paid `POST /v1/chat/completions` and `POST /v1/responses` requests, this
+specific `503` is not safe to retry with the same payment:
+
+```http
+HTTP/1.1 503 Service Unavailable
+X-Routstr-Error-Scope: node
+Content-Type: application/json
+
+{
+  "error": {
+    "type": "internal_error",
+    "message": "The payment could not be settled, so the response was withheld. Claim the refund at /v1/balance/refund with the original X-Cashu token.",
+    "code": "payment_settlement_failed"
+  },
+  "request_id": "req-123"
+}
+```
+
+The original `X-Cashu` token was already spent. Do not resend it. Retain it and
+claim the refund with `POST /v1/balance/refund`; the original token identifies
+the stored refund. For EHBP requests, this is a plaintext router-generated
+response and does not include `Ehbp-Response-Nonce`.
+
 ### Upstream attribution (424 Failed Dependency)
 
 When an upstream provider fails, this node is still healthy, so the failure is
@@ -92,8 +117,9 @@ Two exceptions keep their own status:
   when the provider wrapped them in a 5xx.
 - **Provider-side 4xx** (`400`/`401`/`403`/`404`/`422`) passes through unchanged.
 
-Node faults (unreachable mint, database failure, internal exception) still
-answer `500` with **no** `X-Routstr-Error-Scope` header.
+Outside the paid inference settlement failure above, node faults (unreachable
+mint, database failure, internal exception) answer `500` with **no**
+`X-Routstr-Error-Scope` header.
 
 ## Error Types
 
@@ -559,6 +585,10 @@ def retry_with_backoff(
             if attempt == max_retries - 1:
                 raise
             
+            # A settlement failure spent the token and must be claimed, not retried
+            if getattr(e, 'code', None) == 'payment_settlement_failed':
+                raise
+
             # Check if error is retryable
             if hasattr(e, 'status_code'):
                 if e.status_code in [424, 429, 502, 503, 504]:

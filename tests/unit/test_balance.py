@@ -59,7 +59,9 @@ async def test_refund_x_cashu_returns_token() -> None:
     )
 
     session = MagicMock()
-    session.exec = AsyncMock(side_effect=[_exec_result(in_tx), _exec_result(out_tx)])
+    session.exec = AsyncMock(
+        side_effect=[_exec_result(in_tx), _exec_result(out_tx), _update_result(1)]
+    )
     session.add = MagicMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
@@ -75,7 +77,6 @@ async def test_refund_x_cashu_returns_token() -> None:
     assert body["token"] == "cashuArefund_token"
     assert body["msats"] == "1000"
     assert result.headers["X-Cashu"] == "cashuArefund_token"
-    assert out_tx.collected is True
 
 
 @pytest.mark.asyncio
@@ -93,7 +94,9 @@ async def test_refund_x_cashu_sat_unit() -> None:
     )
 
     session = MagicMock()
-    session.exec = AsyncMock(side_effect=[_exec_result(in_tx), _exec_result(out_tx)])
+    session.exec = AsyncMock(
+        side_effect=[_exec_result(in_tx), _exec_result(out_tx), _update_result(1)]
+    )
     session.add = MagicMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
