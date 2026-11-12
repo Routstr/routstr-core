@@ -88,6 +88,7 @@ from .cooldown import model_identity, provider_identity, record_failure
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
 from .http_client import acquire_upstream_http_client, build_x_cashu_client
 from .image_generation import (
+    _reported_provider,
     is_image_generation_path,
     parse_json_body,
     read_image_response,
@@ -132,10 +133,16 @@ IMAGES_PER_RESERVATION = 4
 
 
 def _decoded_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    """Let ASGI frame bodies that httpx decoded or Routstr annotated."""
+    """Let ASGI frame bodies that httpx decoded or Routstr annotated.
+
+    X-Routstr-* headers are Routstr's own; an upstream copy would shadow or
+    spoof the values Routstr sets and exposes to browsers.
+    """
     excluded = {"content-length", "content-encoding", "transfer-encoding", "connection"}
     return {
-        name: value for name, value in headers.items() if name.lower() not in excluded
+        name: value
+        for name, value in headers.items()
+        if name.lower() not in excluded and not name.lower().startswith("x-routstr-")
     }
 
 
@@ -420,20 +427,6 @@ def _responses_usage_payload(data_json: dict) -> dict:
     """
     nested = data_json.get("response")
     return nested if isinstance(nested, dict) else data_json
-
-
-def _reported_provider(payload: dict) -> str | None:
-    """Provider named by an upstream payload, if any.
-
-    Checked at top level first, then inside the Anthropic ``message`` and
-    Responses ``response`` envelopes, which is where those dialects nest it.
-    """
-    for obj in (payload, payload.get("message"), payload.get("response")):
-        if isinstance(obj, dict):
-            value = obj.get("provider")
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return None
 
 
 def _header_safe(value: str, limit: int = 128) -> str:
@@ -2589,23 +2582,16 @@ class BaseUpstreamProvider:
             },
         )
 
-        # httpx already decoded the body, so the upstream's framing headers no
-        # longer describe it. X-Routstr-* headers are Routstr's own and set
-        # below; an upstream copy would shadow them.
-        headers = {
-            name: value
-            for name, value in response.headers.items()
-            if name.lower()
-            not in {"content-length", "content-encoding", "transfer-encoding"}
-            and not name.lower().startswith("x-routstr-")
-        }
+        # Upstream framing and X-Routstr-* headers are dropped; Routstr's own
+        # X-Routstr-* values are set below.
+        headers = _decoded_response_headers(response.headers)
         _inject_cost_response_headers(headers, cost_data)
         # The body is relayed as the upstream sent it, often raw image bytes,
         # so the provider and image count that chat responses carry in JSON
         # are given as headers instead.
         attribution: dict[str, Any] = {}
         if is_json:
-            reported = _header_safe(_reported_provider(parse_json_body(content)) or "")
+            reported = _header_safe(usage.provider or "")
             if reported:
                 attribution["provider"] = reported
         self._apply_provider_field(attribution)

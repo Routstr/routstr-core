@@ -23,7 +23,8 @@ from routstr.core.db import ApiKey, ModelRow, ReservationRelease
 from routstr.payment.helpers import calculate_discounted_max_cost
 from routstr.payment.image_pricing import ImagePriceTier, ImagePricing
 from routstr.payment.models import Architecture, Model, Pricing, _row_to_model
-from routstr.upstream.base import BaseUpstreamProvider
+from routstr.upstream.base import BaseUpstreamProvider, _decoded_response_headers
+from routstr.upstream.openrouter import OpenRouterUpstreamProvider
 from routstr.upstream.venice import VeniceUpstreamProvider
 
 from .proxy_test_utils import mock_request_stream, patch_proxy_session
@@ -340,6 +341,7 @@ async def test_upstream_cannot_spoof_routstr_headers() -> None:
         content=json.dumps(payload).encode(),
         headers={
             "content-type": "application/json",
+            "x-request-id": "u1",
             "x-routstr-provider": "spoofed",
             "X-Routstr-Provider-Url": "http://spoofed",
             "x-routstr-image-count": "99",
@@ -356,6 +358,73 @@ async def test_upstream_cannot_spoof_routstr_headers() -> None:
     assert raw[b"x-routstr-provider-url"] == [b"http://upstream"]
     assert raw[b"x-routstr-image-count"] == [b"1"]
     assert raw[b"x-routstr-cost-msats"] == [str(int(SATS_PER_IMAGE * 1000)).encode()]
+    assert raw[b"x-request-id"] == [b"u1"]
+
+
+def test_decoded_response_headers_drop_upstream_routstr_headers() -> None:
+    headers = httpx.Headers(
+        {
+            "content-type": "application/json",
+            "content-length": "10",
+            "x-request-id": "u1",
+            "X-Routstr-Provider": "spoofed",
+            "x-routstr-cost-msats": "0",
+        }
+    )
+
+    assert _decoded_response_headers(headers) == {
+        "content-type": "application/json",
+        "x-request-id": "u1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_openrouter_image_response_names_the_serving_provider() -> None:
+    engine = await _engine()
+    payload = {"provider": "GMICloud", "data": [{"b64_json": "a"}]}
+    response, _, _ = await _forward_response(
+        engine,
+        "v1/images/generations",
+        _upstream(json.dumps(payload).encode(), "application/json"),
+        provider=OpenRouterUpstreamProvider(api_key="k"),
+    )
+
+    assert response.headers["x-routstr-provider"] == "openrouter:GMICloud"
+    assert response.headers["x-routstr-provider-url"] == "https://openrouter.ai/api/v1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "base_url", ["http://10.0.0.5/v1", "https://upstream:8443/v1"], ids=["ip", "port"]
+)
+async def test_image_response_masks_a_private_provider_url(base_url: str) -> None:
+    engine = await _engine()
+    response, _, _ = await _forward_response(
+        engine,
+        "v1/image/upscale",
+        _upstream(b"\x89PNG\r\n", "image/png"),
+        provider=BaseUpstreamProvider(base_url=base_url, api_key="k", provider_fee=1.0),
+    )
+
+    assert response.headers["x-routstr-provider-url"] == "http://localhost"
+
+
+@pytest.mark.asyncio
+async def test_json_image_response_without_content_type_names_provider() -> None:
+    engine = await _engine()
+    payload = {"provider": "Fireworks", "data": [{"b64_json": "a"}]}
+    upstream = httpx.Response(
+        200,
+        content=json.dumps(payload).encode(),
+        request=httpx.Request("POST", "http://upstream"),
+    )
+    response, out, _ = await _forward_response(
+        engine, "v1/images/generations", upstream
+    )
+
+    assert json.loads(out) == payload
+    assert response.headers["x-routstr-provider"] == "base:Fireworks"
+    assert response.headers["x-routstr-image-count"] == "1"
 
 
 @pytest.mark.asyncio

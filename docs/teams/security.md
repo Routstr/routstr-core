@@ -142,7 +142,8 @@ Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS
 Access-Control-Allow-Headers: Authorization, Content-Type, X-Cashu, X-Routstr-Model
 Access-Control-Expose-Headers: X-Cashu, X-Routstr-Request-Id, X-Routstr-Cost-Msats,
                                X-Routstr-Cost-Usd, X-Routstr-Input-Cost-Msats,
-                               X-Routstr-Output-Cost-Msats
+                               X-Routstr-Output-Cost-Msats, X-Routstr-Provider,
+                               X-Routstr-Provider-Url, X-Routstr-Image-Count
 ```
 
 A wildcard origin is safe **here specifically** because the app uses no cookies and no sessions. There is no ambient browser identity for a cross-origin page to borrow — a malicious page cannot make an authenticated request on a visitor's behalf, because every non-public request still needs its own API key or signature.
