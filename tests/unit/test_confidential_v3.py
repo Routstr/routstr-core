@@ -225,6 +225,33 @@ def test_offer_endpoint_takes_the_version_query(
         assert resp.status_code == 200 and resp.json() == {"v": 3}
 
 
+def test_nostr_listing_carries_the_confidential_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§11: clients filter on the listing's ``confidential`` tag before they
+    fetch offers. A node without a sidecar announces none."""
+    from routstr.nostr import listing
+
+    key = "11" * 32
+    monkeypatch.setattr(settings, "confidential_sidecar_url", "")
+    assert listing._confidential_version() is None
+    plain = listing.create_listing_event(key, "id", ["https://node.example"])
+    assert not [t for t in plain["tags"] if t[0] == "confidential"]
+    monkeypatch.setattr(settings, "confidential_sidecar_url", "http://127.0.0.1:7444")
+    assert listing._confidential_version() == 3
+    event = listing.create_listing_event(
+        key, "id", ["https://node.example"], confidential=3
+    )
+    assert ["confidential", "3"] in event["tags"]
+    # A node that turns the mode on (or moves to another version) re-announces.
+    assert not listing.events_semantically_equal(plain, event)
+    older = listing.create_listing_event(
+        key, "id", ["https://node.example"], confidential=2
+    )
+    assert not listing.events_semantically_equal(older, event)
+    assert listing.events_semantically_equal(event, dict(event))
+
+
 # ---------------------------------------------------------------------------
 # the offer a connection was opened on
 # ---------------------------------------------------------------------------
