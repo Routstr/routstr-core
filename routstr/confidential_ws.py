@@ -870,20 +870,19 @@ async def _sidecar_to_client(
     the client's socket open when the sidecar's ends (an ``http: 2`` session
     still has its last frames to send)."""
     try:
-        while True:
-            try:
-                frame = await upstream.recv()
-            except websockets.ConnectionClosed:
-                # The sidecar's socket ended (not the client's).
-                state.h2_sidecar_gone = True
-                break
+        async for frame in upstream:
             if isinstance(frame, bytes):
                 await websocket.send_bytes(frame)
                 continue
             outgoing = await _on_sidecar_text(frame, websocket, state)
             if outgoing is not None:
                 await websocket.send_text(outgoing)
-    except (websockets.ConnectionClosed, WebSocketDisconnect, RuntimeError):
+        # The sidecar's socket ended (not the client's).
+        state.h2_sidecar_gone = True
+    except websockets.ConnectionClosed:
+        # Only the sidecar's socket raises this: it ended without a close.
+        state.h2_sidecar_gone = True
+    except (WebSocketDisconnect, RuntimeError):
         # The client's socket ended: nothing more can be sent to it.
         pass
     finally:
