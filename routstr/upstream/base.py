@@ -1185,7 +1185,12 @@ class BaseUpstreamProvider:
     ) -> Response:
         """Log upstream errors and forward the response in a JSON envelope."""
         status_code = upstream_response.status_code
-        headers = dict(upstream_response.headers)
+        # X-Routstr-* headers are Routstr's own, as in _decoded_response_headers.
+        headers = {
+            name: value
+            for name, value in upstream_response.headers.items()
+            if not name.lower().startswith("x-routstr-")
+        }
         content_type = headers.get("content-type") or headers.get("Content-Type", "")
         upstream_request_id = (
             headers.get("request-id")
