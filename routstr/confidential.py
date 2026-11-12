@@ -1232,6 +1232,17 @@ class BillingError(Exception):
         self.detail = detail if detail is not None else message
 
 
+def _billing_error(exc: HTTPException) -> BillingError:
+    """The node's usual HTTP error as a refusal: its body is the ``detail``,
+    its message (when the body has one) the reason a client shows."""
+    detail = exc.detail
+    inner = detail.get("error") if isinstance(detail, dict) else None
+    message = inner.get("message") if isinstance(inner, dict) else None
+    if not isinstance(message, str) or not message:
+        message = str(detail)
+    return BillingError(message, exc.status_code, detail)
+
+
 def prompt_token_limit(model_obj: Any) -> int | None:
     """The largest prompt the node must reserve for: the model's context length.
 
@@ -1455,7 +1466,7 @@ async def check_credential(auth: str, offer_sig: str) -> str:
         try:
             key = await validate_bearer_key(auth, session, min_cost=floor)
         except HTTPException as exc:
-            raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
+            raise _billing_error(exc) from exc
         return str(key.hashed_key)
 
 
@@ -1490,9 +1501,7 @@ async def reserve_deposit(auth: str, offer_sig: str) -> Billing | None:
             snapshot = await pay_for_request(key, deposit, session)
         except HTTPException as exc:
             if exc.status_code != 402:
-                raise BillingError(
-                    str(exc.detail), exc.status_code, exc.detail
-                ) from exc
+                raise _billing_error(exc) from exc
             message = (
                 f"the balance does not cover the connection deposit of {deposit} "
                 "msat (released by the connection's first settled request)"
@@ -1580,7 +1589,7 @@ async def reserve(
         try:
             key = await validate_bearer_key(auth, session)
         except HTTPException as exc:
-            raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
+            raise _billing_error(exc) from exc
         limit = prompt_token_limit(cand.model)
         if limit is None:
             if _has_bad_context_length(cand.model):
@@ -1615,7 +1624,7 @@ async def reserve(
         try:
             snapshot = await pay_for_request(key, max_cost, session)
         except HTTPException as exc:
-            raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
+            raise _billing_error(exc) from exc
         return Billing(
             key.hashed_key,
             model_id,
@@ -1733,12 +1742,12 @@ async def reserve_image(
         try:
             key = await validate_bearer_key(auth, session)
         except HTTPException as exc:
-            raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
+            raise _billing_error(exc) from exc
         max_cost = per_image * count + max(fee, abandon)
         try:
             snapshot = await pay_for_request(key, max_cost, session)
         except HTTPException as exc:
-            raise BillingError(str(exc.detail), exc.status_code, exc.detail) from exc
+            raise _billing_error(exc) from exc
         return Billing(
             key.hashed_key,
             model_id,

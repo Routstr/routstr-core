@@ -1,380 +1,76 @@
-"""``http: 2`` confidential sessions (protocol v3, option A), node side.
+"""Protocol v3 connections, node side (PROTOCOL-V3.md §3, §8, §12).
 
-One two-party handshake and one provider connection serve many sequential
-requests. The setup checks the offer signature and the credential and reserves
-the connection deposit (released with the first settled request, charged when
-the connection carried none); every ``request`` is validated, reserved and
-settled the way a v2 session is.
+A connection is one two-party handshake; it carries requests: many, one
+after another, on framing ``"2"``, exactly one on framing ``"1.1"``. The
+setup reserves the connection deposit; each ``request`` is validated,
+reserved and settled on its own. These tests hold the node to the money rules
+of §12.10: when the deposit is released or charged, that the session fee is
+due once per connection, and what a refused request leaves behind.
+
+``test_confidential.py`` has the harness (a scripted sidecar and a ledger
+that stands in for the node's billing) and the rules of a single request.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
-import uuid
+import time
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import routstr.confidential as conf
 import routstr.confidential_ws as cws
 from routstr.core.settings import settings
-from routstr.nostr.sdk import generate_keypair, parse_keypair
 
-from .test_confidential import (
+# ruff: noqa: F811  (the imported fixtures are requested by name)
+from .test_confidential import (  # noqa: F401
+    _HEAD,
+    FEES,
+    H2,
+    IMAGE_PRICE,
+    IMAGE_SUFFIX,
     RATES,
     SID,
-    MockSidecar,
-    _app,
+    SIDE_OFFER,
+    SIG,
+    _attest,
+    _closed,
+    _Conn,
+    _current_sig,
+    _error_usage,
+    _flat_usage,
+    _fresh_module_state,
     _IdleClient,
+    _image_request,
+    _Ledger,
     _QueueSidecar,
+    _ready,
+    _refused_setup,
+    _released,
+    _request,
+    _request_ok,
+    _settled,
+    _setup,
     _Up,
-    _use_sidecar,
+    _usage,
     _verify_schnorr,
+    billing_db,
+    fee_settings,
+    node_identity,
 )
 
-
-@pytest.fixture(autouse=True)
-def _fresh_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Module-level caches must not leak between tests."""
-    monkeypatch.setattr(
-        conf, "_SIDECAR_CACHE", {"at": 0.0, "offer": None, "failed_at": None}
-    )
-    monkeypatch.setattr(conf, "_SIGNED_OFFERS", conf.OrderedDict())
-    monkeypatch.setattr(conf, "_LAST_OFFER", {"payload": None, "offer": None})
-    monkeypatch.setattr(conf, "_FIXED_PRICING_LOGGED", {"done": False})
-    monkeypatch.setattr(cws, "_active_sessions", 0)
-    monkeypatch.setattr(cws, "_active_zk", 0)
-    monkeypatch.setattr(cws, "_live_sids", {})
-    monkeypatch.setattr(cws, "_pending", {})
-    monkeypatch.setattr(cws, "_pending_by_addr", {})
-    monkeypatch.setattr(cws, "_unused_by_ip", {})
+DEP = 700
+_FEE = {"session_fee_msat": FEES[0], "abandon_fee_msat": FEES[1]}
 
 
-@pytest.fixture()
-def node_identity(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
-    """Install a throwaway node Nostr identity; returns (secret_hex, pub_hex)."""
-    nsec, npub = generate_keypair()
-    secret_hex, pub_hex = parse_keypair(nsec)
-    monkeypatch.setattr(settings, "nsec", nsec)
-    monkeypatch.setattr(settings, "npub", npub)
-    return secret_hex, pub_hex
-
-
-H2 = {"probe_path": "/api/v1/models", "idle_secs": 300, "max_requests": 100}
-SIG = "ab" * 64
-
-_SETUP = {
-    "type": "setup",
-    "v": 3,
-    "http": "2",
-    "nonce_c": "aa" * 32,
-    "auth": "sk-client-key",
-    "offer_sig": SIG,
-}
-_READY = {
-    "type": "ready",
-    "sid": SID,
-    "pubkey": "cc" * 32,
-    "head_len": 170,
-    "http": "2",
-    "h2": H2,
-    "v": 3,
-}
-
-
-def _request(n: int, **over: Any) -> dict[str, Any]:
-    return {
-        "type": "request",
-        "n": n,
-        "kind": "chat",
-        "model": "test-model",
-        "max_tokens": 12,
-        "body_len": 150,
-        "auth": "sk-client-key",
-        "offer_sig": SIG,
-        **over,
-    }
-
-
-def _image_request(n: int, **over: Any) -> dict[str, Any]:
-    return {
-        "type": "request",
-        "n": n,
-        "kind": "images",
-        "model": "z-image-turbo",
-        "variant": "webp",
-        "count": 1,
-        "body_len": 150,
-        "auth": "sk-client-key",
-        "offer_sig": SIG,
-        **over,
-    }
-
-
-def _usage(n: int, **over: Any) -> dict[str, Any]:
-    return {
-        "type": "usage",
-        "sid": SID,
-        "http": "2",
-        "n": n,
-        "model": "test-model",
-        "usage": {
-            "model": "test-model",
-            "usage": {"prompt_tokens": 5, "completion_tokens": 7},
-        },
-        **over,
-    }
-
-
-def _attest(n: int) -> dict[str, Any]:
-    return {
-        "type": "attestation",
-        "n": n,
-        "a": {"sid": SID, "http": "2", "n": n, "stream": 2 * n + 1},
-        "sig": "dd" * 64,
-    }
-
-
-def _settled(n: int) -> list[dict[str, Any]]:
-    """What the sidecar sends for a request that settles on its usage."""
-    return [
-        {"type": "request_ok", "sid": SID, "n": n, "stream": 2 * n + 1, "suffix": "}"},
-        {"type": "body_released", "n": n},
-        _attest(n),
-        _usage(n),
-    ]
-
-
-class _Snapshot:
-    def __init__(self, n: int) -> None:
-        self.release_id = f"rel-{n}"
-
-
-IMAGE_SUFFIX = ',"model":"z-image-turbo","variants":1,"format":"webp"}'
-
-
-class _Billing:
-    kind = "chat"
-    variant: str | None = None
-    count = 1
-    msat_per_image = 0
-    suffix = ""
-
-    def __init__(self, n: int, auth: str) -> None:
-        self.key_hash = f"k-{auth}"
-        self.model_id = "test-model"
-        self.reserved_msats = 9000
-        self.snapshot = _Snapshot(n)
-        self.rates = dict(RATES)
-
-
-class _Ledger:
-    """Records the money calls of a session, in order."""
-
-    def __init__(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        credential_error: Any = None,
-        reserve_error_at: int | None = None,
-        reserve_error: Any = None,
-        offer: dict[str, Any] | None = None,
-        deposit: int = 0,
-        deposit_error: Any = None,
-        images: bool = False,
-    ) -> None:
-        self.calls: list[str] = []
-        self.deposits: list[tuple[str, str]] = []
-
-        async def reserve_deposit(auth: str, offer_sig: str) -> Any:
-            self.deposits.append((auth, offer_sig))
-            if deposit_error is not None:
-                self.calls.append("deposit")
-                raise deposit_error
-            if deposit == 0:
-                return None
-            self.calls.append("deposit")
-            billing = _Billing(0, auth)
-            billing.snapshot.release_id = "dep"
-            billing.reserved_msats = deposit
-            return billing
-
-        monkeypatch.setattr(cws, "reserve_deposit", reserve_deposit)
-        self.checked: list[tuple[str, str]] = []
-        self.reserved: list[dict[str, Any]] = []
-
-        async def check_credential(auth: str, offer_sig: str) -> str:
-            self.calls.append("check")
-            self.checked.append((auth, offer_sig))
-            if credential_error is not None:
-                raise credential_error
-            return "k"
-
-        async def reserve(
-            auth: str,
-            model: str,
-            max_tokens: int,
-            offer_sig: str | None = None,
-            accepted_fee_msat: int | None = None,
-            accepted_abandon_fee_msat: int | None = None,
-        ) -> Any:
-            self.calls.append("reserve")
-            self.reserved.append(
-                {
-                    "auth": auth,
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "offer_sig": offer_sig,
-                    "fee": accepted_fee_msat,
-                    "abandon": accepted_abandon_fee_msat,
-                }
-            )
-            if reserve_error_at == len(self.reserved):
-                raise reserve_error
-            return _Billing(len(self.reserved), auth)
-
-        async def reserve_image(
-            auth: str,
-            model: str,
-            variant: str,
-            count: int,
-            offer_sig: str | None = None,
-            accepted_fee_msat: int | None = None,
-            accepted_abandon_fee_msat: int | None = None,
-        ) -> Any:
-            self.calls.append("reserve_image")
-            self.reserved.append(
-                {
-                    "auth": auth,
-                    "model": model,
-                    "variant": variant,
-                    "count": count,
-                    "offer_sig": offer_sig,
-                    "fee": accepted_fee_msat,
-                    "abandon": accepted_abandon_fee_msat,
-                }
-            )
-            if reserve_error_at == len(self.reserved):
-                raise reserve_error
-            billing = _Billing(len(self.reserved), auth)
-            billing.kind = "images"
-            billing.model_id = model
-            billing.variant = variant
-            billing.count = count
-            billing.msat_per_image = 10350
-            billing.suffix = IMAGE_SUFFIX
-            billing.reserved_msats = 10350 * count
-            return billing
-
-        async def settle(billing: Any, usage: dict[str, Any]) -> dict[str, Any]:
-            self.calls.append(f"settle:{billing.snapshot.release_id}")
-            return {"cost_msats": 12, "balance_msats": 88000}
-
-        async def settle_flat(billing: Any) -> dict[str, Any]:
-            self.calls.append(f"flat:{billing.snapshot.release_id}")
-            return {
-                "cost_msats": billing.msat_per_image * billing.count,
-                "balance_msats": 77000,
-            }
-
-        async def release(billing: Any) -> int:
-            self.calls.append(f"release:{billing.snapshot.release_id}")
-            return 97000
-
-        async def charge(billing: Any) -> int:
-            self.calls.append(f"charge:{billing.snapshot.release_id}")
-            return 91000
-
-        async def sidecar_offer() -> dict[str, Any]:
-            if offer is not None:
-                return offer
-            return {
-                "v": 3,
-                "upstream_host": "api.venice.ai",
-                "max_tokens_cap": 4096,
-                "http": ["1.1", "2"],
-                "h2": {**H2, "kinds": ["chat", "images"]} if images else H2,
-            }
-
-        monkeypatch.setattr(cws, "check_credential", check_credential)
-        monkeypatch.setattr(cws, "reserve", reserve)
-        monkeypatch.setattr(cws, "settle", settle)
-        monkeypatch.setattr(cws, "reserve_image", reserve_image)
-        monkeypatch.setattr(cws, "settle_flat", settle_flat)
-        monkeypatch.setattr(
-            cws, "images_endpoint", lambda side: {"x": 1} if images else None
-        )
-        monkeypatch.setattr(cws, "release", release)
-        monkeypatch.setattr(cws, "charge_reservation", charge)
-        monkeypatch.setattr(cws, "cached_sidecar_offer", sidecar_offer)
-
-
-def _h2_sidecar(holder: dict[str, Any], per_request: Any) -> Any:
-    """A scripted sidecar: ``ready`` and ``head_written`` on the setup, then
-    ``per_request(n)`` frames for each ``request``. Everything it receives is
-    recorded in ``holder``."""
-
-    async def handler(ws: Any) -> None:
-        holder.setdefault("requests", [])
-        holder.setdefault("other", [])
-        async for frame in ws:
-            if isinstance(frame, bytes):
-                holder["other"].append(frame)
-                continue
-            msg = json.loads(frame)
-            if msg.get("type") == "setup":
-                holder["setup"] = msg
-                await ws.send(json.dumps(_READY))
-                await ws.send(json.dumps({"type": "head_written"}))
-            elif msg.get("type") == "request":
-                holder["requests"].append(msg)
-                for out in per_request(msg["n"]):
-                    await ws.send(json.dumps(out))
-            else:
-                holder["other"].append(msg)
-        holder["closed"] = True
-
-    return handler
-
-
-class _Conn:
-    """A client connection to the node, with the scripted sidecar behind it."""
-
-    def __init__(
-        self, monkeypatch: pytest.MonkeyPatch, per_request: Any, handler: Any = None
-    ) -> None:
-        self.holder: dict[str, Any] = {}
-        self._mock = MockSidecar(handler or _h2_sidecar(self.holder, per_request))
-        self._monkeypatch = monkeypatch
-
-    def __enter__(self) -> "_Conn":
-        self._mock.__enter__()
-        _use_sidecar(self._monkeypatch, self._mock.port)
-        self._cm = TestClient(_app()).websocket_connect(
-            f"/v1/confidential/ws?session_id={uuid.uuid4()}&v=2"
-        )
-        self.ws = self._cm.__enter__()
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        try:
-            self._cm.__exit__(None, None, None)
-        finally:
-            self._mock.__exit__(None, None, None)
-
-    def send(self, msg: dict[str, Any]) -> None:
-        self.ws.send_text(json.dumps(msg))
-
-    def recv(self, count: int = 1) -> list[dict[str, Any]]:
-        return [json.loads(self.ws.receive_text()) for _ in range(count)]
-
-    def open(self) -> dict[str, Any]:
-        self.send(_SETUP)
-        ready, head = self.recv(2)
-        assert ready["type"] == "ready" and head["type"] == "head_written"
-        return ready
+def _deposit(frame: dict[str, Any]) -> tuple[Any, Any, Any]:
+    """(outcome, reason, msat) of the deposit a last frame reports."""
+    dep = frame.get("deposit") or {}
+    return dep.get("outcome"), dep.get("reason"), dep.get("msat")
 
 
 # ---------------------------------------------------------------------------
@@ -402,204 +98,334 @@ async def _offer(monkeypatch: pytest.MonkeyPatch, extra: dict[str, Any]) -> Any:
     return await conf.build_offer()
 
 
-async def test_offer_carries_the_sidecars_http_and_h2(
+async def test_offer_is_a_v3_offer(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
     _secret, pub_hex = node_identity
-    offer = await _offer(monkeypatch, {"http": ["1.1", "2"], "h2": H2})
-    # The sidecar's block, plus the node's two terms (defaults: no abandon
-    # fee, so no deposit; 120 s idle).
-    block = {**H2, "connection_deposit_msat": 0, "idle_timeout_s": 120}
-    assert offer["http"] == ["1.1", "2"] and offer["h2"] == block
+    offer = await _offer(monkeypatch, {"http": ["2", "1.1"], "h2": H2})
     signed = json.loads(offer["sig_payload"])
-    assert signed["http"] == ["1.1", "2"] and signed["h2"] == block
+    for o in (offer, signed):
+        # Exactly this version (no list), the sidecar's framings in its
+        # order, its h2 block and key-schedule protocol.
+        assert o["v"] == 3 and o["twopc"] == "split-public-1"
+        assert o["http"] == ["2", "1.1"] and o["h2"] == H2
+        # Connection terms are top-level: they hold for both framings.
+        assert o["connection_deposit_msat"] == 1000 and o["idle_timeout_s"] == 120
+        assert "connection_deposit_msat" not in o["h2"]
     assert _verify_schnorr(offer["sig_payload"], offer["sig"], pub_hex)
-    assert conf.signed_offer_terms(offer["sig"]).h2 == block  # type: ignore[union-attr]
+    terms = conf.signed_offer_terms(offer["sig"])
+    assert terms is not None and terms.http == ("2", "1.1") and terms.h2 == H2
+    assert terms.connection_deposit_msat == 1000 and terms.idle_timeout_s == 120
 
 
-async def test_offer_names_the_deposit_and_the_idle_timeout(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+@pytest.mark.parametrize("extra", [{}, {"http": ["1.1"]}, {"http": ["1.1"], "h2": H2}])
+async def test_offer_without_framing_2_has_no_h2_block(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], extra: dict
 ) -> None:
-    # Unset (-1): the abandon fee, which is never below the session fee.
-    monkeypatch.setattr(settings, "confidential_abandon_fee_msat", 7000)
-    offer = await _offer(monkeypatch, {"http": ["1.1", "2"], "h2": H2})
-    assert offer["h2"]["connection_deposit_msat"] == 7000
-    # Set: that value, at least the node's minimum reservation; 0 is off.
-    monkeypatch.setattr(settings, "confidential_connection_deposit_msat", 2500)
-    offer = await _offer(monkeypatch, {"http": ["1.1", "2"], "h2": H2})
-    assert offer["h2"]["connection_deposit_msat"] == 2500
-    monkeypatch.setattr(settings, "min_request_msat", 4000)
-    assert conf.connection_deposit_msat() == 4000
-    monkeypatch.setattr(settings, "confidential_connection_deposit_msat", 0)
-    assert conf.connection_deposit_msat() == 0
-    # The idle timeout is the setting, never above the sidecar's own limit.
-    monkeypatch.setattr(settings, "confidential_idle_timeout_s", 90)
-    assert conf.h2_idle_timeout_s(H2) == 90
-    monkeypatch.setattr(settings, "confidential_idle_timeout_s", 900)
-    assert conf.h2_idle_timeout_s(H2) == 300
-    assert conf.h2_idle_timeout_s({**H2, "idle_secs": 45}) == 45
+    """A sidecar that serves (or currently serves) only HTTP/1.1: the offer
+    lists that framing, still with a deposit and an idle timeout."""
+    offer = await _offer(monkeypatch, extra)
+    assert offer["http"] == ["1.1"] and "h2" not in offer
+    assert offer["v"] == 3 and offer["connection_deposit_msat"] == 1000
+    assert "h2" not in json.loads(offer["sig_payload"])
 
 
 @pytest.mark.parametrize(
     "extra",
     [
-        {},
-        {"http": ["1.1"]},
-        {"http": ["1.1", "2"]},
-        {"h2": H2},
-        {"http": "2", "h2": H2},
+        {"http": []},
+        {"http": "2"},
+        {"http": ["2"]},  # "2" needs the h2 block
+        {"http": ["2", "2"], "h2": H2},
+        {"http": ["1.1", "3"]},
+        {"http": [2], "h2": H2},
     ],
 )
-async def test_offer_without_http2_is_the_v2_offer(
+async def test_offer_refuses_a_malformed_framing_list(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], extra: dict
 ) -> None:
-    """Without both fields the offer names neither, so a node whose sidecar
-    serves only HTTP/1.1 signs exactly what it signed before."""
-    offer = await _offer(monkeypatch, extra)
-    assert "http" not in offer and "h2" not in offer
-    assert "http" not in json.loads(offer["sig_payload"])
+    with pytest.raises(conf.OfferRefused):
+        await _offer(monkeypatch, extra)
 
 
-# ---------------------------------------------------------------------------
-# shape checks
-# ---------------------------------------------------------------------------
+def test_connection_deposit_default_and_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset: the largest of the abandon fee, the session fee and 1000 msat.
+    Set: that value (0 = no deposit), at least the node's minimum request."""
+    monkeypatch.setattr(settings, "min_request_msat", 1)
+    assert conf.connection_deposit_msat() == 1000
+    monkeypatch.setattr(settings, "confidential_session_fee_msat", 3000)
+    assert conf.connection_deposit_msat() == 3000
+    monkeypatch.setattr(settings, "confidential_abandon_fee_msat", 5000)
+    assert conf.connection_deposit_msat() == 5000
+    # An abandon fee below the session fee counts as the session fee.
+    monkeypatch.setattr(settings, "confidential_abandon_fee_msat", 100)
+    assert conf.connection_deposit_msat() == 3000
+    monkeypatch.setattr(settings, "confidential_session_fee_msat", 200)
+    assert conf.connection_deposit_msat() == 1000
+    monkeypatch.setattr(settings, "confidential_connection_deposit_msat", 2500)
+    assert conf.connection_deposit_msat() == 2500
+    monkeypatch.setattr(settings, "min_request_msat", 4000)
+    assert conf.connection_deposit_msat() == 4000
+    monkeypatch.setattr(settings, "confidential_connection_deposit_msat", 0)
+    assert conf.connection_deposit_msat() == 0
 
 
-def test_setup_http_selects_the_mode() -> None:
-    assert cws.setup_http({}) == 1
-    assert cws.setup_http({"http": "1.1"}) == 1 and cws.setup_http({"http": 1.1}) == 1
-    assert cws.setup_http({"http": "2"}) == 2 and cws.setup_http({"http": "2"}) == 2
-    for bad in (3, "h2", True, 1, [2], {"v": 2}):
-        with pytest.raises(cws.SetupError):
-            cws.setup_http({"http": bad})
+def test_idle_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    side = {"http": ["2", "1.1"], "h2": H2}
+    monkeypatch.setattr(settings, "confidential_idle_timeout_s", 90)
+    assert conf.idle_timeout_s(side) == 90
+    # Never above the sidecar's own idle limit while it serves framing "2"…
+    monkeypatch.setattr(settings, "confidential_idle_timeout_s", 900)
+    assert conf.idle_timeout_s(side) == 300
+    assert conf.idle_timeout_s({**side, "h2": {**H2, "idle_secs": 45}}) == 45
+    # …and unbounded by it otherwise; never below 10 s.
+    assert conf.idle_timeout_s({"http": ["1.1"], "h2": H2}) == 900
+    monkeypatch.setattr(settings, "confidential_idle_timeout_s", 3)
+    assert conf.idle_timeout_s(side) == 10
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"model": "m"},
-        {"max_tokens": 5},
-        {"kind": "chat"},
-        {"len": 10},
-        {"suffix": "}"},
-        {"count": 1},
-        {"variant": "v"},
-        {"session_fee_msat": 0},
-        {"nonce_c": "zz"},
-        {"offer_sig": "not hex"},
-        {"offer_sig": None},
-        {"auth": 5},
-        {"armed": "yes"},
-    ],
-)
-def test_h2_setup_shape(change: dict[str, Any]) -> None:
-    cws.validate_h2_setup(dict(_SETUP))
-    cws.validate_h2_setup({**_SETUP, "armed": True})
-    with pytest.raises(cws.SetupError):
-        cws.validate_h2_setup({**_SETUP, **change})
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"n": 2},
-        {"n": True},
-        {"n": "1"},
-        {"kind": "images"},
-        {"kind": "video"},
-        {"variant": "webp"},
-        {"count": 1},
-        {"model": ""},
-        {"max_tokens": 0},
-        {"max_tokens": 4097},
-        {"max_tokens": True},
-        {"body_len": 0},
-        {"body_len": cws.MAX_BODY_LEN + 1},
-        {"suffix": 5},
-        {"offer_sig": "xyz"},
-        {"auth": None},
-        {"session_fee_msat": -1},
-        {"abandon_fee_msat": "1"},
-        {"type": "setup"},
-    ],
-)
-def test_h2_request_shape(change: dict[str, Any]) -> None:
-    cws.validate_h2_request(_request(1), 4096, 1)
-    cws.validate_h2_request(_request(3, suffix="}", session_fee_msat=5), 4096, 3)
-    with pytest.raises(cws.SetupError):
-        cws.validate_h2_request({**_request(1), **change}, 4096, 1)
-
-
-# ---------------------------------------------------------------------------
-# sessions
-# ---------------------------------------------------------------------------
-
-
-def test_setup_reserves_nothing_and_each_request_settles(
+async def test_offer_lists_images_on_framing_2_only_with_an_images_block(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
+    side_h2 = {**H2, "kinds": ["chat", "images"]}
+    # The sidecar serves images on framing "2", the node prices none: chat
+    # only, and the block is the one a chat-only sidecar gives.
+    offer = await _offer(monkeypatch, {"http": ["2", "1.1"], "h2": side_h2})
+    assert "kinds" not in offer["h2"] and "images" not in offer
+    # With priced image variants the signed block lists both kinds.
+    block = {"head_template": "POST /api/v1/image/generate HTTP/1.1\r\n\r\n"}
+    monkeypatch.setattr(conf, "images_offer_block", lambda side, pct: block)
+    offer = await _offer(monkeypatch, {"http": ["2", "1.1"], "h2": side_h2})
+    assert offer["h2"]["kinds"] == ["chat", "images"] and offer["images"] == block
+    assert json.loads(offer["sig_payload"])["h2"]["kinds"] == ["chat", "images"]
+    # A sidecar that keeps images on framing "1.1": the node does not add them.
+    offer = await _offer(monkeypatch, {"http": ["2", "1.1"], "h2": H2})
+    assert "kinds" not in offer["h2"] and offer["images"] == block
+    assert conf.h2_kinds({"kinds": ["images"]}, True) == ["chat"]
+    assert conf.h2_kinds({"kinds": "chat,images"}, True) == ["chat"]
+
+
+def test_offer_endpoint_takes_the_version_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clients ask for ``/v1/confidential/offer?v=3`` (§11); the node ignores
+    the query."""
+
+    async def build() -> dict[str, Any]:
+        return {"v": 3}
+
+    monkeypatch.setattr(conf, "build_offer", build)
+    app = FastAPI()
+    app.include_router(conf.confidential_router)
+    client = TestClient(app)
+    for query in ("", "?v=3", "?v=2", "?v=x&other=1"):
+        resp = client.get(f"/v1/confidential/offer{query}")
+        assert resp.status_code == 200 and resp.json() == {"v": 3}
+
+
+# ---------------------------------------------------------------------------
+# the offer a connection was opened on
+# ---------------------------------------------------------------------------
+
+
+def test_connection_fields_leave_out_what_belongs_to_a_request() -> None:
+    offer = {
+        "v": 3,
+        "twopc": "split-public-1",
+        "upstream_host": "h",
+        "head_template": "t",
+        "chat": {"cap_keys": ["max_tokens"]},
+        "h2": H2,
+        "connection_deposit_msat": 5,
+        "idle_timeout_s": 120,
+        "images": {"head_template": "i", "price_list": {"m": [1]}},
+        "http": ["2", "1.1"],
+        "price_list": {"m": RATES},
+        "session_fee_msat": 7,
+    }
+    base = conf.connection_fields(offer)
+    # Prices, fees and the framing list are per request.
+    for change in (
+        {"price_list": {}},
+        {"session_fee_msat": 9},
+        {"abandon_fee_msat": 9},
+        {"http": ["1.1"]},
+        {"images": {"head_template": "i", "price_list": {}}},
+    ):
+        assert conf.connection_fields({**offer, **change}) == base
+    for change in (
+        {"v": 4},
+        {"twopc": "x"},
+        {"upstream_host": "g"},
+        {"head_template": "u"},
+        {"chat": {}},
+        {"h2": {**H2, "max_requests": 5}},
+        {"connection_deposit_msat": 6},
+        {"idle_timeout_s": 60},
+        {"images": {"head_template": "j", "price_list": {"m": [1]}}},
+    ):
+        assert conf.connection_fields({**offer, **change}) != base
+
+
+def _terms(connection: str, http: tuple[str, ...] = ("2", "1.1")) -> conf.OfferTerms:
+    return conf.OfferTerms({}, http=http, connection=connection)
+
+
+def test_check_request_offer() -> None:
+    opened = _terms("A")
+    conf._remember_offer("aa", opened)
+    conf._remember_offer("bb", _terms("A"))  # a newer offer, same connection terms
+    conf._remember_offer("cc", _terms("B"))
+    conf._remember_offer("dd", _terms("A", ("1.1",)))  # "2" was withdrawn
+    conf.check_request_offer("aa", opened, "2")
+    conf.check_request_offer("bb", opened, "2")
+    conf.check_request_offer("dd", opened, "1.1")
+    for sig, framing, kind in (
+        ("cc", "2", "offer_changed"),
+        ("dd", "2", "offer_changed"),
+        ("ee", "2", "offer_expired"),
+    ):
+        with pytest.raises(conf.BillingError) as err:
+            conf.check_request_offer(sig, opened, framing)
+        assert err.value.status == 409
+        assert err.value.detail["error"]["type"] == kind
+
+
+def test_an_offer_stays_remembered_while_a_connection_is_open_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = {"t": 1000.0}
+    monkeypatch.setattr(conf.time, "monotonic", lambda: now["t"])
+    terms = _terms("A")
+    conf._remember_offer("aa", terms)
+    assert conf.pin_offer("zz") is None  # an offer this node does not know
+    assert conf.pin_offer("aa") is terms and conf.pin_offer("aa") is terms
+    now["t"] += conf.SIGNED_OFFER_TTL_S * 3
+    assert conf.signed_offer_terms("aa") is terms
+    conf.unpin_offer("aa")
+    assert conf.signed_offer_terms("aa") is terms  # the second connection
+    conf.unpin_offer("aa")
+    # Then it stays for the usual time, counted from the connection's end.
+    now["t"] += conf.SIGNED_OFFER_TTL_S - 1
+    assert conf.signed_offer_terms("aa") is terms
+    now["t"] += 2
+    assert conf.signed_offer_terms("aa") is None
+    conf.unpin_offer("aa")  # idempotent
+
+
+def _real_offers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three offers this node signed: ``SIG`` (the connection's), ``new``
+    (other prices, same connection terms), ``moved`` (another deposit)."""
+    conf._remember_offer(SIG, _terms("A"))
+    conf._remember_offer("ce" * 64, _terms("A"))
+    conf._remember_offer("cf" * 64, _terms("B"))
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_a_request_naming_a_changed_offer_is_refused_and_the_connection_stays(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    _real_offers(monkeypatch)
+    with _Conn(monkeypatch, http=http) as conn:
+        conn.open()
+        conn.send(_request(offer_sig="cf" * 64))
+        refused = conn.recv1()
+        assert refused["type"] == "request_refused" and refused["status"] == 409
+        assert refused["n"] == 1
+        assert refused["detail"]["error"]["type"] == "offer_changed"
+        conn.send(_request(offer_sig="0d" * 64))  # one the node never signed
+        expired = conn.recv1()
+        assert expired["type"] == "request_refused"
+        assert expired["detail"]["error"]["type"] == "offer_expired"
+        # A newer offer with the same connection terms, or the old one: fine.
+        conn.send(_request(offer_sig="ce" * 64))
+        assert conn.recv1()["type"] == "request_ok"
+    assert [r["offer_sig"] for r in ledger.reserved] == ["ce" * 64]
+    assert conn.holder["requests"][0]["n"] == 1
+    # The connection's offer is no longer pinned once it ended.
+    assert conf._PINNED_OFFERS == {}
+
+
+def test_the_connection_takes_its_idle_timeout_from_its_offer(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    _Ledger(monkeypatch)
+    conf._remember_offer(SIG, conf.OfferTerms({}, idle_timeout_s=33))
+    seen: dict[str, Any] = {}
+    real = cws._run_h2_session
+
+    async def spy(ws: Any, upstream: Any, state: Any, started: float) -> None:
+        seen["idle"] = state.h2_idle_timeout
+        seen["pinned"] = SIG in conf._PINNED_OFFERS
+        await real(ws, upstream, state, started)
+
+    monkeypatch.setattr(cws, "_run_h2_session", spy)
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+    assert seen == {"idle": 33.0, "pinned": True}
+    assert conf._PINNED_OFFERS == {}
+
+
+def test_a_refused_setup_unpins_its_offer(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    _Ledger(monkeypatch, conf.BillingError("no funds", 402))
+    conf._remember_offer(SIG, _terms("A"))
+    _refused_setup(monkeypatch, _setup())
+    assert conf._PINNED_OFFERS == {}
+
+
+# ---------------------------------------------------------------------------
+# requests on a connection
+# ---------------------------------------------------------------------------
+
+
+def test_requests_on_one_framing_2_connection(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Three requests, one handshake: each reserved and settled on its own;
+    the first settlement returns the deposit and carries the session fee."""
     _secret, pub_hex = node_identity
-    ledger = _Ledger(monkeypatch)
-    with _Conn(monkeypatch, _settled) as conn:
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    receipts = []
+    with _Conn(monkeypatch, lambda n: _settled(n, "2"), "2") as conn:
         ready = conn.open()
-        # The setup checked the credential and the offer, and reserved nothing.
-        assert ledger.calls == ["check"]
-        assert ledger.checked == [("sk-client-key", SIG)]
-        setup = conn.holder["setup"]
-        assert setup["http"] == "2" and setup["nonce_c"] == "aa" * 32
-        assert "auth" not in setup and "offer_sig" not in setup
-        assert setup["escrow"].startswith("conn-")
-        assert ready["pubkey"] == pub_hex and ready["http"] == "2" and ready["h2"] == H2
-        assert len(ready["zk_token"]) == 64
-
-        receipts = []
-        # The second request pays with another credential and accepts fees.
-        extras: list[dict[str, Any]] = [
-            {},
-            {"auth": "cashuBfresh", "session_fee_msat": 7, "abandon_fee_msat": 9},
-            {},
-        ]
+        assert ready["deposit_msat"] == DEP
         for n in (1, 2, 3):
-            conn.send(_request(n, **extras[n - 1]))
-            ok, released, att, receipt_msg = conn.recv(4)
-            assert ok["type"] == "request_ok" and ok["n"] == n
-            assert released == {"type": "body_released", "n": n}
-            assert _verify_schnorr(att["a_json"], att["sig"], pub_hex)
-            assert att["sidecar_sig"] == "dd" * 64
-            receipt = receipt_msg["receipt"]
-            assert receipt["http"] == "2" and receipt["n"] == n and receipt["sid"] == SID
-            assert receipt["cost_msats"] == 12 and receipt["reserved_msats"] == 9000
-            assert (
-                receipt["attestation_hash"]
-                == hashlib.sha256(att["a_json"].encode()).hexdigest()
-            )
-            assert _verify_schnorr(
-                receipt_msg["receipt_json"], receipt_msg["sig"], pub_hex
-            )
-            receipts.append(receipt)
-        # Three attestations, three receipts, each bound to its own.
-        assert len({r["attestation_hash"] for r in receipts}) == 3
-
+            # Another credential and offer signature per request is allowed.
+            conn.send(_request(n, auth=f"sk-{n}", **_FEE))
+            ok = conn.recv1()
+            assert ok["type"] == "request_ok" and ok["stream"] == 2 * n + 1
+            msg = conn.until("receipt")
+            assert _verify_schnorr(msg["receipt_json"], msg["sig"], pub_hex)
+            receipts.append(msg["receipt"])
+        assert cws._live_sids[SID].billing is None  # idle holds nothing
     assert ledger.calls == [
         "check",
+        "deposit",
         "reserve",
         "settle:rel-1",
+        "release:dep",
         "reserve",
         "settle:rel-2",
         "reserve",
         "settle:rel-3",
     ]
-    assert [r["auth"] for r in ledger.reserved] == [
-        "sk-client-key",
-        "cashuBfresh",
-        "sk-client-key",
-    ]
-    assert ledger.reserved[1]["fee"] == 7 and ledger.reserved[1]["abandon"] == 9
-    assert ledger.reserved[0]["offer_sig"] == SIG
-    # The sidecar saw the request terms, never the credential, the offer
-    # signature or the fees.
-    for n, seen in enumerate(conn.holder["requests"], start=1):
-        assert seen == {
+    assert [r["auth"] for r in ledger.reserved] == ["sk-1", "sk-2", "sk-3"]
+    # The session fee is due until the connection's first settlement.
+    assert [r["session_fee_due"] for r in ledger.reserved] == [True, False, False]
+    assert [r["n"] for r in receipts] == [1, 2, 3]
+    assert [r["cost_msats"] for r in receipts] == [2012, 12, 12]
+    assert [r.get("session_fee_msat", 0) for r in receipts] == [2000, 0, 0]
+    assert [r.get("deposit_released_msat") for r in receipts] == [DEP, None, None]
+    assert all(r["http"] == "2" and r["sid"] == SID for r in receipts)
+    assert all(r["abandon_fee_msat"] == 5000 for r in receipts)
+    # The sidecar saw no credential, offer signature or fee.
+    assert conn.holder["requests"] == [
+        {
             "type": "request",
             "n": n,
             "kind": "chat",
@@ -607,145 +433,308 @@ def test_setup_reserves_nothing_and_each_request_settles(
             "max_tokens": 12,
             "body_len": 150,
         }
+        for n in (1, 2, 3)
+    ]
+
+
+def test_a_framing_11_connection_carries_one_request(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Request 1 comes before the ClientHello; after its settlement the
+    sidecar closes the connection (``done``), with nothing left to say about
+    the deposit."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    with _Conn(monkeypatch, lambda n: _settled(n, "1.1"), "1.1") as conn:
+        ready = conn.open(_setup("1.1", armed=True))
+        assert ready["deposit_msat"] == DEP and "head_len" not in ready
+        conn.send(_request(**_FEE))
+        ok = conn.recv1()
+        assert ok["type"] == "request_ok" and ok["head_len"] == 228
+        receipt = conn.until("receipt")["receipt"]
+        assert conn.recv1() == {"type": "closed", "reason": "done"}
+        assert conn.closed()
+    assert receipt["http"] == "1.1" and receipt["n"] == 1
+    assert receipt["deposit_released_msat"] == DEP and receipt["cost_msats"] == 2012
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "settle:rel-1",
+        "release:dep",
+    ]
+
+
+def test_a_second_request_on_framing_11_ends_the_connection(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch)
+    script = lambda n: _settled(n, "1.1")[:-1]  # noqa: E731  (stays open)
+    with _Conn(monkeypatch, script, "1.1") as conn:
+        conn.open()
+        conn.send(_request())
+        conn.until("receipt")
+        conn.send(_request(2))
+        err = conn.recv1()
+        assert err["type"] == "error" and err["status"] == 409
+        assert "one request" in err["reason"]
+        assert conn.closed()
+    assert ledger.calls == ["check", "reserve", "settle:rel-1"]
 
 
 def test_records_and_control_frames_are_relayed(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
     _Ledger(monkeypatch)
-    with _Conn(monkeypatch, _settled) as conn:
-        conn.open()
-        conn.send(_request(1))
-        conn.send({"type": "ctl", "frame": "settings_ack"})
-        conn.ws.send_bytes(b"\x17record")
-        conn.send({"type": "release", "n": 1, "upto": 2})
-        conn.recv(4)
-    # In the client's order, after the request they belong to.
-    assert conn.holder["other"] == [
+    control = [
+        {"type": "settings_seen", "header_table_size": None},
         {"type": "ctl", "frame": "settings_ack"},
-        b"\x17record",
         {"type": "release", "n": 1, "upto": 2},
+        {"type": "disclose", "n": 1, "r": "00", "tail_lens": [5]},
+    ]
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+        conn.send(control[0])
+        conn.send(_request())
+        conn.recv1()
+        conn.ws.send_bytes(b"\x17\x03\x03\x00\x01x")
+        for msg in control[1:]:
+            conn.send(msg)
+        # The sidecar has everything before the client leaves.
+        for _ in range(100):
+            if len(conn.holder["other"]) == 5:
+                break
+            time.sleep(0.02)
+    assert conn.holder["other"] == [
+        control[0],
+        b"\x17\x03\x03\x00\x01x",
+        *control[1:],
     ]
 
 
-def test_a_connection_that_ends_between_requests_costs_nothing(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    ledger = _Ledger(monkeypatch)
-    with _Conn(monkeypatch, _settled) as conn:
-        conn.open()
-        conn.send(_request(1))
-        conn.recv(4)
-    assert ledger.calls == ["check", "reserve", "settle:rel-1"]
+# ---------------------------------------------------------------------------
+# refused requests
+# ---------------------------------------------------------------------------
 
-    # Never used at all: nothing was reserved, nothing is charged.
-    ledger = _Ledger(monkeypatch)
-    with _Conn(monkeypatch, _settled) as conn:
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_a_request_the_node_refuses_leaves_the_connection_and_its_number(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """402 for request 1 (the balance covers the deposit, not the
+    reservation), then the same request again after a top-up: one
+    connection, nothing held for the refusal."""
+    detail = {"error": {"type": "insufficient_quota", "code": "insufficient_balance"}}
+    ledger = _Ledger(
+        monkeypatch,
+        deposit=DEP,
+        fees=FEES,
+        reserve_errors={1: conf.BillingError("Insufficient balance", 402, detail)},
+    )
+    with _Conn(monkeypatch, lambda n: _settled(n, http), http) as conn:
         conn.open()
-    assert ledger.calls == ["check"]
+        conn.send(_request(**_FEE))
+        assert conn.recv1() == {
+            "type": "request_refused",
+            "n": 1,
+            "status": 402,
+            "reason": "Insufficient balance",
+            "detail": detail,
+        }
+        assert conn.holder["requests"] == []  # never reached the sidecar
+        conn.send(_request(**_FEE))
+        receipt = conn.until("receipt")["receipt"]
+    assert receipt["n"] == 1 and receipt["deposit_released_msat"] == DEP
+    # The session fee was still due: the refused request settled nothing.
+    assert [r["session_fee_due"] for r in ledger.reserved] == [True, True]
+    assert receipt["cost_msats"] == 2012
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "reserve",
+        "settle:rel-2",
+        "release:dep",
+    ]
+    assert [r["n"] for r in conn.holder["requests"]] == [1]
 
 
 @pytest.mark.parametrize(
-    "frames,expected",
+    "change,reason",
     [
-        # The sidecar never accepted the request.
-        ([], "release:rel-2"),
-        # Accepted, the body not complete at the provider (π_WIN failed, the
-        # client left): released, as a v2 session before ``body_released``.
-        (["request_ok"], "release:rel-2"),
-        # The provider has the request and no usage was disclosed.
-        (["request_ok", "body_released"], "charge:rel-2"),
-        (["request_ok", "body_released", "attestation"], "charge:rel-2"),
+        ({"model": ""}, "request.model"),
+        ({"max_tokens": 0}, "request.max_tokens"),
+        ({"max_tokens": 4097}, "request.max_tokens"),
+        ({"max_tokens": "12"}, "request.max_tokens"),
+        ({"max_tokens": True}, "request.max_tokens"),
+        ({"body_len": 0}, "request.body_len"),
+        ({"body_len": (8 << 20) + 1}, "request.body_len"),
+        ({"kind": "video"}, "request.kind"),
+        ({"offer_sig": "xyz"}, "request.offer_sig"),
+        ({"auth": 5}, "request.auth"),
+        ({"suffix": 5}, "request.suffix"),
+        ({"session_fee_msat": -1}, "session_fee_msat"),
+        ({"variant": "webp"}, "no variant or count"),
     ],
 )
-def test_a_connection_that_ends_during_a_request_settles_it_as_v2(
+def test_a_malformed_request_is_refused_before_any_reservation(
     monkeypatch: pytest.MonkeyPatch,
     node_identity: tuple[str, str],
-    frames: list[str],
-    expected: str,
+    change: dict[str, Any],
+    reason: str,
 ) -> None:
     ledger = _Ledger(monkeypatch)
-
-    def per_request(n: int) -> list[dict[str, Any]]:
-        if n == 1:
-            return _settled(1)
-        return [f for f in _settled(2) if f["type"] in frames] + [
-            {"type": "error", "reason": "proof pi_win failed"}
-        ]
-
-    with _Conn(monkeypatch, per_request) as conn:
+    with _Conn(monkeypatch, http="2") as conn:
         conn.open()
-        conn.send(_request(1))
-        conn.recv(4)
-        conn.send(_request(2))
-        got = conn.recv(len(frames) + 1)
-        assert got[-1]["type"] == "error"
-    # Request 1 stays settled; only request 2's reservation is decided.
-    assert ledger.calls == ["check", "reserve", "settle:rel-1", "reserve", expected]
+        conn.send(_request(**change))
+        refused = conn.recv1()
+        assert refused["type"] == "request_refused" and refused["status"] == 400
+        assert reason in refused["reason"]
+        conn.send(_request())  # the connection is as it was
+        assert conn.recv1()["type"] == "request_ok"
+    assert ledger.calls == ["check", "reserve", "release:rel-1"]
 
 
-def test_abandoned_request_keeps_the_abandon_fee(
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_a_request_the_sidecar_refuses_is_released_in_full(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """The node reserved, the sidecar does not serve the terms: the whole
+    reservation goes back (no abandon fee) and the number is free again."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    refusal = {
+        "type": "request_refused",
+        "n": 1,
+        "status": 400,
+        "reason": "model not allowed",
+    }
+    answers = iter([[refusal], _settled(1, http)])
+    with _Conn(monkeypatch, lambda n: next(answers), http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        assert conn.recv1() == refusal
+        assert cws._live_sids[SID].billing is None
+        conn.send(_request(**_FEE))
+        receipt = conn.until("receipt")["receipt"]
+    assert receipt["n"] == 1 and receipt["cost_msats"] == 2012
+    assert [r["n"] for r in conn.holder["requests"]] == [1, 1]
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "release:rel-1",
+        "reserve",
+        "settle:rel-2",
+        "release:dep",
+    ]
+
+
+def test_a_request_refusal_for_another_request_is_dropped(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
-    """With an abandon fee, a request the sidecar accepted and the client
-    dropped before the provider had it costs that fee (v2's rule after
-    ``ready``); one the sidecar never accepted is released in full."""
-    for accepted, expected in ((True, ["check", "reserve", "fee:40"]), (False, None)):
-        ledger = _Ledger(monkeypatch)
-        real_reserve = cws.reserve
-
-        async def reserve(*a: Any, **kw: Any) -> Any:
-            billing = await real_reserve(*a, **kw)
-            billing.abandon_fee_msat = 40
-            billing.session_fee_msat = 0
-            return billing
-
-        async def charge_fee(billing: Any, fee: int) -> int:
-            ledger.calls.append(f"fee:{fee}")
-            return 1
-
-        monkeypatch.setattr(cws, "reserve", reserve)
-        monkeypatch.setattr(cws, "charge_fee", charge_fee)
-
-        def per_request(n: int, accepted: bool = accepted) -> list[dict[str, Any]]:
-            ok = [_settled(n)[0]] if accepted else []
-            return ok + [{"type": "error", "reason": "bad request"}]
-
-        with _Conn(monkeypatch, per_request) as conn:
-            conn.open()
-            conn.send(_request(1))
-            conn.recv(2 if accepted else 1)
-        assert ledger.calls == (expected or ["check", "reserve", "release:rel-1"])
-
-
-def test_error_head_settles_by_the_v2_rules(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    """A disclosed 404 (unknown model at the provider) releases the request's
-    reservation; the receipt names the request and the status."""
     ledger = _Ledger(monkeypatch)
-
-    def per_request(n: int) -> list[dict[str, Any]]:
-        if n == 1:
-            return _settled(1)
-        err = _usage(2, usage={"error_status": 404, "choices": []})
-        return [
-            _settled(2)[0],
-            _attest(2),
-            err,
-            {"type": "closed", "reason": "error_settled"},
-        ]
-
-    with _Conn(monkeypatch, per_request) as conn:
+    stray = {"type": "request_refused", "n": 7, "status": 400, "reason": "x"}
+    with _Conn(monkeypatch, lambda n: [stray, _request_ok(n, "2")], "2") as conn:
         conn.open()
-        conn.send(_request(1))
-        conn.recv(4)
+        conn.send(_request())
+        assert conn.recv1()["type"] == "request_ok"
+    assert ledger.calls == ["check", "reserve", "release:rel-1"]
+
+
+# ---------------------------------------------------------------------------
+# protocol errors end the connection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("n", [0, 2, "1", None, True])
+def test_a_wrong_request_number_ends_the_connection(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], n: Any
+) -> None:
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+        conn.send(_request(n))
+        err = conn.recv1()
+        assert err["type"] == "error" and err["status"] == 400
+        assert "request.n must be 1" in err["reason"]
+        # Only a protocol error: the deposit is charged (§12.10 row 12).
+        assert _deposit(err) == ("charged", "unused", DEP)
+        assert conn.closed()
+    assert ledger.calls == ["check", "deposit", "charge:dep"]
+
+
+def test_a_second_request_while_one_is_in_flight_ends_the_connection(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch, fees=FEES)
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        assert conn.recv1()["type"] == "request_ok"
+        conn.send(_request(2, **_FEE))
+        err = conn.recv1()
+        assert err["type"] == "error" and err["status"] == 409
+        assert "already in flight" in err["reason"]
+    # The open request was accepted and dropped: its abandon fee.
+    assert ledger.calls == ["check", "reserve", "fee:rel-1:5000"]
+
+
+def test_a_framing_2_request_before_the_head_is_written_ends_the_connection(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    with _Conn(monkeypatch, http="2", on_setup=[_ready("2")]) as conn:
+        conn.send(_setup("2"))
+        assert conn.recv1()["type"] == "ready"
+        conn.send(_request())
+        err = conn.recv1()
+        assert err["type"] == "error" and "head_written" in err["reason"]
+        assert _deposit(err) == ("charged", "unused", DEP)
+    assert ledger.calls == ["check", "deposit", "charge:dep"]
+    assert conn.holder["requests"] == []
+
+
+def test_a_framing_11_request_comes_before_the_head(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """In framing "1.1" the same moment is the right one: the head names the
+    request."""
+    ledger = _Ledger(monkeypatch)
+    with _Conn(monkeypatch, http="1.1") as conn:
+        conn.open()
+        conn.send(_request())
+        assert conn.recv1()["type"] == "request_ok"
+    assert ledger.calls == ["check", "reserve", "release:rel-1"]
+
+
+def test_duplicate_setup_ends_the_connection(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch)
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+        conn.send(_setup("2"))
+        err = conn.recv1()
+        assert err["type"] == "error" and err["reason"] == "duplicate setup"
+    assert ledger.calls == ["check"]
+
+
+def test_frames_for_another_request_are_dropped(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The node bills and signs only for the request in flight."""
+    ledger = _Ledger(monkeypatch)
+    stale = [_released(1), _attest(1, "2"), _usage(1, "2")]
+    answers = {1: _settled(1, "2"), 2: [_request_ok(2, "2"), *stale]}
+    with _Conn(monkeypatch, lambda n: answers[n], "2") as conn:
+        conn.open()
+        conn.send(_request())
+        conn.until("receipt")
         conn.send(_request(2))
-        _ok, _att, receipt_msg, closed = conn.recv(4)
-    receipt = receipt_msg["receipt"]
-    assert receipt["n"] == 2 and receipt["usage"]["error_status"] == 404
-    assert receipt["cost_msats"] == 0 and receipt["balance_msats"] == 97000
-    assert closed == {"type": "closed", "reason": "error_settled"}
+        assert conn.recv1()["type"] == "request_ok"
+        state = cws._live_sids[SID]
+        for _ in range(50):  # let the stale frames arrive
+            time.sleep(0.01)
+        assert state.body_released is False and state.attestation_hash == ""
     assert ledger.calls == [
         "check",
         "reserve",
@@ -755,179 +744,481 @@ def test_error_head_settles_by_the_v2_rules(
     ]
 
 
-def test_a_refused_request_reserves_nothing_and_ends_the_connection(
+def test_an_oversized_request_frame_ends_the_connection(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
-    detail = {"error": {"type": "insufficient_quota", "code": "insufficient_balance"}}
-    ledger = _Ledger(
-        monkeypatch,
-        reserve_error_at=2,
-        reserve_error=conf.BillingError("Insufficient balance", 402, detail),
-    )
-    with _Conn(monkeypatch, _settled) as conn:
-        conn.open()
-        conn.send(_request(1))
-        conn.recv(4)
-        conn.send(_request(2))
-        (err,) = conn.recv(1)
-        assert err["type"] == "error" and err["status"] == 402
-        assert err["detail"] == detail
-    # The sidecar never saw request 2; request 1 stays settled.
-    assert [r["n"] for r in conn.holder["requests"]] == [1]
-    assert ledger.calls == ["check", "reserve", "settle:rel-1", "reserve"]
-
-
-@pytest.mark.parametrize(
-    "bad,status",
-    [
-        (_request(2), 400),  # out of order
-        ({**_request(1), "max_tokens": 0}, 400),
-        ({**_request(1), "kind": "images"}, 400),
-        # An image request on a connection whose sidecar serves chat only.
-        (_image_request(1), 400),
-        ({k: v for k, v in _request(1).items() if k != "offer_sig"}, 400),
-    ],
-)
-def test_a_malformed_request_is_refused_before_any_reservation(
-    monkeypatch: pytest.MonkeyPatch,
-    node_identity: tuple[str, str],
-    bad: dict[str, Any],
-    status: int,
-) -> None:
     ledger = _Ledger(monkeypatch)
-    with _Conn(monkeypatch, _settled) as conn:
+    with _Conn(monkeypatch, http="2") as conn:
         conn.open()
-        conn.send(bad)
-        (err,) = conn.recv(1)
-        assert err["type"] == "error" and err["status"] == status
+        conn.send(_request(auth="x" * (cws.MAX_SETUP_TEXT + 1)))
+        err = conn.recv1()
+        assert err["type"] == "error" and err["status"] == 413
     assert ledger.calls == ["check"]
-    assert conn.holder["requests"] == []
 
 
-def test_a_second_request_while_one_is_in_flight_is_refused(
+# ---------------------------------------------------------------------------
+# setup
+# ---------------------------------------------------------------------------
+
+
+def test_setup_for_a_framing_the_sidecar_does_not_serve_is_refused(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
-    ledger = _Ledger(monkeypatch)
-
-    def per_request(n: int) -> list[dict[str, Any]]:
-        return _settled(n)[:2]  # released, never disclosed
-
-    with _Conn(monkeypatch, per_request) as conn:
-        conn.open()
-        conn.send(_request(1))
-        conn.recv(2)
-        conn.send(_request(2))
-        (err,) = conn.recv(1)
-        assert err["status"] == 409
-    # The request in flight is finalized by the abort rule (the provider had
-    # it); the refused one reserved nothing.
-    assert ledger.calls == ["check", "reserve", "charge:rel-1"]
-    assert [r["n"] for r in conn.holder["requests"]] == [1]
-
-
-def test_frames_for_another_request_are_dropped(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    """A usage or attestation that names another request (or arrives with no
-    request in flight) is neither signed nor billed."""
-    ledger = _Ledger(monkeypatch)
-
-    def per_request(n: int) -> list[dict[str, Any]]:
-        ok, released, att, usage = _settled(n)
-        stale_att = _attest(n + 1)
-        stale = _usage(n + 1)
-        # After the settlement nothing is in flight: a repeated usage is dropped.
-        return [ok, released, stale_att, stale, att, usage, usage]
-
-    with _Conn(monkeypatch, per_request) as conn:
-        conn.open()
-        conn.send(_request(1))
-        got = conn.recv(4)
-        assert [g["type"] for g in got] == [
-            "request_ok",
-            "body_released",
-            "attestation",
-            "receipt",
-        ]
-        assert json.loads(got[2]["a_json"])["n"] == 1
-    assert ledger.calls == ["check", "reserve", "settle:rel-1"]
-
-
-def test_usage_without_an_attestation_ends_the_connection(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    ledger = _Ledger(monkeypatch)
-
-    def per_request(n: int) -> list[dict[str, Any]]:
-        ok, released, _att, usage = _settled(n)
-        return [ok, released, usage]
-
-    with _Conn(monkeypatch, per_request) as conn:
-        conn.open()
-        conn.send(_request(1))
-        got = conn.recv(3)
-        assert got[-1]["type"] == "error" and got[-1]["status"] == 502
-    assert ledger.calls == ["check", "reserve", "release:rel-1"]
-
-
-def _refused_setup(
-    monkeypatch: pytest.MonkeyPatch, setup: dict[str, Any]
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    with _Conn(monkeypatch, _settled) as conn:
-        conn.send(setup)
-        (err,) = conn.recv(1)
-    return err, conn.holder
+    """E.g. while the sidecar has withdrawn framing "2"."""
+    side = {**SIDE_OFFER, "http": ["1.1"]}
+    ledger = _Ledger(monkeypatch, side=side)
+    holder, err = _refused_setup(monkeypatch, _setup("2"))
+    assert err["status"] == 400 and 'framing "2"' in err["reason"]
+    assert ledger.calls == [] and "setup" not in holder
 
 
 def test_setup_without_funds_never_reaches_the_sidecar(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
+    refusal = conf.BillingError("Insufficient balance", 402, {"error": "x"})
+    ledger = _Ledger(monkeypatch, credential_error=refusal, deposit=DEP)
+    holder, err = _refused_setup(monkeypatch, _setup("2"))
+    assert err["status"] == 402 and err["detail"] == {"error": "x"}
+    # §12.10 row 1: never reserved, nothing to report.
+    assert "deposit" not in err
+    assert ledger.calls == ["check"] and ledger.deposits == []
+    assert "setup" not in holder
+
+
+def test_a_setup_that_cannot_pay_the_deposit_never_reaches_the_sidecar(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    detail = {
+        "error": {"type": "connection_deposit_unfunded", "connection_deposit_msat": DEP}
+    }
+    refusal = conf.BillingError("the balance does not cover", 402, detail)
+    ledger = _Ledger(monkeypatch, deposit_error=refusal)
+    holder, err = _refused_setup(monkeypatch, _setup("1.1"))
+    assert err["status"] == 402 and err["detail"] == detail
+    assert "deposit" not in err
+    assert ledger.calls == ["check"] and "setup" not in holder
+
+
+# ---------------------------------------------------------------------------
+# the connection deposit (§12.10)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_a_connection_dropped_without_a_request_loses_its_deposit(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """Row 12: the client left."""
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    with _Conn(monkeypatch, http=http) as conn:
+        assert conn.open()["deposit_msat"] == DEP
+    assert ledger.calls == ["check", "deposit", "charge:dep"]
+    assert ledger.deposits == [("sk-client-key", SIG)]
+
+
+def test_a_client_that_leaves_while_the_sidecar_is_sending_is_not_a_sidecar_failure(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The sidecar's pump ends because the client's socket did: that must not
+    read as "the sidecar's socket ended" (which releases the deposit)."""
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+
+    class _GoneClient(_IdleClient):
+        async def send_text(self, text: str) -> None:
+            raise RuntimeError("the client is gone")
+
+    async def run() -> cws.SessionState:
+        state = cws.SessionState()
+        state.framing = "2"
+        state.sid = SID
+        state.h2_deposit = await cws.reserve_deposit("sk-client-key", SIG)
+        sidecar = _QueueSidecar([_ready("2"), _HEAD], [])
+        loop = asyncio.get_running_loop()
+        await cws._run_h2_session(_GoneClient(), sidecar, state, loop.time())  # type: ignore[arg-type]
+        return state
+
+    state = asyncio.run(run())
+    assert state.h2_fault is None and state.h2_sidecar_gone is False
+    assert ledger.calls == ["deposit", "charge:dep"]
+
+
+@pytest.mark.parametrize(
+    "last,reason",
+    [
+        # Row 3: the provider unreachable, h2 not selected, "2" withdrawn.
+        ({"type": "error", "reason": "x", "fault": "upstream"}, "provider_unreachable"),
+        (
+            {
+                "type": "error",
+                "reason": "x",
+                "fault": "upstream",
+                "code": "h2_withdrawn",
+            },
+            "provider_unreachable",
+        ),
+        # Row 4: the sidecar failed.
+        (
+            {"type": "error", "reason": "internal error", "fault": "node"},
+            "sidecar_failure",
+        ),
+        # Row 5: the provider closed the open, idle connection.
+        ({"type": "closed", "reason": "upstream_closed"}, "provider_closed"),
+    ],
+)
+def test_the_deposit_is_released_when_the_client_could_not_have_used_the_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    last: dict[str, Any],
+    reason: str,
+) -> None:
+    _secret, pub_hex = node_identity
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    with _Conn(monkeypatch, http="2", on_setup=[_ready("2"), _HEAD, last]) as conn:
+        conn.open()
+        frame = conn.recv1()
+        assert conn.closed()
+    # The sidecar's last frame, with the deposit's outcome signed.
+    assert {k: frame[k] for k in last} == last
+    assert _deposit(frame) == ("released", reason, DEP)
+    dep = frame["deposit"]
+    assert dep["sid"] == SID and dep["cost_msats"] == 0
+    assert dep["balance_msats"] == 97000 and isinstance(dep["time"], int)
+    assert set(dep) == {
+        "sid",
+        "msat",
+        "outcome",
+        "reason",
+        "cost_msats",
+        "balance_msats",
+        "time",
+    }
+    assert json.loads(frame["deposit_json"]) == dep
+    assert _verify_schnorr(frame["deposit_json"], frame["deposit_sig"], pub_hex)
+    assert frame["sig_scheme"] == "schnorr-secp256k1"
+    assert ledger.calls == ["check", "deposit", "release:dep"]
+
+
+@pytest.mark.parametrize(
+    "last,reason",
+    [
+        # Row 12: a failed handshake or π_NK, a protocol error, the provider
+        # closing during the handshake (no fault named by the sidecar).
+        ({"type": "error", "reason": "proof pi_nk failed"}, "unused"),
+        ({"type": "error", "reason": "x", "code": "h2_table_size"}, "unused"),
+        ({"type": "closed", "reason": "idle"}, "unused"),
+        ({"type": "closed", "reason": "max_lifetime"}, "unused"),
+    ],
+)
+def test_the_deposit_is_charged_when_an_unused_connection_ends(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    last: dict[str, Any],
+    reason: str,
+) -> None:
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    with _Conn(monkeypatch, http="2", on_setup=[_ready("2"), _HEAD, last]) as conn:
+        conn.open()
+        frame = conn.recv1()
+    assert frame["type"] == last["type"]
+    assert _deposit(frame) == ("charged", reason, DEP)
+    assert frame["deposit"]["cost_msats"] == DEP
+    assert ledger.calls == ["check", "deposit", "charge:dep"]
+
+
+def test_the_deposit_is_released_when_the_sidecar_refuses_the_setup(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Row 2: no ``ready``, so nothing was garbled."""
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    refusal = {"type": "error", "reason": "too many sessions"}
+    with _Conn(monkeypatch, http="2", on_setup=[refusal]) as conn:
+        conn.send(_setup("2"))
+        frame = conn.recv1()
+    assert frame["type"] == "error"
+    assert _deposit(frame) == ("released", "not_started", DEP)
+    assert frame["deposit"]["sid"] is None
+    assert ledger.calls == ["check", "deposit", "release:dep"]
+
+
+def test_the_deposit_is_released_when_the_sidecar_socket_ends_unexplained(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Row 4: neither ``error`` nor ``closed``."""
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    on_setup = [_ready("2"), _HEAD, {"hang_up": True}]
+    with _Conn(monkeypatch, http="2", on_setup=on_setup) as conn:
+        conn.open()
+        frame = conn.recv1()
+    assert frame["type"] == "error" and frame["status"] == 502
+    assert frame["fault"] == "node"
+    assert _deposit(frame) == ("released", "sidecar_failure", DEP)
+    assert ledger.calls == ["check", "deposit", "release:dep"]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_deposit_when_the_node_fails_a_request(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """Row 6: a request refused with a 5xx is the node's own failure; the
+    connection stays, and if it then ends unused the deposit goes back."""
+    ledger = _Ledger(
+        monkeypatch, deposit=DEP, reserve_errors={1: RuntimeError("db down")}
+    )
+    with _Conn(monkeypatch, http=http) as conn:
+        conn.open()
+        conn.send(_request())
+        refused = conn.recv1()
+        assert refused["type"] == "request_refused" and refused["status"] == 500
+        assert refused["reason"] == "reservation failed"
+    assert ledger.calls == ["check", "deposit", "reserve", "release:dep"]
+
+
+def test_deposit_when_only_refused_requests_were_sent(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Row 12: a 4xx refusal by itself costs nothing, and the deposit follows
+    how the connection ends."""
     ledger = _Ledger(
         monkeypatch,
-        credential_error=conf.BillingError("Insufficient balance", 402, {"x": 1}),
+        deposit=DEP,
+        reserve_errors={1: conf.BillingError("model 'x' is not served confidentially")},
     )
-    err, holder = _refused_setup(monkeypatch, _SETUP)
-    assert err["status"] == 402 and err["detail"] == {"x": 1}
-    assert "setup" not in holder  # no session, no garbled circuit
-    assert ledger.calls == ["check"]
-    assert cws._active_sessions == 0 and cws._unused_by_ip == {}
-
-
-def test_setup_is_refused_when_the_sidecar_offers_no_http2(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    ledger = _Ledger(
-        monkeypatch, offer={"upstream_host": "api.venice.ai", "http": ["1.1"]}
-    )
-    err, holder = _refused_setup(monkeypatch, _SETUP)
-    assert err["status"] == 400 and "http: 2" in err["reason"]
-    assert "setup" not in holder and ledger.calls == []
-
-
-def test_setup_naming_request_terms_is_refused(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    ledger = _Ledger(monkeypatch)
-    err, holder = _refused_setup(monkeypatch, {**_SETUP, "model": "test-model"})
-    assert err["status"] == 400 and "setup" not in holder and ledger.calls == []
-    err, _ = _refused_setup(monkeypatch, {**_SETUP, "http": 3})
-    assert err["status"] == 400 and ledger.calls == []
-
-
-def test_duplicate_setup_is_refused(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    _Ledger(monkeypatch)
-    with _Conn(monkeypatch, _settled) as conn:
+    with _Conn(monkeypatch, http="2") as conn:
         conn.open()
-        conn.send(_SETUP)
-        (err,) = conn.recv(1)
-        assert err["status"] == 400 and err["reason"] == "duplicate setup"
+        conn.send(_request(model="x"))
+        assert conn.recv1()["type"] == "request_refused"
+    assert ledger.calls == ["check", "deposit", "reserve", "charge:dep"]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_deposit_when_a_settlement_cannot_be_written(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """Row 6: the node's last frame says what failed and returns the deposit."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, settle_error=RuntimeError("db down"))
+    monkeypatch.setattr(cws, "SETTLE_RETRY_DELAYS", (0, 0, 0))
+    frames = [f for f in _settled(1, http) if f["type"] != "closed"]
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_request())
+        err = conn.until("error")
+        assert conn.closed()
+    assert err["status"] == 500 and err["fault"] == "node"
+    assert err["detail"]["error"]["outcome"] == "charged_reservation"
+    assert _deposit(err) == ("released", "node_failure", DEP)
+    assert ledger.calls[-2:] == ["charge:rel-1", "release:dep"]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_deposit_when_the_first_request_was_received_and_never_settled(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """Row 7: the provider had the request; its reservation is charged, so
+    the deposit is not charged on top."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    frames = [_request_ok(1, http), _released(1)]
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        conn.until("body_released")
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "release:dep",
+        "charge:rel-1",
+    ]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_deposit_when_the_provider_refused_the_first_request_early(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """Row 8: the provider answered and closed before the body was complete:
+    the request keeps the session fee, the deposit goes back."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    frames = [
+        _request_ok(1, http),
+        {"type": "upstream_closed_early", "n": 1, "response_bytes": 517},
+        {"type": "error", "reason": "upstream closed the connection"},
+    ]
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        err = conn.until("error")
+    assert _deposit(err) == ("released", "provider_refused", DEP)
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "release:dep",
+        "fee:rel-1:2000",
+    ]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+@pytest.mark.parametrize(
+    "ending",
+    [
+        [],  # the client leaves
+        [{"type": "error", "reason": "proof pi_win failed"}],  # a failed proof
+    ],
+)
+def test_deposit_when_the_first_request_is_abandoned(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    http: str,
+    ending: list[dict[str, Any]],
+) -> None:
+    """Row 9: accepted, never released. The deposit is charged and the
+    reservation released in full: the abandon fee is not kept on top."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    frames = [_request_ok(1, http), *ending]
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        conn.until("request_ok")
+        if ending:
+            assert _deposit(conn.recv1()) == ("charged", "request_abandoned", DEP)
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "charge:dep",
+        "release:rel-1",
+    ]
+
+
+@pytest.mark.parametrize("fault", ["upstream", "node"])
+def test_deposit_when_the_provider_is_unreachable_with_request_1_open(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], fault: str
+) -> None:
+    """Framing "1.1" dials the provider with request 1 already accepted: a
+    failure there is rows 3 and 4, and the request costs nothing either."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    err = {"type": "error", "reason": "connecting timed out", "fault": fault}
+    with _Conn(monkeypatch, lambda n: [_request_ok(1), err], "1.1") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        frame = conn.until("error")
+    reason = "provider_unreachable" if fault == "upstream" else "sidecar_failure"
+    assert _deposit(frame) == ("released", reason, DEP)
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "release:dep",
+        "release:rel-1",
+    ]
+
+
+def test_an_abandoned_later_request_keeps_the_abandon_fee(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Once the deposit was released, a dropped request costs the abandon
+    fee, and the connection's end says nothing about a deposit."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    answers = {
+        1: _settled(1, "2"),
+        2: [_request_ok(2, "2"), {"type": "error", "reason": "proof pi_win failed"}],
+    }
+    with _Conn(monkeypatch, lambda n: answers[n], "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        conn.until("receipt")
+        conn.send(_request(2, **_FEE))
+        err = conn.until("error")
+    assert "deposit" not in err
+    assert ledger.calls[-2:] == ["reserve", "fee:rel-2:5000"]
+    assert "charge:dep" not in ledger.calls
+
+
+def test_a_released_later_request_without_a_settlement_is_charged(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    refusal = {"type": "error", "reason": "the disclosed records start before"}
+    answers = {
+        1: _settled(1, "2"),
+        2: [_request_ok(2, "2"), _released(2), refusal],
+    }
+    with _Conn(monkeypatch, lambda n: answers[n], "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        conn.until("receipt")
+        conn.send(_request(2, **_FEE))
+        assert "deposit" not in conn.until("error")
+    assert ledger.calls[-2:] == ["reserve", "charge:rel-2"]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+@pytest.mark.parametrize(
+    "status,charge",
+    [(429, "fee:rel-1:2000"), (404, "fee:rel-1:5000"), (500, "charge:rel-1")],
+)
+def test_an_error_head_is_a_settlement_and_returns_the_deposit(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    http: str,
+    status: int,
+    charge: str,
+) -> None:
+    """Any request the provider received counts: the deposit goes back with
+    the error receipt, and the connection closes ``error_settled``."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    frames = _settled(1, http, _error_usage(status, 1, http))
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        receipt = conn.until("receipt")["receipt"]
+        assert conn.recv1() == {"type": "closed", "reason": "error_settled"}
+    assert receipt["deposit_released_msat"] == DEP
+    assert receipt["usage"]["error_status"] == status
+    assert ledger.calls == ["check", "deposit", "reserve", charge, "release:dep"]
+
+
+def test_an_error_head_after_the_first_settlement_owes_no_session_fee(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """429 on request 2: "less the session fee if still due" is nothing."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    answers = {1: _settled(1, "2"), 2: _settled(2, "2", _error_usage(429, 2, "2"))}
+    with _Conn(monkeypatch, lambda n: answers[n], "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        conn.until("receipt")
+        conn.send(_request(2, **_FEE))
+        receipt = conn.until("receipt")["receipt"]
+    assert receipt["cost_msats"] == 0 and "session_fee_msat" not in receipt
+    assert ledger.calls[-2:] == ["reserve", "release:rel-2"]
+
+
+def test_no_deposit_when_the_offer_asks_for_none(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch, deposit=0)
+    last = _closed("upstream_closed")
+    with _Conn(monkeypatch, http="2", on_setup=[_ready("2"), _HEAD, last]) as conn:
+        assert conn.open()["deposit_msat"] == 0
+        assert conn.recv1() == last  # nothing to report
+    assert ledger.calls == ["check"]
 
 
 # ---------------------------------------------------------------------------
-# credential check
+# billing: the node's ordinary reservation path
 # ---------------------------------------------------------------------------
+
+
+class _Session:
+    async def __aenter__(self) -> "_Session":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+
+class _Key:
+    hashed_key = "abc"
 
 
 async def test_check_credential_needs_a_known_offer_and_funds(
@@ -937,16 +1228,6 @@ async def test_check_credential_needs_a_known_offer_and_funds(
     import routstr.core.db as db
 
     seen: dict[str, Any] = {}
-
-    class _Session:
-        async def __aenter__(self) -> "_Session":
-            return self
-
-        async def __aexit__(self, *exc: Any) -> None:
-            return None
-
-    class _Key:
-        hashed_key = "abc"
 
     async def validate(bearer: str, session: Any, min_cost: int = 0) -> Any:
         seen.update(bearer=bearer, min_cost=min_cost)
@@ -961,21 +1242,176 @@ async def test_check_credential_needs_a_known_offer_and_funds(
     with pytest.raises(conf.BillingError) as unknown:
         await conf.check_credential("sk-x", SIG)
     assert unknown.value.status == 409 and seen == {}
+    assert unknown.value.detail["error"]["type"] == "offer_expired"
 
-    conf._remember_offer(SIG, conf.OfferTerms({}, session_fee_msat=50))
+    # The floor: the largest of 1 msat, the minimum request and the fees.
+    conf._remember_offer(SIG, conf.OfferTerms({}))
     assert await conf.check_credential("sk-x", SIG) == "abc"
-    # The floor: the larger of the minimum request cost and the offer's fees.
-    assert seen == {"bearer": "sk-x", "min_cost": 50}
+    assert seen == {"bearer": "sk-x", "min_cost": 3}
+    conf._remember_offer(SIG, conf.OfferTerms({}, session_fee_msat=50))
+    await conf.check_credential("sk-x", SIG)
+    assert seen["min_cost"] == 50
+    conf._remember_offer(
+        SIG, conf.OfferTerms({}, session_fee_msat=50, abandon_fee_msat=80)
+    )
+    await conf.check_credential("sk-x", SIG)
+    assert seen["min_cost"] == 80
 
     from fastapi import HTTPException
 
     async def broke(bearer: str, session: Any, min_cost: int = 0) -> Any:
-        raise HTTPException(status_code=402, detail={"error": "no funds"})
+        raise HTTPException(
+            status_code=402, detail={"error": {"message": "no funds", "type": "t"}}
+        )
 
     monkeypatch.setattr(auth, "validate_bearer_key", broke)
     with pytest.raises(conf.BillingError) as refused:
         await conf.check_credential("sk-x", SIG)
-    assert refused.value.status == 402 and refused.value.detail == {"error": "no funds"}
+    assert refused.value.status == 402
+    assert refused.value.detail == {"error": {"message": "no funds", "type": "t"}}
+    # The reason a client shows is the message, not a Python repr.
+    assert str(refused.value) == "no funds"
+
+
+async def test_reserve_deposit_refusals(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    import routstr.auth as auth
+    import routstr.core.db as db
+
+    seen: dict[str, Any] = {}
+
+    async def validate(bearer: str, session: Any, min_cost: int = 0) -> Any:
+        seen.update(bearer=bearer, min_cost=min_cost)
+        return _Key()
+
+    async def broke(key: Any, cost: int, session: Any) -> Any:
+        raise HTTPException(
+            status_code=402,
+            detail={"error": {"code": "insufficient_balance", "message": "no"}},
+        )
+
+    monkeypatch.setattr(db, "create_session", lambda: _Session())
+    monkeypatch.setattr(auth, "validate_bearer_key", validate)
+    monkeypatch.setattr(auth, "pay_for_request", broke)
+
+    with pytest.raises(conf.BillingError) as unknown:
+        await conf.reserve_deposit("sk-x", SIG)
+    assert unknown.value.status == 409
+    # No deposit in the offer: nothing is reserved.
+    conf._remember_offer(SIG, conf.OfferTerms({}, connection_deposit_msat=0))
+    assert await conf.reserve_deposit("sk-x", SIG) is None and seen == {}
+    # Too little balance: the node's 402 body, marked as the deposit's.
+    conf._remember_offer(SIG, conf.OfferTerms({}, connection_deposit_msat=700))
+    with pytest.raises(conf.BillingError) as unfunded:
+        await conf.reserve_deposit("sk-x", SIG)
+    assert seen == {"bearer": "sk-x", "min_cost": 700}
+    assert unfunded.value.status == 402
+    error = unfunded.value.detail["error"]
+    assert error["type"] == "connection_deposit_unfunded"
+    assert error["code"] == "insufficient_balance"
+    assert error["connection_deposit_msat"] == 700
+
+
+def _deposit_sig(deposit: int) -> str:
+    sig = "de" * 64
+    conf._remember_offer(sig, conf.OfferTerms({}, connection_deposit_msat=deposit))
+    return sig
+
+
+def _keyed_validate(billing_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``validate_bearer_key`` with the ``min_cost`` the setup passes."""
+    import routstr.auth as auth
+    from routstr.core.db import ApiKey
+
+    async def validate(bearer: str, session: Any, min_cost: int = 0) -> Any:
+        return await session.get(ApiKey, bearer)
+
+    monkeypatch.setattr(auth, "validate_bearer_key", validate)
+
+
+async def test_the_deposit_is_an_ordinary_reservation(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any
+) -> None:
+    """Reserved through ``pay_for_request``; released, it costs nothing;
+    charged, it costs exactly its amount, booked under a name of its own."""
+    _keyed_validate(billing_db, monkeypatch)
+    sig = _deposit_sig(7000)
+    deposit = await conf.reserve_deposit("hk", sig)
+    assert deposit is not None and deposit.kind == "deposit"
+    assert deposit.reserved_msats == 7000 and deposit.candidate is None
+    assert deposit.model_id == conf.DEPOSIT_MODEL_ID
+    key = await billing_db.key()
+    assert (key.balance, key.reserved_balance) == (3_000_000, 7000)
+
+    assert await conf.release(deposit) == 3_000_000
+    key = await billing_db.key()
+    assert (key.balance, key.reserved_balance, key.total_spent) == (3_000_000, 0, 0)
+
+    deposit = await conf.reserve_deposit("hk", sig)
+    assert deposit is not None
+    assert await conf.charge_reservation(deposit) == 2_993_000
+    key = await billing_db.key()
+    assert (key.balance, key.reserved_balance, key.total_spent) == (2_993_000, 0, 7000)
+
+
+async def test_a_deposit_and_a_request_are_held_together(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any, fee_settings: None
+) -> None:
+    """The deposit stays reserved while request 1 is reserved on top; the
+    request's reservation is its usage bound plus the larger fee."""
+    _keyed_validate(billing_db, monkeypatch)
+    deposit = await conf.reserve_deposit("hk", _deposit_sig(7000))
+    assert deposit is not None
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig(), 2000, 10000)
+    # 100k context × 12 + 8 × 120 msat at the surcharged rates, + the abandon fee.
+    assert billing.reserved_msats == 1_200_960 + 10_000
+    key = await billing_db.key()
+    assert key.reserved_balance == 7000 + billing.reserved_msats
+    usage = {
+        "model": "ctx-model",
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 8},
+    }
+    assert (await conf.settle(billing, usage))["cost_msats"] == 12_960 + 2000
+    await conf.release(deposit)
+    key = await billing_db.key()
+    assert (key.reserved_balance, key.total_spent) == (0, 14_960)
+
+
+async def test_the_session_fee_is_charged_once_per_connection(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any, fee_settings: None
+) -> None:
+    """A request after the connection's first settlement reserves the same
+    (the abandon fee is still at stake) and owes no session fee."""
+    usage = {
+        "model": "ctx-model",
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 8},
+    }
+    first = await conf.reserve("hk", "ctx-model", 8, _current_sig(), 2000, 10000)
+    later = await conf.reserve(
+        "hk", "ctx-model", 8, _current_sig(), 2000, 10000, session_fee_due=False
+    )
+    assert first.reserved_msats == later.reserved_msats
+    assert (first.session_fee_msat, later.session_fee_msat) == (2000, 0)
+    assert first.offer_session_fee_msat == later.offer_session_fee_msat == 2000
+    assert later.abandon_fee_msat == 10000
+    assert (await conf.settle(first, usage))["cost_msats"] == 12_960 + 2000
+    assert (await conf.settle(later, usage))["cost_msats"] == 12_960
+    # The client still has to accept the offer's fees in every request.
+    with pytest.raises(conf.BillingError) as err:
+        await conf.reserve("hk", "ctx-model", 8, _current_sig(), session_fee_due=False)
+    assert err.value.detail["error"]["type"] == "session_fee_not_accepted"
+    # A provider refusal after the first settlement keeps nothing.
+    later = await conf.reserve(
+        "hk", "ctx-model", 8, _current_sig(), 2000, 10000, session_fee_due=False
+    )
+    assert cws._fee(later, "session_fee_msat") == 0
+    assert cws._fee(later, "abandon_fee_msat") == 10000
+    assert await cws._release_keeping_fee(later, "session_fee_msat") == (
+        0,
+        (await billing_db.key()).balance,
+    )
+    assert (await billing_db.key()).reserved_balance == 0
 
 
 # ---------------------------------------------------------------------------
@@ -986,63 +1422,47 @@ async def test_check_credential_needs_a_known_offer_and_funds(
 def test_connection_counts_as_unused_until_its_first_request_is_released(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
-    """An idle ``http: 2`` connection holds no reservation, so writing the
-    connection head does not make it "used" (as it does for v2): it counts
-    against its address's unused limit until a request reaches the provider."""
     _Ledger(monkeypatch)
-    with _Conn(monkeypatch, _settled) as conn:
+    frames = [_request_ok(1, "2"), {"sleep": 0.3}, _released(1)]
+    with _Conn(monkeypatch, lambda n: frames, "2") as conn:
         conn.open()
-        assert sum(cws._unused_by_ip.values()) == 1 and cws._active_sessions == 1
-        conn.send(_request(1))
-        conn.recv(4)
-        assert cws._unused_by_ip == {} and cws._active_sessions == 1
-    assert cws._active_sessions == 0 and cws._live_sids == {}
+        # ``head_written`` alone does not make the connection "used".
+        assert cws._unused_by_ip == {"testclient": 1}
+        conn.send(_request())
+        conn.until("request_ok")
+        assert cws._unused_by_ip == {"testclient": 1}
+        conn.until("body_released")
+        assert cws._unused_by_ip == {}
+    assert cws._unused_by_ip == {} and cws._active_sessions == 0
 
 
 def test_unused_limit_refuses_further_connections(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
-    monkeypatch.setattr(settings, "confidential_max_unused_per_ip", 1)
     ledger = _Ledger(monkeypatch)
-    with _Conn(monkeypatch, _settled) as first:
+    monkeypatch.setattr(settings, "confidential_max_unused_per_ip", 1)
+    with _Conn(monkeypatch, http="2") as first:
         first.open()
-        with _Conn(monkeypatch, _settled) as second:
-            (err,) = second.recv(1)
-            assert err["status"] == 429
+        with _Conn(monkeypatch, http="2") as second:
+            err = second.recv1()
+            assert err["type"] == "error" and err["status"] == 429
     assert ledger.calls == ["check"]
 
 
-def test_deadlines_follow_the_request_not_the_connection() -> None:
-    state = cws.SessionState()
-    state.http2 = True
-    # Handshake (or armed): v2's setup-phase limit from the accept.
-    assert cws._h2_deadline(state, 100.0) == 100.0 + cws.SESSION_TIMEOUT_S
-    # Idle: the offer's idle timeout from the last settlement, never above the
-    # sidecar's own limit.
-    state.h2_idle_since, state.h2_idle_timeout = 5000.0, 120.0
-    assert cws._h2_deadline(state, 100.0) == 5000.0 + 120.0
-    state.h2_idle_secs = 60.0
-    assert cws._h2_deadline(state, 100.0) == 5000.0 + 60.0
-    # A request in flight: v2's two phases, counted from the request.
-    state.billing = _Billing(1, "a")  # type: ignore[assignment]
-    state.h2_request_at = 9000.0
-    assert cws._h2_deadline(state, 100.0) == 9000.0 + cws.SESSION_TIMEOUT_S
-    state.released_at = 9100.0
-    assert cws._h2_deadline(state, 100.0) == 9100.0 + cws.POST_RELEASE_TIMEOUT_S
-    state.h2_lifetime = cws.RequestLifetime(deadline=9200.0)
-    assert cws._h2_deadline(state, 100.0) == 9200.0 - cws.SETTLE_GRACE_S
-
-
 async def _run_idle(
-    monkeypatch: pytest.MonkeyPatch, frames: list[dict[str, Any]], deposit: int
+    monkeypatch: pytest.MonkeyPatch,
+    frames: list[dict[str, Any]],
+    deposit: int,
+    settled: int = 0,
 ) -> tuple[_Ledger, Any, Any, cws.SessionState]:
     """Run a connection whose client sends nothing until the node ends it."""
     ledger = _Ledger(monkeypatch, deposit=deposit)
     sidecar = _QueueSidecar(frames, [])
     state = cws.SessionState()
-    state.http2 = True
+    state.framing = "2"
     state.sid = SID
     state.h2_idle_timeout = 0.2
+    state.h2_settled = settled
     if deposit:
         state.h2_deposit = await cws.reserve_deposit("sk-client-key", SIG)
     client = _IdleClient()
@@ -1055,9 +1475,9 @@ async def test_idle_connection_is_closed_after_the_idle_timeout(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
     """The node closes a connection with no request in flight for
-    ``idle_timeout_s``. Without a deposit nothing is charged."""
+    ``idle_timeout_s``. After its first settlement nothing is held."""
     ledger, client, sidecar, _ = await _run_idle(
-        monkeypatch, [_READY, {"type": "head_written"}], 0
+        monkeypatch, [_ready("2"), _HEAD], 0, settled=1
     )
     assert sidecar.closed
     assert client.sent[-1] == {"type": "closed", "reason": "idle"}
@@ -1067,34 +1487,48 @@ async def test_idle_connection_is_closed_after_the_idle_timeout(
 async def test_idle_connection_that_never_carried_a_request_loses_its_deposit(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
+    """Row 10."""
     _secret, pub_hex = node_identity
     ledger, client, sidecar, state = await _run_idle(
-        monkeypatch, [_READY, {"type": "head_written"}], 500
+        monkeypatch, [_ready("2"), _HEAD], DEP
     )
     assert sidecar.closed and state.h2_deposit is None
     assert ledger.calls == ["deposit", "charge:dep"]
     # The client is told in ``closed``, signed like a receipt.
     closed = client.sent[-1]
     assert closed["type"] == "closed" and closed["reason"] == "idle"
+    assert _deposit(closed) == ("charged", "idle", DEP)
     record = closed["deposit"]
-    assert record["outcome"] == "charged" and record["reason"] == "idle"
-    assert record["msat"] == 500 and record["cost_msats"] == 500
-    assert record["sid"] == SID and record["balance_msats"] == 91000
+    assert record["cost_msats"] == DEP and record["sid"] == SID
+    assert record["balance_msats"] == 91000
     assert json.loads(closed["deposit_json"]) == record
     assert _verify_schnorr(closed["deposit_json"], closed["deposit_sig"], pub_hex)
+
+
+async def test_the_idle_time_never_exceeds_the_sidecars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    st = cws.SessionState()
+    st.h2_idle_since = now
+    st.h2_idle_timeout, st.h2_idle_secs = 120.0, 300.0
+    assert cws._h2_deadline(st, now - 50) == now + 120
+    st.h2_idle_secs = 45.0
+    assert cws._h2_deadline(st, now - 50) == now + 45
 
 
 async def test_request_time_limit_charges_a_released_request(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
     """A request the provider has and that is never disclosed is charged at
-    its own time limit, as a v2 session is; the limit runs from the release."""
+    its own time limit; the limit runs from the release."""
     ledger = _Ledger(monkeypatch)
     monkeypatch.setattr(cws, "POST_RELEASE_TIMEOUT_S", 0.3)
     monkeypatch.setattr(cws, "SETTLE_GRACE_S", 0.0)
-    frames = [_READY, {"type": "head_written"}, *_settled(1)[:2]]
+    answer = [_request_ok(1, "2"), _released(1)]
     state = cws.SessionState()
-    state.http2 = True
+    state.framing = "2"
     state.sid = SID
 
     class _Client(_IdleClient):
@@ -1105,6 +1539,8 @@ async def test_request_time_limit_charges_a_released_request(
         async def receive(self) -> dict[str, Any]:
             if self.first:
                 self.first = False
+                # After ``head_written`` reached the node.
+                await asyncio.sleep(0.05)
                 return {"type": "websocket.receive", "text": json.dumps(_request(1))}
             await asyncio.Event().wait()
             return {}
@@ -1112,10 +1548,10 @@ async def test_request_time_limit_charges_a_released_request(
     class _Sidecar(_QueueSidecar):
         async def send(self, data: Any) -> None:
             # The request arrived: answer it.
-            for f in frames:
+            for f in answer:
                 self.queue.put_nowait(json.dumps(f))
 
-    sidecar = _Sidecar([], [])
+    sidecar = _Sidecar([_ready("2"), _HEAD], [])
     client = _Client()
     await cws._run_h2_session(
         client,  # type: ignore[arg-type]
@@ -1127,357 +1563,31 @@ async def test_request_time_limit_charges_a_released_request(
     assert ledger.calls == ["reserve", "charge:rel-1"]
 
 
-def test_zk_route_admits_pi_win() -> None:
-    assert cws._PROOF_RE.fullmatch("pi_win")
-    assert not cws._PROOF_RE.fullmatch("pi_c1")
-
-
-# ---------------------------------------------------------------------------
-# the connection deposit
-# ---------------------------------------------------------------------------
-
-DEP = 500
-_DEP_SETUP = dict(_SETUP)
-
-
-def _open_with_deposit(conn: _Conn) -> dict[str, Any]:
-    conn.send(_DEP_SETUP)
-    ready, head = conn.recv(2)
-    assert ready["type"] == "ready" and head["type"] == "head_written"
-    return ready
-
-
-def test_setup_reserves_the_deposit_and_the_first_settlement_releases_it(
+def test_the_sidecars_orderly_end_is_the_last_frame(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
-    _secret, pub_hex = node_identity
+    """``max_requests`` (also ``max_lifetime``, ``max_bytes``): after the
+    settlement that reached the limit."""
     ledger = _Ledger(monkeypatch, deposit=DEP)
-    with _Conn(monkeypatch, _settled) as conn:
-        ready = _open_with_deposit(conn)
-        assert ledger.calls == ["check", "deposit"]
-        assert ledger.deposits == [("sk-client-key", SIG)]
-        assert ready["deposit_msat"] == DEP
-        # The sid is bound to the deposit's reservation.
-        assert conn.holder["setup"]["escrow"] == "conn-dep"
-        conn.send(_request(1))
-        *_rest, receipt_msg = conn.recv(4)
-        # The first settlement releases the deposit; its signed receipt says so.
-        receipt = receipt_msg["receipt"]
-        assert receipt["n"] == 1 and receipt["deposit_released_msat"] == DEP
-        assert _verify_schnorr(receipt_msg["receipt_json"], receipt_msg["sig"], pub_hex)
-        # The second request: nothing more about the deposit.
-        conn.send(_request(2))
-        got = conn.recv(4)
-        assert got[-1]["type"] == "receipt"
-        assert "deposit_released_msat" not in got[-1]["receipt"]
-    assert ledger.calls == [
-        "check",
-        "deposit",
-        "reserve",
-        "settle:rel-1",
-        "release:dep",
-        "reserve",
-        "settle:rel-2",
-    ]
+    frames = [*_settled(1, "2"), _closed("max_requests")]
+    with _Conn(monkeypatch, lambda n: frames, "2") as conn:
+        conn.open()
+        conn.send(_request())
+        conn.until("receipt")
+        assert conn.recv1() == {"type": "closed", "reason": "max_requests"}
+        assert conn.closed()
+    assert ledger.calls[-1] == "release:dep"
 
 
-def test_a_connection_dropped_without_a_request_loses_its_deposit(
+def test_the_proof_channels_outlive_the_offers_connection_lifetime(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
-    ledger = _Ledger(monkeypatch, deposit=DEP)
-    with _Conn(monkeypatch, _settled) as conn:
-        _open_with_deposit(conn)
-    assert ledger.calls == ["check", "deposit", "charge:dep"]
-
-
-@pytest.mark.parametrize(
-    "error,expected",
-    [
-        (
-            conf.BillingError(
-                "the balance does not cover the connection deposit",
-                402,
-                {"error": {"type": "connection_deposit_unfunded"}},
-            ),
-            402,
-        ),
-        (conf.BillingError("offer expired", 409, {"error": {}}), 409),
-    ],
-)
-def test_a_setup_that_cannot_pay_the_deposit_never_reaches_the_sidecar(
-    monkeypatch: pytest.MonkeyPatch,
-    node_identity: tuple[str, str],
-    error: Any,
-    expected: int,
-) -> None:
-    ledger = _Ledger(monkeypatch, deposit_error=error)
-    err, holder = _refused_setup(monkeypatch, _DEP_SETUP)
-    assert err["status"] == expected and err["detail"] == error.detail
-    assert "setup" not in holder  # no session, no garbled circuit
-    assert ledger.calls == ["check", "deposit"]
-    assert cws._active_sessions == 0 and cws._unused_by_ip == {}
-
-
-def test_the_deposit_is_released_when_no_slot_is_free(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    ledger = _Ledger(monkeypatch, deposit=DEP)
-    monkeypatch.setattr(cws, "MAX_SESSIONS", 0)
-    err, holder = _refused_setup(monkeypatch, _DEP_SETUP)
-    assert err["status"] == 503 and "setup" not in holder
-    assert ledger.calls == ["check", "deposit", "release:dep"]
-
-
-@pytest.mark.parametrize(
-    "frames,expected",
-    [
-        # Never accepted by the sidecar, or accepted and abandoned before the
-        # provider had it: the deposit is the price, the request's own
-        # reservation is released in full (no abandon fee on top).
-        ([], ["charge:dep", "release:rel-1"]),
-        (["request_ok"], ["charge:dep", "release:rel-1"]),
-        # The provider has the request: its reservation is charged, the
-        # deposit goes back.
-        (["request_ok", "body_released"], ["release:dep", "charge:rel-1"]),
-    ],
-)
-def test_deposit_when_the_first_request_is_not_settled(
-    monkeypatch: pytest.MonkeyPatch,
-    node_identity: tuple[str, str],
-    frames: list[str],
-    expected: list[str],
-) -> None:
-    ledger = _Ledger(monkeypatch, deposit=DEP)
-    real_reserve = cws.reserve
-
-    async def reserve(*a: Any, **kw: Any) -> Any:
-        billing = await real_reserve(*a, **kw)
-        billing.abandon_fee_msat = 40
-        billing.session_fee_msat = 0
-        return billing
-
-    async def charge_fee(billing: Any, fee: int) -> int:
-        ledger.calls.append(f"fee:{fee}")
-        return 1
-
-    monkeypatch.setattr(cws, "reserve", reserve)
-    monkeypatch.setattr(cws, "charge_fee", charge_fee)
-
-    def per_request(n: int) -> list[dict[str, Any]]:
-        return [f for f in _settled(n) if f["type"] in frames] + [
-            {"type": "error", "reason": "proof pi_win failed"}
-        ]
-
-    with _Conn(monkeypatch, per_request) as conn:
-        _open_with_deposit(conn)
-        conn.send(_request(1))
-        got = conn.recv(len(frames) + 1)
-        # The sidecar's last word carries the deposit's outcome.
-        assert got[-1]["type"] == "error" and got[-1]["reason"] == "proof pi_win failed"
-        charged = expected[0] == "charge:dep"
-        assert got[-1]["deposit"]["outcome"] == ("charged" if charged else "released")
-        assert got[-1]["deposit"]["reason"] == (
-            "request_abandoned" if charged else "request_received"
-        )
-    assert ledger.calls == ["check", "deposit", "reserve", *expected]
-
-
-def test_deposit_is_released_when_the_provider_refused_the_first_request_early(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    ledger = _Ledger(monkeypatch, deposit=DEP)
-
-    def per_request(n: int) -> list[dict[str, Any]]:
-        return [
-            _settled(n)[0],
-            {"type": "upstream_closed_early", "n": n, "response_bytes": 90},
-            {"type": "error", "reason": "upstream closed the connection"},
-        ]
-
-    with _Conn(monkeypatch, per_request) as conn:
-        _open_with_deposit(conn)
-        conn.send(_request(1))
-        _ok, err = conn.recv(2)
-        assert err["type"] == "error"
-        assert err["deposit"]["reason"] == "provider_refused"
-        assert err["deposit"]["outcome"] == "released"
-    assert ledger.calls == [
-        "check",
-        "deposit",
-        "reserve",
-        "release:dep",
-        "release:rel-1",
-    ]
-
-
-@pytest.mark.parametrize(
-    "status,expected,reason",
-    [
-        (402, "charge:dep", "request_refused"),
-        (500, "release:dep", "node_failure"),
-    ],
-)
-def test_deposit_when_the_node_refuses_the_first_request(
-    monkeypatch: pytest.MonkeyPatch,
-    node_identity: tuple[str, str],
-    status: int,
-    expected: str,
-    reason: str,
-) -> None:
-    ledger = _Ledger(
-        monkeypatch,
-        deposit=DEP,
-        reserve_error_at=1,
-        reserve_error=conf.BillingError("refused", status, {"x": 1}),
-    )
-    with _Conn(monkeypatch, _settled) as conn:
-        _open_with_deposit(conn)
-        conn.send(_request(1))
-        (err,) = conn.recv(1)
-        assert err["status"] == status and err["detail"] == {"x": 1}
-        assert err["deposit"]["reason"] == reason
-    assert ledger.calls == ["check", "deposit", "reserve", expected]
-    assert conn.holder["requests"] == []
-
-
-def _failing_sidecar(holder: dict[str, Any], frames: list[dict[str, Any]]) -> Any:
-    """A sidecar that answers the setup with ``frames`` and ends the session."""
-
-    async def handler(ws: Any) -> None:
-        async for frame in ws:
-            holder["setup"] = json.loads(frame)
-            for out in frames:
-                await ws.send(json.dumps(out))
-            return
-
-    return handler
-
-
-@pytest.mark.parametrize(
-    "frames,expected,reason",
-    [
-        # The provider could not be reached: the sidecar says so.
-        (
-            [_READY, {"type": "error", "reason": "connecting", "fault": "upstream"}],
-            "release:dep",
-            "provider_unreachable",
-        ),
-        # The sidecar's session ended without a word.
-        ([_READY], "release:dep", "sidecar_failure"),
-        # The sidecar refused the setup: nothing was garbled.
-        ([{"type": "error", "reason": "bad setup"}], "release:dep", "not_started"),
-        # The provider closed the idle connection before any request.
-        (
-            [
-                _READY,
-                {"type": "head_written"},
-                {"type": "closed", "reason": "upstream_closed"},
-            ],
-            "release:dep",
-            "provider_closed",
-        ),
-        # The client's own failure (a proof, the handshake): charged.
-        (
-            [_READY, {"type": "error", "reason": "proof pi_nk failed"}],
-            "charge:dep",
-            "unused",
-        ),
-    ],
-)
-def test_deposit_by_how_an_unused_connection_ended(
-    monkeypatch: pytest.MonkeyPatch,
-    node_identity: tuple[str, str],
-    frames: list[dict[str, Any]],
-    expected: str,
-    reason: str,
-) -> None:
-    ledger = _Ledger(monkeypatch, deposit=DEP)
-    holder: dict[str, Any] = {}
-    with _Conn(monkeypatch, None, _failing_sidecar(holder, frames)) as conn:
-        conn.send(_DEP_SETUP)
-        # The connection's last frame says what became of the deposit: the
-        # sidecar's own last word, or the node's when it had none.
-        told = frames[-1]["type"] in ("error", "closed")
-        got = conn.recv(len(frames) + (0 if told else 1))
-        assert got[-1]["type"] == (frames[-1]["type"] if told else "error")
-        assert got[-1]["deposit"]["reason"] == reason
-        assert got[-1]["deposit"]["outcome"] == expected.split(":")[0].replace(
-            "charge", "charged"
-        ).replace("release", "released")
-    assert ledger.calls == ["check", "deposit", expected]
-
-
-async def test_reserve_deposit(monkeypatch: pytest.MonkeyPatch) -> None:
-    from fastapi import HTTPException
-
-    import routstr.auth as auth
-    import routstr.core.db as db
-
-    seen: dict[str, Any] = {}
-
-    class _Session:
-        async def __aenter__(self) -> "_Session":
-            return self
-
-        async def __aexit__(self, *exc: Any) -> None:
-            return None
-
-    class _Key:
-        hashed_key = "abc"
-
-    class _Snap:
-        release_id = "r1"
-        reserved_msats = 700
-
-    async def validate(bearer: str, session: Any, min_cost: int = 0) -> Any:
-        seen.update(bearer=bearer, min_cost=min_cost)
-        return _Key()
-
-    async def pay(key: Any, cost: int, session: Any) -> Any:
-        seen["paid"] = cost
-        return _Snap()
-
-    monkeypatch.setattr(db, "create_session", lambda: _Session())
-    monkeypatch.setattr(auth, "validate_bearer_key", validate)
-    monkeypatch.setattr(auth, "pay_for_request", pay)
-
-    # An unknown offer, or one without http: 2 terms.
-    with pytest.raises(conf.BillingError) as unknown:
-        await conf.reserve_deposit("sk-x", SIG)
-    assert unknown.value.status == 409
-    conf._remember_offer(SIG, conf.OfferTerms({}))
-    with pytest.raises(conf.BillingError):
-        await conf.reserve_deposit("sk-x", SIG)
-
-    # No deposit in the offer: nothing is reserved, whatever the setup says.
-    block = {**H2, "connection_deposit_msat": 0, "idle_timeout_s": 120}
-    conf._remember_offer(SIG, conf.OfferTerms({}, h2=block))
-    assert await conf.reserve_deposit("sk-x", SIG) is None and seen == {}
-
-    conf._remember_offer(
-        SIG, conf.OfferTerms({}, h2={**block, "connection_deposit_msat": 700})
-    )
-    billing = await conf.reserve_deposit("sk-x", SIG)
-    assert seen == {"bearer": "sk-x", "min_cost": 700, "paid": 700}
-    assert billing is not None and billing.kind == "deposit"
-    assert billing.reserved_msats == 700 and billing.key_hash == "abc"
-    assert billing.model_id == conf.H2_DEPOSIT_MODEL_ID
-
-    # Too little balance: the node's 402 body, marked as the deposit's.
-    async def broke(key: Any, cost: int, session: Any) -> Any:
-        raise HTTPException(
-            status_code=402,
-            detail={"error": {"code": "insufficient_balance", "message": "no"}},
-        )
-
-    monkeypatch.setattr(auth, "pay_for_request", broke)
-    with pytest.raises(conf.BillingError) as unfunded:
-        await conf.reserve_deposit("sk-x", SIG)
-    assert unfunded.value.status == 402
-    error = unfunded.value.detail["error"]
-    assert error["type"] == "connection_deposit_unfunded"
-    assert error["code"] == "insufficient_balance"
-    assert error["connection_deposit_msat"] == 700
+    side = {**SIDE_OFFER, "h2": {**H2, "max_lifetime_s": 7200}}
+    _Ledger(monkeypatch, side=side)
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+        assert cws._live_sids[SID].h2_max_lifetime == 7200.0
+        assert cws._live_sids[SID].h2_idle_secs == 300.0
 
 
 # ---------------------------------------------------------------------------
@@ -1485,83 +1595,40 @@ async def test_reserve_deposit(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"variant": ""},
-        {"variant": 5},
-        {"count": 0},
-        {"count": conf.IMAGE_MAX_COUNT + 1},
-        {"count": True},
-        {"max_tokens": 5},
-        {"body_len": 0},
-        {"offer_sig": "xyz"},
-    ],
-)
-def test_h2_image_request_shape(change: dict[str, Any]) -> None:
-    cws.validate_h2_request(_image_request(1), 4096, 1)
-    cws.validate_h2_request(_image_request(2, count=conf.IMAGE_MAX_COUNT), 4096, 2)
-    with pytest.raises(cws.SetupError):
-        cws.validate_h2_request({**_image_request(1), **change}, 4096, 1)
-    without = {k: v for k, v in _image_request(1).items() if k != "variant"}
-    with pytest.raises(cws.SetupError):
-        cws.validate_h2_request(without, 4096, 1)
-
-
-def _image_settled(n: int) -> list[dict[str, Any]]:
-    """What the sidecar sends for an image request that the client accepts."""
-    flat = {"flat": True, "kind": "images", "count": 1}
-    return [
-        {
-            "type": "request_ok",
-            "sid": SID,
-            "n": n,
-            "stream": 2 * n + 1,
-            "suffix": IMAGE_SUFFIX,
-        },
-        {"type": "body_released", "n": n},
-        _attest(n),
-        _usage(n, model="z-image-turbo", usage=flat),
-    ]
-
-
 def test_a_chat_request_and_an_image_request_share_a_connection(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
-    """Request 1 is chat, request 2 an image: reserved by ``reserve_image``,
-    forwarded with the node's own suffix, settled flat on the sidecar's flat
-    usage, with a receipt that names the variant, the count and the price."""
-    _secret, pub_hex = node_identity
-    ledger = _Ledger(monkeypatch, images=True, deposit=DEP)
-
-    def per_request(n: int) -> list[dict[str, Any]]:
-        return _image_settled(n) if n == 2 else _settled(n)
-
-    with _Conn(monkeypatch, per_request) as conn:
-        _open_with_deposit(conn)
-        conn.send(_request(1))
-        chat = conn.recv(4)[-1]["receipt"]
-        assert "kind" not in chat and chat["deposit_released_msat"] == DEP
-        # The client names its own suffix: it never reaches the sidecar.
-        conn.send(_image_request(2, suffix=',"model":"dear","variants":4}', count=1))
-        conn.send({"type": "accept", "n": 2, "server_records": 9})
-        ok, released, att, receipt_msg = conn.recv(4)
-        assert ok["suffix"] == IMAGE_SUFFIX and released["n"] == 2
-        receipt = receipt_msg["receipt"]
-        assert receipt["http"] == "2" and receipt["n"] == 2 and receipt["sid"] == SID
-        assert receipt["kind"] == "images" and receipt["model"] == "z-image-turbo"
-        assert receipt["variant"] == "webp" and receipt["count"] == 1
-        assert receipt["msat_per_image"] == 10350 and receipt["cost_msats"] == 10350
-        assert receipt["usage"] == {"flat": True, "kind": "images", "count": 1}
-        assert "rates" not in receipt and "deposit_released_msat" not in receipt
-        assert (
-            receipt["attestation_hash"]
-            == hashlib.sha256(att["a_json"].encode()).hexdigest()
-        )
-        assert _verify_schnorr(receipt_msg["receipt_json"], receipt_msg["sig"], pub_hex)
-        # The connection takes another chat request afterwards.
-        conn.send(_request(3))
-        assert conn.recv(4)[-1]["receipt"]["n"] == 3
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES, images=True)
+    answers = {
+        1: _settled(1, "2"),
+        2: _settled(2, "2", _flat_usage(2, "2", 2)),
+        3: _settled(3, "2"),
+    }
+    with _Conn(monkeypatch, lambda n: answers[n], "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        chat = conn.until("receipt")["receipt"]
+        conn.send(_image_request(2, count=2, **_FEE))
+        image = conn.until("receipt")["receipt"]
+        conn.send(_request(3, **_FEE))
+        again = conn.until("receipt")["receipt"]
+    assert chat["deposit_released_msat"] == DEP and chat["cost_msats"] == 2012
+    assert "kind" not in chat and chat["rates"] == RATES
+    # The image: the flat price, no session fee (it was charged with request 1).
+    assert image["kind"] == "images" and image["n"] == 2 and image["http"] == "2"
+    assert image["cost_msats"] == 2 * IMAGE_PRICE
+    assert image["reserved_msats"] == 2 * IMAGE_PRICE + 5000
+    assert "deposit_released_msat" not in image and "session_fee_msat" not in image
+    assert again["cost_msats"] == 12
+    assert conn.holder["requests"][1] == {
+        "type": "request",
+        "n": 2,
+        "kind": "images",
+        "model": "z-image-turbo",
+        "count": 2,
+        "body_len": 150,
+        "suffix": IMAGE_SUFFIX,
+    }
     assert ledger.calls == [
         "check",
         "deposit",
@@ -1573,38 +1640,23 @@ def test_a_chat_request_and_an_image_request_share_a_connection(
         "reserve",
         "settle:rel-3",
     ]
-    assert ledger.reserved[1] == {
-        "auth": "sk-client-key",
-        "model": "z-image-turbo",
-        "variant": "webp",
-        "count": 1,
-        "offer_sig": SIG,
-        "fee": None,
-        "abandon": None,
-    }
-    # The sidecar saw the node's rendering of the suffix and the count, no
-    # variant, no credential; and the client's accept, unchanged.
-    assert conn.holder["requests"][1] == {
-        "type": "request",
-        "n": 2,
-        "kind": "images",
-        "model": "z-image-turbo",
-        "count": 1,
-        "body_len": 150,
-        "suffix": IMAGE_SUFFIX,
-    }
-    assert {"type": "accept", "n": 2, "server_records": 9} in conn.holder["other"]
+    assert [r["session_fee_due"] for r in ledger.reserved] == [True, False, False]
 
 
+@pytest.mark.parametrize("http", ["1.1", "2"])
 def test_an_image_request_as_the_first_request_returns_the_deposit(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
 ) -> None:
-    ledger = _Ledger(monkeypatch, images=True, deposit=DEP)
-    with _Conn(monkeypatch, _image_settled) as conn:
-        _open_with_deposit(conn)
-        conn.send(_image_request(1))
-        receipt = conn.recv(4)[-1]["receipt"]
-        assert receipt["kind"] == "images" and receipt["deposit_released_msat"] == DEP
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES, images=True)
+    frames = _settled(1, http, _flat_usage(1, http))
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_image_request(**_FEE))
+        receipt = conn.until("receipt")["receipt"]
+    # The price plus the session fee, due with the first settlement.
+    assert receipt["cost_msats"] == IMAGE_PRICE + 2000
+    assert receipt["session_fee_msat"] == 2000
+    assert receipt["deposit_released_msat"] == DEP
     assert ledger.calls == [
         "check",
         "deposit",
@@ -1614,93 +1666,63 @@ def test_an_image_request_as_the_first_request_returns_the_deposit(
     ]
 
 
-@pytest.mark.parametrize(
-    "usage,expected",
-    [
-        # An error head: v2's image error rules (a 400 keeps at most a fee).
-        ({"error_status": 400, "choices": []}, "release:rel-1"),
-        # Token usage for an image request is a protocol breach.
-        ({"usage": {"prompt_tokens": 1, "completion_tokens": 1}}, "charge:rel-1"),
-    ],
-)
-def test_an_image_request_settles_flat_or_on_an_error_head_only(
+def test_an_abandoned_image_request(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """As a chat request: before any settlement the deposit is charged and
+    the reservation released; afterwards the abandon fee is kept."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES, images=True)
+    fail = {"type": "error", "reason": "proof pi_win failed"}
+    with _Conn(monkeypatch, lambda n: [_request_ok(n, "2"), fail], "2") as conn:
+        conn.open()
+        conn.send(_image_request(**_FEE))
+        assert _deposit(conn.until("error")) == ("charged", "request_abandoned", DEP)
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve_image",
+        "charge:dep",
+        "release:rel-1",
+    ]
+
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES, images=True)
+    answers = {1: _settled(1, "2"), 2: [_request_ok(2, "2"), fail]}
+    with _Conn(monkeypatch, lambda n: answers[n], "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        conn.until("receipt")
+        conn.send(_image_request(2, **_FEE))
+        conn.until("error")
+    assert ledger.calls[-2:] == ["reserve_image", "fee:rel-2:5000"]
+
+
+async def test_flat_settlement_owes_the_session_fee_once(
     monkeypatch: pytest.MonkeyPatch,
-    node_identity: tuple[str, str],
-    usage: dict[str, Any],
-    expected: str,
 ) -> None:
-    ledger = _Ledger(monkeypatch, images=True)
+    charged: list[int] = []
 
-    def per_request(n: int) -> list[dict[str, Any]]:
-        frames = _image_settled(n)
-        frames[-1] = _usage(n, model="z-image-turbo", usage=usage)
-        return frames
+    async def charge(billing: Any, cost: int) -> int:
+        charged.append(cost)
+        return 0
 
-    with _Conn(monkeypatch, per_request) as conn:
-        conn.open()
-        conn.send(_image_request(1))
-        receipt = conn.recv(4)[-1]["receipt"]
-        assert receipt["kind"] == "images" and receipt["variant"] == "webp"
-    assert ledger.calls == ["check", "reserve_image", expected]
+    monkeypatch.setattr(conf, "_charge", charge)
 
+    def billing(fee: int) -> conf.Billing:
+        return conf.Billing(
+            "k",
+            "img",
+            None,
+            2 * 10_000 + 5000,
+            None,
+            {},
+            session_fee_msat=fee,
+            offer_session_fee_msat=2000,
+            abandon_fee_msat=5000,
+            kind="images",
+            count=2,
+            msat_per_image=10_000,
+        )
 
-def test_a_flat_usage_does_not_settle_a_chat_request(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    """A sidecar that reports a flat charge for a chat request (the request
-    reached the provider unpriced): the reservation is charged."""
-    ledger = _Ledger(monkeypatch, images=True)
-
-    def per_request(n: int) -> list[dict[str, Any]]:
-        frames = _settled(n)
-        frames[-1] = _usage(n, usage={"flat": True, "kind": "images", "count": 1})
-        return frames
-
-    with _Conn(monkeypatch, per_request) as conn:
-        conn.open()
-        conn.send(_request(1))
-        receipt = conn.recv(4)[-1]["receipt"]
-        assert receipt["cost_msats"] == receipt["reserved_msats"] == 9000
-    assert ledger.calls == ["check", "reserve", "charge:rel-1"]
-
-
-def test_an_abandoned_image_request_is_released(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    """A tampered suffix fails π_WIN: the provider never has the request, its
-    reservation is released; after ``body_released`` with no accept it is
-    charged."""
-    for frames, expected in ((1, "release:rel-1"), (2, "charge:rel-1")):
-        ledger = _Ledger(monkeypatch, images=True)
-
-        def per_request(n: int, frames: int = frames) -> list[dict[str, Any]]:
-            return _image_settled(n)[:frames] + [
-                {"type": "error", "reason": "proof pi_win failed"}
-            ]
-
-        with _Conn(monkeypatch, per_request) as conn:
-            conn.open()
-            conn.send(_image_request(1))
-            assert conn.recv(frames + 1)[-1]["type"] == "error"
-        assert ledger.calls == ["check", "reserve_image", expected]
-
-
-async def test_offer_lists_images_over_http2_only_with_an_images_block(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    side_h2 = {**H2, "kinds": ["chat", "images"]}
-    # The sidecar serves images over http 2, the node prices none: chat only,
-    # and the block is the one a chat-only sidecar gives.
-    offer = await _offer(monkeypatch, {"http": ["1.1", "2"], "h2": side_h2})
-    assert "kinds" not in offer["h2"] and "images" not in offer
-    # With priced image variants the signed block lists both kinds.
-    block = {"head_template": "POST /api/v1/image/generate HTTP/1.1\r\n\r\n"}
-    monkeypatch.setattr(conf, "images_offer_block", lambda side, pct: block)
-    offer = await _offer(monkeypatch, {"http": ["1.1", "2"], "h2": side_h2})
-    assert offer["h2"]["kinds"] == ["chat", "images"] and offer["images"] == block
-    assert json.loads(offer["sig_payload"])["h2"]["kinds"] == ["chat", "images"]
-    # A sidecar that keeps images on the v2 flow: the node does not add them.
-    offer = await _offer(monkeypatch, {"http": ["1.1", "2"], "h2": H2})
-    assert "kinds" not in offer["h2"] and offer["images"] == block
-    assert conf.h2_kinds({"kinds": ["images"]}, True) == ["chat"]
-    assert conf.h2_kinds({"kinds": "chat,images"}, True) == ["chat"]
+    assert (await conf.settle_flat(billing(2000)))["cost_msats"] == 22_000
+    assert (await conf.settle_flat(billing(0)))["cost_msats"] == 20_000
+    assert charged == [22_000, 20_000]
