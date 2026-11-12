@@ -1153,6 +1153,20 @@ class AnalyticsV2DeliveryState(SQLModel, table=True):  # type: ignore
     updated_at_ms: int = Field(sa_type=BigInteger)
 
 
+class AnalyticsV2ReleasedEpoch(SQLModel, table=True):  # type: ignore
+    """An epoch below the public floor that the operator chose to publish.
+
+    Only valid for the delivery generation it was made in, so any later
+    sharing transition withdraws it.
+    """
+
+    __tablename__ = "analytics_v2_released_epochs"
+
+    epoch: int = Field(primary_key=True, sa_type=BigInteger)
+    generation: int = Field(sa_type=BigInteger)
+    released_at_ms: int = Field(sa_type=BigInteger)
+
+
 class RoutstrFee(SQLModel, table=True):  # type: ignore
     __tablename__ = "routstr_fees"
     id: int = Field(default=1, primary_key=True)

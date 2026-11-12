@@ -23,6 +23,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { AlertCircle, Eye, EyeOff } from 'lucide-react';
 import { toast } from 'sonner';
 import { Switch } from '@/components/ui/switch';
+import { AnalyticsHistory } from './analytics-history';
 
 interface SettingsData {
   name?: string;
@@ -906,6 +907,9 @@ export function AdminSettings() {
                     : ''}
                 </AlertDescription>
               </Alert>
+            ) : null}
+            {shownAnalyticsStatus?.state === 'publishing' ? (
+              <AnalyticsHistory />
             ) : null}
           </CardContent>
           {analyticsSharingChanged ? (
