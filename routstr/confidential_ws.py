@@ -171,7 +171,7 @@ _ZK_PROXY_CAP_S = SESSION_TIMEOUT_S + POST_RELEASE_TIMEOUT_S + SETTLE_GRACE_S
 # The setup fields the sidecar is sent (``escrow`` is set by the node; for an
 # image session also ``kind``, ``count`` and the node-rendered ``suffix``).
 _SETUP_KINDS = ("chat", "images")
-# ``http: 2`` sessions (protocol v3, option A). What a setup must not name
+# Connections (protocol v3). What a setup must not name
 # (it belongs to the requests), what of a ``request`` the sidecar is sent,
 # how long past the sidecar's own idle limit the node waits before it ends an
 # idle connection itself, and the sidecar's limit on a connection's age (a
@@ -351,7 +351,7 @@ class SessionState:
         self.zk_token = secrets.token_hex(32)
         # Open /zk proxies of this session (``MAX_ZK_CONNS_PER_SESSION``).
         self.zk_open = 0
-        # An ``http: 2`` session: one connection, sequential requests. The
+        # A connection carries requests, one at a time. The
         # fields above that describe a reservation (``billing``,
         # ``body_released``, ``released_at``, ``engaged``, ``upstream_refused``,
         # ``finalized``, ``attestation_hash``) then describe the request in
@@ -523,7 +523,7 @@ def validate_h2_setup(msg: Any) -> None:
 
 
 def validate_h2_request(msg: Any, max_tokens_cap: int, expected_n: int) -> None:
-    """Shape and range checks on a ``request`` of an ``http: 2`` session,
+    """Shape and range checks on a ``request`` of a connection,
     before anything is reserved."""
     if not isinstance(msg, dict) or msg.get("type") != "request":
         raise SetupError(400, "not a request")
@@ -875,7 +875,7 @@ async def _sidecar_to_client(
     websocket: WebSocket, upstream: Any, state: SessionState, close_client: bool = True
 ) -> None:
     """Relay the sidecar's frames to the client. ``close_client`` False leaves
-    the client's socket open when the sidecar's ends (an ``http: 2`` session
+    the client's socket open when the sidecar's ends (the session task
     still has its last frames to send)."""
     try:
         async for frame in upstream:
@@ -1307,7 +1307,7 @@ async def _finalize(state: SessionState) -> None:
 
 
 # ---------------------------------------------------------------------------
-# http: 2 sessions (protocol v3, option A)
+# connections and their requests (protocol v3, both framings)
 # ---------------------------------------------------------------------------
 
 
@@ -1325,7 +1325,7 @@ def _h2_deposit_lifetime(idle_s: float) -> RequestLifetime:
 async def _open_h2_session(
     session_id: str, state: SessionState, msg: Any, side: dict[str, Any]
 ) -> Any:
-    """The setup of an ``http: 2`` session: check the offer signature and the
+    """The setup of a connection: check the offer signature and the
     credential, reserve the connection deposit, dial the sidecar. Raises
     ``SetupError``; the deposit is then released (nothing was garbled)."""
     validate_h2_setup(msg)
@@ -1513,7 +1513,7 @@ def _h2_request_done(state: SessionState) -> None:
 
 
 def _h2_deadline(state: SessionState, started: float) -> float:
-    """Loop time at which an ``http: 2`` session is cut off. With a request
+    """Loop time at which a connection is cut off. With a request
     in flight, v2's limits counted from the request; before the connection
     head is written, v2's setup-phase limit; idle (no request in flight since
     ``head_written`` or the last settlement), the offer's ``idle_timeout_s``,
@@ -1634,7 +1634,7 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
 async def _h2_client_to_sidecar(
     websocket: WebSocket, upstream: Any, state: SessionState
 ) -> None:
-    """The client pump of an ``http: 2`` session: as v2's, except that a
+    """The client pump of a connection: everything is relayed, except that a
     ``request`` frame goes to the session task (which reserves) and only its
     credential-free copy reaches the sidecar. Nothing later is forwarded
     until that is decided, so the request's records follow its ``request``."""
@@ -1690,7 +1690,7 @@ async def _h2_client_to_sidecar(
 async def _run_h2_session(
     websocket: WebSocket, upstream: Any, state: SessionState, started: float
 ) -> None:
-    """Relay an ``http: 2`` session. Reservations are made here, in the
+    """Relay a connection (either framing). Reservations are made here, in the
     session's own task (the reservation's lease is renewed while its owner
     task lives), one per ``request``."""
     loop = asyncio.get_running_loop()
