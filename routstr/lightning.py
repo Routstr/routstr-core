@@ -9,6 +9,14 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 from cashu.core.base import MintQuoteState
+from cashu.core.nuts import nut20
+from cashu.core.split import amount_split
+from cashu.wallet.crud import (
+    bump_secret_derivation,
+    get_bolt11_mint_quote,
+    update_proof,
+)
+from cashu.wallet.v1_api import LedgerAPI
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm.attributes import set_committed_value
@@ -81,6 +89,9 @@ class _InvoiceSettlement:
     api_key_hash: str | None
     mint_url: str | None
     validity_date: int | None
+    mint_keyset_id: str | None
+    mint_counter: int | None
+    mint_outputs: int | None
 
     @classmethod
     def from_invoice(cls, invoice: LightningInvoice) -> "_InvoiceSettlement":
@@ -92,6 +103,9 @@ class _InvoiceSettlement:
             api_key_hash=invoice.api_key_hash,
             mint_url=invoice.mint_url,
             validity_date=invoice.validity_date,
+            mint_keyset_id=invoice.mint_keyset_id,
+            mint_counter=invoice.mint_counter,
+            mint_outputs=invoice.mint_outputs,
         )
 
 
@@ -599,8 +613,14 @@ async def check_invoice_payment(
                     extra={"invoice_id": invoice.id, "error": str(error)},
                 )
                 return True
-            if not mint_status.paid:
-                return getattr(mint_status, "state", None) == MintQuoteState.unpaid
+            state = getattr(mint_status, "state", None)
+            # Only this node's own recorded mint call can make a claimed row ISSUED.
+            if not mint_status.paid and not (
+                state == MintQuoteState.issued
+                and observed_status == "settlement_pending"
+                and settlement.mint_counter is not None
+            ):
+                return state == MintQuoteState.unpaid
             payment_confirmed = True
 
             # Fence expiry and other workers before consuming the paid quote.
@@ -645,7 +665,9 @@ async def check_invoice_payment(
 
             # Quote-linked proof verification makes an ambiguous mint response
             # retryable without crediting unrelated wallet balance growth.
-            await _mint_invoice_quote(wallet, settlement)
+            await _mint_invoice_quote(
+                wallet, settlement, issued=state == MintQuoteState.issued
+            )
             minted = True
 
             paid_at = int(time.time())
@@ -725,18 +747,6 @@ def _is_quote_not_found(error: BaseException) -> bool:
     )
 
 
-def _is_outputs_already_signed(error: BaseException) -> bool:
-    message = str(error)
-    return bool(
-        re.search(
-            r"\boutputs?\s+(?:have\s+)?already\s+(?:been\s+)?signed(?:\s+before)?\b",
-            message,
-            re.IGNORECASE,
-        )
-        and re.search(r"\bcode\s*:\s*11003\b", message, re.IGNORECASE)
-    )
-
-
 def _invoice_quote_proof_amount(wallet: Any, quote_id: str) -> int:
     """Return spendable wallet value minted by one Lightning quote."""
     return sum(
@@ -747,42 +757,141 @@ def _invoice_quote_proof_amount(wallet: Any, quote_id: str) -> int:
 
 
 async def _mint_invoice_quote(
-    wallet: Any, invoice: LightningInvoice | _InvoiceSettlement
+    wallet: Any,
+    invoice: LightningInvoice | _InvoiceSettlement,
+    *,
+    issued: bool = False,
 ) -> None:
     """Mint a paid quote, proving quote-linked outputs before DB credit."""
-    mint_url = invoice.mint_url or settings.primary_mint
     await wallet.load_proofs(reload=True)
     if _invoice_quote_proof_amount(wallet, invoice.payment_hash) >= invoice.amount_sats:
         return
-
-    try:
-        await run_mint_operation(
-            lambda: wallet.mint(invoice.amount_sats, quote_id=invoice.payment_hash),
-            op_name=f"invoice_mint_{invoice.purpose}",
-            mint_url=mint_url,
-            retry_timeouts=False,
-        )
-    except Exception as error:
-        if not _is_outputs_already_signed(error):
-            raise
-
-        for keyset_id in wallet.keysets:
-            await wallet.restore_tokens_for_keyset(keyset_id, to=1, batch=25)
-        await wallet.load_proofs(reload=True)
-        recovered = _invoice_quote_proof_amount(wallet, invoice.payment_hash)
-        if recovered < invoice.amount_sats:
-            raise RuntimeError(
-                "Invoice outputs were already signed but quote-linked recovery returned "
-                f"{recovered} sats; expected at least {invoice.amount_sats}"
-            ) from error
+    outputs = await _invoice_outputs(wallet, invoice, issued=issued)
+    if issued:
+        # Proofs the wallet already spent no longer count as linked, but their
+        # signatures still prove the mint issued this quote to these outputs.
+        signed = await _link_invoice_outputs(wallet, invoice, *outputs)
+        if signed >= invoice.amount_sats:
+            return
     else:
+        await _send_invoice_outputs(wallet, invoice, *outputs)
+    linked = _invoice_quote_proof_amount(wallet, invoice.payment_hash)
+    if linked < invoice.amount_sats:
+        raise RuntimeError(
+            f"Invoice quote-linked proofs total {linked} sats; "
+            f"expected at least {invoice.amount_sats}"
+        )
+
+
+async def _invoice_outputs(
+    wallet: Any, invoice: LightningInvoice | _InvoiceSettlement, *, issued: bool
+) -> tuple[str, int, int]:
+    """The keyset and counter range reserved for this quote's outputs.
+
+    Every attempt sends the same outputs, and nothing else uses their counters,
+    so any signature the mint gives for them belongs to this quote.
+    """
+    if (
+        invoice.mint_keyset_id is not None
+        and invoice.mint_counter is not None
+        and invoice.mint_outputs
+        and (issued or invoice.mint_keyset_id == wallet.keyset_id)
+    ):
+        return invoice.mint_keyset_id, invoice.mint_counter, invoice.mint_outputs
+    keyset_id = wallet.keyset_id
+    count = len(amount_split(invoice.amount_sats))
+    counter = await bump_secret_derivation(db=wallet.db, keyset_id=keyset_id, by=count)
+    async with create_session() as session:
+        await session.exec(  # type: ignore[call-overload]
+            update(LightningInvoice)
+            .where(col(LightningInvoice.id) == invoice.id)
+            .values(mint_keyset_id=keyset_id, mint_counter=counter, mint_outputs=count)
+        )
+        await session.commit()
+    return keyset_id, counter, count
+
+
+async def _send_invoice_outputs(
+    wallet: Any,
+    invoice: LightningInvoice | _InvoiceSettlement,
+    keyset_id: str,
+    counter: int,
+    count: int,
+) -> None:
+    # Build the outputs from the reserved range instead of calling wallet.mint,
+    # which derives them from the shared keyset counter.
+    secrets_, rs, paths = await wallet.generate_secrets_from_to(
+        counter, counter + count - 1, keyset_id=keyset_id
+    )
+    outputs, rs = wallet._construct_outputs(
+        amount_split(invoice.amount_sats), secrets_, rs, keyset_id=keyset_id
+    )
+    quote = await get_bolt11_mint_quote(db=wallet.db, quote=invoice.payment_hash)
+    signature = (
+        nut20.sign_mint_quote(invoice.payment_hash, outputs, quote.privkey)
+        if quote and quote.privkey
+        else None
+    )
+    promises = await run_mint_operation(
+        lambda: LedgerAPI.mint(wallet, outputs, invoice.payment_hash, signature),
+        op_name=f"invoice_mint_{invoice.purpose}",
+        mint_url=invoice.mint_url or settings.primary_mint,
+        retry_timeouts=False,
+    )
+    proofs = await wallet._construct_proofs(promises, secrets_, rs, paths)
+    async with wallet.db.connect() as conn:
+        for proof in proofs:
+            proof.mint_id = invoice.payment_hash
+            await update_proof(proof, mint_id=invoice.payment_hash, conn=conn)
+    await wallet.load_proofs(reload=True)
+
+
+async def _link_invoice_outputs(
+    wallet: Any,
+    invoice: LightningInvoice | _InvoiceSettlement,
+    keyset_id: str,
+    counter: int,
+    count: int,
+) -> int:
+    """Link the quote's outputs to it, restoring any the wallet did not store.
+
+    Returns the value the mint signed across the range, spent proofs included.
+    """
+    secrets_, rs, paths = await wallet.generate_secrets_from_to(
+        counter, counter + count - 1, keyset_id=keyset_id
+    )
+    stored = {proof.secret: proof.amount for proof in wallet.proofs}
+    signed = sum(stored.get(secret, 0) for secret in secrets_)
+    unstored = [
+        (secret, r, path)
+        for secret, r, path in zip(secrets_, rs, paths)
+        if secret not in stored
+    ]
+    if unstored:
+        missing_secrets = [secret for secret, _, _ in unstored]
+        missing_rs = [r for _, r, _ in unstored]
+        missing_paths = [path for _, _, path in unstored]
+        outputs, _ = wallet._construct_outputs(
+            [1] * len(unstored), missing_secrets, missing_rs, keyset_id=keyset_id
+        )
+        _, restored = await run_mint_operation(
+            lambda: wallet.restore_promises(
+                outputs, missing_secrets, missing_rs, missing_paths
+            ),
+            op_name="invoice_restore",
+            mint_url=invoice.mint_url or settings.primary_mint,
+        )
+        signed += sum(proof.amount for proof in restored)
+        if restored:
+            await wallet.invalidate(restored, check_spendable=True)
         await wallet.load_proofs(reload=True)
-        minted_amount = _invoice_quote_proof_amount(wallet, invoice.payment_hash)
-        if minted_amount < invoice.amount_sats:
-            raise RuntimeError(
-                "Invoice mint succeeded but quote-linked proofs total "
-                f"{minted_amount} sats; expected at least {invoice.amount_sats}"
-            )
+    wanted = set(secrets_)
+    async with wallet.db.connect() as conn:
+        for proof in wallet.proofs:
+            if proof.secret in wanted and not proof.mint_id:
+                proof.mint_id = invoice.payment_hash
+                await update_proof(proof, mint_id=invoice.payment_hash, conn=conn)
+    return signed
 
 
 def _invoice_api_key_hash(invoice: LightningInvoice | _InvoiceSettlement) -> str:

@@ -768,7 +768,9 @@ async def _proxy(
                 request=request,
             )
     else:
-        request_body_dict = parse_request_body_json(request_body, path)
+        request_body_dict = parse_request_body_json(
+            request_body, path, headers.get("content-type", "")
+        )
         if is_responses_api:
             model_id = extract_model_from_responses_request(request_body_dict)
         else:
@@ -1693,11 +1695,38 @@ def extract_model_from_responses_request(request_body_dict: dict[str, Any]) -> s
     return "unknown"
 
 
-def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:
+def parse_request_body_json(
+    request_body: bytes, path: str, content_type: str = ""
+) -> dict[str, Any]:
+    # Multipart uploads (OpenAI images.edit) are not JSON; refuse them by name
+    # rather than letting json.loads fail as a 500.
+    if request_body and content_type.lower().startswith("multipart/"):
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "unsupported_media_type",
+                    "message": "Multipart request bodies are not supported; "
+                    "send a JSON body with images as base64 or URLs.",
+                }
+            },
+        )
     request_body_dict = {}
     if request_body:
         try:
             request_body_dict = json.loads(request_body)
+            if not isinstance(request_body_dict, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "invalid_json",
+                            "message": "Request body must be a JSON object",
+                        }
+                    },
+                )
 
             if "max_tokens" in request_body_dict:
                 max_tokens_value = request_body_dict["max_tokens"]
@@ -1718,7 +1747,7 @@ def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:
                     "model": request_body_dict.get("model", "not_specified"),
                 },
             )
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.error(
                 "Invalid JSON in request body",
                 extra={

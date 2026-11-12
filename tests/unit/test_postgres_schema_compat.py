@@ -177,6 +177,8 @@ def test_timestamp_columns_survive_2038_on_postgresql(
 NARROW_INTEGER_COLUMNS = {
     ("analytics_v2_delivery_state", "id"),
     ("analytics_v2_outbox", "kind"),
+    ("lightning_invoices", "mint_counter"),
+    ("lightning_invoices", "mint_outputs"),
     ("model_paths", "id"),
     ("model_paths", "upstream_provider_id"),
     ("models", "upstream_provider_id"),

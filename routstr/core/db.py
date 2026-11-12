@@ -558,6 +558,15 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
         default=None,
         description="Mint URL where the quote was created (fallback tracking)",
     )
+    mint_keyset_id: str | None = Field(
+        default=None, description="Keyset of the outputs reserved for the quote"
+    )
+    mint_counter: int | None = Field(
+        default=None, description="First secret counter of those outputs"
+    )
+    mint_outputs: int | None = Field(
+        default=None, description="Number of those outputs"
+    )
     created_at: int = Field(
         default_factory=lambda: int(time.time()),
         sa_type=UnixTimestamp,

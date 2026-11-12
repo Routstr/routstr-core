@@ -4,11 +4,16 @@ Routstr Core provides a complete OpenAI-compatible API with additional endpoints
 
 ## Base URL
 
-```
-https://api.routstr.com/v1
+Choose a node from the [provider directory](https://routstr.com/providers). The
+OpenAI-compatible base URL is the node's URL with `/v1` appended:
+
+```text
+https://provider.example/v1
 ```
 
-All API endpoints are prefixed with `/v1` for versioning.
+`https://provider.example` is a placeholder; replace it with your chosen node's URL.
+Check `/v1/models` before sending payment. Other APIs can use different prefixes, such as
+`/v2/lightning/invoice`.
 
 ## Authentication
 
@@ -147,7 +152,7 @@ Protected administrative functions:
 Instead of using `Authorization: Bearer sk-...`, you can send a Cashu token directly in the `X-Cashu` header. The response will include an `X-Cashu-Refund` header with your change.
 
 ```bash
-curl https://api.routstr.com/v1/chat/completions \
+curl https://provider.example/v1/chat/completions \
   -H "X-Cashu: cashuA3s8jKx9..." \
   -H "Content-Type: application/json" \
   -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'

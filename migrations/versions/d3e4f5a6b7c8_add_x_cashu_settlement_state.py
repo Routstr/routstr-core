@@ -1,7 +1,7 @@
 """add x-cashu settlement state to cashu_transactions
 
 Revision ID: d3e4f5a6b7c8
-Revises: e1b7c3d9a204
+Revises: 98cf337f18f4
 Create Date: 2026-10-26 00:00:00.000000
 """
 
@@ -11,7 +11,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "d3e4f5a6b7c8"
-down_revision = "e1b7c3d9a204"
+down_revision = "98cf337f18f4"
 branch_labels = None
 depends_on = None
 
