@@ -1,53 +1,58 @@
-"""Confidential-upstream websocket proxies (node side).
+"""Confidential-upstream websocket proxies (node side), protocol v3.
 
-* ``GET /v1/confidential/ws?session_id=<uuid>&v=2``: the session control
-  and TLS-record channel to the cu-sidecar. The first client frame must be
-  ``setup`` (within ``SETUP_TIMEOUT_S``). It carries the client's ordinary
-  bearer (``auth``: an ``sk-`` key or a Cashu token) and the ``offer_sig``
-  of the signed offer the client verified. The node validates
-  the setup, freezes the rates, reserves, and only then dials the sidecar and
-  forwards the setup *without* ``auth``/``offer_sig`` (the non-secret
-  reservation id binds the session id instead). Afterwards it intercepts:
+* ``GET /v1/confidential/ws?session_id=<uuid>&v=3``: the control and
+  TLS-record channel of one **connection** (one two-party handshake with the
+  provider) to the cu-sidecar. A socket of another version is told to upgrade
+  (426 ``upgrade_required``) and closed.
 
-  - ``ready``: announces the node's Nostr key (the sidecar's offer is dropped:
-    the node-signed offer is the only one);
-  - ``body_released``: the upstream now has the complete request;
-  - ``usage``: the π_C3S-verified usage (or upstream error status) for this
-    session's sid; the node settles it and returns a signed receipt;
-  - ``attestation``: re-signed with the node's key.
+  The first client frame must be ``setup`` (within ``SETUP_TIMEOUT_S``):
+  ``{v: 3, http: "2" | "1.1", nonce_c, armed, auth, offer_sig}``. It names
+  the connection only. The node checks that the sidecar serves the framing,
+  that ``offer_sig`` names an offer it signed and remembers (which then
+  stays remembered while the connection lives), that the credential
+  (``auth``: an ``sk-`` key or a Cashu token) has funds, and reserves that
+  offer's connection deposit; only then it dials the sidecar and forwards
+  the setup *without* ``auth``/``offer_sig``.
 
-  When the session ends without settlement, the reservation is released if
-  the upstream never received the complete request, and charged in full
-  otherwise (the client withheld its usage disclosure). With an abandon fee
-  (``CONFIDENTIAL_ABANDON_FEE_MSAT``, or the session fee), a session the
-  sidecar accepted (``ready``) is charged that fee instead of being released
-  for free: the node did the 2PC work either way. Every refusal or failure is reported as
-  ``{"type": "error", "status", "reason", "detail"}`` before the socket closes.
+  Each ``request`` frame carries what is billed (``n``, the kind, model and
+  ``max_tokens`` or variant and count, ``auth``, ``offer_sig``, the accepted
+  fees). The node validates it, freezes the rates of the offer it names and
+  reserves (``reserve`` / ``reserve_image``), then forwards it without the
+  credential, the offer signature and the fees. A request it or the sidecar
+  does not accept is answered with ``request_refused``: nothing is held for
+  it and the connection stays. Framing ``"2"`` carries many requests, one
+  after another; framing ``"1.1"`` exactly one, sent before the ClientHello.
 
-  An ``http: 2`` setup (protocol v3, option A; offered only when the sidecar
-  offers it) opens one provider connection for many sequential requests. It
-  names no model: the node checks the offer signature and that the
-  credential has funds, reserves the offer's connection deposit (released
-  when the connection's first request reaches settlement, charged when the
-  connection ends without one unless the node, the sidecar or the provider
-  failed; ``_h2_deposit_verdict``), then dials the sidecar. It closes a
-  connection with no request in flight for the offer's ``idle_timeout_s``.
-  Each ``request``
-  frame then carries what a v2 setup carries (``auth``, ``offer_sig``, the
-  fees, model, ``max_tokens``); the node validates it, freezes the rates and
-  reserves as for a v2 setup, and forwards it without the credential. That
-  request's ``body_released``, ``attestation`` and ``usage`` are handled as
-  above, the receipt names the request (``n``), and the connection is idle
-  again. A connection that ends between requests costs nothing more; one that ends
-  during a request finalizes that request's reservation by the rules above.
-  A request the node refuses ends the connection.
+  Of the sidecar's frames the node intercepts:
 
-* ``GET /v1/confidential/zk?proof=<pi_*>&session_id=<sid>&zk_token=<token>``: a byte proxy for
-  one ZK proof (``twopc``: the two-party handshake; ``zkchan``: the
-  session's long-lived proof channel, which carries π_NK, π_WIN and π_C3S
-  over correlations set up while the session is armed). Only the sid of a
-  live session on this process (announced by the sidecar's ``ready``), with
-  the token the node added to that ``ready``, is admitted, so the node must run as a single worker process.
+  - ``ready``: adds the node's Nostr key, the ``/zk`` token and the deposit
+    it reserved (the sidecar's offer is dropped: the node-signed one is the
+    only one);
+  - ``body_released``: the provider now has the complete request;
+  - ``attestation``: re-signed with the node's key;
+  - ``usage``: the verified usage, error status or flat image settlement of
+    the request in flight; the node settles it and returns a signed receipt.
+    The connection's first settlement releases the deposit and carries the
+    session fee;
+  - ``closed`` / ``error``: the sidecar's last frame, sent on as the
+    connection's last frame with the deposit's signed outcome when the
+    deposit was not released by a settlement (``_h2_deposit_verdict``).
+
+  A request in flight when the connection ends is released if the provider
+  never received it complete (less the abandon fee once the sidecar accepted
+  it, unless the deposit is charged for it or the provider or the sidecar
+  failed; less the session fee if the provider answered and closed first)
+  and charged in full otherwise (the client withheld its disclosure). The
+  node closes a connection with no request in flight for the offer's
+  ``idle_timeout_s``. The rules are PROTOCOL-V3.md §12.10.
+
+* ``GET /v1/confidential/zk?proof=<name>&session_id=<sid>&zk_token=<token>``:
+  a byte proxy (``twopc``: the two-party key schedule; ``zkchan``: the
+  connection's long-lived proof channel, which carries π_NK, π_WIN and π_C3S;
+  ``pi_nk``, ``pi_win``, ``pi_c3s``: one proof). Only the sid of a live
+  connection on this process (announced by the sidecar's ``ready``), with
+  the token the node added to that ``ready``, is admitted, so the node must
+  run as a single worker process.
 """
 
 from __future__ import annotations
@@ -116,8 +121,8 @@ _UUID_RE = re.compile(
 # The zk route is keyed by the protocol sid (a 32-byte hex digest).
 _SID_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
-# Protocol v2 only (v1's pi_c1/pi_n/pi_c2/pi_c3 are retired).
-# ``pi_win`` proves the client's records of an ``http: 2`` session.
+# Protocol v3 only: ``pi_win`` proves the client's records (v2's pi_c2s and
+# v1's pi_c1/pi_n/pi_c2/pi_c3 are gone).
 _PROOF_RE = re.compile(r"^(twopc|zkchan|pi_nk|pi_c3s|pi_win)$")
 # The proof/2PC channel carries mux frames of at most 1 MiB; the session
 # channel carries TLS records (≤ 16.6 KiB each), which a client may batch, at
