@@ -268,3 +268,20 @@ def test_openrouter_caps_chat_at_the_listed_price() -> None:
     assert own["order"] == ["wafer/us"] and own["sort"] == "throughput"
     assert own["max_price"]["prompt"] == 0.05
     assert own["max_price"]["completion"] == pytest.approx(1.4, abs=1e-9)
+
+    # False is an int in Python; read as 0 it would refuse every seller.
+    flag = routing({"provider": {"max_price": {"prompt": False}}})
+    assert flag["max_price"]["prompt"] == pytest.approx(0.0699, abs=1e-9)
+
+
+def test_openrouter_zero_fee_leaves_chat_uncapped() -> None:
+    provider = OpenRouterUpstreamProvider(api_key="k", provider_fee=0)
+    body = json.dumps({"model": "test-model", "messages": []}).encode()
+    out = provider.prepare_request_body(body, CHAT_MODEL)
+    assert out is not None
+    assert "provider" not in json.loads(out)
+    responses = provider.prepare_responses_request_body(
+        json.dumps({"model": "test-model", "input": "hi"}).encode(), CHAT_MODEL
+    )
+    assert responses is not None
+    assert "provider" not in json.loads(responses)

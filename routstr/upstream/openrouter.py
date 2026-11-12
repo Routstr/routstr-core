@@ -35,8 +35,10 @@ def _capped_at_listed_price(
     body: bytes | None, model: Model, provider_fee: float
 ) -> bytes | None:
     """Let OpenRouter serve a text request only from an endpoint priced within
-    the model's listed price, keeping the client's own ``max_price`` where lower."""
-    if not body or produces_images(model):
+    the model's listed price, keeping the client's own ``max_price`` where lower.
+    A fee of 0 or less lists nothing to recover the seller's price from, and
+    the node bills nothing for it, so the request goes out uncapped."""
+    if not body or provider_fee <= 0 or produces_images(model):
         return body
     try:
         data = json.loads(body)
