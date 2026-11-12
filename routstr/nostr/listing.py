@@ -64,6 +64,7 @@ def create_listing_event(
     mint_urls: list[str] | None = None,
     version: str | None = None,
     metadata: dict[str, Any] | None = None,
+    confidential: int | None = None,
 ) -> dict[str, Any]:
     """
     Create a listing provider announcement event (kind:38421).
@@ -75,6 +76,9 @@ def create_listing_event(
         mint_urls: Optional list of ecash mint URLs for payments
         version: Provider software version
         metadata: Optional metadata dictionary (name, picture, about, etc.)
+        confidential: The routstr-confidential protocol version this node
+            serves (a ``confidential`` tag), so clients can filter before
+            they fetch offers; ``None`` when it serves none
 
     Returns:
         Complete signed nostr event as a dict ready for publishing
@@ -88,6 +92,8 @@ def create_listing_event(
                 tags.append(["mint", m])
     if version:
         tags.append(["version", version])
+    if confidential is not None:
+        tags.append(["confidential", str(confidential)])
 
     content = json.dumps(metadata, separators=(",", ":")) if metadata else ""
 
@@ -97,6 +103,16 @@ def create_listing_event(
         content=content,
         tags=tags,
     )
+
+
+def _confidential_version() -> int | None:
+    """The routstr-confidential protocol version this node serves, or
+    ``None`` when confidential mode is off (no sidecar configured)."""
+    if not settings.confidential_sidecar_url:
+        return None
+    from ..confidential import CONFIDENTIAL_VERSION
+
+    return CONFIDENTIAL_VERSION
 
 
 def _get_tag_values(event: dict[str, Any], key: str) -> list[str]:
@@ -141,6 +157,11 @@ def events_semantically_equal(a: dict[str, Any], b: dict[str, Any]) -> bool:
         return False
 
     if _get_single_tag_value(a, "version") != _get_single_tag_value(b, "version"):
+        return False
+
+    if _get_single_tag_value(a, "confidential") != _get_single_tag_value(
+        b, "confidential"
+    ):
         return False
 
     content_a = _parse_content_json(cast(str, a.get("content", "")))
@@ -520,6 +541,7 @@ async def announce_provider() -> None:
                 mint_urls=_resolve_mint_urls(),
                 version=get_app_version(),
                 metadata=metadata,
+                confidential=_confidential_version(),
             )
 
             # Fetch existing events for this provider_id
