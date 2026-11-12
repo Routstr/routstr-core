@@ -231,11 +231,12 @@ class _PrefixUp(_Up):
         return model_id.removeprefix("vendor/")
 
 
-def test_chat_is_offered_only_under_the_providers_own_id(
+def test_chat_is_offered_under_the_public_id_pinning_the_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The pinned suffix sends the offered id to the provider unchanged, so a
-    model whose public id is not the provider's spelling is not offered."""
+    """A model is offered under its public id; the suffix pins the id the
+    plain path sends the provider (``transform_model_name`` of the provider
+    row's id), and the offer lists the pair where the two differ."""
     from types import SimpleNamespace
 
     import routstr.proxy as proxy
@@ -246,6 +247,7 @@ def test_chat_is_offered_only_under_the_providers_own_id(
         "same": "same",
         "glm-5.3": "GLM-5.3",  # lower-cased public id
         "alias": "real-model",  # operator alias (forwarded id)
+        "kimi-k3.1-pro": "moonshotai/kimi-k3.1-pro",  # org/ prefix dropped
         "vendor/pfx": "vendor/pfx",  # the provider strips the prefix
         "nameless": None,
     }
@@ -258,7 +260,31 @@ def test_chat_is_offered_only_under_the_providers_own_id(
         lambda mid: [(SimpleNamespace(id=public[mid]), up)],
     )
     offered = conf.offered_models({"upstream_host": "api.venice.ai"})
-    assert set(offered) == {"same"}
+    assert {m: c.provider_model for m, c in offered.items()} == {
+        "same": "same",
+        "glm-5.3": "GLM-5.3",
+        "alias": "real-model",
+        "kimi-k3.1-pro": "moonshotai/kimi-k3.1-pro",
+        "vendor/pfx": "pfx",
+    }
+    priced = {m: (c, {"in": 1.0, "out": 1.0}) for m, c in offered.items()}
+    # Only the pairs that differ are listed (none for a provider whose ids
+    # are the public ones: its offer is unchanged).
+    assert conf.upstream_models_block(priced) == {
+        "alias": "real-model",
+        "glm-5.3": "GLM-5.3",
+        "kimi-k3.1-pro": "moonshotai/kimi-k3.1-pro",
+        "vendor/pfx": "pfx",
+    }
+    assert conf.upstream_models_block({"same": priced["same"]}) == {}
+    # The allowlist names the provider's id: what the sidecar checks.
+    only = conf.offered_models(
+        {
+            "upstream_host": "api.venice.ai",
+            "model_allowlist": ["moonshotai/kimi-k3.1-pro"],
+        }
+    )
+    assert set(only) == {"kimi-k3.1-pro"}
     assert (
         conf.provider_model_id(conf.Candidate(SimpleNamespace(id="vendor/x"), up))
         == "x"
@@ -266,6 +292,11 @@ def test_chat_is_offered_only_under_the_providers_own_id(
     # Without a transform hook the model's own id is what the provider gets.
     plain = conf.Candidate(SimpleNamespace(id="M"), _Up("https://api.venice.ai"))
     assert conf.provider_model_id(plain) == "M"
+    terms = conf.OfferTerms(
+        {}, upstream_models={"kimi-k3.1-pro": "moonshotai/kimi-k3.1-pro"}
+    )
+    assert conf.pinned_model(terms, "kimi-k3.1-pro") == "moonshotai/kimi-k3.1-pro"
+    assert conf.pinned_model(terms, "same") == "same"
 
 
 def test_model_allowlist_semantics() -> None:
