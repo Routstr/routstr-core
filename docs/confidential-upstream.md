@@ -35,8 +35,9 @@ only `twopc`, `zkchan`, `pi_nk`, `pi_win` and `pi_c3s`; a sidecar whose offer
 does not name `v: 3` is refused (no offer, no `confidential_upstream` models
 field). Clients fetch the offer as `/v1/confidential/offer?v=3` (the query is
 ignored), and the node's Nostr listing carries the tag `["confidential","3"]`
-while a sidecar is configured. Protocol v2 remains on the branch
-`confidential-2pc`, v1 on `confidential-upstream`.
+while a sidecar is configured. Protocol v3 is on the branch
+`confidential-2pc` (this one); the retired v2 is archived on `confidential-v2`,
+v1 on `confidential-upstream`.
 
 ## Connections and requests
 
