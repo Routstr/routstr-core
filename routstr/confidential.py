@@ -906,6 +906,18 @@ CONNECTION_FIELDS = (
 )
 
 
+# The connection-level fields whose change is a change of what the client
+# verified about the connection itself (the provider, the head the
+# credential is written in, the pinned suffix, the key schedule, the HTTP/2
+# rules): a live connection opened on another value of one of them takes no
+# further request once the node serves the new offer. The deposit and the
+# idle timeout are terms of the connection's money and lifetime only: an old
+# connection keeps the ones it was opened on.
+SECURITY_FIELDS = tuple(
+    f for f in CONNECTION_FIELDS if f not in ("connection_deposit_msat", "idle_timeout_s")
+)
+
+
 def connection_fields(offer: dict[str, Any]) -> str:
     """The connection-level fields of ``offer`` as canonical JSON."""
     out: dict[str, Any] = {k: offer[k] for k in CONNECTION_FIELDS if k in offer}
@@ -1400,19 +1412,62 @@ def _fee_not_accepted(fee: int, abandon: int) -> BillingError:
     )
 
 
+def _security_view(connection: str, drop: tuple[str, ...] = ()) -> str:
+    """The security-relevant part (``SECURITY_FIELDS`` and the images block
+    without prices) of a ``connection_fields`` string, without ``drop``."""
+    try:
+        fields = json.loads(connection)
+    except ValueError:
+        return connection
+    keep = {
+        k: v
+        for k, v in fields.items()
+        if (k in SECURITY_FIELDS or k == "images") and k not in drop
+    }
+    return canonical_json(keep).decode("utf-8")
+
+
 def check_request_offer(offer_sig: str, opened_on: OfferTerms, framing: str) -> None:
     """A request on a connection opened on the offer ``opened_on`` names the
-    offer ``offer_sig``: its connection-level fields must be the same and it
-    must still list the connection's framing. Raises ``BillingError`` (409):
-    ``offer_expired`` for an offer this node does not remember,
-    ``offer_changed`` otherwise (the client opens a new connection)."""
-    terms = signed_offer_terms(offer_sig)
+    offer ``offer_sig``. Raises ``BillingError`` (409):
+
+    - ``offer_expired``: the node does not remember that offer, or has not
+      served it for ``SIGNED_OFFER_TTL_S`` (it serves another one now). A
+      connection keeps its opening offer remembered for the connection-level
+      comparison, but its *prices* are good only while the node still serves
+      it or for ``SIGNED_OFFER_TTL_S`` after it stopped: old rates do not
+      outlive a price change by more than that (the client refetches and
+      names the new offer; a price-only change keeps the connection).
+    - ``offer_changed``: the named offer differs from the opening one in a
+      connection-level field or no longer lists the framing, or the offer the
+      node serves now differs from the opening one in a security-relevant
+      field (``SECURITY_FIELDS``): such a connection takes no further
+      request, whichever offer the request names (the client opens a new
+      connection)."""
+    found = _SIGNED_OFFERS.get(offer_sig)
+    fresh = found is not None and time.monotonic() - found[0] < SIGNED_OFFER_TTL_S
+    terms = found[1] if fresh and found is not None else None
     if terms is None:
         message = (
             "the signed offer is unknown or expired; refetch /v1/confidential/offer"
         )
         raise BillingError(
             message, 409, {"error": {"type": "offer_expired", "message": message}}
+        )
+    current = _LAST_OFFER.get("offer")
+    # A framing "2" the sidecar withdrew (no h2 block now) is not a change of
+    # its rules: live connections keep working.
+    drop = () if not isinstance(current, dict) or "h2" in current else ("h2",)
+    if isinstance(current, dict) and _security_view(
+        connection_fields(current), drop
+    ) != _security_view(opened_on.connection, drop):
+        message = (
+            "the node's offer changed in what secures the connection (provider, "
+            "head, suffix, key schedule or HTTP/2 rules) since the connection "
+            "was opened; open a new connection"
+        )
+        raise BillingError(
+            message, 409, {"error": {"type": "offer_changed", "message": message}}
         )
     if terms is opened_on:
         return

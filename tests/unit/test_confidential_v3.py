@@ -320,6 +320,69 @@ def test_check_request_offer() -> None:
         assert err.value.detail["error"]["type"] == kind
 
 
+def test_a_request_cannot_keep_old_prices_past_the_offer_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The offer a connection was opened on stays remembered for the
+    connection-level comparison, but a request may name it (and get its
+    rates) only while the node still serves it, or for SIGNED_OFFER_TTL_S
+    after it stopped: then ``offer_expired``, the client refetches, and a
+    price-only change keeps the connection."""
+    now = {"t": 1000.0}
+    monkeypatch.setattr(conf.time, "monotonic", lambda: now["t"])
+    opened = _terms("A")
+    conf._remember_offer("aa", opened)
+    assert conf.pin_offer("aa") is opened
+    conf.check_request_offer("aa", opened, "2")
+    now["t"] += conf.SIGNED_OFFER_TTL_S + 1
+    with pytest.raises(conf.BillingError) as err:
+        conf.check_request_offer("aa", opened, "2")
+    assert err.value.detail["error"]["type"] == "offer_expired"
+    # The node serves a re-priced offer (same connection terms): accepted.
+    conf._remember_offer("bb", _terms("A"))
+    conf.check_request_offer("bb", opened, "2")
+    # Served again (unchanged), the old one is fresh again.
+    conf._remember_offer("aa", _terms("A"))
+    conf.check_request_offer("aa", opened, "2")
+    conf.unpin_offer("aa")
+
+
+def test_a_security_relevant_offer_change_retires_live_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the node serves an offer that differs in what secures the
+    connection (here the pinned chat suffix), a connection opened on the old
+    one takes no further request, even naming its own offer; a change of the
+    deposit or the idle timeout, or framing "2" withdrawn, does not retire it."""
+    base = {
+        "v": 3,
+        "twopc": "split-public-1",
+        "upstream_host": "api.venice.ai",
+        "head_template": "POST /x HTTP/1.1\r\n\r\n",
+        "chat": {"cap_keys": ["max_tokens"]},
+        "h2": {"probe_path": "/api/v1/models"},
+        "connection_deposit_msat": 1000,
+        "idle_timeout_s": 120,
+    }
+    opened = _terms(conf.connection_fields(base))
+    conf._remember_offer("aa", opened)
+    for current, retired in (
+        (base, False),
+        ({**base, "idle_timeout_s": 60, "connection_deposit_msat": 2000}, False),
+        ({k: v for k, v in base.items() if k != "h2"}, False),
+        ({**base, "chat": {"cap_keys": ["max_completion_tokens"]}}, True),
+        ({**base, "head_template": "POST /y HTTP/1.1\r\n\r\n"}, True),
+        ({**base, "h2": {"probe_path": "/other"}}, True),
+    ):
+        monkeypatch.setitem(conf._LAST_OFFER, "offer", {**current, "sig": "zz"})
+        if retired:
+            with pytest.raises(conf.BillingError) as err:
+                conf.check_request_offer("aa", opened, "2")
+            assert err.value.detail["error"]["type"] == "offer_changed"
+        else:
+            conf.check_request_offer("aa", opened, "2")
+
+
 def test_an_offer_stays_remembered_while_a_connection_is_open_on_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1843,3 +1906,258 @@ async def test_flat_settlement_owes_the_session_fee_once(
     assert (await conf.settle_flat(billing(2000)))["cost_msats"] == 22_000
     assert (await conf.settle_flat(billing(0)))["cost_msats"] == 20_000
     assert charged == [22_000, 20_000]
+
+
+# ---------------------------------------------------------------------------
+# which side ended the connection, deposit atomicity, refusals, slots
+# ---------------------------------------------------------------------------
+
+
+async def test_a_sidecar_that_dies_under_a_frame_is_a_sidecar_failure_whichever_pump_ends_first(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The client pump fails to forward a frame (the sidecar's socket is
+    gone) and finishes before the sidecar pump sees the end: the verdict
+    waits for the sidecar pump, so the deposit is released as the sidecar's
+    failure, not charged as unused. A last frame the sidecar did send before
+    its socket ended still decides."""
+
+    class _Upstream(_QueueSidecar):
+        def __init__(self, last: dict[str, Any] | None) -> None:
+            super().__init__([_ready("2"), _HEAD], [])
+            self.last = last
+
+        async def send(self, data: Any) -> None:
+            async def end_later() -> None:
+                await asyncio.sleep(0.3)
+                if self.last is not None:
+                    self.queue.put_nowait(json.dumps(self.last))
+                self.queue.put_nowait(None)
+
+            asyncio.ensure_future(end_later())
+            raise cws.websockets.ConnectionClosedError(None, None)
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.closed = True
+
+    class _Client(_IdleClient):
+        def __init__(self) -> None:
+            super().__init__()
+            text = json.dumps({"type": "settings_seen", "header_table_size": None})
+            self.frames = [{"type": "websocket.receive", "text": text}]
+
+        async def receive(self) -> dict[str, Any]:
+            await asyncio.sleep(0.05)
+            if self.frames:
+                return self.frames.pop()
+            await asyncio.Event().wait()
+            return {}
+
+    async def run(last: dict[str, Any] | None) -> tuple[cws.SessionState, list[str], _Client]:
+        ledger = _Ledger(monkeypatch, deposit=DEP)
+        state = cws.SessionState()
+        state.framing, state.sid = "2", SID
+        state.h2_deposit = await cws.reserve_deposit("sk-client-key", SIG)
+        client = _Client()
+        loop = asyncio.get_running_loop()
+        await cws._run_h2_session(client, _Upstream(last), state, loop.time())  # type: ignore[arg-type]
+        return state, ledger.calls, client
+
+    state, calls, client = await run(None)
+    assert state.h2_fault == "sidecar_failure"
+    assert calls == ["deposit", "release:dep"]
+    assert client.sent[-1]["fault"] == "node" and _deposit(client.sent[-1])[1] == "sidecar_failure"
+    # The sidecar's own last frame arrived first: it decides (row 12).
+    state, calls, client = await run({"type": "error", "reason": "proof pi_nk failed"})
+    assert state.h2_fault is None and calls == ["deposit", "charge:dep"]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_a_deposit_that_cannot_be_released_at_the_first_settlement_is_kept_and_reported(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """The first settlement's charge is written but the deposit's release
+    fails every retry: no receipt (it would have to report the release), the
+    node's error says what was charged, the deposit stays the connection's
+    and its end releases it, signed (row 6)."""
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    monkeypatch.setattr(cws, "SETTLE_RETRY_DELAYS", (0, 0, 0))
+    inner = cws.release
+    fails = {"left": 4}
+
+    async def release(billing: Any) -> int:
+        if billing.snapshot.release_id == "dep" and fails["left"] > 0:
+            fails["left"] -= 1
+            ledger.calls.append("release-failed:dep")
+            raise RuntimeError("db down")
+        return await inner(billing)
+
+    monkeypatch.setattr(cws, "release", release)
+    frames = [f for f in _settled(1, http) if f["type"] != "closed"]
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_request())
+        got = []
+        while True:
+            m = conn.recv1()
+            got.append(m["type"])
+            if m["type"] == "error":
+                break
+        assert conn.closed()
+    assert "receipt" not in got
+    assert m["status"] == 500 and m["fault"] == "node"
+    assert m["detail"]["error"]["outcome"] == "charged_usage:12"
+    assert _deposit(m) == ("released", "node_failure", DEP)
+    assert ledger.calls[-6:] == ["settle:rel-1"] + ["release-failed:dep"] * 4 + ["release:dep"]
+
+
+def test_requests_refused_in_a_row_end_the_connection(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Refused requests hold nothing and cost nothing, so they are bounded:
+    the refusal after MAX_REFUSED_IN_A_ROW ends the connection (429) and a
+    connection that carried only refused requests loses its deposit."""
+    limit = cws.MAX_REFUSED_IN_A_ROW
+    errors = {i: conf.BillingError("Insufficient balance", 402) for i in range(1, limit + 2)}
+    ledger = _Ledger(monkeypatch, deposit=DEP, reserve_errors=errors)
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+        for _ in range(limit):
+            conn.send(_request())
+            assert conn.recv1()["type"] == "request_refused"
+        conn.send(_request())
+        err = conn.recv1()
+        assert err["type"] == "error" and err["status"] == 429
+        assert conn.closed()
+    assert _deposit(err) == ("charged", "unused", DEP)
+    assert ledger.calls.count("reserve") == limit + 1 and ledger.calls[-1] == "charge:dep"
+
+
+def test_an_accepted_request_restarts_the_refusal_count(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    limit = cws.MAX_REFUSED_IN_A_ROW
+    # Refusals 1..limit, then an accepted request, then limit refusals more.
+    errors = {i: conf.BillingError("Insufficient balance", 402) for i in range(1, limit + 1)}
+    errors.update({i: conf.BillingError("Insufficient balance", 402) for i in range(limit + 2, 2 * limit + 2)})
+    _Ledger(monkeypatch, deposit=DEP, reserve_errors=errors)
+    with _Conn(monkeypatch, lambda n: _settled(n, "2"), "2") as conn:
+        conn.open()
+        for _ in range(limit):
+            conn.send(_request())
+            assert conn.recv1()["type"] == "request_refused"
+        conn.send(_request())
+        assert conn.until("receipt")["receipt"]["n"] == 1
+        for _ in range(limit):
+            conn.send(_request(2))
+            assert conn.recv1()["type"] == "request_refused"
+
+
+def test_a_provider_close_after_client_frames_on_an_unused_connection_is_not_the_providers(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Row 5 releases the deposit when the provider closed an open, idle
+    connection; after control frames of the client on a connection that
+    carried no request the close may be the client's doing (the sidecar
+    flags it): charged as unused."""
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    last = {"type": "closed", "reason": "upstream_closed", "after_client_frames": True}
+    with _Conn(monkeypatch, http="2", on_setup=[_ready("2"), _HEAD, last]) as conn:
+        conn.open()
+        frame = conn.recv1()
+        assert conn.closed()
+    assert _deposit(frame) == ("charged", "unused", DEP)
+    assert ledger.calls == ["check", "deposit", "charge:dep"]
+
+
+def _holder(addr: str, idle_since: float | None, settled: int = 1, busy: bool = False) -> cws.SessionState:
+    s = cws.SessionState()
+    s.addr_key = addr
+    s.h2_settled = settled
+    s.h2_idle_since = idle_since
+    if busy:
+        s.billing = object()  # type: ignore[assignment]
+    return s
+
+
+async def _claim(states: list[cws.SessionState]) -> None:
+    for s in states:
+        await cws._claim_slot(s)
+        cws._mark_used(s)
+
+
+async def test_a_full_node_evicts_the_longest_idle_used_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Load: 32 connections, each settled one request and idles. A 33rd
+    setup closes the one idle longest (its deposit was already released)
+    instead of being refused; connections with a request in flight or not
+    yet used are never evicted, and with only those left the node refuses."""
+    monkeypatch.setattr(cws, "EVICT_WAIT_S", 0.01)
+    monkeypatch.setattr(settings, "confidential_max_active_per_ip", 0)
+    states = [_holder(f"198.51.100.{i}", 100.0 + i) for i in range(cws.MAX_SESSIONS)]
+    await _claim(states)
+    assert cws._active_sessions == cws.MAX_SESSIONS
+    newcomer = _holder("203.0.113.9", None, settled=0)
+    await cws._claim_slot(newcomer)
+    assert states[0].h2_evicted and states[0].h2_moved.is_set()
+    assert not any(s.h2_evicted for s in states[1:])
+    assert cws._active_sessions == cws.MAX_SESSIONS and newcomer.counted
+    assert states[0] not in cws._slot_holders
+    # The rest busy (a request in flight) or unused: nothing to evict.
+    for s in states[1:]:
+        s.billing = object()  # type: ignore[assignment]
+    cws._mark_used(newcomer)
+    with pytest.raises(cws.SetupError) as exc:
+        await cws._claim_slot(_holder("203.0.113.10", None, settled=0))
+    assert exc.value.status == 503
+    # Every slot freed once, whatever ended first.
+    for s in [*states, newcomer]:
+        cws._free_slot(s)
+    assert cws._active_sessions == 0 and cws._active_by_ip == {} and cws._slot_holders == {}
+
+
+async def test_an_address_has_a_total_limit_and_evicts_its_own_idle_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One address may not hold every slot with used, mostly idle
+    connections: at ``confidential_max_active_per_ip`` its new setup closes
+    its own longest-idle used connection, or is refused (429)."""
+    monkeypatch.setattr(cws, "EVICT_WAIT_S", 0.01)
+    monkeypatch.setattr(settings, "confidential_max_active_per_ip", 3)
+    other = _holder("198.51.100.1", 1.0)
+    mine = [_holder("203.0.113.1", 10.0 + i) for i in range(3)]
+    await _claim([other, *mine])
+    await cws._claim_slot(_holder("203.0.113.1", None, settled=0))
+    assert mine[0].h2_evicted and not other.h2_evicted
+    assert cws._active_by_ip == {"198.51.100.1": 1, "203.0.113.1": 3}
+    for s in mine[1:]:
+        s.billing = object()  # type: ignore[assignment]
+    with pytest.raises(cws.SetupError) as exc:
+        await cws._claim_slot(_holder("203.0.113.1", None, settled=0))
+    assert exc.value.status == 429 and "this address" in str(exc.value)
+
+
+async def test_an_evicted_idle_connection_closes_in_order(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The connection the slot was taken from ends with ``closed`` reason
+    ``evicted``; it holds nothing (its deposit went back at its first
+    settlement), so nothing is charged."""
+    ledger = _Ledger(monkeypatch)
+    state = cws.SessionState()
+    state.framing, state.sid = "2", SID
+    state.h2_settled, state.h2_idle_since = 1, asyncio.get_running_loop().time()
+    sidecar = _QueueSidecar([_ready("2"), _HEAD], [])
+    client = _IdleClient()
+
+    async def evict_soon() -> None:
+        await asyncio.sleep(0.1)
+        state.h2_evicted = True
+        state.h2_moved.set()
+
+    asyncio.ensure_future(evict_soon())
+    loop = asyncio.get_running_loop()
+    await cws._run_h2_session(client, sidecar, state, loop.time())  # type: ignore[arg-type]
+    assert client.sent[-1] == {"type": "closed", "reason": "evicted"}
+    assert ledger.calls == []

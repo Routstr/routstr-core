@@ -93,6 +93,23 @@ the same and it still lists the connection's framing; otherwise the request
 is refused with 409 `offer_changed` and the client opens a new connection or
 names the old offer.
 
+Two limits on that memory, so a long connection cannot keep obsolete terms:
+
+- *Prices.* A request may name an offer only while the node still serves it
+  or for 10 minutes after it stopped (409 `offer_expired` otherwise; the
+  client refetches and names the newest, and a price-only change keeps the
+  connection). Old rates therefore outlive a price change by at most 10
+  minutes, whatever the connection's `h2.max_lifetime_s`.
+- *Security-relevant changes.* Once the node serves an offer whose `v`,
+  `twopc`, `upstream_host`, `head_template`, `chat`, `h2` or `images` block
+  (prices aside) differs from a live connection's, that connection takes no
+  further request (409 `offer_changed`, even naming its own offer): a changed
+  suffix or head is in force for every request from then on. A changed
+  deposit or idle timeout applies to new connections only, and framing "2"
+  withdrawn by the sidecar does not end live connections. Rotating the
+  provider key means restarting the sidecar, which ends every live connection
+  (`fault`, deposits released).
+
 ## Billing (the node's normal path)
 
 Requests are billed like any request whose prompt the node cannot read (cf.
@@ -262,8 +279,19 @@ signed.
   only by the node: every node request to it carries
   `CONFIDENTIAL_SIDECAR_TOKEN`, and a sidecar off loopback refuses requests
   without it (and refuses to start without a token).
-- At most 32 connections at once per node process, each for its whole life.
-  A setup that finds all taken is refused (503) and its deposit released.
+- At most 32 connections at once per node process, each for its whole life,
+  and at most `CONFIDENTIAL_MAX_ACTIVE_PER_IP` (16) per client address, used
+  or not. A setup that finds either full first closes the longest-idle *used*
+  connection there (one that settled a request, has none in flight, and so
+  holds no deposit): `closed` with reason `evicted`. Only when there is none
+  is it refused (503 node, 429 address) and its deposit released. A client
+  can therefore not hold every slot with cheap, mostly idle connections.
+- Requests refused in a row on one connection (by the node or the sidecar)
+  are capped at 8: the ninth ends the connection (`error` 429; a connection
+  that carried only refused requests loses its deposit, row 12).
+- A provider close of a connection that carried no request, after the client
+  had control frames written to it, is flagged by the sidecar
+  (`after_client_frames`) and is not row 5: the deposit is charged.
 - A connection counts as unused for `CONFIDENTIAL_MAX_UNUSED_PER_IP` until
   the first `body_released` of one of its requests, or until it ends.
 - Time: 10 minutes from the websocket accept to `head_written` (the armed
@@ -327,6 +355,7 @@ signed.
 | `CONFIDENTIAL_ABANDON_FEE_MSAT` | fee (msat) for a request the provider rejected (another 4xx) and for an accepted request dropped before `body_released` once the deposit was released; never below the session fee (0 = equal to it) | `0` (off) |
 | `CONFIDENTIAL_RATE_SURCHARGE_PCT` | percentage added to the per-token rates and image prices; the signed offer carries the surcharged prices | `0` (off) |
 | `CONFIDENTIAL_RESERVE_MARGIN_TOKENS` | completion tokens reserved beyond the pinned `max_tokens` (a provider may bill a few more than the cap, and the charge never exceeds the reservation); only the hold grows; a usage with more completion tokens than `max_tokens` plus this is logged as a warning; in the signed offer as `reserve_margin_tokens` | `16` |
+| `CONFIDENTIAL_MAX_ACTIVE_PER_IP` | connections per client address in total (used or not); at the limit a setup closes the address's longest-idle used connection, else is refused (429); 0 disables | `16` |
 | `CONFIDENTIAL_MAX_UNUSED_PER_IP` | refuse (429) a new connection from a client address (IPv6: its /64) that already has this many unused ones (setup reserved, no request released yet; armed connections count); 0 disables | `12` |
 | `CONFIDENTIAL_TRUSTED_PROXIES` | comma-separated peers whose client-address header is believed (e.g. `127.0.0.1,::1` for nginx on the same host); `self` adds the node's own addresses (enable only behind a reverse proxy that always sets the header) | empty (no peer is trusted) |
 | `CONFIDENTIAL_CLIENT_IP_HEADER` | header a trusted proxy puts the client address in; for `X-Forwarded-For` the rightmost entry over all its header lines is used; another header is read from its last line | `x-forwarded-for` |
