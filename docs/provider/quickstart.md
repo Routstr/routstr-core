@@ -172,8 +172,9 @@ The master key and identity exist the moment the node boots, so capture them
 quiesced for a consistent copy, and copy:
 
 - **`routstr_secret.key`** — encrypts node secrets at rest, including the `nsec`
-  in `keys.db`. Lose it and the stored `nsec` cannot be decrypted;
-- **`keys.db`** (plus any `keys.db-wal` / `keys.db-shm` sidecars);
+  in the database. Lose it and the stored `nsec` cannot be decrypted;
+- **the database** — a `pg_dump` of the bundled PostgreSQL (see
+  [Backup and Restore](deployment.md#backup-and-restore));
 - **`.wallet/`** — your Bitcoin. It is created the first time the node handles
   ecash, so a fresh node has none yet; include it in every backup once it exists;
 - **`.env`** — node configuration.

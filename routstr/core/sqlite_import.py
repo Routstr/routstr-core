@@ -46,7 +46,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from .db import DATABASE_URL
+from .db import BUNDLED_DATABASE, DATABASE_URL
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -712,7 +712,9 @@ async def _changed_since_import(source: Path, imported_digest: str) -> bool:
         return await asyncio.to_thread(_sqlite_digest, snapshot) != imported_digest
 
 
-async def _import_once(engine: AsyncEngine, database_url: str, source: Path) -> None:
+async def _import_once(
+    engine: AsyncEngine, database_url: str, source: Path, explicit: bool = True
+) -> None:
     async with engine.connect() as conn:
         marker = await _import_marker(conn)
         occupied = [] if marker else await _target_has_rows(conn, _app_tables())
@@ -741,6 +743,12 @@ async def _import_once(engine: AsyncEngine, database_url: str, source: Path) -> 
             )
         return
     if not source.exists():
+        if not explicit:
+            logger.info(
+                "No SQLite database to import; starting with a new database",
+                extra={"looked_for": str(source)},
+            )
+            return
         logger.warning(
             "SQLITE_IMPORT_PATH does not exist, so nothing is imported. If this "
             "node should take over an existing SQLite database, stop it and fix "
@@ -771,16 +779,31 @@ async def _import_once(engine: AsyncEngine, database_url: str, source: Path) -> 
     )
 
 
+def _import_setting() -> tuple[str, bool]:
+    """The file to import and whether the operator named it."""
+    default = "keys.db" if BUNDLED_DATABASE else ""
+    explicit = "SQLITE_IMPORT_PATH" in os.environ
+    return os.environ.get("SQLITE_IMPORT_PATH", default), explicit
+
+
 async def import_sqlite_on_startup(database_url: str = DATABASE_URL) -> None:
     """Import ``SQLITE_IMPORT_PATH`` into an empty PostgreSQL ``DATABASE_URL`` once.
 
-    No-op unless both are set. Any failure leaves PostgreSQL without the
-    imported rows and is raised, so the node does not start.
+    No-op unless both are set. On the compose stack's bundled PostgreSQL an
+    unset ``SQLITE_IMPORT_PATH`` means ``keys.db``, the file the node used
+    before. Any failure leaves PostgreSQL without the imported rows and is
+    raised, so the node does not start.
     """
-    source_setting = os.environ.get("SQLITE_IMPORT_PATH", "")
+    source_setting, explicit = _import_setting()
+    is_postgres = make_url(database_url).get_backend_name() == "postgresql"
+    if not is_postgres and os.environ.get("BUNDLED_DATABASE_URL"):
+        logger.info(
+            "DATABASE_URL keeps this node on SQLite instead of the bundled "
+            "PostgreSQL; see docs/provider/deployment.md to move it"
+        )
     if not source_setting:
         return
-    if make_url(database_url).get_backend_name() != "postgresql":
+    if not is_postgres:
         logger.warning(
             "SQLITE_IMPORT_PATH is ignored because DATABASE_URL is not PostgreSQL"
         )
@@ -795,7 +818,7 @@ async def import_sqlite_on_startup(database_url: str = DATABASE_URL) -> None:
             )
             await lock_conn.commit()
             try:
-                await _import_once(engine, database_url, source)
+                await _import_once(engine, database_url, source, explicit)
             except Exception as exc:
                 logger.error(
                     "SQLite import did not run; nothing was copied and the node "

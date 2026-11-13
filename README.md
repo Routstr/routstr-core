@@ -79,7 +79,7 @@ python3 scripts/node_setup.py start \
   --ln-address you@wallet.com
 
 # Phase 2: back up before configuring
-#   routstr_secret.key, keys.db (+ -wal/-shm), .wallet/ and .env
+#   routstr_secret.key, a pg_dump of the database, .wallet/ and .env
 docker compose -f compose.node.yml exec routstr \
   /.venv/bin/python scripts/reveal_nsec.py
 

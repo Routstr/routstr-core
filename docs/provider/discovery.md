@@ -34,7 +34,8 @@ simply waits — nothing is published.
 
 Only the generated `npub` is logged at startup; the `nsec` is stored encrypted at
 rest and never printed. Retrieve it when you need to back it up with
-`python scripts/reveal_nsec.py` (requires `ROUTSTR_SECRET_KEY`). It is the node's
+`docker compose exec routstr /.venv/bin/python scripts/reveal_nsec.py` (add
+`-f compose.node.yml` on the private stack). It is the node's
 identity: back up the database and the master key together. A node that already has
 an identity — a provided `NSEC` seed or an nsec saved in the dashboard — is never
 regenerated, and an identity you intentionally clear in the dashboard stays cleared.

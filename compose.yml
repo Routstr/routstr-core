@@ -15,15 +15,24 @@ services:
       ["sh", "-c", "mkdir -p /output && cp -r /app/built/. /output/ && echo 'UI build copied to mounted volume' && ls -la /output/ && echo 'UI built and ready' && tail -f /dev/null"]
     restart: unless-stopped
 
+  postgres:
+    extends:
+      file: compose.postgres.yml
+      service: postgres
+
   routstr:
     build: .
     depends_on:
-      - ui
+      ui:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     volumes:
       - .:/app:z
       - ./logs:/app/logs:z
       - tor-data:/var/lib/tor:ro
       - ./ui_out:/app/ui_out:ro,z
+      - postgres-secret:/run/routstr-postgres:ro
     env_file:
       - .env
     environment:
@@ -31,6 +40,11 @@ services:
       # Self-provision a Nostr identity on first boot so the node announces
       # itself without an operator pasting an nsec. A provided NSEC still wins.
       - AUTO_GENERATE_NSEC=true
+      # The bundled PostgreSQL, used only while DATABASE_URL is unset. On the
+      # first start an existing ./keys.db is copied into it once and renamed to
+      # keys.db.imported-<timestamp>.
+      - BUNDLED_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-routstr}@postgres:5432/${POSTGRES_DB:-routstr}
+      - BUNDLED_DATABASE_PASSWORD_FILE=/run/routstr-postgres/password
     ports:
       - 8000:8000
     extra_hosts: # Needed to access locally running models
@@ -50,3 +64,5 @@ services:
 
 volumes:
   tor-data:
+  postgres-data:
+  postgres-secret:
