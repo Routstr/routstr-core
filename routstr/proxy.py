@@ -902,11 +902,11 @@ async def _proxy(
                 or not request_body_dict
                 or not is_openrouter_base_url(pinned[1].base_url)
                 or _canonical_api_path(path)
-                not in {"chat/completions", "completions", "responses"}
+                not in {"chat/completions", "completions", "responses", "messages"}
             ):
                 return create_error_response(
                     "unsupported_request",
-                    "Endpoint pinning requires an OpenRouter completion or Responses JSON request",
+                    "Endpoint pinning requires an OpenRouter completion, Responses, or Messages JSON request",
                     400,
                     request=request,
                 )
