@@ -173,6 +173,7 @@ EHBP), at rates fixed when the request is accepted:
 | refused (`request_refused`) | nothing; never reserved, or released in full when the sidecar refused it |
 | settled 2xx | chat: the usage at the frozen rates; images: `msat_per_image × count`; plus the session fee if still due |
 | error head 429/503 (the provider's capacity) or 401/402/403 (the node's own provider key or account) | the session fee if still due |
+| framing `"2"`: the provider refused the stream unprocessed (`RST_STREAM(REFUSED_STREAM)`, or GOAWAY with `NO_ERROR` below it), proven by the client (`disclose_reset`, before or after `body_released`) | the session fee if still due; the connection closes and the client runs the request again elsewhere |
 | error head, any other 4xx (a request the provider rejected) | the abandon fee |
 | error head, any other 5xx | the reservation (the provider may have billed work) |
 | accepted, and the connection ends before `body_released` (a failed π_WIN, the client leaves, the time limit) | the abandon fee; nothing when the deposit is charged for it (below), and nothing when the sidecar named the provider or itself as the cause (`fault`) |
@@ -213,8 +214,11 @@ the offer in the `setup`. The node bills at the terms of the offer named by
 `offer_sig`, even if the settings changed since.
 
 **The deposit** is released when the connection's first request reaches a
-settlement (usage, `accept`, or an error head); that receipt carries
-`deposit_released_msat`. A connection that ends with no settled request,
+settlement (usage, `accept`, an error head, or a disclosed refusal of its
+stream); that receipt carries `deposit_released_msat`. So a GOAWAY that ends
+the connection before `body_released` does not cost the deposit once the
+client discloses it (row 9 only covers an end the client cannot show to be the
+provider's). A connection that ends with no settled request,
 first matching row:
 
 | # | How the connection ended | Deposit | `reason` |
