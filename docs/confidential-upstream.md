@@ -218,7 +218,10 @@ settlement (usage, `accept`, an error head, or a disclosed refusal of its
 stream); that receipt carries `deposit_released_msat`. So a GOAWAY that ends
 the connection before `body_released` does not cost the deposit once the
 client discloses it (row 9 only covers an end the client cannot show to be the
-provider's). A connection that ends with no settled request,
+provider's). With nothing of the request written, the GOAWAY counts only if the
+sidecar received it within `min(30 s, h2.idle_secs / 4)` of `request_ok`: a
+client that holds a request until the provider's idle close pays as for an
+abandoned request. A connection that ends with no settled request,
 first matching row:
 
 | # | How the connection ended | Deposit | `reason` |
