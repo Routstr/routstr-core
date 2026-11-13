@@ -120,6 +120,10 @@ UNBILLED_ERROR_STATUSES = frozenset(range(400, 500)) | {503}
 # never used; otherwise a deliberately invalid body would be a free way to
 # make the node work.
 PROVIDER_REFUSAL_STATUSES = frozenset({401, 402, 403, 429, 503})
+# A stream the provider refused without processing it, framing "2"
+# (``disclose_reset``: RST_STREAM(REFUSED_STREAM) on it, or GOAWAY with a
+# last-stream-id below it, RFC 9113 §8.7): settled like a 429.
+REFUSAL_FRAMES = frozenset({"rst_stream", "goaway"})
 
 # A 4K image takes the provider long enough (a busy one took 44 s and 5.9 MB as
 # base64) that several in one response could outlast the provider's idle

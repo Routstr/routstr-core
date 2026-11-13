@@ -1345,6 +1345,99 @@ def test_an_error_head_after_the_first_settlement_owes_no_session_fee(
     assert ledger.calls[-2:] == ["reserve", "release:rel-2"]
 
 
+_RST = {"refused": "rst_stream", "error_code": 7, "choices": []}
+_GOAWAY = {"refused": "goaway", "error_code": 0, "last_stream_id": 1, "choices": []}
+
+
+@pytest.mark.parametrize("refusal", [_RST, _GOAWAY])
+@pytest.mark.parametrize("released", [False, True])
+def test_a_disclosed_refusal_settles_like_a_429(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    refusal: dict[str, Any],
+    released: bool,
+) -> None:
+    """``disclose_reset`` (framing "2"): the provider refused the stream
+    without processing it. Before or after ``body_released``, the request
+    costs the session fee if still due and nothing more; it is the
+    connection's first settlement, so the deposit goes back with the
+    receipt, and the connection closes ``error_settled``."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    frames: list[dict[str, Any]] = [_request_ok(1, "2")]
+    if released:
+        frames.append(_released(1))
+    frames += [_attest(1, "2"), _usage(1, "2", usage=refusal), _closed("error_settled")]
+    with _Conn(monkeypatch, lambda n: frames, "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        receipt = conn.until("receipt")["receipt"]
+        assert conn.recv1() == {"type": "closed", "reason": "error_settled"}
+    assert receipt["usage"] == refusal
+    assert receipt["cost_msats"] == 2000
+    assert receipt["deposit_released_msat"] == DEP
+    assert ledger.calls == ["check", "deposit", "reserve", "fee:rel-1:2000", "release:dep"]
+
+
+def test_a_refusal_after_the_first_settlement_costs_nothing(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    answers = {
+        1: _settled(1, "2"),
+        2: [_request_ok(2, "2"), _attest(2, "2"), _usage(2, "2", usage=_RST), _closed("error_settled")],
+    }
+    with _Conn(monkeypatch, lambda n: answers[n], "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        conn.until("receipt")
+        conn.send(_request(2, **_FEE))
+        receipt = conn.until("receipt")["receipt"]
+    assert receipt["cost_msats"] == 0 and "session_fee_msat" not in receipt
+    assert ledger.calls[-2:] == ["reserve", "release:rel-2"]
+
+
+def test_a_goaway_before_the_body_was_released_does_not_charge_the_deposit(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """§12.10: the provider ends the connection with GOAWAY before any of the
+    request reached it (no response bytes in its interval) and closes. Without
+    a disclosure that is row 9 (the deposit charged); the client discloses the
+    GOAWAY after the close (the sidecar waits for it), and the request is
+    settled as a refusal: the deposit goes back, the session fee is kept."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    frames = [
+        _request_ok(1, "2"),
+        {"type": "upstream_closed_early", "n": 1, "response_bytes": 0},
+        _attest(1, "2"),
+        _usage(1, "2", usage=_GOAWAY),
+        _closed("error_settled"),
+    ]
+    with _Conn(monkeypatch, lambda n: frames, "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        receipt = conn.until("receipt")["receipt"]
+        last = conn.recv1()
+    assert last["reason"] == "error_settled" and "deposit" not in last
+    assert receipt["deposit_released_msat"] == DEP
+    assert ledger.calls == ["check", "deposit", "reserve", "fee:rel-1:2000", "release:dep"]
+    assert "charge:dep" not in ledger.calls
+
+
+@pytest.mark.parametrize("usage", [{"refused": "other", "choices": []}, {"refused": True}])
+def test_an_unknown_refusal_kind_is_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], usage: dict[str, Any]
+) -> None:
+    """Only the two refusals of §5.4 settle for the fee: anything else that
+    reaches billing without token usage is priced as usage (here: none)."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    frames = [_request_ok(1, "2"), _released(1), _attest(1, "2"), _usage(1, "2", usage=usage)]
+    with _Conn(monkeypatch, lambda n: frames, "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        conn.until("receipt")
+    assert "fee:rel-1:2000" not in ledger.calls
+
+
 def test_no_deposit_when_the_offer_asks_for_none(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:

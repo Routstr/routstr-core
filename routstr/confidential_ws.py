@@ -84,6 +84,7 @@ from .confidential import (
     FRAMINGS,
     IMAGE_MAX_COUNT,
     PROVIDER_REFUSAL_STATUSES,
+    REFUSAL_FRAMES,
     UNBILLED_ERROR_STATUSES,
     UPGRADE_REQUIRED,
     Billing,
@@ -1178,6 +1179,12 @@ async def _apply_settlement(
             return billing.reserved_msats, await charge_reservation(billing)
         settled = await settle_flat(billing)
         return int(settled["cost_msats"]), settled["balance_msats"]
+    if usage.get("refused") in REFUSAL_FRAMES:
+        # The provider refused the stream without processing it (RFC 9113
+        # §8.7: RST_STREAM(REFUSED_STREAM), or a GOAWAY below the stream),
+        # proven by π_WIN over its own frames (`disclose_reset`): settled as
+        # a 429, the session fee if still due and nothing else.
+        return await _release_keeping_fee(billing, "session_fee_msat")
     error_status = usage.get("error_status")
     if _is_int(error_status):
         if error_status in UNBILLED_ERROR_STATUSES:
