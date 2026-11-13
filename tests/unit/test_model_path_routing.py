@@ -692,6 +692,49 @@ async def test_unsupported_endpoint_pins_fail_before_payment(
 
 
 @pytest.mark.asyncio
+async def test_messages_pin_rejected_when_upstream_translates_messages() -> None:
+    """A generic provider at openrouter.ai translates Messages through LiteLLM,
+    whose field allowlist drops ``provider``. Accepting the pin would bill the
+    endpoint price while OpenRouter routes freely, so it must fail closed."""
+    from routstr.upstream.generic import GenericUpstreamProvider
+
+    upstream = GenericUpstreamProvider(
+        base_url="https://openrouter.ai/api/v1", api_key="upstream-key"
+    )
+    upstream.db_id = 1
+    request = _make_request(
+        {
+            "x-cashu": "test-token",
+            "x-routstr-model-path": encode_model_path(
+                upstream.base_url, MODEL_ID, "cloudflare"
+            ),
+        },
+        json.dumps(
+            {
+                "model": MODEL_ID,
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "Hi"}],
+            }
+        ).encode(),
+    )
+    with (
+        patch.object(proxy_module, "check_token_balance") as payment,
+        patch.object(
+            proxy_module, "get_candidates", return_value=[(MagicMock(), upstream)]
+        ),
+        patch.object(upstream, "forward_request", AsyncMock()) as forward,
+        patch.object(upstream, "forward_x_cashu_request", AsyncMock()) as x_cashu,
+        patch_proxy_session(MagicMock()),
+    ):
+        response = await proxy_module.proxy(request, "v1/messages")
+    assert response.status_code == 400
+    assert json.loads(response.body)["error"]["type"] == "unsupported_request"
+    payment.assert_not_called()
+    forward.assert_not_awaited()
+    x_cashu.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cashu", [False, True])
 async def test_ehbp_pin_does_not_fall_back(cashu: bool) -> None:
     from routstr.core.exceptions import UpstreamError
