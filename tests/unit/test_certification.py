@@ -261,7 +261,7 @@ class TestExpectedTokenMsats:
         pricing = Pricing(prompt=1.4e-7, completion=2.8e-7)
         return pricing.copy(update=overrides)
 
-    def _usage(self, **kwargs: int) -> Any:
+    def _usage(self, **kwargs: Any) -> Any:
         from routstr.payment.usage import NormalizedUsage
 
         return NormalizedUsage(**kwargs)

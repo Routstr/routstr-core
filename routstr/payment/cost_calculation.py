@@ -1,4 +1,5 @@
 import math
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from pydantic.v1 import BaseModel, Field
@@ -13,6 +14,7 @@ from .usage import (
     parse_token_count,
     usage_field_presence,
 )
+from .usage_multipliers import usage_multiplier
 
 if TYPE_CHECKING:
     from .models import Model
@@ -323,7 +325,9 @@ async def calculate_cost(
 
     # Fall back to token-based pricing
     try:
-        pricing_rates = _get_pricing_rates(response_data, model_obj, provider_fee)
+        pricing_rates = _get_pricing_rates(
+            response_data, model_obj, provider_fee, usage.pricing_dimensions
+        )
     except ValueError as e:
         return CostDataError(message=str(e), code="pricing_error")
 
@@ -476,12 +480,18 @@ def _get_pricing_rates(
     response_data: dict,
     model_obj: "Model | None",
     provider_fee: float | None,
+    pricing_dimensions: Mapping[str, str] | None = None,
 ) -> tuple[float, float, float, float, str] | None:
     """Get configured rates, falling back to LiteLLM's model cost map.
 
     The served ``model_obj`` (when the caller has it) is billed directly;
     otherwise the response's model string is resolved through the alias map,
     which yields the best-ranked candidate rather than the serving one.
+
+    ``pricing_dimensions`` (what the response reported it ran as, e.g. fast
+    mode) scale every token rate by the model's usage multipliers. Callers
+    pricing an upstream-reported cost leave it out: that cost already
+    includes them.
 
     Returns rates and their source (configured or LiteLLM).
     ``None`` means configured fixed pricing should be used by the caller.
@@ -557,11 +567,22 @@ def _get_pricing_rates(
         )
         source = "litellm"
 
+    multiplier = usage_multiplier(
+        model_obj.usage_multipliers if model_obj else None,
+        pricing_dimensions or {},
+        response_model,
+    )
+    if multiplier != 1.0:
+        mspp_1k, mspc_1k, mscr_1k, mscw_1k = (
+            rate * multiplier for rate in (mspp_1k, mspc_1k, mscr_1k, mscw_1k)
+        )
+
     logger.info(
         "Applied model-specific pricing",
         extra={
             "model": response_model,
             "pricing_source": source,
+            "usage_multiplier": multiplier,
             "input_price_msats_per_1k": mspp_1k,
             "output_price_msats_per_1k": mspc_1k,
             "cache_read_price_msats_per_1k": mscr_1k,

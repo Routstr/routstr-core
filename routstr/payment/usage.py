@@ -44,6 +44,8 @@ from typing import TypedDict
 
 from pydantic.v1 import BaseModel
 
+from .usage_multipliers import pricing_dimensions
+
 
 class UsageSources(TypedDict):
     input_source: str
@@ -95,6 +97,8 @@ class NormalizedUsage(BaseModel):
     cache_write_tokens: int = 0
     cache_write_1h_tokens: int = 0
     web_search_requests: int = 0
+    # Price-relevant variants the response reported, e.g. {"speed": "fast"}.
+    pricing_dimensions: dict[str, str] = {}
 
 
 def parse_token_count(value: object) -> int:
@@ -289,4 +293,5 @@ def normalize_usage(usage_data: object) -> NormalizedUsage | None:
         cache_write_tokens=cache_write,
         cache_write_1h_tokens=cache_write_1h_tokens,
         web_search_requests=web_search_requests,
+        pricing_dimensions=pricing_dimensions(usage_data),
     )

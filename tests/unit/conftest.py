@@ -10,6 +10,16 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlmodel import SQLModel
 
+from routstr.core.settings import settings
+from routstr.upstream import usage_multiplier_sources
+
+
+@pytest.fixture(autouse=True)
+def _disable_usage_multiplier_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep catalog refreshes off OpenRouter; multiplier tests opt back in."""
+    monkeypatch.setattr(settings, "usage_multiplier_source", "none")
+    monkeypatch.setattr(usage_multiplier_sources, "_instances", {})
+
 
 @pytest_asyncio.fixture(params=["sqlite", "postgres"])
 async def analytics_engine(
