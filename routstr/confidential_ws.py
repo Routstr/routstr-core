@@ -22,12 +22,17 @@
   does not accept is answered with ``request_refused``: nothing is held for
   it and the connection stays. Framing ``"2"`` carries many requests, one
   after another; framing ``"1.1"`` exactly one, sent before the ClientHello.
+  A first-use Cashu credential waits at most ``WALLET_LOCK_TIMEOUT_S`` for
+  the wallet lock; past it the setup or the request is refused with 503
+  ``wallet_busy``, which a client may retry.
 
   Of the sidecar's frames the node intercepts:
 
   - ``ready``: adds the node's Nostr key, the ``/zk`` token and the deposit
     it reserved (the sidecar's offer is dropped: the node-signed one is the
     only one);
+  - ``request_ok``: adds ``reserved_msats``, what the request in flight
+    holds (the most it can be charged; its receipt carries the same value);
   - ``body_released``: the provider now has the complete request;
   - ``attestation``: re-signed with the node's key;
   - ``usage``: the verified usage, error status or flat image settlement of
@@ -216,6 +221,18 @@ _slot_holders: dict["SessionState", None] = {}
 # How long a setup waits for an evicted connection to let go of its sidecar
 # session before it dials (the sidecar has its own session limit).
 EVICT_WAIT_S = 5.0
+# Bounds on the setup steps that can be abandoned without a side effect, so
+# that a setup ends in ``ready`` or a refusal in finite time: reading the
+# sidecar's offer (its fetch has a per-phase HTTP timeout, not a total one),
+# claiming a session slot (each eviction waits up to EVICT_WAIT_S, and a
+# concurrent setup may take the freed slot first) and sending the setup to
+# the sidecar (its dial has ``open_timeout``). The credential check and the
+# deposit are not cut off: a Cashu redemption that has the wallet lock must
+# finish; the wait for that lock is bounded (``WALLET_LOCK_TIMEOUT_S`` in
+# ``confidential``) and the mint calls have their own deadlines.
+SIDECAR_OFFER_WAIT_S = 5.0
+SLOT_WAIT_S = 2 * EVICT_WAIT_S + 1.0
+SIDECAR_SEND_S = 10.0
 # Requests the node or the sidecar may refuse in a row on one connection
 # (``request_refused``): each costs a credential check and a reservation
 # attempt and holds nothing, so a client could repeat them for nothing. The
@@ -911,16 +928,20 @@ async def _open_session(
                 await _upgrade_required(websocket)
                 return None
         try:
-            side = await cached_sidecar_offer()
+            side = await asyncio.wait_for(cached_sidecar_offer(), SIDECAR_OFFER_WAIT_S)
         except Exception as exc:
-            logger.warning("confidential ws: sidecar offer unavailable: %s", exc)
+            logger.warning("confidential ws: sidecar offer unavailable: %r", exc)
             raise SetupError(503, "confidential sidecar unavailable") from exc
         return await _open_h2_session(session_id, state, msg, side)
     except (WebSocketDisconnect, RuntimeError):
+        _release_pending(state)
         await _finalize(state)
         return None
     except SetupError as exc:
         logger.warning("confidential ws: rejecting session: %s", exc)
+        # The pending slot is free before the refusal is sent (a slow
+        # client must not hold it); the caller's cleanup repeats this.
+        _release_pending(state)
         await _finalize(state)
         # A deposit that was reserved and released again (the sidecar could
         # not be dialed): the refusal says so, signed.
@@ -945,7 +966,7 @@ async def _dial_sidecar(session_id: str, setup: dict[str, Any]) -> Any:
     except Exception as exc:
         raise SetupError(502, "confidential sidecar unreachable") from exc
     try:
-        await upstream.send(json.dumps(setup))
+        await asyncio.wait_for(upstream.send(json.dumps(setup)), SIDECAR_SEND_S)
     except Exception as exc:
         await _close(upstream, 1011)
         raise SetupError(502, "confidential sidecar unreachable") from exc
@@ -1053,7 +1074,11 @@ async def _on_sidecar_text(
             # request keeps its fee, as a v2 session does after ``ready``.
             state.engaged = True
             state.h2_refused = 0
-            return frame
+            # What the request holds, said before the client releases it:
+            # the most it can be charged (an upstream 5xx or a withheld
+            # disclosure costs exactly this). The receipt repeats it.
+            msg["reserved_msats"] = state.billing.reserved_msats
+            return json.dumps(msg)
     if kind == "upstream_closed_early":
         # The provider closed before the final body record was released. With
         # response bytes it answered first (a refusal from the head alone,
@@ -1483,7 +1508,12 @@ async def _open_h2_session(
         "escrow": f"conn-{escrow}",
     }
     try:
-        await _claim_slot(state)
+        try:
+            # Abandoning the claim is safe: it takes the slot only after its
+            # last wait (victims already closed stay closed).
+            await asyncio.wait_for(_claim_slot(state), SLOT_WAIT_S)
+        except asyncio.TimeoutError as exc:
+            raise SetupError(503, "too many confidential sessions") from exc
         upstream = await _dial_sidecar(session_id, setup)
     except SetupError:
         # No slot, or the sidecar is unreachable: the node's side, and no
@@ -1668,7 +1698,7 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
     if state.framing == "2" and state.h2_idle_since is None:
         raise ProtocolError(409, 'a framing "2" request comes after head_written')
     try:
-        side = await cached_sidecar_offer()
+        side = await asyncio.wait_for(cached_sidecar_offer(), SIDECAR_OFFER_WAIT_S)
         cap = int(side.get("max_tokens_cap", 4096))
     except Exception as exc:
         logger.warning("confidential ws: sidecar offer unavailable: %s", exc)
