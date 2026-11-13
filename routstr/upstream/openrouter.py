@@ -1,4 +1,5 @@
 import json
+import math
 from typing import TYPE_CHECKING
 
 import httpx
@@ -28,6 +29,41 @@ def _carries_usage(payload: dict) -> bool:
         isinstance(obj, dict) and isinstance(obj.get("usage"), dict)
         for obj in (payload, payload.get("message"), payload.get("response"))
     )
+
+
+def _capped_at_listed_price(
+    body: bytes | None, model: Model, provider_fee: float
+) -> bytes | None:
+    """Let OpenRouter serve a text request only from an endpoint priced within
+    the model's listed price, keeping the client's own ``max_price`` where lower.
+    A fee of 0 or less lists nothing to recover the seller's price from, and
+    the node bills nothing for it, so the request goes out uncapped."""
+    if not body or provider_fee <= 0 or produces_images(model):
+        return body
+    try:
+        data = json.loads(body)
+    except Exception:
+        return body
+    if not isinstance(data, dict):
+        return body
+    listed_usd = {
+        "prompt": model.pricing.prompt * 1_000_000,
+        "completion": model.pricing.completion * 1_000_000,
+        "request": model.pricing.request,
+        "image": model.pricing.image,
+    }
+    routing = data.get("provider")
+    routing = dict(routing) if isinstance(routing, dict) else {}
+    caps = routing.get("max_price")
+    caps = dict(caps) if isinstance(caps, dict) else {}
+    for field, usd in listed_usd.items():
+        cap = math.ceil(usd / provider_fee * 1e9) / 1e9
+        own = caps.get(field)
+        if not isinstance(own, (int, float)) or isinstance(own, bool) or own > cap:
+            caps[field] = cap
+    routing["max_price"] = caps
+    data["provider"] = routing
+    return json.dumps(data).encode()
 
 
 class OpenRouterUpstreamProvider(BaseUpstreamProvider):
@@ -106,7 +142,7 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
     ) -> bytes | None:
         body = super().prepare_request_body(body, model_obj, include_stream_usage)
         if not body or not produces_images(model_obj):
-            return body
+            return _capped_at_listed_price(body, model_obj, self.provider_fee)
         # Pin the endpoint the request was quoted on. OpenRouter would
         # otherwise pick one with other prices, or re-route a failed
         # generation to another provider, buying twice for one settlement.
@@ -126,6 +162,12 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
             routing["allow_fallbacks"] = False
             data["provider"] = routing
         return json.dumps(data).encode()
+
+    def prepare_responses_request_body(
+        self, body: bytes | None, model_obj: Model
+    ) -> bytes | None:
+        body = super().prepare_responses_request_body(body, model_obj)
+        return _capped_at_listed_price(body, model_obj, self.provider_fee)
 
     @classmethod
     def _build_from_row(
