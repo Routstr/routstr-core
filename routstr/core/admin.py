@@ -15,6 +15,13 @@ from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..nostr.analytics_runtime import analytics_status
+from ..nostr.analytics_v2_delivery import (
+    AnalyticsV2DeliveryError,
+    IdentityMismatchError,
+    SharingDisabledError,
+    list_unpublished_analytics_v2_epochs,
+    release_analytics_v2_epochs,
+)
 from ..payment.models import (
     REQUIRED_PRICING_FIELDS,
     Model,
@@ -264,6 +271,52 @@ async def get_settings(request: Request) -> dict:
 )
 async def get_analytics_sharing_status() -> dict[str, object]:
     return analytics_status()
+
+
+@admin_router.get(
+    "/api/analytics-sharing/history", dependencies=[Depends(require_admin_api)]
+)
+async def get_analytics_sharing_history() -> dict[str, object]:
+    state, epochs = await list_unpublished_analytics_v2_epochs(create_session)
+    return {
+        "sharing_enabled": state.sharing_enabled,
+        "generation": state.generation,
+        "epochs": [
+            {
+                "epoch": epoch.epoch,
+                "coverage_start": epoch.coverage_start.isoformat(),
+                "coverage_end": epoch.coverage_end.isoformat(),
+                "publishable_days": epoch.publishable_days,
+                "requests": epoch.requests,
+                "revenue_msats": epoch.revenue_msats,
+                "released": epoch.released,
+            }
+            for epoch in epochs
+        ],
+    }
+
+
+class AnalyticsHistoryRelease(BaseModel):
+    epochs: list[int]
+    generation: int
+
+
+@admin_router.post(
+    "/api/analytics-sharing/history/release",
+    dependencies=[Depends(require_admin_api)],
+)
+async def release_analytics_sharing_history(
+    body: AnalyticsHistoryRelease,
+) -> dict[str, object]:
+    try:
+        released = await release_analytics_v2_epochs(
+            create_session, body.epochs, expected_generation=body.generation
+        )
+    except (SharingDisabledError, IdentityMismatchError) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except AnalyticsV2DeliveryError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"released": list(released)}
 
 
 class SettingsUpdate(RootModel[dict[str, object]]):

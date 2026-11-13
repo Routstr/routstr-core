@@ -66,6 +66,7 @@ BORN_WIDE_TABLES = {
     "analytics_v2_delivery_state",
     "analytics_v2_outbox",
     "analytics_v2_relay_receipts",
+    "analytics_v2_released_epochs",
     "database_imports",
     "terminal_outcome_epochs",
     "terminal_outcome_writer_runs",
