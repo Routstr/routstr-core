@@ -634,6 +634,47 @@ def offered_models(side_offer: dict[str, Any]) -> dict[str, Candidate]:
     return out
 
 
+_PINNED_ID = re.compile(r"[\x21-\x7e]{1,256}")
+_WARNED: set[tuple[str, ...]] = set()
+
+
+def _warn_once(key: tuple[str, ...], msg: str, *args: Any) -> None:
+    if key in _WARNED:
+        return
+    if len(_WARNED) > 4096:
+        _WARNED.clear()
+    _WARNED.add(key)
+    logger.warning(msg, *args)
+
+
+def pinned_id_problem(public_id: str, provider_id: str | None) -> str | None:
+    """Why ``provider_id`` cannot be the id the chat suffix pins for the
+    public ``public_id`` (PROTOCOL-V3.md §12.1), or ``None``.
+
+    Only the provider's prefix may differ: the provider id is the public id
+    itself, or ends with ``"/" + public_id`` (``moonshotai/kimi-k3.1-pro``,
+    ``@cf/meta/llama-3.2-1b-instruct``). Clients refuse an offer whose
+    ``upstream_models`` maps a public id to any other model (it would let a
+    node pin a cheaper model under the id the client pays for), and the value
+    is rendered into the suffix as a JSON string: printable ASCII without a
+    quote or backslash."""
+    if provider_id is None or provider_id == public_id:
+        return None
+    if (
+        not isinstance(provider_id, str)
+        or not _PINNED_ID.fullmatch(provider_id)
+        or '"' in provider_id
+        or "\\" in provider_id
+    ):
+        return f"the provider id {provider_id!r} cannot be pinned in the suffix"
+    if not provider_id.endswith("/" + public_id):
+        return (
+            f"the provider id {provider_id!r} is not the public id under a "
+            "provider prefix"
+        )
+    return None
+
+
 def upstream_models_block(
     priced: dict[str, tuple[Candidate, dict[str, float]]],
 ) -> dict[str, str]:
@@ -955,6 +996,15 @@ def priced_models(
     """Offered models that have a usable rate entry: the one advertised set."""
     out: dict[str, tuple[Candidate, dict[str, float]]] = {}
     for model_id, cand in offered_models(side_offer).items():
+        problem = pinned_id_problem(model_id, getattr(cand, "provider_model", None))
+        if problem is not None:
+            _warn_once(
+                ("pinned_id", model_id, str(getattr(cand, "provider_model", None))),
+                "confidential: model %r left out of the offer: %s",
+                model_id,
+                problem,
+            )
+            continue
         entry = usable_price_entry(model_id, cand)
         if entry is not None:
             out[model_id] = (cand, entry)
