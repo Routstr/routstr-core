@@ -63,6 +63,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -351,6 +352,7 @@ def validate_sidecar_offer(data: Any) -> None:
     if not _is_int(key_length) or key_length < 0:
         raise OfferRefused("sidecar offer is malformed: key_length")
     model_allowlist(data)  # raises OfferRefused when malformed
+    chat_model_filter(data)  # likewise
     sidecar_framings(data)
 
 
@@ -485,9 +487,95 @@ def produces_text(model: Any) -> bool:
 
     Image and embedding models carry zero token rates, which are usable
     prices, so without this they would be offered for chat at no charge.
+    A model that can also produce images, audio or video is not offered
+    either: the request body is opaque to the node, so a client could ask it
+    for that output (OpenRouter's ``modalities``) in the private part, and
+    the provider bills those tokens at an image or audio rate while the
+    usage reports them as completion tokens, which the node bills at the
+    text rate.
     """
     arch = getattr(model, "architecture", None)
-    return "text" in (getattr(arch, "output_modalities", None) or [])
+    outputs = list(getattr(arch, "output_modalities", None) or [])
+    return bool(outputs) and all(m == "text" for m in outputs)
+
+
+_FILTER_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def chat_model_filter(side_offer: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """The operator's ``chat_model_filter`` from the sidecar offer:
+    ``(exclude_if_supports, exclude_if_priced)``, both empty when absent.
+
+    ``exclude_if_supports`` names request parameters (the catalogue's
+    ``supported_parameters``) that raise the provider's charge outside the
+    token counts and that the chat suffix cannot pin off; a model that
+    accepts one is not offered. ``exclude_if_priced`` names pricing
+    components (the catalogue's ``pricing`` members: ``web_search``,
+    ``request``, ``overrides``, ``audio``, ...) the node does not bill; a
+    model that has one with a non-zero value is not offered. Anything else
+    than a list of identifier strings under those two names raises
+    ``OfferRefused``: a typo must not silently offer every model.
+    """
+    block = side_offer.get("chat_model_filter")
+    if block is None:
+        return set(), set()
+    if not isinstance(block, dict) or not set(block) <= {
+        "exclude_if_supports",
+        "exclude_if_priced",
+    }:
+        raise OfferRefused("sidecar offer is malformed: chat_model_filter")
+    out: list[set[str]] = []
+    for name in ("exclude_if_supports", "exclude_if_priced"):
+        items = block.get(name, [])
+        if not isinstance(items, list) or not all(
+            isinstance(k, str) and _FILTER_KEY.match(k) for k in items
+        ):
+            raise OfferRefused(f"sidecar offer is malformed: chat_model_filter.{name}")
+        out.append(set(items))
+    return out[0], out[1]
+
+
+def _priced_components(model: Any) -> set[str] | None:
+    """The pricing components of ``model`` with a non-zero value: the
+    ``Pricing`` rates above zero plus the catalogue's ``extra_pricing_keys``.
+    ``None`` when the model has no pricing."""
+    pricing = getattr(model, "pricing", None)
+    if pricing is None:
+        return None
+    found: set[str] = set()
+    fields = getattr(pricing, "__fields__", None) or {}
+    for name in fields:
+        value = getattr(pricing, name, 0)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value > 0
+        ):
+            found.add(name)
+    found.update(getattr(model, "extra_pricing_keys", None) or [])
+    return found
+
+
+def filtered_out(model: Any, supports: set[str], priced: set[str]) -> str | None:
+    """Why the operator's ``chat_model_filter`` keeps ``model`` (the
+    provider's catalogue row) out of the chat offer, or ``None``. Fails
+    closed: with a filter configured, a model whose catalogue does not list
+    its parameters (or its pricing) is not offered."""
+    if supports:
+        params = getattr(model, "supported_parameters", None)
+        if not isinstance(params, list):
+            return "supported_parameters unknown"
+        hit = supports.intersection(params)
+        if hit:
+            return f"supports {sorted(hit)[0]}"
+    if priced:
+        components = _priced_components(model)
+        if components is None:
+            return "pricing unknown"
+        hit = priced & components
+        if hit:
+            return f"priced {sorted(hit)[0]}"
+    return None
 
 
 def provider_model_id(cand: Candidate) -> str | None:
@@ -522,12 +610,22 @@ def offered_models(side_offer: dict[str, Any]) -> dict[str, Candidate]:
 
     host = str(side_offer.get("upstream_host", ""))
     allowlist = model_allowlist(side_offer)
+    supports, priced = chat_model_filter(side_offer)
     out: dict[str, Candidate] = {}
     for model in get_unique_models():
         if not produces_text(model):
             continue
         cand = candidate_for(model.id, host)
         if cand is None:
+            continue
+        # The provider's own catalogue row is what it bills by.
+        if (
+            cand.model is not model
+            and getattr(cand.model, "architecture", None) is not None
+            and not produces_text(cand.model)
+        ):
+            continue
+        if (supports or priced) and filtered_out(cand.model, supports, priced):
             continue
         provider_id = provider_model_id(cand)
         if provider_id is None or not model_allowed(provider_id, allowlist):
@@ -938,7 +1036,9 @@ CONNECTION_FIELDS = (
 # idle timeout are terms of the connection's money and lifetime only: an old
 # connection keeps the ones it was opened on.
 SECURITY_FIELDS = tuple(
-    f for f in CONNECTION_FIELDS if f not in ("connection_deposit_msat", "idle_timeout_s")
+    f
+    for f in CONNECTION_FIELDS
+    if f not in ("connection_deposit_msat", "idle_timeout_s")
 )
 
 

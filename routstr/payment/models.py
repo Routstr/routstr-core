@@ -4,7 +4,7 @@ import random
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic.v1 import BaseModel, validator
+from pydantic.v1 import BaseModel, root_validator, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core.db import ModelRow, get_session
@@ -106,6 +106,23 @@ class Reasoning(BaseModel):
         )
 
 
+def _priced(value: object) -> bool:
+    """A catalogue pricing member that charges something: a non-zero rate
+    (number or numeric string) or a non-empty list/object (tiers)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        try:
+            return float(value) != 0
+        except ValueError:
+            return bool(value.strip())
+    if isinstance(value, (list, dict)):
+        return len(value) > 0
+    return False
+
+
 class Model(BaseModel):
     id: str
     name: str
@@ -124,12 +141,34 @@ class Model(BaseModel):
     forwarded_model_id: str | None = None
     reasoning: Reasoning | None = None
     image_pricing: ImagePricing | None = None
+    # The request parameters the catalogue says the model accepts
+    # (OpenRouter's ``supported_parameters``); ``None`` when not listed.
+    supported_parameters: list[str] | None = None
+    # Priced components of the catalogue's ``pricing`` that ``Pricing`` has no
+    # field for (OpenRouter: ``overrides`` tiers, ``audio``,
+    # ``input_cache_write_1h``, ...), with a non-zero value; ``None`` if none.
+    extra_pricing_keys: list[str] | None = None
 
     class Config:
         extra = "ignore"
 
     def __hash__(self) -> int:
         return hash(self.id)
+
+    @root_validator(pre=True)
+    def _note_extra_pricing(cls, values: dict) -> dict:
+        if values.get("extra_pricing_keys") is not None:
+            return values
+        pricing = values.get("pricing")
+        if isinstance(pricing, dict):
+            extra = sorted(
+                k
+                for k, v in pricing.items()
+                if k not in Pricing.__fields__ and _priced(v)
+            )
+            if extra:
+                values = dict(values, extra_pricing_keys=extra)
+        return values
 
     @validator("reasoning", pre=True)
     def _coerce_reasoning(cls, value: object) -> object:
@@ -149,6 +188,9 @@ class Model(BaseModel):
         # Non-reasoning models omit the field entirely so the catalog stays
         # additive: existing clients never see a new null key.
         data = super().dict(**kwargs)  # type: ignore[arg-type]
+        for key in ("supported_parameters", "extra_pricing_keys"):
+            if data.get(key) is None:
+                data.pop(key, None)
         reasoning = data.get("reasoning")
         if not reasoning:
             data.pop("reasoning", None)
