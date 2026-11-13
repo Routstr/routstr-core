@@ -127,6 +127,31 @@ async def test_plain_text_error_is_normalized(
 
 
 @pytest.mark.asyncio
+async def test_upstream_routstr_headers_are_not_relayed(
+    provider: BaseUpstreamProvider,
+) -> None:
+    upstream = _make_upstream_response(
+        body=b"Service Unavailable",
+        status_code=503,
+        content_type="text/plain",
+        extra_headers={
+            "x-routstr-provider": "spoofed",
+            "x-routstr-cost-msats": "1",
+            "x-request-id": "u1",
+        },
+    )
+
+    response = await provider.forward_upstream_error_response(
+        _make_request(), "v1/messages", upstream
+    )
+
+    assert "x-routstr-provider" not in response.headers
+    assert "x-routstr-cost-msats" not in response.headers
+    assert response.headers[ERROR_SCOPE_HEADER] == ERROR_SCOPE_UPSTREAM
+    assert response.headers["x-request-id"] == "u1"
+
+
+@pytest.mark.asyncio
 async def test_empty_body_with_non_json_content_type_normalizes(
     provider: BaseUpstreamProvider,
 ) -> None:

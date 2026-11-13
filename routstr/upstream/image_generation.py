@@ -49,6 +49,20 @@ def parse_json_body(request_body: bytes | None) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _reported_provider(payload: dict) -> str | None:
+    """Provider named by an upstream payload, if any.
+
+    Checked at top level first, then inside the Anthropic ``message`` and
+    Responses ``response`` envelopes, which is where those dialects nest it.
+    """
+    for obj in (payload, payload.get("message"), payload.get("response")):
+        if isinstance(obj, dict):
+            value = obj.get("provider")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
 def _payload(content: bytes) -> dict | None:
     try:
         payload = json.loads(content)
@@ -129,4 +143,5 @@ def read_image_response(content: bytes, is_json: bool) -> ImageUsage:
         input_image_tokens=input_image_tokens,
         output_image_tokens=output_tokens,
         upstream_cost_usd=upstream_cost,
+        provider=_reported_provider(payload),
     )

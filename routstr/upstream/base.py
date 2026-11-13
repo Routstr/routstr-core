@@ -89,6 +89,7 @@ from .cooldown import model_identity, provider_identity, record_failure
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
 from .http_client import acquire_upstream_http_client, build_x_cashu_client
 from .image_generation import (
+    _reported_provider,
     is_image_generation_path,
     parse_json_body,
     read_image_response,
@@ -133,10 +134,16 @@ IMAGES_PER_RESERVATION = 4
 
 
 def _decoded_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    """Let ASGI frame bodies that httpx decoded or Routstr annotated."""
+    """Let ASGI frame bodies that httpx decoded or Routstr annotated.
+
+    X-Routstr-* headers are Routstr's own; an upstream copy would shadow or
+    spoof the values Routstr sets and exposes to browsers.
+    """
     excluded = {"content-length", "content-encoding", "transfer-encoding", "connection"}
     return {
-        name: value for name, value in headers.items() if name.lower() not in excluded
+        name: value
+        for name, value in headers.items()
+        if name.lower() not in excluded and not name.lower().startswith("x-routstr-")
     }
 
 
@@ -492,18 +499,10 @@ def _responses_usage_payload(data_json: dict) -> dict:
     return nested if isinstance(nested, dict) else data_json
 
 
-def _reported_provider(payload: dict) -> str | None:
-    """Provider named by an upstream payload, if any.
-
-    Checked at top level first, then inside the Anthropic ``message`` and
-    Responses ``response`` envelopes, which is where those dialects nest it.
-    """
-    for obj in (payload, payload.get("message"), payload.get("response")):
-        if isinstance(obj, dict):
-            value = obj.get("provider")
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return None
+def _header_safe(value: str, limit: int = 128) -> str:
+    """``value`` reduced to bounded printable ASCII so it cannot break the
+    response once billing has already settled."""
+    return "".join(c for c in value if " " <= c <= "~").strip()[:limit]
 
 
 def _render_sse_event(field_lines: list[str], data: str) -> str:
@@ -1256,7 +1255,12 @@ class BaseUpstreamProvider:
     ) -> Response:
         """Log upstream errors and forward the response in a JSON envelope."""
         status_code = upstream_response.status_code
-        headers = dict(upstream_response.headers)
+        # X-Routstr-* headers are Routstr's own, as in _decoded_response_headers.
+        headers = {
+            name: value
+            for name, value in upstream_response.headers.items()
+            if not name.lower().startswith("x-routstr-")
+        }
         content_type = headers.get("content-type") or headers.get("Content-Type", "")
         upstream_request_id = (
             headers.get("request-id")
@@ -2582,9 +2586,8 @@ class BaseUpstreamProvider:
             )
             raise
         content_type = response.headers.get("content-type")
-        usage = read_image_response(
-            content, _is_json_content_type(content_type) if content_type else True
-        )
+        is_json = _is_json_content_type(content_type) if content_type else True
+        usage = read_image_response(content, is_json)
         body = parse_json_body(request_body)
         total_sats = settle_image_sats(model_obj, body, usage, path)
 
@@ -2654,15 +2657,24 @@ class BaseUpstreamProvider:
             },
         )
 
-        # httpx already decoded the body, so the upstream's framing headers no
-        # longer describe it.
-        headers = {
-            name: value
-            for name, value in response.headers.items()
-            if name.lower()
-            not in {"content-length", "content-encoding", "transfer-encoding"}
-        }
+        # Upstream framing and X-Routstr-* headers are dropped; Routstr's own
+        # X-Routstr-* values are set below.
+        headers = _decoded_response_headers(response.headers)
         _inject_cost_response_headers(headers, cost_data)
+        # The body is relayed as the upstream sent it, often raw image bytes,
+        # so the provider and image count that chat responses carry in JSON
+        # are given as headers instead.
+        attribution: dict[str, Any] = {}
+        if is_json:
+            reported = _header_safe(usage.provider or "")
+            if reported:
+                attribution["provider"] = reported
+        self._apply_provider_field(attribution)
+        headers["X-Routstr-Provider"] = _header_safe(str(attribution["provider"]))
+        provider_url = _header_safe(str(attribution.get("provider_url") or ""), 2048)
+        if provider_url:
+            headers["X-Routstr-Provider-Url"] = provider_url
+        headers["X-Routstr-Image-Count"] = str(usage.image_count)
 
         return Response(
             content=content,

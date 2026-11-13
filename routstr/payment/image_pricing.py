@@ -230,6 +230,7 @@ class ImageUsage:
 
     ``upstream_cost_usd`` is the USD the upstream says it charged, when it
     says so at all. Token counts are zero for upstreams that report none.
+    ``provider`` is the provider a JSON body names, kept for attribution.
     """
 
     image_count: int = 0
@@ -237,6 +238,7 @@ class ImageUsage:
     input_image_tokens: int = 0
     output_image_tokens: int = 0
     upstream_cost_usd: float = 0.0
+    provider: str | None = None
 
 
 # Request fields that carry reference images, across the supported dialects:
