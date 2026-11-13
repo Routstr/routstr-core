@@ -59,8 +59,10 @@ Both use the same messages:
    names an offer it signed and remembers (409 `offer_expired`); that the
    credential is valid with an available balance of at least
    `max(1 msat, MIN_REQUEST_MSAT, session fee, abandon fee)` (401/402; a
-   Cashu token is redeemed here); and it reserves the **connection deposit**
-   (402 `connection_deposit_unfunded`). Then it takes a session slot, dials
+   Cashu token is redeemed here; a first-use token waits at most 10 s for
+   the node's wallet lock, else 503 `wallet_busy` and the client retries);
+   and it reserves the **connection deposit** (402
+   `connection_deposit_unfunded`). Then it takes a session slot, dials
    the sidecar and forwards `{type, v, http, nonce_c, armed, escrow}`.
    `ready` comes back with the node's `pubkey`, `zk_token`, `sig_scheme` and
    `deposit_msat` (what was reserved). An armed connection is bound to the
@@ -71,7 +73,10 @@ Both use the same messages:
    reserves, and forwards the request to the sidecar without the credential,
    the offer signature and the fees (an image request with the node's own
    rendering of the suffix). `auth` and `offer_sig` may differ from the
-   setup's.
+   setup's. The sidecar's `request_ok {n, suffix, …}` reaches the client
+   with `reserved_msats` added: what the node reserved for the request, the
+   most it can be charged (an upstream 5xx or a withheld disclosure costs
+   exactly this). The request's receipt carries the same `reserved_msats`.
 3. A request the node or the sidecar does not accept is answered with
    `request_refused {n, status, reason[, detail]}`: nothing is held for it,
    the connection stays, and the next `request` carries the same `n`. A wrong
@@ -133,8 +138,12 @@ EHBP), at rates fixed when the request is accepted:
    completion tokens past the cap; the charge is still the usage). Usage
    beyond the reservation is paid by the node, so size the margin for the
    provider. A model without a known context length reserves its undiscounted
-   maximum cost plus the margin; a model whose metadata lists a negative
-   context length is refused. An image request reserves
+   maximum cost `max_cost` (msat) plus the margin, scaled for cache
+   writes:
+   `max(MIN_REQUEST_MSAT, ceil(max_cost*ratio*(1+pct/100) + margin*out/1000))`
+   with `ratio = max(1, cache_write/in)` when both rates are positive, else 1
+   (this scales the completion part too, which over-reserves slightly); a
+   model whose metadata lists a negative context length is refused. An image request reserves
    `msat_per_image × count` plus the larger fee (`reserve_image`).
 4. On the π_C3S-verified usage the node charges exactly
    `ceil((in*(prompt-cached-written) + min(cached_in,in)*cached + cache_write*written + out*completion)/1000)`,
@@ -275,7 +284,10 @@ signed.
   /64). A new connection that finds either full closes the oldest one still
   waiting for its `setup` (503) rather than being refused; it is refused
   (429/503) only when every pending connection there is already being
-  reserved.
+  reserved. A connection being reserved stays pending for a bounded time:
+  reading the sidecar's offer (5 s), the credential check (a first-use
+  Cashu token waits at most 10 s for the wallet lock; a redemption that has
+  it runs under the mint calls' own deadlines) and the deposit.
 - The sidecar does not check client credentials, so it must be reachable
   only by the node: every node request to it carries
   `CONFIDENTIAL_SIDECAR_TOKEN`, and a sidecar off loopback refuses requests

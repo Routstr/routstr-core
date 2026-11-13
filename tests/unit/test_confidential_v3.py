@@ -14,6 +14,7 @@ that stands in for the node's billing) and the rules of a single request.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from typing import Any
@@ -37,9 +38,12 @@ from .test_confidential import (  # noqa: F401
     SID,
     SIDE_OFFER,
     SIG,
+    _app,
     _attest,
     _closed,
     _Conn,
+    _connect,
+    _ConnectRecorder,
     _current_sig,
     _error_usage,
     _flat_usage,
@@ -57,6 +61,7 @@ from .test_confidential import (  # noqa: F401
     _setup,
     _Up,
     _usage,
+    _use_sidecar,
     _verify_schnorr,
     billing_db,
     fee_settings,
@@ -1376,7 +1381,7 @@ async def test_check_credential_needs_a_known_offer_and_funds(
 
     seen: dict[str, Any] = {}
 
-    async def validate(bearer: str, session: Any, min_cost: int = 0) -> Any:
+    async def validate(bearer: str, session: Any, min_cost: int = 0, **_: Any) -> Any:
         seen.update(bearer=bearer, min_cost=min_cost)
         return _Key()
 
@@ -1406,7 +1411,7 @@ async def test_check_credential_needs_a_known_offer_and_funds(
 
     from fastapi import HTTPException
 
-    async def broke(bearer: str, session: Any, min_cost: int = 0) -> Any:
+    async def broke(bearer: str, session: Any, min_cost: int = 0, **_: Any) -> Any:
         raise HTTPException(
             status_code=402, detail={"error": {"message": "no funds", "type": "t"}}
         )
@@ -1428,7 +1433,7 @@ async def test_reserve_deposit_refusals(monkeypatch: pytest.MonkeyPatch) -> None
 
     seen: dict[str, Any] = {}
 
-    async def validate(bearer: str, session: Any, min_cost: int = 0) -> Any:
+    async def validate(bearer: str, session: Any, min_cost: int = 0, **_: Any) -> Any:
         seen.update(bearer=bearer, min_cost=min_cost)
         return _Key()
 
@@ -1471,7 +1476,7 @@ def _keyed_validate(billing_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     import routstr.auth as auth
     from routstr.core.db import ApiKey
 
-    async def validate(bearer: str, session: Any, min_cost: int = 0) -> Any:
+    async def validate(bearer: str, session: Any, min_cost: int = 0, **_: Any) -> Any:
         return await session.get(ApiKey, bearer)
 
     monkeypatch.setattr(auth, "validate_bearer_key", validate)
@@ -2161,3 +2166,238 @@ async def test_an_evicted_idle_connection_closes_in_order(
     await cws._run_h2_session(client, sidecar, state, loop.time())  # type: ignore[arg-type]
     assert client.sent[-1] == {"type": "closed", "reason": "evicted"}
     assert ledger.calls == []
+
+
+# ---------------------------------------------------------------------------
+# bounded setups and the announced reservation
+# ---------------------------------------------------------------------------
+
+
+class _NoKeySession:
+    """A database session that knows no key (a first-use Cashu token)."""
+
+    no_autoflush = contextlib.nullcontext()
+
+    async def __aenter__(self) -> "_NoKeySession":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+    async def get(self, *args: Any) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+
+def test_a_setup_waiting_for_a_busy_wallet_is_refused_in_time(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    tmp_path: Any,
+) -> None:
+    """A first-use Cashu token whose redemption cannot get the wallet lock
+    holds its (non-evictable) pending slot only for the lock bound: the setup
+    is refused with 503 ``wallet_busy`` and the slot is free again, for the
+    same address and for another one."""
+    import fcntl
+    import os
+    from types import SimpleNamespace
+
+    import routstr.auth as auth
+    import routstr.core.db as db
+    import routstr.wallet as wallet
+
+    bound = 0.6
+    lock = tmp_path / ".routstr-operation.lock"
+    monkeypatch.setattr(wallet, "_WALLET_OPERATION_LOCK", lock)
+    monkeypatch.setattr(conf, "WALLET_LOCK_TIMEOUT_S", bound)
+    monkeypatch.setattr(db, "create_session", lambda: _NoKeySession())
+    monkeypatch.setattr(
+        auth,
+        "deserialize_token_from_string",
+        lambda token: SimpleNamespace(mint="http://mint:3338", unit="sat"),
+    )
+    redeemed: list[str] = []
+
+    async def credit_balance(token: str, *args: Any) -> int:
+        redeemed.append(token)
+        return 0
+
+    monkeypatch.setattr(auth, "credit_balance", credit_balance)
+    monkeypatch.setattr(settings, "fixed_pricing", False)
+
+    async def side() -> dict[str, Any]:
+        return dict(SIDE_OFFER)
+
+    monkeypatch.setattr(cws, "cached_sidecar_offer", side)
+    conf._remember_offer(SIG, conf.OfferTerms({}))
+    dials = _ConnectRecorder(monkeypatch)
+    _use_sidecar(monkeypatch, 7444)
+    monkeypatch.setattr(cws, "MAX_PENDING", 2)
+    monkeypatch.setattr(cws, "MAX_PENDING_PER_ADDR", 1)
+    addresses = iter(["198.51.100.1"] * 3 + ["198.51.100.2"])
+    monkeypatch.setattr(cws, "client_address", lambda ws: next(addresses))
+
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        client = TestClient(_app())
+        with _connect(client) as first:
+            started = time.monotonic()
+            first.send_text(json.dumps(_setup(auth="cashuAfirst")))
+            time.sleep(0.2)
+            # The first setup is being reserved: its slot cannot be evicted.
+            with _connect(client) as second:
+                err = json.loads(second.receive_text())
+                assert err["status"] == 429 and "pending" in err["reason"]
+            err = json.loads(first.receive_text())
+            waited = time.monotonic() - started
+        assert err["status"] == 503
+        assert err["detail"]["error"]["type"] == "wallet_busy"
+        assert bound <= waited < bound + 3.0
+        assert cws._pending == {} and cws._pending_by_addr == {}
+        # The slot is free again, for the same address and for another.
+        for token in ("cashuAsame", "cashuAother"):
+            with _connect(client) as ws:
+                ws.send_text(json.dumps(_setup(auth=token)))
+                err = json.loads(ws.receive_text())
+            assert err["status"] == 503, err
+            assert err["detail"]["error"]["type"] == "wallet_busy"
+            assert cws._pending == {}
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    assert redeemed == [] and dials.urls == []
+    assert cws._active_sessions == 0
+
+
+def test_a_hanging_sidecar_offer_refuses_the_setup_in_time(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+
+    async def hang() -> dict[str, Any]:
+        await asyncio.Event().wait()
+        return {}
+
+    monkeypatch.setattr(cws, "cached_sidecar_offer", hang)
+    monkeypatch.setattr(cws, "SIDECAR_OFFER_WAIT_S", 0.2)
+    with _connect(TestClient(_app())) as ws:
+        ws.send_text(json.dumps(_setup()))
+        err = json.loads(ws.receive_text())
+    assert err["status"] == 503 and "sidecar" in err["reason"]
+    assert ledger.calls == [] and cws._pending == {}
+
+
+def test_a_slot_claim_that_does_not_end_releases_the_deposit(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Abandoning the slot claim is a refusal after the deposit: released in
+    full (``not_started``), nothing dialed, no pending entry and no slot."""
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    dials = _ConnectRecorder(monkeypatch)
+    _use_sidecar(monkeypatch, 7444)
+
+    async def stuck(state: Any) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(cws, "_claim_slot", stuck)
+    monkeypatch.setattr(cws, "SLOT_WAIT_S", 0.2)
+    with _connect(TestClient(_app())) as ws:
+        ws.send_text(json.dumps(_setup()))
+        err = json.loads(ws.receive_text())
+    assert err["status"] == 503
+    assert _deposit(err) == ("released", "not_started", DEP)
+    assert ledger.calls == ["check", "deposit", "release:dep"]
+    assert dials.urls == [] and cws._pending == {} and cws._active_sessions == 0
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_request_ok_announces_the_reservation_the_receipt_repeats(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    with _Conn(monkeypatch, lambda n: _settled(n, http), http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        ok = conn.until("request_ok")
+        receipt = conn.until("receipt")["receipt"]
+    assert ok["n"] == 1 and ok["suffix"] == "}"
+    assert ok["reserved_msats"] == 9000 == receipt["reserved_msats"]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_request_ok_of_an_image_request_announces_its_reservation(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    _Ledger(monkeypatch, deposit=DEP, fees=FEES, images=True)
+    frames = _settled(1, http, _flat_usage(1, http, 2))
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_image_request(count=2, **_FEE))
+        ok = conn.until("request_ok")
+        receipt = conn.until("receipt")["receipt"]
+    reserved = 2 * IMAGE_PRICE + max(FEES)
+    assert ok["reserved_msats"] == reserved == receipt["reserved_msats"]
+
+
+def test_each_request_ok_announces_its_own_reservation(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """On a framing-"2" connection the announced value is the reservation of
+    the request the ``request_ok`` names (the session fee is reserved only
+    while it is due)."""
+    _Ledger(monkeypatch, deposit=DEP, fees=FEES, images=True)
+    answers = {1: _settled(1, "2"), 2: _settled(2, "2", _flat_usage(2, "2", 3))}
+    with _Conn(monkeypatch, lambda n: answers[n], "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        first = conn.until("request_ok")
+        r1 = conn.until("receipt")["receipt"]
+        conn.send(_image_request(2, count=3, **_FEE))
+        second = conn.until("request_ok")
+        r2 = conn.until("receipt")["receipt"]
+    assert (first["n"], second["n"]) == (1, 2)
+    assert first["reserved_msats"] == r1["reserved_msats"]
+    assert second["reserved_msats"] == r2["reserved_msats"] == 3 * IMAGE_PRICE + 5000
+
+
+async def test_a_busy_wallet_is_a_retryable_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The credential check and the deposit pass the wallet-lock bound and
+    turn its expiry into 503 ``wallet_busy``; the deposit's own 402 stays
+    marked as the deposit's."""
+    from fastapi import HTTPException
+
+    import routstr.auth as auth
+    import routstr.core.db as db
+    from routstr.wallet import WalletBusyError
+
+    bounds: list[Any] = []
+
+    async def busy(bearer: str, session: Any, **kw: Any) -> Any:
+        bounds.append(kw.get("wallet_lock_timeout_s"))
+        raise WalletBusyError(kw["wallet_lock_timeout_s"])
+
+    monkeypatch.setattr(db, "create_session", lambda: _Session())
+    monkeypatch.setattr(auth, "validate_bearer_key", busy)
+    monkeypatch.setattr(settings, "fixed_pricing", False)
+    conf._remember_offer(SIG, conf.OfferTerms({}, connection_deposit_msat=700))
+    for call in (conf.check_credential, conf.reserve_deposit):
+        with pytest.raises(conf.BillingError) as refused:
+            await call("cashuAtoken", SIG)
+        assert refused.value.status == 503
+        assert refused.value.detail["error"]["type"] == "wallet_busy"
+    assert bounds == [conf.WALLET_LOCK_TIMEOUT_S] * 2
+
+    async def short(bearer: str, session: Any, **kw: Any) -> Any:
+        raise HTTPException(
+            status_code=402, detail={"error": {"code": "insufficient_balance"}}
+        )
+
+    monkeypatch.setattr(auth, "validate_bearer_key", short)
+    with pytest.raises(conf.BillingError) as unfunded:
+        await conf.reserve_deposit("sk-x", SIG)
+    assert unfunded.value.detail["error"]["type"] == "connection_deposit_unfunded"

@@ -2017,7 +2017,7 @@ async def billing_db(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
         async with AsyncSession(engine, expire_on_commit=False) as session:
             yield session
 
-    async def validate_bearer_key(auth: str, session: Any) -> Any:
+    async def validate_bearer_key(auth: str, session: Any, **_: Any) -> Any:
         return await session.get(ApiKey, auth)
 
     async def side() -> dict[str, Any]:
@@ -2109,6 +2109,50 @@ async def test_reservation_without_context_uses_the_max_cost(
     billing_db.model.context_length = None
     billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     assert billing.reserved_msats == 1_100_000  # sats_pricing.max_cost
+
+
+async def test_reservation_without_context_covers_dearer_cache_writes(
+    billing_db: Any,
+) -> None:
+    """The model's maximum cost prices the prompt at the input rate. With a
+    dearer cache-write rate it is scaled by their ratio, so a prompt billed
+    entirely as cache writes is charged in full, not capped below its cost."""
+    billing_db.model.top_provider = None
+    billing_db.model.context_length = None
+    rates = {
+        "in": 10_000.0,
+        "cached_in": 1_000.0,
+        "cache_write": 12_500.0,
+        "out": 100_000.0,
+    }
+    terms = conf.OfferTerms({"ctx-model": rates})
+    sig = "c1" * 64
+    conf._remember_offer(sig, terms)
+    billing = await conf.reserve("hk", "ctx-model", 8, sig)
+    # max_cost (1_100_000 msat) × 12.5 / 10.
+    assert billing.reserved_msats == 1_375_000
+    prompt = 100_000
+    usage = {
+        "model": "ctx-model",
+        "usage": {
+            "prompt_tokens": prompt,
+            "completion_tokens": 0,
+            "prompt_tokens_details": {"cache_creation_input_tokens": prompt},
+        },
+    }
+    cost = prompt * 12_500 // 1000
+    assert cost > 1_100_000  # what the unscaled reservation capped it at
+    assert (await conf.settle(billing, usage))["cost_msats"] == cost
+
+    # A cheaper (or no) cache-write rate leaves the maximum as it is.
+    for write in (5_000.0, 0.0):
+        sig = hashlib.sha256(str(write).encode()).hexdigest() * 2
+        conf._remember_offer(
+            sig, conf.OfferTerms({"ctx-model": {**rates, "cache_write": write}})
+        )
+        billing = await conf.reserve("hk", "ctx-model", 8, sig)
+        assert billing.reserved_msats == 1_100_000
+        await conf.release(billing)
 
 
 async def test_fixed_pricing_refuses_confidential_setups(

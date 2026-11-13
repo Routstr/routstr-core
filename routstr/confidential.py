@@ -1669,6 +1669,44 @@ def check_request_offer(offer_sig: str, opened_on: OfferTerms, framing: str) -> 
         )
 
 
+# The longest a setup or a request waits for the wallet lock before a
+# first-use Cashu token is redeemed. Past it the node refuses with 503
+# ``wallet_busy`` (the client may retry): the wait holds a pending setup slot
+# or the connection's request, and a lock held by a slow redemption or payout
+# must not keep either for longer. Only the wait is bounded: a redemption
+# that has the lock runs to the end, under the mint operations' own deadlines.
+WALLET_LOCK_TIMEOUT_S = 10.0
+
+
+async def _validate_bearer(auth: str, session: Any, min_cost: int = 0) -> Any:
+    """``auth.validate_bearer_key`` with the wallet-lock bound. A wait past it
+    is a ``BillingError`` (503 ``wallet_busy``); the node's usual refusals
+    stay ``HTTPException`` for the caller to map."""
+    from .auth import validate_bearer_key
+    from .wallet import WalletBusyError
+
+    try:
+        return await validate_bearer_key(
+            auth,
+            session,
+            min_cost=min_cost,
+            wallet_lock_timeout_s=WALLET_LOCK_TIMEOUT_S,
+        )
+    except WalletBusyError as exc:
+        message = "the node's wallet is busy; retry shortly"
+        raise BillingError(
+            message,
+            503,
+            {
+                "error": {
+                    "type": "wallet_busy",
+                    "message": message,
+                    "retry_after_s": 1,
+                }
+            },
+        ) from exc
+
+
 def _refuse_fixed_pricing_setup() -> None:
     try:
         refuse_fixed_pricing()
@@ -1686,7 +1724,6 @@ async def check_credential(auth: str, offer_sig: str) -> str:
     A Cashu token is redeemed here, as by any first use. The money is
     reserved per ``request`` (``reserve``), which checks the credential again.
     """
-    from .auth import validate_bearer_key
     from .core.db import create_session
 
     _refuse_fixed_pricing_setup()
@@ -1706,7 +1743,7 @@ async def check_credential(auth: str, offer_sig: str) -> str:
     )
     async with create_session() as session:
         try:
-            key = await validate_bearer_key(auth, session, min_cost=floor)
+            key = await _validate_bearer(auth, session, min_cost=floor)
         except HTTPException as exc:
             raise _billing_error(exc) from exc
         return str(key.hashed_key)
@@ -1722,7 +1759,7 @@ async def reserve_deposit(auth: str, offer_sig: str) -> Billing | None:
     refused with 402 and ``connection_deposit_unfunded``: the caller has not
     dialed the sidecar yet, so nothing is garbled for such a client.
     """
-    from .auth import pay_for_request, validate_bearer_key
+    from .auth import pay_for_request
     from .core.db import create_session
 
     terms = signed_offer_terms(offer_sig)
@@ -1739,7 +1776,7 @@ async def reserve_deposit(auth: str, offer_sig: str) -> Billing | None:
         return None
     async with create_session() as session:
         try:
-            key = await validate_bearer_key(auth, session, min_cost=deposit)
+            key = await _validate_bearer(auth, session, min_cost=deposit)
             snapshot = await pay_for_request(key, deposit, session)
         except HTTPException as exc:
             if exc.status_code != 402:
@@ -1807,7 +1844,7 @@ async def reserve(
     those fees. Everything is frozen from the signed offer ``offer_sig`` names;
     an unknown or expired offer is refused (409).
     """
-    from .auth import pay_for_request, validate_bearer_key
+    from .auth import pay_for_request
     from .core.db import create_session
     from .payment.helpers import get_max_cost_for_model
 
@@ -1835,7 +1872,7 @@ async def reserve(
         raise _fee_not_accepted(fee, abandon)
     async with create_session() as session:
         try:
-            key = await validate_bearer_key(auth, session)
+            key = await _validate_bearer(auth, session)
         except HTTPException as exc:
             raise _billing_error(exc) from exc
         limit = prompt_token_limit(cand.model)
@@ -1850,11 +1887,25 @@ async def reserve(
                     model_id, session, cand.model
                 )
             # The full maximum (no tolerance discount: the body is opaque),
-            # plus the completion margin, like the context-length branch.
+            # plus the completion margin, like the context-length branch. The
+            # model's maximum prices the prompt at the input rate; a prompt
+            # the provider bills as cache writes costs more when that rate is
+            # higher, so the maximum is scaled by their ratio. That scales the
+            # completion part too and over-reserves slightly, which is the
+            # safe side: the charge is capped at the reservation. Clients
+            # check the reservation with this exact formula.
+            in_rate = rates["in"]
+            write_rate = rates.get("cache_write", 0.0)
+            ratio = (
+                max(1.0, write_rate / in_rate)
+                if in_rate > 0 and write_rate > 0
+                else 1.0
+            )
             max_cost = max(
                 settings.min_request_msat,
                 math.ceil(
-                    undiscounted * (1.0 + pct / 100.0) + margin * rates["out"] / 1000
+                    undiscounted * ratio * (1.0 + pct / 100.0)
+                    + margin * rates["out"] / 1000
                 ),
             )
         else:
@@ -1950,7 +2001,7 @@ async def reserve_image(
     session and abandon fees, which the client must have accepted. An unknown
     or expired offer, model or variant is refused (409), like chat.
     """
-    from .auth import pay_for_request, validate_bearer_key
+    from .auth import pay_for_request
     from .core.db import create_session
 
     _refuse_fixed_pricing_setup()
@@ -1989,7 +2040,7 @@ async def reserve_image(
     )
     async with create_session() as session:
         try:
-            key = await validate_bearer_key(auth, session)
+            key = await _validate_bearer(auth, session)
         except HTTPException as exc:
             raise _billing_error(exc) from exc
         max_cost = per_image * count + max(fee, abandon)
