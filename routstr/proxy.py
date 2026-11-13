@@ -905,6 +905,12 @@ async def _proxy(
                 or not is_openrouter_base_url(pinned[1].base_url)
                 or _canonical_api_path(path)
                 not in {"chat/completions", "completions", "responses", "messages"}
+                # Messages translated through LiteLLM lose the ``provider``
+                # field, so only a native Messages upstream can honour the pin.
+                or (
+                    _canonical_api_path(path) == "messages"
+                    and not pinned[1].supports_anthropic_messages
+                )
             ):
                 return create_error_response(
                     "unsupported_request",
