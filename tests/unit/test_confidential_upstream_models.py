@@ -71,6 +71,65 @@ async def test_offer_lists_the_provider_id_only_where_it_differs(
     assert "upstream_models" not in await conf.build_offer()
 
 
+@pytest.mark.parametrize(
+    "public,provider",
+    [
+        (PUBLIC, PROVIDER),
+        ("same", "same"),
+        ("claude-fable-latest", "~anthropic/claude-fable-latest"),
+        ("meta/llama-3.2-1b-instruct", "@cf/meta/llama-3.2-1b-instruct"),
+        ("lfm-2.5-2.6b:free", "liquid/lfm-2.5-2.6b:free"),
+    ],
+)
+def test_pinned_id_may_differ_only_by_a_provider_prefix(
+    public: str, provider: str
+) -> None:
+    assert conf.pinned_id_problem(public, provider) is None
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        "qwen/qwen3.8-27b",
+        "claude-opus-4.5-x",
+        "xclaude-opus-4.5",
+        "a/claude-opus-4.5/x",
+        'a"b/claude-opus-4.5',
+        "a b/claude-opus-4.5",
+    ],
+)
+def test_pinned_id_naming_another_model_is_refused(provider: str) -> None:
+    assert conf.pinned_id_problem("claude-opus-4.5", provider) is not None
+
+
+async def test_offer_leaves_out_a_model_mapped_to_another_model(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    # Finding 17: the signed offer must never map a public id to another
+    # model (clients refuse such an offer as a whole). The model is left out
+    # and logged; the others are served.
+    up = _Up("https://api.numes.ai/api/v1")
+    cands = {
+        PUBLIC: conf.Candidate(SimpleNamespace(id=PROVIDER), up, PROVIDER),
+        "claude-opus-4.5": conf.Candidate(
+            SimpleNamespace(id="qwen/qwen3.8-27b"), up, "qwen/qwen3.8-27b"
+        ),
+    }
+    warned: list[str] = []
+    conf._WARNED.clear()
+    monkeypatch.setattr(
+        conf.logger, "warning", lambda msg, *a, **k: warned.append(msg % a)
+    )
+    monkeypatch.setattr(conf, "cached_sidecar_offer", _side)
+    monkeypatch.setattr(conf, "offered_models", lambda s: cands)
+    monkeypatch.setattr(conf, "price_entry", lambda mid, c: dict(RATES))
+    offer = await conf.build_offer()
+    assert set(offer["price_list"]) == {PUBLIC}
+    assert offer["upstream_models"] == {PUBLIC: PROVIDER}
+    assert "claude-opus-4.5" not in await conf.models_fields()
+    assert any("'claude-opus-4.5' left out of the offer" in m for m in warned)
+
+
 async def test_reserve_pins_the_named_offers_provider_id(
     monkeypatch: pytest.MonkeyPatch, billing_db: Any
 ) -> None:
