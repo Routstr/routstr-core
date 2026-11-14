@@ -27,6 +27,7 @@ from ..core.db import (
     AnalyticsV2DeliveryState,
     AnalyticsV2Outbox,
     AnalyticsV2RelayReceipt,
+    AnalyticsV2ReleasedEpoch,
     TerminalOutcome,
     TerminalOutcomeEpoch,
 )
@@ -34,6 +35,7 @@ from ..core.logging import get_logger
 from .analytics_v2 import (
     ANALYTICS_KIND,
     DEFAULT_MAX_FRAME_BYTES,
+    AnalyticsV2Error,
     EncodedAnalyticsEvent,
     LedgerOutcome,
     PriorVersion,
@@ -181,6 +183,17 @@ class DeliveryStateSnapshot:
 class ActivationResult:
     state: DeliveryStateSnapshot
     transitioned: bool
+
+
+@dataclass(frozen=True)
+class UnpublishedEpoch:
+    epoch: int
+    coverage_start: date
+    coverage_end: date
+    publishable_days: int
+    requests: int
+    revenue_msats: int
+    released: bool
 
 
 @dataclass(frozen=True)
@@ -583,6 +596,136 @@ async def rotate_analytics_v2_identity(
         return snapshot
 
 
+async def list_unpublished_analytics_v2_epochs(
+    session_factory: SessionFactory, *, today_utc: date | None = None
+) -> tuple[DeliveryStateSnapshot, tuple[UnpublishedEpoch, ...]]:
+    """Closed epochs below the public floor that the operator may release."""
+    today = datetime.now(UTC).date() if today_utc is None else today_utc
+    first_week = _first_public_week(today)
+    async with session_factory() as session:
+        state = await _get_or_create_delivery_state(session, _clock_ms())
+        snapshot = _snapshot(state)
+        if not state.sharing_enabled or state.active_epoch_floor is None:
+            await session.commit()
+            return snapshot, ()
+        released = await _released_epochs(session, state.generation)
+        result = await session.exec(
+            select(TerminalOutcomeEpoch)
+            .where(col(TerminalOutcomeEpoch.epoch) < state.active_epoch_floor)
+            .where(col(TerminalOutcomeEpoch.coverage_end_day).is_not(None))
+            .order_by(col(TerminalOutcomeEpoch.epoch))
+        )
+        rows: list[UnpublishedEpoch] = []
+        for epoch in result.all():
+            is_released = epoch.epoch in released
+            if not is_released and not await _is_releasable(
+                session, epoch, state.active_epoch_floor
+            ):
+                continue
+            assert epoch.coverage_end_day is not None
+            start = max(epoch.coverage_start_day, first_week)
+            totals = (
+                await session.execute(
+                    sa_select(
+                        func.count(col(TerminalOutcome.outcome_id)),
+                        func.coalesce(func.sum(TerminalOutcome.revenue_msats), 0),
+                    )
+                    .where(col(TerminalOutcome.terminal_day) >= start)
+                    .where(col(TerminalOutcome.terminal_day) <= epoch.coverage_end_day)
+                )
+            ).one()
+            rows.append(
+                UnpublishedEpoch(
+                    epoch=epoch.epoch,
+                    coverage_start=epoch.coverage_start_day,
+                    coverage_end=epoch.coverage_end_day,
+                    publishable_days=max(0, (epoch.coverage_end_day - start).days + 1),
+                    requests=int(totals[0]),
+                    revenue_msats=int(totals[1]),
+                    released=is_released,
+                )
+            )
+        await session.commit()
+    return snapshot, tuple(rows)
+
+
+async def release_analytics_v2_epochs(
+    session_factory: SessionFactory,
+    epochs: Sequence[int],
+    *,
+    expected_generation: int,
+    at_ms: int | None = None,
+) -> tuple[int, ...]:
+    """Let the producer publish closed epochs that were never published.
+
+    Only epochs without any outbox row qualify: rows under an older identity
+    are already public, and an old cancelled row would block the new frames.
+    """
+    if not epochs or any(type(epoch) is not int or epoch < 0 for epoch in epochs):
+        raise AnalyticsV2DeliveryError("epochs must be nonnegative integers")
+    timestamp = _clock_ms() if at_ms is None else at_ms
+    _require_nonnegative_int(timestamp, "at_ms")
+    async with session_factory() as session:
+        fence = await session.exec(  # type: ignore[call-overload]
+            update(AnalyticsV2DeliveryState)
+            .where(col(AnalyticsV2DeliveryState.id) == 1)
+            .where(col(AnalyticsV2DeliveryState.sharing_enabled).is_(True))
+            .where(col(AnalyticsV2DeliveryState.generation) == expected_generation)
+            .values(generation=expected_generation)
+        )
+        if fence.rowcount != 1:
+            raise SharingDisabledError("Analytics v2 sharing changed meanwhile")
+        state = await session.get(AnalyticsV2DeliveryState, 1)
+        assert state is not None and state.active_epoch_floor is not None
+        if state.identity_pubkey is None:
+            raise IdentityMismatchError("Analytics v2 identity is not claimed")
+        released = await _released_epochs(session, expected_generation)
+        for number in sorted(set(epochs)):
+            if number in released:
+                continue
+            epoch = await session.get(TerminalOutcomeEpoch, number)
+            if epoch is None or not await _is_releasable(
+                session, epoch, state.active_epoch_floor
+            ):
+                raise AnalyticsV2DeliveryError(f"Epoch {number} cannot be released")
+            await session.merge(
+                AnalyticsV2ReleasedEpoch(
+                    epoch=number,
+                    generation=expected_generation,
+                    released_at_ms=timestamp,
+                )
+            )
+        await session.commit()
+    return tuple(sorted(set(epochs)))
+
+
+async def _released_epochs(session: AsyncSession, generation: int) -> frozenset[int]:
+    result = await session.exec(
+        select(AnalyticsV2ReleasedEpoch.epoch).where(
+            col(AnalyticsV2ReleasedEpoch.generation) == generation
+        )
+    )
+    return frozenset(result.all())
+
+
+async def _is_releasable(
+    session: AsyncSession, epoch: TerminalOutcomeEpoch, active_epoch_floor: int
+) -> bool:
+    if epoch.epoch >= active_epoch_floor or epoch.coverage_end_day is None:
+        return False
+    outbox = await session.exec(
+        select(AnalyticsV2Outbox.event_id)
+        .where(col(AnalyticsV2Outbox.epoch) == epoch.epoch)
+        .limit(1)
+    )
+    return outbox.first() is None
+
+
+def _first_public_week(today_utc: date) -> date:
+    cutoff = today_utc - timedelta(days=PUBLIC_HISTORY_DAYS)
+    return cutoff - timedelta(days=cutoff.weekday())
+
+
 async def enqueue_signed_event(
     session_factory: SessionFactory,
     event: EncodedAnalyticsEvent,
@@ -634,7 +777,10 @@ async def enqueue_signed_event(
         state = await _get_or_create_delivery_state(session, timestamp)
         if not state.sharing_enabled:
             raise SharingDisabledError("Analytics v2 sharing is disabled")
-        if state.active_epoch_floor is None or event.epoch < state.active_epoch_floor:
+        if state.active_epoch_floor is None or (
+            event.epoch < state.active_epoch_floor
+            and event.epoch not in await _released_epochs(session, state.generation)
+        ):
             raise SharingDisabledError(
                 "Analytics v2 event is outside the active epoch lane"
             )
@@ -792,11 +938,13 @@ class AnalyticsV2Producer:
                 return 0
             completed_day_limit = instant.date()
             # Read the outbox before the ledger; enqueue fences this snapshot.
+            async with self._session_factory() as session:
+                released = await _released_epochs(session, state.generation)
             latest, created_at_floors, attempted_by_id = await self._load_version_state(
-                state.active_epoch_floor, state.generation
+                state.active_epoch_floor, state.generation, released
             )
             epochs, outcomes = await self._load_eligible_epochs(
-                state.active_epoch_floor, completed_day_limit
+                state.active_epoch_floor, completed_day_limit, released
             )
             if not epochs:
                 return 0
@@ -827,29 +975,41 @@ class AnalyticsV2Producer:
                         for row in week_rows
                     ):
                         continue
-                    aggregate = self._next_aggregate(
-                        week_rows,
-                        epoch=epoch,
-                        week=week,
-                        today_utc=completed_day_limit,
-                        prior_row=prior_row,
-                        attempted_by_id=attempted_by_id,
-                        max_frame_bytes=frame_limit,
-                        earlier_epochs_through=earlier_through.get(epoch.epoch),
-                    )
-                    if aggregate is None:
+                    try:
+                        aggregate = self._next_aggregate(
+                            week_rows,
+                            epoch=epoch,
+                            week=week,
+                            today_utc=completed_day_limit,
+                            prior_row=prior_row,
+                            attempted_by_id=attempted_by_id,
+                            max_frame_bytes=frame_limit,
+                            earlier_epochs_through=earlier_through.get(epoch.epoch),
+                        )
+                        if aggregate is None:
+                            continue
+                        created_at = max(
+                            int(instant.timestamp()),
+                            created_at_floors.get(address.d_tag, -1) + 1,
+                        )
+                        encoded = encode_week_event(
+                            aggregate,
+                            private_key_hex=self._private_key_hex,
+                            provider_d=self._provider_d,
+                            created_at=created_at,
+                            max_frame_bytes=frame_limit,
+                        )
+                    except AnalyticsV2Error:
+                        if epoch.epoch not in released:
+                            raise
+                        # A released backlog epoch must never stall the live lane.
+                        logger.warning(
+                            "Skipping released analytics epoch %s week %s",
+                            epoch.epoch,
+                            week,
+                            exc_info=True,
+                        )
                         continue
-                    created_at = max(
-                        int(instant.timestamp()),
-                        created_at_floors.get(address.d_tag, -1) + 1,
-                    )
-                    encoded = encode_week_event(
-                        aggregate,
-                        private_key_hex=self._private_key_hex,
-                        provider_d=self._provider_d,
-                        created_at=created_at,
-                        max_frame_bytes=frame_limit,
-                    )
                     if encoded.pubkey != self._public_key_hex:
                         raise IdentityMismatchError(
                             "Analytics v2 private key does not match the claimed pubkey"
@@ -894,13 +1054,21 @@ class AnalyticsV2Producer:
         return through
 
     async def _load_eligible_epochs(
-        self, active_epoch_floor: int, today_utc: date
+        self,
+        active_epoch_floor: int,
+        today_utc: date,
+        released: frozenset[int] = frozenset(),
     ) -> tuple[tuple[TerminalOutcomeEpoch, ...], tuple[LedgerOutcome, ...]]:
         yesterday = today_utc - timedelta(days=1)
         async with self._session_factory() as session:
             result = await session.exec(
                 select(TerminalOutcomeEpoch)
-                .where(col(TerminalOutcomeEpoch.epoch) >= active_epoch_floor)
+                .where(
+                    or_(
+                        col(TerminalOutcomeEpoch.epoch) >= active_epoch_floor,
+                        col(TerminalOutcomeEpoch.epoch).in_(released),
+                    )
+                )
                 .order_by(col(TerminalOutcomeEpoch.epoch))
             )
             epochs = tuple(
@@ -949,7 +1117,10 @@ class AnalyticsV2Producer:
         return epochs, rows
 
     async def _load_version_state(
-        self, active_epoch_floor: int, generation: int
+        self,
+        active_epoch_floor: int,
+        generation: int,
+        released: frozenset[int] = frozenset(),
     ) -> tuple[
         dict[tuple[int, str], AnalyticsV2Outbox],
         dict[str, int],
@@ -982,6 +1153,7 @@ class AnalyticsV2Producer:
                             self._public_key_hex,
                             active_epoch_floor,
                             generation,
+                            released,
                             attempted_only=False,
                         )
                     )
@@ -995,6 +1167,7 @@ class AnalyticsV2Producer:
                             self._public_key_hex,
                             active_epoch_floor,
                             generation,
+                            released,
                             attempted_only=True,
                         )
                     )
@@ -1729,6 +1902,7 @@ def _newest_slot_event_ids(
     pubkey: str,
     active_epoch_floor: int,
     generation: int,
+    released: frozenset[int],
     *,
     attempted_only: bool,
 ) -> Any:
@@ -1756,7 +1930,12 @@ def _newest_slot_event_ids(
             .label("slot_rank"),
         )
         .where(col(AnalyticsV2Outbox.pubkey) == pubkey)
-        .where(col(AnalyticsV2Outbox.epoch) >= active_epoch_floor)
+        .where(
+            or_(
+                col(AnalyticsV2Outbox.epoch) >= active_epoch_floor,
+                col(AnalyticsV2Outbox.epoch).in_(released),
+            )
+        )
         .where(col(AnalyticsV2Outbox.delivery_generation) == generation)
     )
     if attempted_only:
