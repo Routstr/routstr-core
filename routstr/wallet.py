@@ -74,9 +74,26 @@ _wallet_operation_depth: ContextVar[int] = ContextVar(
 )
 
 
+class WalletBusyError(Exception):
+    """The wallet operation lock was not acquired within the caller's bound."""
+
+    def __init__(self, waited_seconds: float) -> None:
+        self.waited_seconds = waited_seconds
+        super().__init__(
+            f"wallet operation lock not acquired within {waited_seconds:.1f}s"
+        )
+
+
 @asynccontextmanager
-async def wallet_operation_guard() -> AsyncGenerator[None, None]:
-    """Serialize proof mutation and owner payout across local worker processes."""
+async def wallet_operation_guard(
+    acquire_timeout_s: float | None = None,
+) -> AsyncGenerator[None, None]:
+    """Serialize proof mutation and owner payout across local worker processes.
+
+    ``acquire_timeout_s`` bounds only the wait for the lock (``None``: wait as
+    long as it takes). Past it, ``WalletBusyError`` is raised before anything
+    ran under the lock, so the caller may refuse and let its client retry.
+    """
     depth = _wallet_operation_depth.get()
     if depth:
         token = _wallet_operation_depth.set(depth + 1)
@@ -90,12 +107,17 @@ async def wallet_operation_guard() -> AsyncGenerator[None, None]:
     fd = os.open(_WALLET_OPERATION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
     acquired = False
     depth_token = None
+    deadline = (
+        None if acquire_timeout_s is None else time.monotonic() + acquire_timeout_s
+    )
     try:
         while not acquired:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
             except BlockingIOError:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise WalletBusyError(acquire_timeout_s or 0.0) from None
                 await _scheduler_sleep(0.05)
         depth_token = _wallet_operation_depth.set(1)
         async with fail_fast_mint_operations():

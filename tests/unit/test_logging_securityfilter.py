@@ -234,3 +234,24 @@ def test_tty_console_renders_exception_text_verbatim(
     handler.handle(_exception_record(text))
 
     assert text in out.getvalue()
+
+
+def test_confidential_session_id_is_shortened(
+    filter_message: Callable[[str], str],
+) -> None:
+    sid = "8a6e5426" + "ab" * 28
+    out = filter_message(
+        f"('10.0.0.3', 1) - \"WebSocket /v1/confidential/zk?proof=zkchan&session_id={sid}\" [accepted]"
+    )
+    assert sid not in out
+    assert "session_id=8a6e5426abab…" in out
+    out = filter_message(f"GET /zk?proof=pi_nk&sid={sid}")
+    assert sid not in out and "sid=8a6e5426abab…" in out
+
+
+def test_zk_token_is_removed(filter_message: Callable[[str], str]) -> None:
+    token = "cd" * 32
+    out = filter_message(
+        f'"WebSocket /v1/confidential/zk?proof=zkchan&session_id=ab&zk_token={token}" [accepted]'
+    )
+    assert token not in out
