@@ -41,7 +41,33 @@ from .settings import settings
 
 logger = get_logger(__name__)
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
+
+def _bundled_database_url() -> str | None:
+    """The compose stack's PostgreSQL, used when ``DATABASE_URL`` is not set.
+
+    Resolved here rather than in compose so ``docker compose exec`` scripts reach
+    the same database as the node. The password lives in a file the postgres
+    service generates on its first start.
+    """
+    url = os.environ.get("BUNDLED_DATABASE_URL")
+    if not url:
+        return None
+    password_file = os.environ.get("BUNDLED_DATABASE_PASSWORD_FILE")
+    if not password_file:
+        return url
+    # Only the trailing newline an editor may add; PostgreSQL keeps other spaces.
+    password = pathlib.Path(password_file).read_text().rstrip("\r\n")
+    return make_url(url).set(password=password).render_as_string(hide_password=False)
+
+
+BUNDLED_DATABASE = not os.environ.get("DATABASE_URL") and bool(
+    os.environ.get("BUNDLED_DATABASE_URL")
+)
+DATABASE_URL = (
+    os.environ.get("DATABASE_URL")
+    or _bundled_database_url()
+    or "sqlite+aiosqlite:///keys.db"
+)
 
 # Money (millisatoshis), lifetime counters and unix timestamps are all 64-bit
 # quantities. SQLite stores every INTEGER as 64-bit so plain ``int`` fields were

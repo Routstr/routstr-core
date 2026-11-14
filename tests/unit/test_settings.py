@@ -184,11 +184,19 @@ def test_database_pool_defaults_provide_concurrency_headroom() -> None:
 
 
 def test_postgres_deployment_persists_generated_password() -> None:
-    deployment = Path(__file__).parents[2] / "docs/provider/deployment.md"
-    text = deployment.read_text()
+    root = Path(__file__).parents[2]
+    postgres = (root / "compose.postgres.yml").read_text()
 
-    assert 'echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> .env' in text
-    assert "same password across restarts" in text
+    assert 'if [ ! -s "$$f" ]; then' in postgres
+    assert "pg_isready -h 127.0.0.1" in postgres
+    assert "postgres-secret:/run/routstr-postgres" in postgres
+    assert "SEED_PASSWORD: ${POSTGRES_PASSWORD:-}" in postgres
+    assert "POSTGRES_PASSWORD_FILE: /run/routstr-postgres/password" in postgres
+    for stack in ("compose.yml", "compose.node.yml"):
+        text = (root / stack).read_text()
+        assert "file: compose.postgres.yml" in text
+        assert "postgres-secret:/run/routstr-postgres:ro" in text
+        assert "BUNDLED_DATABASE_PASSWORD_FILE" in text
 
 
 def test_env_only_settings_are_documented() -> None:

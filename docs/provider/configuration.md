@@ -262,9 +262,10 @@ Use environment variables for:
 | `UPSTREAM_API_KEY`   | Upstream API key                  | —                                    |
 | `ADMIN_PASSWORD`     | Legacy seed for the dashboard password (otherwise generated + logged on first start) | (auto-generated) |
 | `ROUTSTR_SECRET_KEY` | Master key encrypting node secrets at rest. Auto-generated to a key file if unset | (auto-generated) |
-| `ROUTSTR_SECRET_KEY_FILE` | Path to the generated key file (used when `ROUTSTR_SECRET_KEY` is unset) | `routstr_secret.key` beside the database |
-| `DATABASE_URL`       | Database connection string. SQLite or PostgreSQL, e.g. `postgresql+asyncpg://user:pass@host:5432/routstr` | `sqlite+aiosqlite:///keys.db` |
-| `SQLITE_IMPORT_PATH` | SQLite file copied once into an empty PostgreSQL `DATABASE_URL` at startup (see [below](#postgresql-and-multiple-workers)) | — |
+| `ROUTSTR_SECRET_KEY_FILE` | Path to the generated key file (used when `ROUTSTR_SECRET_KEY` is unset) | `routstr_secret.key` beside a SQLite database, otherwise in the working directory (the checkout on Compose) |
+| `DATABASE_URL`       | Database connection string. SQLite or PostgreSQL, e.g. `postgresql+asyncpg://user:pass@host:5432/routstr`. Overrides the bundled PostgreSQL on Docker Compose | Compose stacks: bundled PostgreSQL; otherwise `sqlite+aiosqlite:///keys.db` |
+| `SQLITE_IMPORT_PATH` | SQLite file copied once into an empty PostgreSQL `DATABASE_URL` at startup (see [below](#postgresql-and-multiple-workers)) | Bundled PostgreSQL: `keys.db`; otherwise — |
+| `POSTGRES_PASSWORD`  | Compose only: password for the bundled PostgreSQL, used when its password file is first created | (auto-generated) |
 | `NAME`               | Node display name                 | `ARoutstrNode`                       |
 | `DESCRIPTION`        | Node description                  | `A Routstr Node`                     |
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
@@ -323,21 +324,22 @@ Environment variables are read on startup. Dashboard settings override them and 
 
 The node's Nostr private key (`nsec`) is encrypted in the database using
 `ROUTSTR_SECRET_KEY`. You don't have to set it: if it's unset, the node generates a
-key on first start, writes it **beside the database** (the file named by
-`ROUTSTR_SECRET_KEY_FILE`, default `routstr_secret.key`) so it persists on the same
-volume as your data, and prints it once.
+key on first start, writes it to the file named by `ROUTSTR_SECRET_KEY_FILE`
+(default `routstr_secret.key` beside a SQLite database; on the Compose stacks'
+PostgreSQL, in the checkout), and prints it once.
 
-**Back up that key** — it lives on the same volume as your database, so include it
-in your backups. If it is lost or changed, previously encrypted secrets can't be
+**Back up that key** — it is not inside the database, so include it in your
+backups. If it is lost or changed, previously encrypted secrets can't be
 decrypted and must be re-entered — there is no rotation. To keep the key off the
 data volume, set `ROUTSTR_SECRET_KEY` explicitly (an env value always takes
 precedence over the file). See also [Deployment](deployment.md).
 
-**On PostgreSQL, set the key explicitly.** There is no local database file to sit
-beside, so the generated key lands in the working directory. If that directory
-isn't persisted, the key is gone on the next start and a node with a stored nsec
-refuses to boot with `ROUTSTR_SECRET_KEY is not set`. Set `ROUTSTR_SECRET_KEY`, or
-point `ROUTSTR_SECRET_KEY_FILE` at a persistent path.
+**On PostgreSQL outside Docker Compose, set the key explicitly.** There is no
+local database file to sit beside, so the generated key lands in the working
+directory. If that directory isn't persisted, the key is gone on the next start
+and a node with a stored nsec refuses to boot with `ROUTSTR_SECRET_KEY is not set`.
+Set `ROUTSTR_SECRET_KEY`, or point `ROUTSTR_SECRET_KEY_FILE` at a persistent path.
+The Compose stacks run in the mounted checkout, so the key file persists there.
 
 ### PostgreSQL and Multiple Workers
 
@@ -364,9 +366,10 @@ DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/routstr
 - Pool sizing is per worker: `DATABASE_POOL_SIZE` and `DATABASE_MAX_OVERFLOW`
   (defaults 10 and 20) are multiplied by the worker count on the server side.
 
-On Docker Compose, follow the step-by-step guide in
-[Deployment](deployment.md#postgresql-optional): back up, switch, verify, and
-how to switch back. The rest of this section is the reference behind it.
+The Docker Compose stacks already run on PostgreSQL; see
+[Deployment](deployment.md#database-postgresql) for the automatic move from
+SQLite, checks, and how to stay on or go back to SQLite. The rest of this
+section is the reference behind it.
 
 An existing SQLite database moves over with
 `uv run python scripts/migrate_sqlite_to_postgres.py --source keys.db --target <url>`.
@@ -375,8 +378,9 @@ refuses to drop data silently; run it with `--dry-run` first. Keep the same
 `ROUTSTR_SECRET_KEY`, or the copied encrypted secrets cannot be read.
 
 The node can run the same copy itself at startup: set
-`SQLITE_IMPORT_PATH=keys.db` next to a PostgreSQL `DATABASE_URL`
-(`compose.postgres.yml` does this, see [Deployment](deployment.md#postgresql-optional)).
+`SQLITE_IMPORT_PATH=keys.db` next to a PostgreSQL `DATABASE_URL`. On the Compose
+stacks' bundled PostgreSQL this is the default; set `SQLITE_IMPORT_PATH=`
+(empty) to turn it off.
 
 - One worker imports while the others wait on an advisory lock. The copy and a
   row in `database_imports` commit together, so every later start skips it.
@@ -393,8 +397,9 @@ The node can run the same copy itself at startup: set
   the file yourself. If that file changes afterwards (a SQLite node kept using
   it), the node refuses to start, because those new rows are not in PostgreSQL.
 - Any failure rolls the copy back, logs the cause and stops startup; there is no
-  fallback to SQLite. A missing file with no import record logs a warning and
-  starts on the empty database, as on a fresh install. Check the path before
+  fallback to SQLite. A missing file with no import record starts on the empty
+  database, as on a fresh install (with a warning when `SQLITE_IMPORT_PATH` was
+  set explicitly). Check the path before
   that first start: once the node has written to the database, a later import
   is refused.
 - `.wallet/` stays on local SQLite and `ROUTSTR_SECRET_KEY` must not change.

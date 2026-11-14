@@ -70,6 +70,7 @@ async def test_no_setting_is_a_no_op(
     monkeypatch: pytest.MonkeyPatch, source: Path
 ) -> None:
     monkeypatch.delenv("SQLITE_IMPORT_PATH", raising=False)
+    monkeypatch.setattr(sqlite_import, "BUNDLED_DATABASE", False)
     monkeypatch.setattr(sqlite_import, "create_async_engine", _no_database)
 
     await sqlite_import.import_sqlite_on_startup(POSTGRES_URL)
@@ -86,6 +87,64 @@ async def test_non_postgres_database_url_is_a_no_op(
     await sqlite_import.import_sqlite_on_startup("sqlite+aiosqlite:///keys.db")
 
     assert source.read_bytes() == b"sqlite stand-in"
+
+
+async def test_database_url_off_the_bundled_postgres_is_logged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    infos: list[Any] = []
+    monkeypatch.setenv("SQLITE_IMPORT_PATH", "")
+    monkeypatch.setenv("BUNDLED_DATABASE_URL", POSTGRES_URL)
+    monkeypatch.setattr(sqlite_import.logger, "info", infos.append)
+
+    await sqlite_import.import_sqlite_on_startup("sqlite+aiosqlite:///keys.db")
+
+    assert any("keeps this node on SQLite" in message for message in infos)
+
+
+class _LockConnection:
+    async def execute(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def __aenter__(self) -> _LockConnection:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        return None
+
+
+class _LockEngine:
+    def connect(self) -> _LockConnection:
+        return _LockConnection()
+
+    async def dispose(self) -> None:
+        return None
+
+
+async def test_bundled_postgres_imports_keys_db_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[Path, bool]] = []
+
+    async def record(
+        engine: Any, database_url: str, source: Path, explicit: bool = True
+    ) -> None:
+        calls.append((source, explicit))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SQLITE_IMPORT_PATH", raising=False)
+    monkeypatch.setattr(sqlite_import, "BUNDLED_DATABASE", True)
+    monkeypatch.setattr(
+        sqlite_import, "create_async_engine", lambda *a, **k: _LockEngine()
+    )
+    monkeypatch.setattr(sqlite_import, "_import_once", record)
+
+    await sqlite_import.import_sqlite_on_startup(POSTGRES_URL)
+
+    assert calls == [((tmp_path / "keys.db").resolve(), False)]
 
 
 async def test_import_marker_skips_the_import(
@@ -206,3 +265,41 @@ def test_read_only_source_is_left_in_place(
 
     assert sqlite_import._retire_source(source) is None
     assert source.exists()
+
+
+@pytest.mark.parametrize(
+    ("bundled", "env", "expected"),
+    [
+        (True, None, ("keys.db", False)),
+        (True, "", ("", True)),
+        (True, "/data/old.db", ("/data/old.db", True)),
+        (False, None, ("", False)),
+    ],
+)
+def test_bundled_postgres_imports_keys_db_unless_told_otherwise(
+    monkeypatch: pytest.MonkeyPatch,
+    bundled: bool,
+    env: str | None,
+    expected: tuple[str, bool],
+) -> None:
+    monkeypatch.setattr(sqlite_import, "BUNDLED_DATABASE", bundled)
+    if env is None:
+        monkeypatch.delenv("SQLITE_IMPORT_PATH", raising=False)
+    else:
+        monkeypatch.setenv("SQLITE_IMPORT_PATH", env)
+
+    assert sqlite_import._import_setting() == expected
+
+
+async def test_default_source_missing_starts_a_new_database_quietly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, target: AsyncEngine
+) -> None:
+    warnings: list[Any] = []
+    monkeypatch.setattr(sqlite_import, "copy_sqlite_to_postgres", _no_copy)
+    monkeypatch.setattr(sqlite_import.logger, "warning", warnings.append)
+
+    await sqlite_import._import_once(
+        target, POSTGRES_URL, tmp_path / "keys.db", explicit=False
+    )
+
+    assert warnings == []

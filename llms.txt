@@ -33,8 +33,8 @@ for the operator's artifact. Report the blocker, not a fabricated success.
 - **O4 — Bootstrap password.** Read the one-time admin password from the node logs
   in the operator's own terminal and rotate it in Settings → Admin Settings. The
   agent supplies the exact command and URL and never reads that log line.
-- **O5 — Key backup.** Back up the master key and the NSEC off-host and test a
-  restore (Phase 2).
+- **O5 — Key backup.** Back up the master key, the NSEC and a database dump
+  off-host and test a restore (Phase 2).
 - **O6 — Paid acceptance.** With model, mint, prompt and limit approved, run small
   paid non-streaming and streaming tests with the operator's own funded client
   credential — a consumer credential, not node funding and not an admin token.
@@ -49,6 +49,8 @@ for the operator's artifact. Report the blocker, not a fabricated success.
 - Run bare `docker compose up`: stock `compose.yml` publishes port 8000 on all
   interfaces and starts Tor. Every Compose operation here uses
   `-f compose.node.yml`.
+- Run `docker compose … down -v` or remove the `postgres-data`/`postgres-secret`
+  volumes: they hold the node's database (balances, keys, settings).
 - Run the log command to read the bootstrap password, or paste raw Docker logs or
   admin responses into a report.
 - Report a gate as passed without the operator's artifact.
@@ -116,7 +118,8 @@ python3 scripts/node_setup.py start --private
 - Report ref/version, port, reachability and model count.
 
 `start` prepares `.env` (never clobbering existing values), starts
-`compose.node.yml` (loopback only, no Tor, analytics sharing on by default), waits for the local
+`compose.node.yml` (loopback only, no Tor, analytics sharing on by default, data
+in the bundled PostgreSQL), waits for the local
 `/v1/info` and `/v1/models`, generates the master key and Nostr identity, and — in
 public mode — publishes the listing (approved by O1). It also mints a long-lived
 CLI token and writes it to `~/.routstr/config.json` (0600) for the Routstr CLI;
@@ -129,12 +132,12 @@ A running API with zero models is **not configured**.
 **Agent**
 
 - Hand the operator the numbered list below, with the reveal command.
-- Afterwards verify that both artifacts exist at the backup target (name, size,
-  hash). Never read their contents.
+- Afterwards verify that all three artifacts exist at the backup target (name,
+  size, hash). Never read their contents.
 
 **Operator** (O5)
 
-The master key and identity exist as soon as the node boots. Back up exactly two
+The master key and identity exist as soon as the node boots. Back up exactly three
 things, off-host and encrypted:
 
 1. The NSEC — the node's Nostr identity key. In your own terminal:
@@ -144,12 +147,15 @@ docker compose -f compose.node.yml exec routstr /.venv/bin/python scripts/reveal
 ```
 
 2. `routstr_secret.key` — the master key file.
+3. A `pg_dump` of the node's database, with the **Back up** block in
+   `docs/provider/deployment.md` (Backup and Restore); add `-f compose.node.yml`
+   after `docker compose`.
 
-Test a restore once, somewhere isolated. Keep the two together: the master key
-decrypts the `nsec` stored in `keys.db`. Do not ingest the revealed `nsec` or any
-logs into the agent context.
+Test a restore once, somewhere isolated. Keep the three together: the master key
+decrypts the `nsec` and other secrets stored in the database. Do not ingest the
+revealed `nsec`, the dump or any logs into the agent context.
 
-Gate G1 — "both items stored and restore tested."
+Gate G1 — "all three items stored and restore tested."
 
 ### Phase 3 — Dashboard
 
