@@ -379,3 +379,68 @@ async def test_info_endpoints_response_consistency(
         first_ids = {m["id"] for m in first_models}
         response_ids = {m["id"] for m in models}
         assert first_ids == response_ids
+
+
+class _CatalogModel:
+    """A model-shaped object large enough to be worth compressing."""
+
+    def __init__(self, index: int) -> None:
+        self.index = index
+
+    def dict(self) -> dict[str, Any]:
+        return {
+            "id": f"vendor/model-{self.index}",
+            "name": f"Vendor Model {self.index}",
+            "created": 0,
+            "description": "A model served by a local inference proxy",
+            "context_length": 8192,
+            "architecture": {
+                "modality": "text->text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "Other",
+                "instruct_type": None,
+            },
+            "pricing": {"prompt": 0.0000001, "completion": 0.0000002},
+        }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_models_endpoint_compresses_and_revalidates(
+    integration_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The catalog every daemon polls must be gzipped and revalidatable.
+
+    A node with a few hundred models returns ~670 KB of JSON; the polling
+    daemons give the fetch 10 s, so an uncompressed catalog is enough to make a
+    healthy node look unreachable. Compression and the ETag are what keep that
+    poll cheap, so they are asserted through the real app here, not just on the
+    helper.
+    """
+    from routstr import proxy
+
+    monkeypatch.setattr(
+        proxy,
+        "get_unique_models",
+        lambda: [_CatalogModel(index) for index in range(300)],
+    )
+
+    response = await integration_client.get(
+        "/v1/models", headers={"accept-encoding": "gzip"}
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-encoding"] == "gzip"
+    assert response.headers["vary"].lower() == "accept-encoding"
+    assert response.headers["cache-control"] == "no-cache"
+    etag = response.headers["etag"]
+    assert etag.startswith('W/"')
+    assert len(response.json()["data"]) == 300
+
+    revalidated = await integration_client.get(
+        "/v1/models", headers={"accept-encoding": "gzip", "if-none-match": etag}
+    )
+
+    assert revalidated.status_code == 304
+    assert revalidated.content == b""
