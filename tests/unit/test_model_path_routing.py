@@ -412,6 +412,9 @@ async def test_messages_endpoint_pin_uses_native_openrouter_transport(
             # Avoid unrelated model metadata mocks altering body preparation.
             model.image_pricing = None
             model.architecture.output_modalities = ["text"]
+            model.pricing = MagicMock(
+                prompt=1e-6, completion=2e-6, request=0.0, image=0.0
+            )
             response = await _run_proxy(
                 request, [(model, upstream), (model, fallback)], "v1/messages"
             )
@@ -421,6 +424,8 @@ async def test_messages_endpoint_pin_uses_native_openrouter_transport(
     forwarded = json.loads(sent[0].content)
     assert forwarded["messages"] == body["messages"]
     assert forwarded["stream"] == stream
+    max_price = forwarded["provider"].pop("max_price")
+    assert set(max_price) == {"prompt", "completion", "request", "image"}
     assert forwarded["provider"] == {"order": ["cloudflare"], "allow_fallbacks": False}
     assert "x-routstr-model-path" not in sent[0].headers
     prepare.assert_called_once()
