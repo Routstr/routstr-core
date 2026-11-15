@@ -5,6 +5,8 @@ Tests preparers, builders, accessors, and model cache methods.
 
 from unittest.mock import Mock
 
+import h11
+import httpx
 import pytest
 
 from routstr.upstream.base import BaseUpstreamProvider
@@ -38,6 +40,63 @@ def test_prepare_headers_auth_header_passthrough() -> None:
 
     # Currently provider key is used (may be intentional for proxy pattern)
     assert "Authorization" in headers
+
+
+def test_prepare_headers_sanitizes_non_ascii_values() -> None:
+    """Unicode attribution headers must not crash httpx request building."""
+    p = BaseUpstreamProvider("https://api.test.com", "sk-test-key")
+    headers = p.prepare_headers(
+        {"X-Title": "Routstr client — session", "X-Custom": "café"}
+    )
+
+    assert headers["X-Title"] == "Routstr client  session"
+    assert headers["X-Custom"] == "caf"
+    # This is the operation that previously raised UnicodeEncodeError.
+    httpx.Request("POST", "https://api.test.com/v1/chat/completions", headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("— My App", "My App"),
+        ("My App —", "My App"),
+        ("—\tMy App\t—", "My App"),
+        ("— My App — session —", "My App  session"),
+        ("— \t —", None),
+    ],
+)
+def test_prepare_headers_sanitized_values_are_valid_http11(
+    value: str, expected: str | None
+) -> None:
+    p = BaseUpstreamProvider("https://api.test.com", "sk-test-key")
+    # Match Starlette's latin-1 decoding of UTF-8 client header bytes.
+    wire_value = value.encode("utf-8").decode("latin-1")
+    headers = p.prepare_headers({"x-title": wire_value})
+
+    if expected is None:
+        assert "x-title" not in headers
+    else:
+        assert headers["x-title"] == expected
+
+    request = httpx.Request("POST", "https://api.test.com/", headers=headers)
+    # Request construction alone doesn't validate HTTP/1.1 header whitespace.
+    connection = h11.Connection(h11.CLIENT)
+    assert connection.send(
+        h11.Request(
+            method=request.method,
+            target=request.url.raw_path,
+            headers=request.headers.raw,
+        )
+    )
+
+
+def test_prepare_headers_drops_unusable_non_ascii_headers() -> None:
+    """Non-ASCII names and values with no ASCII content cannot be forwarded."""
+    p = BaseUpstreamProvider("https://api.test.com", "sk-test-key")
+    headers = p.prepare_headers({"X-Тitle": "value", "X-Title": "—"})
+
+    assert "X-Тitle" not in headers
+    assert "X-Title" not in headers
 
 
 # ===========================================================================
