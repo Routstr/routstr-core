@@ -1,4 +1,5 @@
 import json
+import re
 from typing import TYPE_CHECKING
 
 import httpx
@@ -16,6 +17,73 @@ if TYPE_CHECKING:
 ANTHROPIC_SUPPORTED_EFFORTS: frozenset[str] = frozenset(
     {"low", "medium", "high", "xhigh", "max"}
 )
+
+# Body fields the API accepts only with their beta. Relays such as routstrd
+# drop client headers, so the beta is restored from the body that needs it.
+_FIELD_BETAS = (
+    ("context_management", "context-management-2025-06-27"),
+    ("safeguards", "dangerous-tool-use-2026-09-03"),
+)
+_MESSAGE_FIELD_BETAS = (("output_config", "per-turn-control-2026-07-01"),)
+
+_NATIVE_CLAUDE_ID = re.compile(
+    r"^claude-(?P<family>[a-z]+)-(?P<major>\d+)(?:-(?P<minor>\d{1,2}))?(?:-\d{8})?$"
+)
+
+
+def _rejects_budgeted_thinking(native_id: object) -> bool:
+    """Whether Anthropic answers ``thinking.type: enabled`` with a 400.
+
+    Probed against the API: Opus 4.7+, every 5.x model and Fable accept only
+    adaptive thinking; 4.6 accepts both and 4.5 accepts only budgets.
+    """
+    if not isinstance(native_id, str):
+        return False
+    match = _NATIVE_CLAUDE_ID.match(native_id)
+    if match is None:
+        return False
+    if match["family"] == "fable":
+        return True
+    return (int(match["major"]), int(match["minor"] or 0)) >= (4, 7)
+
+
+def _effort_for_budget(budget: int) -> str:
+    # Tiers bracket the common client budgets (2k/8k/16k for low/medium/high).
+    if budget <= 4096:
+        return "low"
+    if budget <= 12288:
+        return "medium"
+    return "high"
+
+
+def _normalize_thinking(data: dict) -> bool:
+    """Rewrite client thinking shapes the native API rejects.
+
+    Clients that predate adaptive-only models still send budgeted thinking.
+    Other providers (OpenRouter, the litellm path) already translate it, so
+    without this the same request succeeds or fails depending on which
+    provider the router picks.
+    """
+    thinking = data.get("thinking")
+    if not isinstance(thinking, dict):
+        return False
+    normalized = dict(thinking)
+    if normalized.get("type") == "enabled" and _rejects_budgeted_thinking(
+        data.get("model")
+    ):
+        budget = normalized.pop("budget_tokens", None)
+        normalized["type"] = "adaptive"
+        config = data.get("output_config", {})
+        if (
+            isinstance(budget, int)
+            and isinstance(config, dict)
+            and "effort" not in config
+        ):
+            data["output_config"] = {**config, "effort": _effort_for_budget(budget)}
+    if normalized == thinking:
+        return False
+    data["thinking"] = normalized
+    return True
 
 
 class AnthropicUpstreamProvider(BaseUpstreamProvider):
@@ -137,7 +205,44 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
             headers["anthropic-workspace-id"] = self.workspace_id
         return headers
 
+    def prepare_body_headers(self, headers: dict, body: bytes | None) -> dict:
+        if not body:
+            return headers
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return headers
+        if not isinstance(data, dict):
+            return headers
+        required = [beta for field, beta in _FIELD_BETAS if field in data]
+        thinking = data.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("display") == "updates":
+            required.append("thinking-display-updates-2026-08-18")
+        messages = data.get("messages")
+        if isinstance(messages, list):
+            required += [
+                beta
+                for field, beta in _MESSAGE_FIELD_BETAS
+                if any(isinstance(m, dict) and field in m for m in messages)
+            ]
+        if not required:
+            return headers
+        name = next(
+            (key for key in headers if key.lower() == "anthropic-beta"),
+            "anthropic-beta",
+        )
+        present = [b.strip() for b in headers.get(name, "").split(",") if b.strip()]
+        missing = [beta for beta in required if beta not in present]
+        if not missing:
+            return headers
+        return {**headers, name: ",".join(present + missing)}
+
     def _apply_reasoning_effort(self, data: dict, model_obj: Model) -> bool:
+        # Generic effort is resolved first so it wins over a translated budget.
+        changed = self._apply_generic_effort(data)
+        return _normalize_thinking(data) or changed
+
+    def _apply_generic_effort(self, data: dict) -> bool:
         # Anthropic accepts effort spelled three ways: OpenAI-compatible
         # ``reasoning_effort``, Anthropic ``reasoning.effort``, and the newer
         # native ``output_config.effort``. Normalize all of them onto
