@@ -751,7 +751,9 @@ unset), `head_template`, `key_length`, `key_alphabet`, `suffix_keys`, `chat`
 `cached_in`, `cache_write`, `out` in msats per 1k tokens, surcharge
 included), `mints`, `notary_pubkey`, `notary_pubkey_curve`, and when set
 `session_fee_msat`, `abandon_fee_msat`, `rate_surcharge_pct`,
-`reserve_margin_tokens`, `upstream_models`, `capabilities` + `images`.
+`reserve_margin_tokens`, `upstream_models`, `context_lengths` (per chat
+model, the prompt limit in tokens its reservation is sized by; absent for a
+model without a known context length), `capabilities` + `images`.
 `sig` is the node's BIP-340 signature and `sig_payload` the exact signed
 bytes. A request may name an offer while the node serves it and for 10
 minutes after.
@@ -801,7 +803,8 @@ framing `"1.1"`: once, before the ClientHello):
 Images: `"kind": "images"`, `variant` and `count` instead of `max_tokens`.
 `n` is the last accepted request's number plus 1. `auth` and `offer_sig` may
 differ from the setup's; the fee fields echo the named offer's. The node
-reserves the model's full-context prompt plus `max_tokens` (images:
+reserves the model's full-context prompt (the named offer's
+`context_lengths` entry) plus `max_tokens` (images:
 `msat_per_image × count`) plus the larger fee, and forwards the request
 without the credential. Answers:
 
