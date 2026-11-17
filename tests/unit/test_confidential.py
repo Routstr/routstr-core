@@ -2310,6 +2310,53 @@ def test_zk_proxy_passes_bytes(monkeypatch: pytest.MonkeyPatch, proof: str) -> N
             assert ws.receive_bytes() == payload
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        f"sid={SID}",
+        f"session_id={SID}",
+        f"sid={SID}&session_id={SID}",
+        # ``sid`` wins over ``session_id``.
+        f"sid={SID}&session_id={'ab' * 32}",
+    ],
+)
+def test_zk_proxy_reads_sid_then_session_id(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    sids: list[str] = []
+
+    async def echo(ws: Any) -> None:
+        sids.append(ws.path)
+        async for frame in ws:
+            await ws.send(frame)
+
+    with MockSidecar(echo) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        client = TestClient(_app())
+        state = cws._live_sids[SID] = cws.SessionState()
+        url = f"/v1/confidential/zk?proof=zkchan&{query}&zk_token={state.zk_token}"
+        with client.websocket_connect(url) as ws:
+            ws.send_bytes(b"x")
+            assert ws.receive_bytes() == b"x"
+    assert sids == [f"/zk?proof=zkchan&sid={SID}"]
+
+
+def test_zk_proxy_sid_names_the_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live ``session_id`` does not admit a ``sid`` that names no connection."""
+    with MockSidecar(_sidecar({})) as mock:
+        _use_sidecar(monkeypatch, mock.port)
+        client = TestClient(_app())
+        state = cws._live_sids[SID] = cws.SessionState()
+        url = (
+            f"/v1/confidential/zk?proof=zkchan&sid={'ab' * 32}"
+            f"&session_id={SID}&zk_token={state.zk_token}"
+        )
+        with client.websocket_connect(url) as ws:
+            msg = ws.receive()
+            assert msg["type"] == "websocket.close"
+            assert msg["code"] == 1008
+
+
 @pytest.mark.parametrize("token", ["", "t0k3n-shared-with-the-sidecar"])
 def test_zk_proxy_sends_the_sidecar_token(
     monkeypatch: pytest.MonkeyPatch, token: str
