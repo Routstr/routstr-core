@@ -48,6 +48,7 @@ def _fresh_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(conf, "_SIGNED_OFFERS", conf.OrderedDict())
     monkeypatch.setattr(conf, "_LAST_OFFER", {"payload": None, "offer": None})
+    monkeypatch.setattr(conf, "_LAST_FRAMINGS", {"http": None})
     monkeypatch.setattr(conf, "_FIXED_PRICING_LOGGED", {"done": False})
     monkeypatch.setattr(cws, "_active_sessions", 0)
     monkeypatch.setattr(cws, "_active_zk", 0)
