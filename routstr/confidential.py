@@ -17,7 +17,7 @@ request reserves the full-context prompt plus the pinned completion cap with
 ``pay_for_request`` (``reserve``), is charged the π_C3S-verified usage at the
 rates frozen from the signed offer it names, and is released when the
 upstream never ran. Refunds of unused balance are the existing
-``/v1/wallet/refund``.
+``/v1/balance/refund``.
 
 Pricing of the node's own work:
 ``CONFIDENTIAL_RATE_SURCHARGE_PCT`` raises the per-token rates of the signed

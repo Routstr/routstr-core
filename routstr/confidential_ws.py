@@ -51,7 +51,8 @@
   node closes a connection with no request in flight for the offer's
   ``idle_timeout_s``. The rules are PROTOCOL-V3.md §12.10.
 
-* ``GET /v1/confidential/zk?proof=<name>&session_id=<sid>&zk_token=<token>``:
+* ``GET /v1/confidential/zk?proof=<name>&sid=<sid>&zk_token=<token>``
+  (``session_id=<sid>`` is accepted in place of ``sid``):
   a byte proxy (``twopc``: the two-party key schedule; ``zkchan``: the
   connection's long-lived proof channel, which carries π_NK, π_WIN and π_C3S;
   ``pi_nk``, ``pi_win``, ``pi_c3s``: one proof). Only the sid of a live
@@ -213,7 +214,8 @@ _pending_by_addr: dict[str, dict["SessionState", None]] = {}
 # until the session ends): only these may open a /zk proxy.
 _live_sids: dict[str, "SessionState"] = {}
 # Unused sessions per client address bucket: counted from the reservation
-# until the sidecar reports ``head_written`` or the session ends.
+# until the sidecar reports a request's ``body_released`` (the provider has a
+# complete request) or the session ends.
 _unused_by_ip: dict[str, int] = {}
 # Sessions holding a slot per client address bucket (used or not), and the
 # slot holders themselves (the candidates for eviction).
@@ -350,7 +352,7 @@ class SessionState:
         # The client's address bucket (``_address_bucket``).
         self.addr_key = "unknown"
         # Client address bucket counted in ``_unused_by_ip`` until the session
-        # is used.
+        # is used (its first ``body_released``).
         self.unused_ip: str | None = None
         # Pending (in ``_pending``) until the setup is reserved or fails; only
         # a connection still waiting for its setup frame may be evicted.
@@ -1560,9 +1562,10 @@ def _h2_deposit_verdict(state: SessionState, ended: str) -> tuple[bool, str]:
     request through (``state.h2_fault``); the sidecar never accepted the
     setup (``not_started``). Charged otherwise: the node garbled a key
     schedule for a connection that carried no request (``ended`` says how it
-    ended: ``unused``, ``idle``, ``setup_timeout``, ``request_refused``), or
-    whose only request was abandoned before the provider had it
-    (``request_abandoned``)."""
+    ended: ``unused``, ``idle``, ``setup_timeout``; a connection whose
+    requests were all refused is ``unused``), or whose only request was
+    abandoned before the provider had it (``request_abandoned``). An evicted
+    connection always had a settlement."""
     if state.h2_settled > 0:
         return False, "request_settled"
     if state.h2_fault is not None:
@@ -2082,12 +2085,19 @@ async def _h2_end_deposit(state: SessionState, ended: str) -> dict[str, Any] | N
 
 @confidential_ws_router.websocket("/v1/confidential/zk")
 async def confidential_zk_proxy(
-    websocket: WebSocket, proof: str = "", session_id: str = "", zk_token: str = ""
+    websocket: WebSocket,
+    proof: str = "",
+    sid: str = "",
+    session_id: str = "",
+    zk_token: str = "",
 ) -> None:
     global _active_zk
     await websocket.accept()
+    # The connection's sid: ``sid`` (PROTOCOL-V3.md §12.2); ``session_id`` is
+    # the older name of the same parameter, read when ``sid`` is absent.
+    session_id = sid or session_id
     if not _SID_RE.fullmatch(session_id or "") or not _PROOF_RE.fullmatch(proof or ""):
-        await websocket.close(code=1008, reason="invalid session_id or proof")
+        await websocket.close(code=1008, reason="invalid sid or proof")
         return
     # Only a session that passed setup (credential checked, reservation held)
     # on this node may open proof channels; anything else never reaches the
