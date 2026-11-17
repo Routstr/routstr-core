@@ -2277,6 +2277,127 @@ async def test_signed_offer_freezes_the_reserve_margin(
     assert billing.reserved_msats == 100_024
 
 
+_REAL_OFFERED_MODELS = conf.offered_models
+
+
+async def _sidecar_v3() -> dict[str, Any]:
+    return {
+        "upstream_host": "api.venice.ai",
+        "v": 3,
+        "twopc": "split-public-1",
+        "head_template": "POST / HTTP/1.1\r\n\r\n",
+        "key_length": 42,
+        "suffix_keys": ["model", "max_tokens"],
+    }
+
+
+async def test_offer_signs_the_context_length_the_reservation_uses(
+    monkeypatch: pytest.MonkeyPatch,
+    billing_db: Any,
+    node_identity: tuple[str, str],
+) -> None:
+    """Two upstreams serve one id with different context lengths. /v1/models
+    lists the best-ranked row (here a direct provider's, 50k tokens), while a
+    confidential request reserves for the sidecar host's own row (100k). A
+    client that bounded the reservation by the listing's row would refuse
+    the node's honest reservation; the offer signs the number reserve() uses."""
+    import routstr.proxy as proxy
+
+    arch = SimpleNamespace(output_modalities=["text"])
+    direct = SimpleNamespace(**{**vars(_ctx_model()), "architecture": arch})
+    direct.context_length = 50_000
+    direct.top_provider = SimpleNamespace(
+        context_length=50_000, max_completion_tokens=None
+    )
+    venice = billing_db.model  # the sidecar host's row: 100k
+    direct_up = _Up("https://api.direct.example/v1", "generic")
+    venice_up = _Up("https://api.venice.ai/api/v1")
+    monkeypatch.setattr(proxy, "get_unique_models", lambda: [direct])
+    monkeypatch.setattr(
+        proxy,
+        "get_candidates",
+        lambda mid: [(direct, direct_up), (venice, venice_up)],
+    )
+    monkeypatch.setattr(conf, "offered_models", _REAL_OFFERED_MODELS)
+    monkeypatch.setattr(conf, "cached_sidecar_offer", _sidecar_v3)
+    monkeypatch.setattr(settings, "confidential_sidecar_url", "http://127.0.0.1:7443")
+    monkeypatch.setattr(settings, "http_url", "https://node.example.com")
+    monkeypatch.setattr(conf, "_LAST_OFFER", {"payload": None, "offer": None})
+
+    # What /v1/models serves for the id, and what the node reserves for.
+    (listed,) = proxy.get_unique_models()
+    assert listed.context_length == 50_000
+    cand = conf.offered_models(await _sidecar_v3())["ctx-model"]
+    assert cand.model is venice and conf.prompt_token_limit(cand.model) == 100_000
+
+    offer = await conf.build_offer()
+    assert offer["context_lengths"] == {"ctx-model": 100_000}
+    assert json.loads(offer["sig_payload"])["context_lengths"] == {"ctx-model": 100_000}
+    billing = await conf.reserve("hk", "ctx-model", 8, offer["sig"])
+    # 100000*1 + 8*2 msats at the offer's rates: the signed limit, not 50k.
+    rates = offer["price_list"]["ctx-model"]
+    expected = math.ceil(
+        (100_000 * max(rates["in"], rates.get("cache_write", 0.0)) + 8 * rates["out"])
+        / 1000
+    )
+    assert billing.reserved_msats == expected
+    listing_bound = math.ceil((50_000 * rates["in"] + 8 * rates["out"]) / 1000)
+    assert billing.reserved_msats > listing_bound
+    await conf.release(billing)
+
+
+async def test_reserve_uses_the_signed_context_length(billing_db: Any) -> None:
+    """The signed limit is frozen with the offer's terms: a catalogue row that
+    changes after signing does not move a reservation on that offer."""
+    conf._remember_offer(
+        "ab" * 64,
+        conf.OfferTerms(
+            {"ctx-model": dict(RATES)}, context_lengths={"ctx-model": 40_000}
+        ),
+    )
+    billing = await conf.reserve("hk", "ctx-model", 8, "ab" * 64)
+    # 40000*1 + 8*2 msats (the catalogue says 100k)
+    assert billing.reserved_msats == 40_016
+    await conf.release(billing)
+
+    # An offer without the field (or without the model) keeps the catalogue's.
+    for i, lengths in enumerate(({}, {"other": 7})):
+        sig = f"{i:02x}" * 64
+        conf._remember_offer(
+            sig, conf.OfferTerms({"ctx-model": dict(RATES)}, context_lengths=lengths)
+        )
+        billing = await conf.reserve("hk", "ctx-model", 8, sig)
+        assert billing.reserved_msats == 100_016
+        await conf.release(billing)
+
+
+async def test_offer_lists_no_context_length_for_a_model_without_one(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    unknown = SimpleNamespace(context_length=None, top_provider=None)
+    known = SimpleNamespace(
+        context_length=8192, top_provider=SimpleNamespace(context_length=16384)
+    )
+    up = _Up("https://api.venice.ai/api/v1")
+    monkeypatch.setattr(conf, "cached_sidecar_offer", _sidecar_v3)
+    monkeypatch.setattr(
+        conf,
+        "offered_models",
+        lambda side: {"u": conf.Candidate(unknown, up), "k": conf.Candidate(known, up)},
+    )
+    monkeypatch.setattr(conf, "price_entry", lambda mid, c: dict(RATES))
+    monkeypatch.setattr(settings, "confidential_sidecar_url", "http://127.0.0.1:7443")
+    monkeypatch.setattr(conf, "_LAST_OFFER", {"payload": None, "offer": None})
+    offer = await conf.build_offer()
+    assert set(offer["price_list"]) == {"u", "k"}
+    assert offer["context_lengths"] == {"k": 16384}
+
+    monkeypatch.setattr(
+        conf, "offered_models", lambda side: {"u": conf.Candidate(unknown, up)}
+    )
+    assert "context_lengths" not in await conf.build_offer()
+
+
 async def test_zero_cost_releases_and_reports_balance(billing_db: Any) -> None:
     billing = await conf.reserve("hk", "ctx-model", 8, _current_sig())
     out = await conf.settle(

@@ -133,7 +133,11 @@ EHBP), at rates fixed when the request is accepted:
    the larger fee:
    `max(MIN_REQUEST_MSAT, ceil((prompt_limit*max(in,cache_write) + (max_tokens+margin)*out)/1000)) + max(session fee, abandon fee)`,
    where `prompt_limit` is the model's full context length (a prompt cap
-   smaller than that would leave part of an accepted prompt unreserved) and
+   smaller than that would leave part of an accepted prompt unreserved): the
+   one the named offer signs in `context_lengths`, which is the sidecar
+   host's own catalogue row when the offer was signed (another upstream may
+   list the same id with another context length in `/v1/models`, so clients
+   bound the reservation only by the signed number), and
    `margin` is the offer's `reserve_margin_tokens` (providers may bill a few
    completion tokens past the cap; the charge is still the usage). Usage
    beyond the reservation is paid by the node, so size the margin for the

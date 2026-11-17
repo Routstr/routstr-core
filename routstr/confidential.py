@@ -1059,6 +1059,11 @@ class OfferTerms:
     connection: str = ""
     # Public id -> the provider's id the chat suffix pins, where they differ.
     upstream_models: dict[str, str] = dc_field(default_factory=dict)
+    # Public id -> the prompt limit (tokens) a chat request on this offer
+    # reserves for: the sidecar host's own catalogue row when the offer was
+    # signed. The client bounds ``reserved_msats`` with this number, so it is
+    # frozen like the rates.
+    context_lengths: dict[str, int] = dc_field(default_factory=dict)
 
 
 # sig -> (monotonic time last served, terms), oldest first.
@@ -1260,6 +1265,11 @@ async def build_offer() -> dict[str, Any]:
     priced = priced_models(side)
     prices = {mid: surcharged(entry, pct) for mid, (_c, entry) in priced.items()}
     upstream_models = upstream_models_block(priced)
+    context_lengths = {
+        mid: limit
+        for mid, (cand, _e) in priced.items()
+        if (limit := prompt_token_limit(getattr(cand, "model", None))) is not None
+    }
     margin = reserve_margin_tokens()
     images = images_offer_block(side, pct)
     h2 = h2_offer_block(side, images is not None)
@@ -1304,6 +1314,13 @@ async def build_offer() -> dict[str, Any]:
         # prefix): the chat suffix pins it. Absent when every id is the
         # provider's own, so such an offer is unchanged.
         offer["upstream_models"] = upstream_models
+    if context_lengths:
+        # The prompt limit each chat reservation is sized by (PROTOCOL-V3
+        # §12.10), per public id: the sidecar host's own row, which need not
+        # be the one /v1/models lists (another upstream may rank first for
+        # the id). A model without a known limit is absent: its reservation
+        # is the model's maximum cost, which the client cannot bound.
+        offer["context_lengths"] = context_lengths
     if images is not None:
         # Absent without images.
         offer["capabilities"] = ["chat", "images"]
@@ -1321,6 +1338,7 @@ async def build_offer() -> dict[str, Any]:
         idle,
         connection_fields(offer),
         upstream_models,
+        context_lengths,
     )
     payload = canonical_json(offer).decode("utf-8")
     last = _LAST_OFFER["offer"]
@@ -1838,7 +1856,8 @@ async def reserve(
     request then owes no session fee (the client still echoes the offer's).
 
     The prompt is opaque to the node, so the reservation covers the model's
-    full context length plus the pinned ``max_tokens`` (which π_WIN enforces
+    full context length (the one the named offer signs in ``context_lengths``)
+    plus the pinned ``max_tokens`` (which π_WIN enforces
     before the upstream starts) and the offer's completion margin (a provider
     may bill slightly past the cap), at the frozen rates. Without a known
     context length it is the model's undiscounted maximum cost (no tolerance
@@ -1879,7 +1898,10 @@ async def reserve(
             key = await _validate_bearer(auth, session)
         except HTTPException as exc:
             raise _billing_error(exc) from exc
-        limit = prompt_token_limit(cand.model)
+        # The limit the named offer signed (the client checks the reservation
+        # against it), else the catalogue's: an offer without the field, or a
+        # model it lists none for.
+        limit = terms.context_lengths.get(model_id) or prompt_token_limit(cand.model)
         if limit is None:
             if _has_bad_context_length(cand.model):
                 raise BillingError(
