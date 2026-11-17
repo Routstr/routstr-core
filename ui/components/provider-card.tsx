@@ -31,7 +31,9 @@ import { ProviderBalance } from '@/components/provider-balance';
 import { ProviderModelsPanel } from '@/components/provider-models-panel';
 import { ProviderCertificationDialog } from '@/components/provider-certification-dialog';
 import { RoutstrCreateKeySection } from '@/components/providers/RoutstrCreateKeySection';
+import { RefundTokenDialog } from '@/components/providers/RefundTokenDialog';
 import { RoutstrProviderService } from '@/lib/api/services/routstr-provider';
+import type { RoutstrRefundResult } from '@/lib/api/services/routstr-provider';
 import { getErrorStatus } from '@/lib/api/client';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
@@ -97,6 +99,16 @@ export function ProviderCard({
   const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
   const [isCertifyOpen, setIsCertifyOpen] = useState(false);
   const [isReleaseDialogOpen, setIsReleaseDialogOpen] = useState(false);
+  // The current key is only replaced once its balance has left it: refunded,
+  // empty, or handed to the operator as a token.
+  const [isCurrentKeyRefunded, setIsCurrentKeyRefunded] = useState(false);
+  const [keyRefundError, setKeyRefundError] = useState<string | null>(null);
+  const [keyRefundNote, setKeyRefundNote] = useState<string | null>(null);
+  const [unreceivedRefund, setUnreceivedRefund] = useState<{
+    token: string;
+    message: string;
+    forKeyReplacement: boolean;
+  } | null>(null);
   // The claim as the query cache held it when the admin opened the dialog.
   // The mutation sends this token rather than re-reading the query at submit
   // time: a background refetch after the dialog opened must not swap in a
@@ -162,21 +174,49 @@ export function ProviderCard({
     },
   });
 
-  const refundMutation = useMutation({
+  // The mutation variable says whether the refund gates a key replacement.
+  const refundMutation = useMutation<RoutstrRefundResult, Error, boolean>({
     mutationFn: () => RoutstrProviderService.refundBalance(provider.id),
-    onSuccess: (data) => {
-      if (data.ok) {
-        toast.success('Refund successful', { description: data.message });
+    onMutate: (forKeyReplacement) => {
+      if (forKeyReplacement) setKeyRefundError(null);
+    },
+    onSuccess: (data, forKeyReplacement) => {
+      if (data.ok || data.token) {
         queryClient.invalidateQueries({
           queryKey: ['provider-balance', provider.id],
         });
         queryClient.invalidateQueries({ queryKey: ['balances'] });
+      }
+      if (data.ok) {
+        toast.success(
+          data.no_balance ? 'Nothing to refund' : 'Refund successful',
+          { description: data.message }
+        );
+        if (forKeyReplacement) {
+          setKeyRefundNote(data.no_balance ? data.message : null);
+          setIsCurrentKeyRefunded(true);
+        }
+      } else if (data.token) {
+        setUnreceivedRefund({
+          token: data.token,
+          message: data.message,
+          forKeyReplacement,
+        });
       } else {
-        toast.error('Refund failed', { description: data.message });
+        if (forKeyReplacement) setKeyRefundError(data.message);
+        toast.error(
+          forKeyReplacement
+            ? 'Refund failed, key not replaced'
+            : 'Refund failed',
+          { description: data.message }
+        );
       }
     },
-    onError: (error: Error) => {
-      toast.error(`Refund error: ${error.message}`);
+    onError: (error, forKeyReplacement) => {
+      if (forKeyReplacement) setKeyRefundError(error.message);
+      toast.error(
+        `Refund error${forKeyReplacement ? ', key not replaced' : ''}: ${error.message}`
+      );
     },
   });
 
@@ -251,7 +291,14 @@ export function ProviderCard({
               <Button
                 variant='outline'
                 size='sm'
-                onClick={() => setIsKeyModalOpen(true)}
+                onClick={() => {
+                  // Refund again on every open: the key may have been topped
+                  // up since an earlier refund.
+                  setIsCurrentKeyRefunded(false);
+                  setKeyRefundError(null);
+                  setKeyRefundNote(null);
+                  setIsKeyModalOpen(true);
+                }}
                 className={cn(
                   'justify-center gap-1.5',
                   canShowBalance && provider.api_key
@@ -281,7 +328,7 @@ export function ProviderCard({
               <Button
                 variant='outline'
                 size='sm'
-                onClick={() => refundMutation.mutate()}
+                onClick={() => refundMutation.mutate(false)}
                 disabled={refundMutation.isPending}
                 className='justify-center gap-1.5 text-orange-600 hover:text-orange-700 dark:text-orange-400'
                 title='Refund balance to local wallet'
@@ -399,41 +446,67 @@ export function ProviderCard({
             </DialogTitle>
             <DialogDescription>
               {provider.api_key
-                ? 'Create a new API key on the upstream node. The remaining balance on the current key will be automatically refunded to your local wallet before it is replaced.'
+                ? 'Create a new API key on the upstream node. The remaining balance on the current key is refunded to your local wallet first; the key is only replaced once that refund succeeds.'
                 : 'Create an API key on the upstream Routstr node to enable balance, top-up, and refund operations.'}
             </DialogDescription>
           </DialogHeader>
           <div className='py-4'>
-            <RoutstrCreateKeySection
-              baseUrl={provider.base_url || ''}
-              onApiKeyCreated={async (newApiKey) => {
-                if (provider.api_key) {
-                  try {
-                    const result = await RoutstrProviderService.refundBalance(
-                      provider.id
-                    );
-                    if (result.ok) {
-                      toast.success('Old key refunded', {
-                        description: result.message,
-                      });
-                    } else {
-                      toast.warning('Refund skipped', {
-                        description: result.message,
-                      });
-                    }
-                  } catch (error) {
-                    toast.warning(
-                      `Could not refund old key: ${error instanceof Error ? error.message : 'Unknown error'}`
-                    );
-                  }
-                }
-                onUpdateApiKey(newApiKey);
-                setIsKeyModalOpen(false);
-              }}
-            />
+            {provider.api_key && !isCurrentKeyRefunded ? (
+              <div className='space-y-3 rounded-lg border p-4'>
+                <p className='text-muted-foreground text-sm'>
+                  Step 1: refund the current key. If the refund fails, the
+                  current key is kept and you can retry.
+                </p>
+                {keyRefundError && (
+                  <p className='text-destructive text-sm'>{keyRefundError}</p>
+                )}
+                <Button
+                  onClick={() => refundMutation.mutate(true)}
+                  disabled={refundMutation.isPending}
+                  className='w-full gap-1.5'
+                >
+                  <RotateCcw
+                    className={cn(
+                      'h-4 w-4',
+                      refundMutation.isPending && 'animate-spin'
+                    )}
+                  />
+                  {keyRefundError ? 'Retry refund' : 'Refund current key'}
+                </Button>
+              </div>
+            ) : (
+              <>
+                {keyRefundNote && (
+                  <p className='text-muted-foreground text-sm'>
+                    {keyRefundNote}
+                  </p>
+                )}
+                <RoutstrCreateKeySection
+                  baseUrl={provider.base_url || ''}
+                  onApiKeyCreated={(newApiKey) => {
+                    onUpdateApiKey(newApiKey);
+                    setIsCurrentKeyRefunded(false);
+                    setIsKeyModalOpen(false);
+                  }}
+                />
+              </>
+            )}
           </div>
         </DialogContent>
       </Dialog>
+
+      <RefundTokenDialog
+        token={unreceivedRefund?.token ?? null}
+        message={unreceivedRefund?.message}
+        onSaved={() => {
+          // The upstream already debited the key, so the token now holds its
+          // balance and the key can be replaced.
+          if (unreceivedRefund?.forKeyReplacement) {
+            setIsCurrentKeyRefunded(true);
+          }
+          setUnreceivedRefund(null);
+        }}
+      />
 
       {hasDetails ? (
         <CardContent>

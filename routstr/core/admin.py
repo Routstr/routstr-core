@@ -2756,6 +2756,7 @@ async def get_lightning_invoices_api(
 )
 async def refund_routstr_provider_balance(provider_id: str) -> dict[str, object]:
     """Refund balance from an upstream Routstr provider back to the local wallet."""
+    from ..refund import REFUND_BALANCE_TOO_SMALL, REFUND_NO_BALANCE
     from ..upstream.helpers import _instantiate_provider
     from ..upstream.routstr import RoutstrUpstreamProvider
 
@@ -2784,6 +2785,26 @@ async def refund_routstr_provider_balance(provider_id: str) -> dict[str, object]
                     if isinstance(error_info, dict)
                     else str(error_info)
                 )
+                code = error_info.get("code") if isinstance(error_info, dict) else None
+                # Nothing left on the upstream key is not a failure: the admin
+                # UI must be able to replace such a key without stranding funds.
+                normalized = str(message).strip().rstrip(".").lower()
+                if code == REFUND_NO_BALANCE or normalized == "no balance to refund":
+                    return {
+                        "ok": True,
+                        "no_balance": True,
+                        "message": "Upstream key has no balance to refund",
+                    }
+                if (
+                    code == REFUND_BALANCE_TOO_SMALL
+                    or normalized == "balance too small to refund"
+                ):
+                    return {
+                        "ok": True,
+                        "no_balance": True,
+                        "message": "Upstream key balance is below 1 sat and cannot "
+                        "be refunded; the remainder is abandoned",
+                    }
                 return {
                     "ok": False,
                     "message": f"Upstream refund failed: {message}",
