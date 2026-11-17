@@ -406,17 +406,18 @@ def test_a_withdrawn_framing_ends_no_live_connection() -> None:
     """Once framing "2" is withdrawn, the node's offer lists only "1.1" and
     has no ``h2`` block: a live "2" connection may name that offer. An offer
     with another ``h2`` block is still a change of the connection."""
-    base = {
+    h2: dict[str, Any] = {"probe_path": "/api/v1/models"}
+    base: dict[str, Any] = {
         "v": 3,
         "twopc": "split-public-1",
         "upstream_host": "api.venice.ai",
-        "h2": {"probe_path": "/api/v1/models"},
+        "h2": h2,
         "connection_deposit_msat": 1000,
         "idle_timeout_s": 120,
     }
     withdrawn = {k: v for k, v in base.items() if k != "h2"}
     opened = conf.OfferTerms(
-        {}, h2=base["h2"], http=("2", "1.1"), connection=conf.connection_fields(base)
+        {}, h2=h2, http=("2", "1.1"), connection=conf.connection_fields(base)
     )
     conf._remember_offer("aa", opened)
     conf._remember_offer(
@@ -425,12 +426,13 @@ def test_a_withdrawn_framing_ends_no_live_connection() -> None:
             {}, http=("1.1",), connection=conf.connection_fields(withdrawn)
         ),
     )
-    other = {**base, "h2": {"probe_path": "/other"}}
+    other_h2: dict[str, Any] = {"probe_path": "/other"}
+    other = {**base, "h2": other_h2}
     conf._remember_offer(
         "cc",
         conf.OfferTerms(
             {},
-            h2=other["h2"],
+            h2=other_h2,
             http=("2", "1.1"),
             connection=conf.connection_fields(other),
         ),
