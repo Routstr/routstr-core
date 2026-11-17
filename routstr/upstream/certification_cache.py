@@ -19,7 +19,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ..core.logging import get_logger
-from ..payment.cost_calculation import CostDataError, calculate_cost
+from ..payment.cost_calculation import (
+    CostDataError,
+    calculate_cost,
+    flat_request_pricing_active,
+)
 from ..payment.usage import NormalizedUsage, normalize_usage
 from .certification import (
     _PROBE_MAX_COST_MSATS,
@@ -360,6 +364,24 @@ def cache_billing_row(
             TITLE_BILLING,
             f"The cost engine could not price the cached completion: "
             f"{cost_data.message}.",
+            evidence,
+        )
+    if flat_request_pricing_active():
+        evidence.update(
+            {
+                "usage": usage.dict(),
+                "basis": "fixed_request_pricing",
+                "actual_total_msats": int(cost_data.total_msats),
+            }
+        )
+        return certification_row(
+            ROW_BILLING,
+            STATUS_WARN,
+            TITLE_BILLING,
+            f"Cached reads are not discounted ({int(cost_data.total_msats)} "
+            "calculated msats) because the node bills a flat fixed price per "
+            "request. Upstream cost, any upstream discount and actual client "
+            "debit are unverified.",
             evidence,
         )
 

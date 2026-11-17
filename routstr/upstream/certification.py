@@ -28,7 +28,11 @@ from urllib.parse import urlparse
 import httpx
 
 from ..core.logging import get_logger
-from ..payment.cost_calculation import _resolve_usd_cost, calculate_cost
+from ..payment.cost_calculation import (
+    _resolve_usd_cost,
+    calculate_cost,
+    flat_request_pricing_active,
+)
 from ..payment.rates import coerce_rate
 from ..payment.usage import normalize_usage
 from .certification_probe import (
@@ -754,13 +758,22 @@ def cost_prompt_completion_row(
         )
 
     reported_usd = _reported_usd_cost(payload)
+    expected_input: int | None
+    expected_output: int | None
     try:
-        if reported_usd > 0:
+        if flat_request_pricing_active():
+            from ..core.settings import settings
+
+            expected_total = settings.fixed_cost_per_request * 1000
+            expected_input = None
+            expected_output = None
+            basis = "fixed_request_pricing"
+        elif reported_usd > 0:
             expected_total = _expected_usd_msats(
                 reported_usd, provider_fee, sats_to_usd
             )
-            expected_input: int | None = None
-            expected_output: int | None = None
+            expected_input = None
+            expected_output = None
             basis = "upstream_reported_usd"
         else:
             expected_total, expected_input, expected_output = _expected_token_msats(
@@ -818,11 +831,12 @@ def cost_prompt_completion_row(
     ):
         mismatches.append(f"input {actual_input} != {expected_input}")
 
-    basis_label = (
-        "upstream-reported USD converted with the provider fee and exchange rate"
-        if basis == "upstream_reported_usd"
-        else "configured token pricing"
-    )
+    basis_label = {
+        "fixed_request_pricing": "the flat fixed price per request",
+        "upstream_reported_usd": (
+            "upstream-reported USD converted with the provider fee and exchange rate"
+        ),
+    }.get(basis, "configured token pricing")
     if mismatches:
         return certification_row(
             "cost.prompt_completion",

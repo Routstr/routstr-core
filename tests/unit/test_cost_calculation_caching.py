@@ -737,9 +737,9 @@ async def test_missing_upstream_cost_uses_litellm_model_pricing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Token usage without an upstream cost is priced from LiteLLM."""
-    monkeypatch.setattr(settings, "fixed_pricing", True)
-    monkeypatch.setattr(settings, "fixed_per_1k_input_tokens", 0)
-    monkeypatch.setattr(settings, "fixed_per_1k_output_tokens", 0)
+    # Fixed pricing without per-1k rates bills a flat fee per request, so the
+    # LiteLLM fallback is only reached with fixed pricing off.
+    monkeypatch.setattr(settings, "fixed_pricing", False)
     monkeypatch.setattr(
         "routstr.payment.models.litellm_cost_entry",
         lambda model: {

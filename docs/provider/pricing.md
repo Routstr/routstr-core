@@ -33,6 +33,8 @@ Charge a flat rate per request, regardless of model or token count.
 | **Fixed Pricing** | Enable flat-rate mode |
 | **Fixed Cost** | Sats per request |
 
+Every request that reports token usage (or a local token estimate) is charged exactly the fixed cost, even if the upstream reports its own USD cost. A response with no usage, or with zero tokens in every bucket, is treated as empty and the hold is released. Setting a **Fixed Per 1K** rate (see [Token-Based Overrides](#token-based-overrides)) switches settlement to per-token billing at those rates.
+
 **Best for**: Simple proxies, internal tools, or subscription-like access.
 
 ---
