@@ -1143,6 +1143,92 @@ def test_deposit_when_only_refused_requests_were_sent(
     assert ledger.calls == ["check", "deposit", "reserve", "charge:dep"]
 
 
+_WALLET_BUSY = {1: conf.BillingError("wallet busy", 503)}
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+@pytest.mark.parametrize(
+    "ending,reason",
+    [
+        ({"type": "error", "reason": "connect failed", "fault": "upstream"}, None),
+        ({"type": "error", "reason": "sidecar failed", "fault": "node"}, None),
+        ({"hang_up": True}, "sidecar_failure"),
+    ],
+)
+def test_a_sidecar_fault_after_a_node_refusal_releases_the_open_request(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    http: str,
+    ending: dict[str, Any],
+    reason: str | None,
+) -> None:
+    """A 5xx refusal of the node, then an accepted request that the sidecar's
+    fault or its lost socket ends: the fault decides the request (released in
+    full, no abandon fee) and the deposit's reason (rows 3, 4)."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES, reserve_errors=_WALLET_BUSY)
+    with _Conn(monkeypatch, lambda n: [_request_ok(n, http), ending], http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        refused = conn.recv1()
+        assert refused["type"] == "request_refused" and refused["status"] == 503
+        conn.send(_request(**_FEE))
+        assert conn.recv1()["type"] == "request_ok"
+        err = conn.until("error")
+    fault = ending.get("fault")
+    expected = reason or (
+        "provider_unreachable" if fault == "upstream" else "sidecar_failure"
+    )
+    assert _deposit(err) == ("released", expected, DEP)
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "reserve",
+        "release:dep",
+        "release:rel-2",
+    ]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_an_accepted_request_after_a_node_refusal_puts_the_deposit_at_risk_again(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """Row 6 holds only while no request was accepted after the node's 5xx
+    refusal: a client that abandons the next, accepted request loses the
+    deposit (row 9), as without the refusal."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES, reserve_errors=_WALLET_BUSY)
+    with _Conn(monkeypatch, lambda n: [_request_ok(n, http)], http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        assert conn.recv1()["status"] == 503
+        conn.send(_request(**_FEE))
+        assert conn.recv1()["type"] == "request_ok"
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "reserve",
+        "charge:dep",
+        "release:rel-2",
+    ]
+
+
+def test_a_connection_left_idle_after_a_node_refusal_gets_its_deposit_back(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Row 6: the node's 5xx refusal, then nothing until the idle limit."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, reserve_errors=_WALLET_BUSY)
+    conf._remember_offer(SIG, conf.OfferTerms({}, idle_timeout_s=1))
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+        conn.send(_request())
+        assert conn.recv1()["status"] == 503
+        closed = conn.recv1()
+    assert closed["type"] == "closed" and closed["reason"] == "idle"
+    assert _deposit(closed) == ("released", "node_failure", DEP)
+    assert ledger.calls == ["check", "deposit", "reserve", "release:dep"]
+
+
 @pytest.mark.parametrize("http", ["1.1", "2"])
 def test_deposit_when_a_settlement_cannot_be_written(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
