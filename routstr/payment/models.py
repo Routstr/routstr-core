@@ -778,6 +778,10 @@ async def model_paths_for_model(model_id: str) -> dict:
     return result
 
 
+# ``Model`` fields that stay out of the public model list.
+_INTERNAL_MODEL_FIELDS = ("supported_parameters", "extra_pricing_keys")
+
+
 @models_router.get("/v1/models")
 @models_router.get("/v1/models/", include_in_schema=False)
 @models_router.get("/models")
@@ -795,6 +799,10 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
     data = []
     for model in items:
         item = model.dict()
+        # Catalogue details the node reads itself (the confidential model
+        # filter); ``Model.dict()`` keeps them for the model snapshot.
+        for key in _INTERNAL_MODEL_FIELDS:
+            item.pop(key, None)
         if model.id in confidential:
             item["confidential_upstream"] = confidential[model.id]
         data.append(item)
