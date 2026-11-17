@@ -102,6 +102,7 @@ from .confidential import (
     node_pubkey_hex,
     pin_offer,
     pricing_fields,
+    refresh_offer_for_request,
     release,
     reserve,
     reserve_deposit,
@@ -1765,7 +1766,15 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
             )
     if state.offer_terms is not None:
         try:
-            check_request_offer(msg["offer_sig"], state.offer_terms, state.framing)
+            # Judged against what the node would sign now, also on a node
+            # nobody fetched an offer from lately.
+            await asyncio.wait_for(
+                refresh_offer_for_request(msg["offer_sig"]), SIDECAR_OFFER_WAIT_S
+            )
+        except asyncio.TimeoutError:
+            logger.warning("confidential ws: the current offer took too long")
+        try:
+            check_request_offer(msg["offer_sig"], state.offer_terms)
         except BillingError as exc:
             raise SetupError(exc.status, str(exc), exc.detail) from exc
     # The session fee pays for the handshake: due until the connection's

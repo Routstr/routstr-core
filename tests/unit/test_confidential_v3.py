@@ -312,16 +312,12 @@ def test_check_request_offer() -> None:
     conf._remember_offer("bb", _terms("A"))  # a newer offer, same connection terms
     conf._remember_offer("cc", _terms("B"))
     conf._remember_offer("dd", _terms("A", ("1.1",)))  # "2" was withdrawn
-    conf.check_request_offer("aa", opened, "2")
-    conf.check_request_offer("bb", opened, "2")
-    conf.check_request_offer("dd", opened, "1.1")
-    for sig, framing, kind in (
-        ("cc", "2", "offer_changed"),
-        ("dd", "2", "offer_changed"),
-        ("ee", "2", "offer_expired"),
-    ):
+    conf.check_request_offer("aa", opened)
+    conf.check_request_offer("bb", opened)
+    conf.check_request_offer("dd", opened)
+    for sig, kind in (("cc", "offer_changed"), ("ee", "offer_expired")):
         with pytest.raises(conf.BillingError) as err:
-            conf.check_request_offer(sig, opened, framing)
+            conf.check_request_offer(sig, opened)
         assert err.value.status == 409
         assert err.value.detail["error"]["type"] == kind
 
@@ -339,17 +335,17 @@ def test_a_request_cannot_keep_old_prices_past_the_offer_ttl(
     opened = _terms("A")
     conf._remember_offer("aa", opened)
     assert conf.pin_offer("aa") is opened
-    conf.check_request_offer("aa", opened, "2")
+    conf.check_request_offer("aa", opened)
     now["t"] += conf.SIGNED_OFFER_TTL_S + 1
     with pytest.raises(conf.BillingError) as err:
-        conf.check_request_offer("aa", opened, "2")
+        conf.check_request_offer("aa", opened)
     assert err.value.detail["error"]["type"] == "offer_expired"
     # The node serves a re-priced offer (same connection terms): accepted.
     conf._remember_offer("bb", _terms("A"))
-    conf.check_request_offer("bb", opened, "2")
+    conf.check_request_offer("bb", opened)
     # Served again (unchanged), the old one is fresh again.
     conf._remember_offer("aa", _terms("A"))
-    conf.check_request_offer("aa", opened, "2")
+    conf.check_request_offer("aa", opened)
     conf.unpin_offer("aa")
 
 
@@ -383,10 +379,144 @@ def test_a_security_relevant_offer_change_retires_live_connections(
         monkeypatch.setitem(conf._LAST_OFFER, "offer", {**current, "sig": "zz"})
         if retired:
             with pytest.raises(conf.BillingError) as err:
-                conf.check_request_offer("aa", opened, "2")
+                conf.check_request_offer("aa", opened)
             assert err.value.detail["error"]["type"] == "offer_changed"
         else:
-            conf.check_request_offer("aa", opened, "2")
+            conf.check_request_offer("aa", opened)
+
+
+def test_a_withdrawn_framing_ends_no_live_connection() -> None:
+    """Once framing "2" is withdrawn, the node's offer lists only "1.1" and
+    has no ``h2`` block: a live "2" connection may name that offer. An offer
+    with another ``h2`` block is still a change of the connection."""
+    base = {
+        "v": 3,
+        "twopc": "split-public-1",
+        "upstream_host": "api.venice.ai",
+        "h2": {"probe_path": "/api/v1/models"},
+        "connection_deposit_msat": 1000,
+        "idle_timeout_s": 120,
+    }
+    withdrawn = {k: v for k, v in base.items() if k != "h2"}
+    opened = conf.OfferTerms(
+        {}, h2=base["h2"], http=("2", "1.1"), connection=conf.connection_fields(base)
+    )
+    conf._remember_offer("aa", opened)
+    conf._remember_offer(
+        "bb",
+        conf.OfferTerms(
+            {}, http=("1.1",), connection=conf.connection_fields(withdrawn)
+        ),
+    )
+    other = {**base, "h2": {"probe_path": "/other"}}
+    conf._remember_offer(
+        "cc",
+        conf.OfferTerms(
+            {},
+            h2=other["h2"],
+            http=("2", "1.1"),
+            connection=conf.connection_fields(other),
+        ),
+    )
+    conf.check_request_offer("bb", opened)
+    with pytest.raises(conf.BillingError) as err:
+        conf.check_request_offer("cc", opened)
+    assert err.value.detail["error"]["type"] == "offer_changed"
+
+
+async def _quiet_node_offer(
+    monkeypatch: pytest.MonkeyPatch, now: dict[str, float], **extra: Any
+) -> tuple[str, conf.OfferTerms]:
+    """Build the node's offer at the time ``now`` (as a fetch would) and
+    pin it as a connection's: (sig, terms)."""
+    monkeypatch.setattr(conf.time, "monotonic", lambda: now["t"])
+    offer = await _offer(monkeypatch, extra)
+    terms = conf.pin_offer(offer["sig"])
+    assert terms is not None
+    return offer["sig"], terms
+
+
+async def test_an_unchanged_offer_stays_served_on_a_quiet_node(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Nobody fetched the offer for 11 minutes, and it has not changed: a
+    request naming it is accepted (the node builds its current offer, which
+    is the same one)."""
+    now = {"t": 1000.0}
+    sig, opened = await _quiet_node_offer(monkeypatch, now)
+    now["t"] += 11 * 60
+    await conf.refresh_offer_for_request(sig)
+    conf.check_request_offer(sig, opened)
+    conf.unpin_offer(sig)
+
+
+async def test_a_changed_offer_keeps_its_prices_for_the_offer_ttl_only(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    now = {"t": 1000.0}
+    sig, opened = await _quiet_node_offer(monkeypatch, now)
+    # The node re-prices: the old offer was last served when it was built.
+    monkeypatch.setattr(
+        conf, "price_entry", lambda mid, c: {**RATES, "out": RATES["out"] * 2}
+    )
+    now["t"] += 5 * 60
+    await conf.refresh_offer_for_request(sig)
+    assert conf._LAST_OFFER["offer"]["sig"] != sig
+    conf.check_request_offer(sig, opened)
+    now["t"] += 6 * 60
+    await conf.refresh_offer_for_request(sig)
+    with pytest.raises(conf.BillingError) as err:
+        conf.check_request_offer(sig, opened)
+    assert err.value.detail["error"]["type"] == "offer_expired"
+    # The re-priced offer has the same connection terms: accepted.
+    conf.check_request_offer(conf._LAST_OFFER["offer"]["sig"], opened)
+    conf.unpin_offer(sig)
+
+
+async def test_a_security_relevant_change_retires_connections_without_a_fetch(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    now = {"t": 1000.0}
+    sig, opened = await _quiet_node_offer(
+        monkeypatch, now, chat={"cap_keys": ["max_tokens"]}
+    )
+    side = await conf.cached_sidecar_offer()
+
+    async def changed() -> dict[str, Any]:
+        # The sidecar's pinned suffix changed; nobody fetched the offer.
+        return {**side, "chat": {"cap_keys": ["max_completion_tokens"]}}
+
+    monkeypatch.setattr(conf, "cached_sidecar_offer", changed)
+    now["t"] += conf.OFFER_REFRESH_S + 1
+    await conf.refresh_offer_for_request(sig)
+    with pytest.raises(conf.BillingError) as err:
+        conf.check_request_offer(sig, opened)
+    assert err.value.detail["error"]["type"] == "offer_changed"
+    conf.unpin_offer(sig)
+
+
+def test_a_request_on_a_quiet_node_is_judged_against_its_current_offer(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The connection's offer was last served 11 minutes ago: the node builds
+    its current offer before it judges the request (here: the same one)."""
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    terms = _terms("A")
+    conf._remember_offer(SIG, terms)
+    built: list[str] = []
+
+    async def build_offer() -> dict[str, Any]:
+        built.append("offer")
+        conf._remember_offer(SIG, terms)
+        return {"sig": SIG}
+
+    monkeypatch.setattr(conf, "build_offer", build_offer)
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+        conf._SIGNED_OFFERS[SIG] = (time.monotonic() - 11 * 60, terms)
+        conn.send(_request())
+        assert conn.recv1()["type"] == "request_ok"
+    assert built == ["offer"] and len(ledger.reserved) == 1
 
 
 def test_an_offer_stays_remembered_while_a_connection_is_open_on_it(

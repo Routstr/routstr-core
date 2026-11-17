@@ -1636,7 +1636,44 @@ def _security_view(connection: str, drop: tuple[str, ...] = ()) -> str:
     return canonical_json(keep).decode("utf-8")
 
 
-def check_request_offer(offer_sig: str, opened_on: OfferTerms, framing: str) -> None:
+# A request that names an offer the node has not served for this long makes
+# the node build its current offer first (``refresh_offer_for_request``): a
+# quiet node, which nobody fetched an offer from, still judges a request
+# against what it would sign now.
+OFFER_REFRESH_S = 60.0
+
+
+async def refresh_offer_for_request(offer_sig: str) -> None:
+    """Before ``check_request_offer``: when the offer ``offer_sig`` was not
+    served in the last ``OFFER_REFRESH_S``, build the node's current offer
+    (``build_offer``, with its caches). An unchanged offer is then served
+    again (its prices stay good), a changed one is the current offer the
+    security comparison runs against. A failure to build leaves the node's
+    memory as it was."""
+    found = _SIGNED_OFFERS.get(offer_sig)
+    if found is not None and time.monotonic() - found[0] < OFFER_REFRESH_S:
+        return
+    try:
+        await build_offer()
+    except Exception as exc:
+        logger.warning("confidential: could not build the current offer: %s", exc)
+
+
+def _connection_view(connection: str, drop: tuple[str, ...]) -> str:
+    """A ``connection_fields`` string without the fields ``drop``."""
+    if not drop:
+        return connection
+    try:
+        fields = json.loads(connection)
+    except ValueError:
+        return connection
+    if not isinstance(fields, dict):
+        return connection
+    keep = {k: v for k, v in fields.items() if k not in drop}
+    return canonical_json(keep).decode("utf-8")
+
+
+def check_request_offer(offer_sig: str, opened_on: OfferTerms) -> None:
     """A request on a connection opened on the offer ``opened_on`` names the
     offer ``offer_sig``. Raises ``BillingError`` (409):
 
@@ -1648,11 +1685,15 @@ def check_request_offer(offer_sig: str, opened_on: OfferTerms, framing: str) -> 
       outlive a price change by more than that (the client refetches and
       names the new offer; a price-only change keeps the connection).
     - ``offer_changed``: the named offer differs from the opening one in a
-      connection-level field or no longer lists the framing, or the offer the
-      node serves now differs from the opening one in a security-relevant
-      field (``SECURITY_FIELDS``): such a connection takes no further
-      request, whichever offer the request names (the client opens a new
-      connection)."""
+      connection-level field, or the offer the node serves now differs from
+      the opening one in a security-relevant field (``SECURITY_FIELDS``):
+      such a connection takes no further request, whichever offer the
+      request names (the client opens a new connection).
+
+    The connection is already open, so the framings the named offer lists
+    are not compared: a framing the sidecar withdrew (``"2"``, with its
+    ``h2`` block) ends no live connection. ``refresh_offer_for_request``
+    runs first."""
     found = _SIGNED_OFFERS.get(offer_sig)
     fresh = found is not None and time.monotonic() - found[0] < SIGNED_OFFER_TTL_S
     terms = found[1] if fresh and found is not None else None
@@ -1680,7 +1721,12 @@ def check_request_offer(offer_sig: str, opened_on: OfferTerms, framing: str) -> 
         )
     if terms is opened_on:
         return
-    if terms.connection != opened_on.connection or framing not in terms.http:
+    # A named offer without the ``h2`` block is one served while framing "2"
+    # is withdrawn: the connection keeps the HTTP/2 rules it was opened on.
+    drop_h2 = ("h2",) if terms.h2 is None else ()
+    if _connection_view(terms.connection, drop_h2) != _connection_view(
+        opened_on.connection, drop_h2
+    ):
         message = (
             "the offer this request names differs, in what describes the "
             "connection, from the one the connection was opened on; open a "
