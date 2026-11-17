@@ -162,7 +162,7 @@ EHBP), at rates fixed when the request is accepted:
 5. An upstream HTTP error is disclosed from the response's status line and
    headers only (framing `"2"`: π_WIN under `s_ap_0`; `"1.1"`: π_C3S); the
    node learns the status and those headers, never the error body.
-6. Unused balance is withdrawn with the existing `/v1/wallet/refund`.
+6. Unused balance is withdrawn with the existing `/v1/balance/refund`.
 
 ### What a request costs
 
@@ -261,8 +261,9 @@ sig_scheme}`; `receipt_json` is the signed text):
 |---|---|
 | `v` | 1 (the receipt format) |
 | `sid`, `http`, `n` | the connection, its framing (`"2"` or `"1.1"`), the request |
-| `model` | the pinned model |
-| `usage` | what was settled: the provider's usage event, `{"error_status", "choices": []}`, or `{"flat": true, "kind": "images", "count"}` |
+| `model` | the model the request named (its public id) |
+| `upstream_model` | chat, when it differs from `model`: the provider's id the suffix pinned (the offer's `upstream_models`) |
+| `usage` | what was settled: the provider's usage event, `{"error_status", "choices": []}`, a disclosed refusal `{"refused": "rst_stream" \| "goaway", "error_code"[, "last_stream_id"], "choices": []}`, or `{"flat": true, "kind": "images", "count"}` |
 | `cost_msats`, `reserved_msats`, `balance_msats` | the charge, what was reserved for the request, the key's balance after it |
 | `rates` | chat: the frozen rates |
 | `kind: "images"`, `variant`, `count`, `msat_per_image` | image requests (instead of `rates`) |
@@ -347,7 +348,8 @@ signed.
 - The offer's `ws` URL is built from `HTTP_URL` (`https`→`wss`); without it the
   offer carries the relative path `/v1/confidential/ws`.
 - `/v1/confidential/zk` admits only the sid of a connection that is live on
-  the same node process, with the `zk_token` of its `ready`: at most 6 proof
+  the same node process (`sid=`; `session_id=` is read when `sid` is absent),
+  with the `zk_token` of its `ready`: at most 6 proof
   connections per connection and 192 per process at once. A `/zk` proxy
   closes with its connection.
 - A reservation's lease (its expiry and heartbeat) covers both 10-minute
