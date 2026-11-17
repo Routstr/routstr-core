@@ -90,6 +90,7 @@ from .confidential import (
     UPGRADE_REQUIRED,
     Billing,
     BillingError,
+    OfferRefused,
     cached_sidecar_offer,
     canonical_json,
     charge_fee,
@@ -957,15 +958,27 @@ async def _open_session(
         _release_pending(state)
         await _finalize(state)
         return None
-    except SetupError as exc:
-        logger.warning("confidential ws: rejecting session: %s", exc)
+    except (SetupError, OfferRefused) as exc:
+        if isinstance(exc, OfferRefused):
+            # The sidecar's offer is one this node must not serve (malformed,
+            # another protocol): the node's failure, not the client's. The
+            # cause stays in the log; it can name the sidecar's address.
+            logger.warning("confidential ws: sidecar offer refused: %s", exc)
+            if state.h2_deposit is not None:
+                state.h2_setup_deposit = await _h2_finish_deposit(
+                    state, charge=False, reason="not_started"
+                )
+            frame = _error_frame(503, "confidential sidecar unavailable")
+            frame["fault"] = "node"
+        else:
+            logger.warning("confidential ws: rejecting session: %s", exc)
+            frame = _error_frame(exc.status, str(exc), exc.detail)
         # The pending slot is free before the refusal is sent (a slow
         # client must not hold it); the caller's cleanup repeats this.
         _release_pending(state)
         await _finalize(state)
         # A deposit that was reserved and released again (the sidecar could
         # not be dialed): the refusal says so, signed.
-        frame = _error_frame(exc.status, str(exc), exc.detail)
         try:
             await websocket.send_text(_with_deposit(frame, state.h2_setup_deposit))
         except Exception:
@@ -2055,7 +2068,9 @@ async def _run_h2_session(
         # (``error`` or ``closed``), with the deposit's outcome.
         if last is None:
             last = state.h2_last_frame
-        if last is None and deposit is not None:
+        if last is None:
+            # Neither side had a last word (the client left): an orderly end,
+            # with the deposit's outcome when there is one (§12.9).
             last = {"type": "closed", "reason": "ended"}
         # The money first: the client may be gone, and telling it must not
         # stand between a reservation and its end.

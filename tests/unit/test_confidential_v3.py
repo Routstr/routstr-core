@@ -998,6 +998,18 @@ def test_setup_for_a_framing_the_sidecar_does_not_serve_is_refused(
     assert ledger.calls == [] and "setup" not in holder
 
 
+def test_a_setup_on_a_malformed_sidecar_offer_is_the_nodes_failure(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The sidecar's offer names a malformed framing list: the setup ends
+    with the node's 503, nothing reserved, the sidecar never dialed."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, side={**SIDE_OFFER, "http": "2"})
+    holder, err = _refused_setup(monkeypatch, _setup("2"))
+    assert err["type"] == "error" and err["status"] == 503
+    assert err["fault"] == "node" and "deposit" not in err
+    assert ledger.calls == [] and "setup" not in holder
+
+
 def test_setup_without_funds_never_reaches_the_sidecar(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
@@ -2024,6 +2036,34 @@ def test_refused_requests_do_not_restart_the_idle_time(
         "release:rel-2",
         "charge:dep",
     ]
+
+
+class _LeavingClient(_IdleClient):
+    """A client that leaves shortly after the connection opened."""
+
+    async def receive(self) -> dict[str, Any]:
+        await asyncio.sleep(0.05)
+        return {"type": "websocket.disconnect"}
+
+
+@pytest.mark.parametrize("deposit", [0, DEP])
+async def test_a_connection_nobody_had_the_last_word_on_ends_with_closed_ended(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], deposit: int
+) -> None:
+    """§12.9: the frame is ``closed`` ``ended``, with or without a deposit."""
+    _Ledger(monkeypatch, deposit=deposit)
+    state = cws.SessionState()
+    state.framing = "2"
+    state.sid = SID
+    if deposit:
+        state.h2_deposit = await cws.reserve_deposit("sk-client-key", SIG)
+    client = _LeavingClient()
+    sidecar = _QueueSidecar([_ready("2"), _HEAD], [])
+    started = asyncio.get_running_loop().time()
+    await cws._run_h2_session(client, sidecar, state, started)  # type: ignore[arg-type]
+    last = client.sent[-1]
+    assert (last["type"], last["reason"]) == ("closed", "ended")
+    assert ("deposit" in last) == bool(deposit)
 
 
 async def test_the_idle_time_never_exceeds_the_sidecars(
