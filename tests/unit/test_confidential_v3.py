@@ -1470,6 +1470,46 @@ def test_deposit_when_the_first_request_is_abandoned(
     ]
 
 
+_TOO_LARGE = {"type": "error", "status": 413, "reason": "frame_too_large"}
+
+
+def test_an_oversized_client_frame_on_an_unused_connection_is_the_clients_doing(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The sidecar ends the connection for a client frame over its limit,
+    without ``fault``: row 12."""
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    on_setup = [_ready("2"), _HEAD, _TOO_LARGE]
+    with _Conn(monkeypatch, http="2", on_setup=on_setup) as conn:
+        conn.open()
+        frame = conn.recv1()
+    assert frame["status"] == 413 and "fault" not in frame
+    assert _deposit(frame) == ("charged", "unused", DEP)
+    assert ledger.calls == ["check", "deposit", "charge:dep"]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_an_oversized_client_frame_with_a_request_open_is_the_clients_doing(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """Row 9: the deposit is charged, the request released in full."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    frames = [_request_ok(1, http), _TOO_LARGE]
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        frame = conn.until("error")
+    assert frame["status"] == 413
+    assert _deposit(frame) == ("charged", "request_abandoned", DEP)
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "charge:dep",
+        "release:rel-1",
+    ]
+
+
 @pytest.mark.parametrize("fault", ["upstream", "node"])
 def test_deposit_when_the_provider_is_unreachable_with_request_1_open(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], fault: str
