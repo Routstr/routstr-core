@@ -1057,7 +1057,7 @@ async def send_cashu_refund(
 
 
 def _ehbp_refund_failed_response(
-    request: Request, refund_token: str | None
+    request: Request, refund_token: str | None, refund_reopened: bool
 ) -> Response:
     if refund_token is not None:
         response = create_error_response(
@@ -1071,7 +1071,10 @@ def _ehbp_refund_failed_response(
         return response
     return create_error_response(
         "internal_error",
-        "Refund failed; contact the operator with this request_id. "
+        "Refund failed; claim it later at /v1/balance/refund with the original "
+        "X-Cashu token. Do not resend it as payment."
+        if refund_reopened
+        else "Refund failed; contact the operator with this request_id. "
         "Do not resend the original payment token.",
         500,
         request=request,
@@ -1419,10 +1422,11 @@ async def forward_ehbp_x_cashu_request(
     # Minting may already have consumed proofs, so a request refunds at most once.
     refund_attempted = False
     refund_token_sent: str | None = None
+    refund_reopened = False
     minting: asyncio.Future[str] | None = None
 
     async def mint_refund(refund_amount: int) -> str:
-        nonlocal refund_token_sent
+        nonlocal refund_token_sent, refund_reopened
         claimed = False
         try:
             claimed = await x_cashu_settlement.claim_refund(request_id, refund_amount)
@@ -1434,8 +1438,13 @@ async def forward_ehbp_x_cashu_request(
         except Exception as error:
             if isinstance(error, EhbpRefundStorageError):
                 refund_token_sent = error.token
-            if claimed:
-                await x_cashu_settlement.finish_refund(request_id, refunded=False)
+                if claimed:
+                    await x_cashu_settlement.finish_refund(request_id, refunded=False)
+            elif claimed:
+                # send_token raised, so no refund token exists.
+                refund_reopened = await x_cashu_settlement.reopen_unminted_refund(
+                    request_id
+                )
             raise
         await x_cashu_settlement.finish_refund(request_id, refunded=True)
         return refund_token_sent
@@ -1695,7 +1704,9 @@ async def forward_ehbp_x_cashu_request(
         )
 
         if redeemed and amount > 0 and refund_attempted:
-            return _ehbp_refund_failed_response(request, refund_token_sent)
+            return _ehbp_refund_failed_response(
+                request, refund_token_sent, refund_reopened
+            )
         if redeemed and amount > 0:
             try:
                 refund_token = await refund(amount)
@@ -1717,7 +1728,9 @@ async def forward_ehbp_x_cashu_request(
                         "original_error": str(e),
                     },
                 )
-                return _ehbp_refund_failed_response(request, refund_token_sent)
+                return _ehbp_refund_failed_response(
+                    request, refund_token_sent, refund_reopened
+                )
 
         return create_error_response(
             "upstream_timeout",
@@ -1746,7 +1759,9 @@ async def forward_ehbp_x_cashu_request(
                 "EHBP X-Cashu refund already attempted; not refunding again",
                 extra={"request_id": request_id, "has_token": bool(refund_token_sent)},
             )
-            return _ehbp_refund_failed_response(request, refund_token_sent)
+            return _ehbp_refund_failed_response(
+                request, refund_token_sent, refund_reopened
+            )
         if redeemed and amount > 0:
             try:
                 refund_token = await refund(amount)
@@ -1767,7 +1782,9 @@ async def forward_ehbp_x_cashu_request(
                         "original_error": error_message,
                     },
                 )
-                return _ehbp_refund_failed_response(request, refund_token_sent)
+                return _ehbp_refund_failed_response(
+                    request, refund_token_sent, refund_reopened
+                )
 
         if not redeemed:
             classified = classify_redemption_error(e)

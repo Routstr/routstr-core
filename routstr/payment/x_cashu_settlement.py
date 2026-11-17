@@ -5,12 +5,14 @@ finished (restart, crash, cancellation) can be told apart from one that was
 charged in full, and refunded later.
 
 pending -> refunding -> refunded | failed
+refunding -> pending (no token left the node: none was created, or it was reclaimed)
 pending -> charged
 
 Every X-Cashu path settles before the response starts, so a payment still
-``pending`` after the request lifetime delivered nothing and is refunded in
-full. ``refunding`` means a mint call may have produced a token; it is never
-retried, because minting is not idempotent.
+``pending`` after the request lifetime is refunded: in full when it delivered
+nothing, or the ``refund_amount`` an earlier claim recorded. A ``refunding``
+row that recovery finds stale may have produced a token; it is never retried,
+because minting is not idempotent.
 """
 
 from __future__ import annotations
@@ -136,6 +138,24 @@ async def finish_refund(request_id: str | None, refunded: bool) -> None:
         )
 
 
+async def reopen_unminted_refund(request_id: str | None) -> bool:
+    """Put a claimed refund that created no token back to pending.
+
+    The claimed ``refund_amount`` is kept, so recovery pays the same amount.
+    True means recovery will retry the refund.
+    """
+    if request_id is None:
+        return False
+    try:
+        return await _transition(request_id, (REFUNDING,), PENDING)
+    except Exception:
+        # Recovery resolves a stale refunding row without minting again.
+        logger.exception(
+            "Failed to reopen X-Cashu refund", extra={"request_id": request_id}
+        )
+        return False
+
+
 async def mark_charged(request_id: str | None) -> bool:
     """Record that the payment was kept in full, so recovery never refunds it.
 
@@ -237,29 +257,32 @@ async def drain_settlements(timeout: float) -> None:
 async def _refund_abandoned(payment: CashuTransaction) -> bool:
     request_id = payment.request_id
     assert request_id is not None
-    if not await claim_refund(request_id, payment.amount):
+    # A live refund that created no token left the amount it claimed.
+    amount = (
+        payment.refund_amount if payment.refund_amount is not None else payment.amount
+    )
+    if not await claim_refund(request_id, amount):
         return False
     try:
-        token = await send_token(
-            payment.amount, unit=payment.unit, mint_url=payment.mint_url
-        )
+        token = await send_token(amount, unit=payment.unit, mint_url=payment.mint_url)
     except Exception:
-        logger.critical(
-            "Failed to refund abandoned X-Cashu payment; manual reconciliation required",
+        # send_token returns the token only on success, so nothing left the node.
+        logger.error(
+            "Failed to refund abandoned X-Cashu payment; will retry",
             extra={
                 "request_id": request_id,
-                "amount": payment.amount,
+                "amount": amount,
                 "unit": payment.unit,
                 "mint": payment.mint_url,
             },
             exc_info=True,
         )
-        await finish_refund(request_id, refunded=False)
+        await reopen_unminted_refund(request_id)
         return False
     try:
         await store_cashu_transaction_with_retry(
             token=token,
-            amount=payment.amount,
+            amount=amount,
             unit=payment.unit,
             mint_url=token_mint_url(token, payment.mint_url),
             typ="out",
@@ -273,7 +296,7 @@ async def _refund_abandoned(payment: CashuTransaction) -> bool:
             logger.critical(
                 "Could not tell whether the refund for an abandoned X-Cashu "
                 "payment was stored; manual reconciliation required",
-                extra={"request_id": request_id, "amount": payment.amount},
+                extra={"request_id": request_id, "amount": amount},
                 exc_info=True,
             )
             return False
@@ -285,7 +308,7 @@ async def _refund_abandoned(payment: CashuTransaction) -> bool:
         "Refunded abandoned X-Cashu payment",
         extra={
             "request_id": request_id,
-            "amount": payment.amount,
+            "amount": amount,
             "unit": payment.unit,
             "age_seconds": int(time.time()) - payment.created_at,
         },
