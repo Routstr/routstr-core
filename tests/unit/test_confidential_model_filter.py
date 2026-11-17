@@ -183,6 +183,42 @@ def test_catalogue_fields_survive_a_snapshot_and_stay_absent_otherwise() -> None
     assert "supported_parameters" not in plain and "extra_pricing_keys" not in plain
 
 
+def test_the_public_model_list_leaves_out_the_catalogue_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/v1/models`` lists neither field for a catalogue row that carries
+    both, while the filter still reads them and excludes the model."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import routstr.proxy as proxy
+    from routstr.core.db import get_session
+    from routstr.payment.models import models_router
+
+    row = _raw(
+        "m",
+        params=["tools", "web_search_options"],
+        pricing={"prompt": "0.000001", "completion": "0.000002", "audio": "0.1"},
+    )
+    model = Model(**row)
+    monkeypatch.setattr(proxy, "_unique_models", {"m": model})
+    app = FastAPI()
+    app.include_router(models_router)
+    app.dependency_overrides[get_session] = lambda: None
+    listed = TestClient(app).get("/v1/models").json()["data"]
+    assert [r["id"] for r in listed] == ["m"]
+    assert "supported_parameters" not in listed[0]
+    assert "extra_pricing_keys" not in listed[0]
+    flt = {
+        "chat_model_filter": {
+            "exclude_if_supports": ["web_search_options"],
+            "exclude_if_priced": ["audio"],
+        }
+    }
+    assert _offered(monkeypatch, [row], flt) == set()
+    assert model.dict()["supported_parameters"] == ["tools", "web_search_options"]
+
+
 @pytest.mark.parametrize(
     "block",
     [
