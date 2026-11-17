@@ -431,9 +431,16 @@ class SessionState:
         self.h2_terminal = False
         self.h2_closed_reason: str | None = None
         self.h2_last_frame: dict[str, Any] | None = None
-        # A failure of the node, the sidecar or the provider that ended the
-        # connection before the client could get a request through.
+        # A failure of the sidecar or the provider (``provider_unreachable``,
+        # ``sidecar_failure``, ``provider_closed``): not the client's doing.
+        # It decides a request still open (released in full) and the deposit.
         self.h2_fault: str | None = None
+        # A settlement's billing write failed (or a usage came without an
+        # attestation): the node's own failure.
+        self.h2_node_failed = False
+        # The node refused a request of this connection with a 5xx and has
+        # accepted none since (cleared by the next ``request_ok``).
+        self.h2_refused_5xx = False
         # The outcome of a deposit released because the setup failed after
         # it was reserved (no slot, the sidecar unreachable).
         self.h2_setup_deposit: dict[str, Any] | None = None
@@ -1086,6 +1093,9 @@ async def _on_sidecar_text(
             # request keeps its fee, as a v2 session does after ``ready``.
             state.engaged = True
             state.h2_refused = 0
+            # A request got through after a refusal of the node's own: the
+            # connection is the client's to use or lose again.
+            state.h2_refused_5xx = False
             # What the request holds, said before the client releases it:
             # the most it can be charged (an upstream 5xx or a withheld
             # disclosure costs exactly this). The receipt repeats it.
@@ -1289,7 +1299,7 @@ async def _settle(
                 extra={"sid": _short(state.sid), "model": billing.model_id},
             )
             outcome = await _finalize_unsettled(state)
-            state.h2_fault = state.h2_fault or "node_failure"
+            state.h2_node_failed = True
             _node_error(
                 state,
                 500,
@@ -1339,7 +1349,7 @@ async def _settle(
             # receipt (it would have to report the release). The connection
             # ends with the node's error; its end tries the release again and
             # reports the deposit's outcome, signed (row 6).
-            state.h2_fault = state.h2_fault or "node_failure"
+            state.h2_node_failed = True
             _node_error(
                 state,
                 500,
@@ -1386,7 +1396,7 @@ async def _refuse_unattested(websocket: WebSocket, state: SessionState) -> None:
     full and tell the client the request was not settled."""
     billing = state.billing
     outcome: str | None = None
-    state.h2_fault = state.h2_fault or "node_failure"
+    state.h2_node_failed = True
     async with state.lock:
         if state.finalized or billing is None:
             return
@@ -1556,22 +1566,28 @@ async def _open_h2_session(
 def _h2_deposit_verdict(state: SessionState, ended: str) -> tuple[bool, str]:
     """Whether the deposit of a connection that is ending is charged, and why.
 
-    Released: a request of the connection reached settlement or the provider
-    (``request_settled``, ``request_received``, ``provider_refused``); the
-    node, the sidecar or the provider failed before the client could get a
-    request through (``state.h2_fault``); the sidecar never accepted the
-    setup (``not_started``). Charged otherwise: the node garbled a key
-    schedule for a connection that carried no request (``ended`` says how it
-    ended: ``unused``, ``idle``, ``setup_timeout``; a connection whose
-    requests were all refused is ``unused``), or whose only request was
-    abandoned before the provider had it (``request_abandoned``). An evicted
-    connection always had a settlement."""
+    Released, first match: a request of the connection reached settlement
+    (``request_settled``); the sidecar or the provider failed, or the
+    sidecar's socket was lost (``state.h2_fault``: rows 3, 4, 5); a
+    settlement's billing write failed (``node_failure``); the sidecar never
+    accepted the setup (``not_started``); the node refused a request with a
+    5xx and accepted none since (``node_failure``); a request reached the
+    provider (``request_received``, ``provider_refused``). Charged otherwise:
+    the node garbled a key schedule for a connection that carried no request
+    (``ended`` says how it ended: ``unused``, ``idle``, ``setup_timeout``; a
+    connection whose requests were all refused is ``unused``), or whose
+    request was abandoned before the provider had it
+    (``request_abandoned``). An evicted connection always had a settlement."""
     if state.h2_settled > 0:
         return False, "request_settled"
     if state.h2_fault is not None:
         return False, state.h2_fault
+    if state.h2_node_failed:
+        return False, "node_failure"
     if not state.h2_ready:
         return False, "not_started"
+    if state.h2_refused_5xx:
+        return False, "node_failure"
     if state.billing is not None:
         if state.finalized:
             # Finalized without a receipt: only a failed settlement does that.
@@ -1952,8 +1968,9 @@ async def _run_h2_session(
                     logger.warning("confidential ws: rejecting request: %s", exc)
                     if exc.status >= 500:
                         # The node's own failure: a connection that then ends
-                        # without a settlement gets its deposit back.
-                        state.h2_fault = state.h2_fault or "node_failure"
+                        # without a settlement, before another request was
+                        # accepted, gets its deposit back.
+                        state.h2_refused_5xx = True
                     state.h2_refused += 1
                     if not exc.fatal and state.h2_refused > MAX_REFUSED_IN_A_ROW:
                         exc = ProtocolError(
