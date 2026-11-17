@@ -1072,6 +1072,10 @@ _SIGNED_OFFERS: OrderedDict[str, tuple[float, OfferTerms]] = OrderedDict()
 # remembered whatever its age.
 _PINNED_OFFERS: dict[str, list[Any]] = {}
 _LAST_OFFER: dict[str, Any] = {"payload": None, "offer": None}
+# The framings the last offer build found the sidecar serving (``None``
+# before the first build): a change is logged, so a withdrawal of "2" and
+# its return show in the node's log.
+_LAST_FRAMINGS: dict[str, list[str] | None] = {"http": None}
 
 # The fields of an offer that describe the connection rather than a request
 # (PROTOCOL-V3 §12.1), plus the ``images`` block without its prices.
@@ -1261,6 +1265,12 @@ async def build_offer() -> dict[str, Any]:
             f"this node supports only v{CONFIDENTIAL_VERSION}"
         )
     framings = sidecar_framings(side)
+    before = _LAST_FRAMINGS["http"]
+    if before is not None and before != framings:
+        logger.warning(
+            f"confidential: the framings served changed from {before} to {framings}"
+        )
+    _LAST_FRAMINGS["http"] = list(framings)
     fee, abandon, pct = session_fee_msat(), abandon_fee_msat(), rate_surcharge_pct()
     priced = priced_models(side)
     prices = {mid: surcharged(entry, pct) for mid, (_c, entry) in priced.items()}

@@ -135,6 +135,23 @@ async def test_offer_without_framing_2_has_no_h2_block(
     assert "h2" not in json.loads(offer["sig_payload"])
 
 
+async def test_the_node_logs_a_change_of_the_framings_it_serves(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    warned: list[str] = []
+    monkeypatch.setattr(conf.logger, "warning", lambda msg, *a, **k: warned.append(msg))
+    both = {"http": ["2", "1.1"], "h2": dict(H2)}
+    await _offer(monkeypatch, both)
+    await _offer(monkeypatch, both)
+    assert not any("framings" in w for w in warned)
+    await _offer(monkeypatch, {"http": ["1.1"]})
+    await _offer(monkeypatch, both)
+    changes = [w for w in warned if "framings" in w]
+    assert len(changes) == 2
+    assert "['2', '1.1']" in changes[0] and "['1.1']" in changes[0]
+    assert changes[1].index("['1.1']") < changes[1].index("['2', '1.1']")
+
+
 @pytest.mark.parametrize(
     "extra",
     [
