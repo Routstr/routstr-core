@@ -35,9 +35,9 @@ only `twopc`, `zkchan`, `pi_nk`, `pi_win` and `pi_c3s`; a sidecar whose offer
 does not name `v: 3` is refused (no offer, no `confidential_upstream` models
 field). Clients fetch the offer as `/v1/confidential/offer?v=3` (the query is
 ignored), and the node's Nostr listing carries the tag `["confidential","3"]`
-while a sidecar is configured. Protocol v3 is on the branch
-`confidential-2pc` (this one); the retired v2 is archived on `confidential-v2`,
-v1 on `confidential-upstream`.
+while a sidecar is configured. Protocol v3 is what this branch carries; the
+retired v2 is archived on the branch `confidential-v2`, v1 on
+`confidential-upstream`.
 
 ## Connections and requests
 
@@ -95,9 +95,11 @@ opened on it is alive. A request may name a newer offer (its rates and fees
 are then the newer ones) as long as that offer's connection-level fields
 (`v`, `twopc`, `upstream_host`, `head_template`, `chat`, `h2`,
 `connection_deposit_msat`, `idle_timeout_s`, `images` without its prices) are
-the same and it still lists the connection's framing; otherwise the request
-is refused with 409 `offer_changed` and the client opens a new connection or
-names the old offer.
+the same; otherwise the request is refused with 409 `offer_changed` and the
+client opens a new connection or names the old offer. The framings a named
+offer lists are not compared, since the connection is open already: once the
+sidecar withdraws framing "2", a live "2" connection may name the new offer,
+which is compared without its (absent) `h2` block.
 
 Two limits on that memory, so a long connection cannot keep obsolete terms:
 
@@ -105,7 +107,11 @@ Two limits on that memory, so a long connection cannot keep obsolete terms:
   or for 10 minutes after it stopped (409 `offer_expired` otherwise; the
   client refetches and names the newest, and a price-only change keeps the
   connection). Old rates therefore outlive a price change by at most 10
-  minutes, whatever the connection's `h2.max_lifetime_s`.
+  minutes, whatever the connection's `h2.max_lifetime_s`. When the named
+  offer was not served in the last 60 s, the node builds its current offer
+  before it judges the request, so an unchanged offer stays good on a node
+  nobody fetched an offer from, and the comparison below runs against the
+  offer the node would sign now.
 - *Security-relevant changes.* Once the node serves an offer whose `v`,
   `twopc`, `upstream_host`, `head_template`, `chat`, `h2` or `images` block
   (prices aside) differs from a live connection's, that connection takes no
@@ -235,13 +241,19 @@ first matching row:
 | 3 | the sidecar reported `fault: "upstream"` (the provider unreachable, `h2` not selected, framing `"2"` withdrawn) | released | `provider_unreachable` |
 | 4 | the sidecar reported `fault: "node"`, or its socket ended without `error` or `closed` | released | `sidecar_failure` |
 | 5 | the provider closed the open, idle connection before any request | released | `provider_closed` |
-| 6 | the node refused a request of this connection with a 5xx, or a settlement's billing write failed | released | `node_failure` |
+| 6 | the node refused a request of this connection with a 5xx and accepted none after it, or a settlement's billing write failed | released | `node_failure` |
 | 7 | a request was written in full (`body_released`) and never settled | released (the reservation is charged) | `request_received` |
 | 8 | the provider answered a request and closed before its body was complete | released (the request keeps the session fee) | `provider_refused` |
 | 9 | a request was accepted and the connection ended before its `body_released` for any other reason | **charged**; the reservation is released in full | `request_abandoned` |
 | 10 | no request in flight for `idle_timeout_s` | **charged** | `idle` |
 | 11 | `head_written` not reached within 10 minutes | **charged** | `setup_timeout` |
 | 12 | anything else: the client left, a failed handshake or π_NK, a protocol error, only refused requests | **charged** | `unused` |
+
+A 5xx refusal of the node returns the deposit only while no later request of
+the connection was accepted (`request_ok`): after that, the connection's end
+is judged as without the refusal (an abandoned request is row 9), and a
+sidecar fault or a lost sidecar socket always decides an open request
+(released in full) and the reason (rows 3, 4).
 
 The connection's last frame then carries
 `deposit {sid, msat, outcome, reason, cost_msats, balance_msats, time}` with
