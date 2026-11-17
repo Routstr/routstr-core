@@ -278,6 +278,7 @@ def test_connection_fields_leave_out_what_belongs_to_a_request() -> None:
         "session_fee_msat": 7,
     }
     base = conf.connection_fields(offer)
+    change: dict[str, Any]
     # Prices, fees and the framing list are per request.
     for change in (
         {"price_list": {}},
@@ -580,7 +581,7 @@ def test_records_and_control_frames_are_relayed(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
     _Ledger(monkeypatch)
-    control = [
+    control: list[dict[str, Any]] = [
         {"type": "settings_seen", "header_table_size": None},
         {"type": "ctl", "frame": "settings_ack"},
         {"type": "release", "n": 1, "upto": 2},
@@ -1375,7 +1376,13 @@ def test_a_disclosed_refusal_settles_like_a_429(
     assert receipt["usage"] == refusal
     assert receipt["cost_msats"] == 2000
     assert receipt["deposit_released_msat"] == DEP
-    assert ledger.calls == ["check", "deposit", "reserve", "fee:rel-1:2000", "release:dep"]
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "fee:rel-1:2000",
+        "release:dep",
+    ]
 
 
 def test_a_refusal_after_the_first_settlement_costs_nothing(
@@ -1384,7 +1391,12 @@ def test_a_refusal_after_the_first_settlement_costs_nothing(
     ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
     answers = {
         1: _settled(1, "2"),
-        2: [_request_ok(2, "2"), _attest(2, "2"), _usage(2, "2", usage=_RST), _closed("error_settled")],
+        2: [
+            _request_ok(2, "2"),
+            _attest(2, "2"),
+            _usage(2, "2", usage=_RST),
+            _closed("error_settled"),
+        ],
     }
     with _Conn(monkeypatch, lambda n: answers[n], "2") as conn:
         conn.open()
@@ -1419,18 +1431,33 @@ def test_a_goaway_before_the_body_was_released_does_not_charge_the_deposit(
         last = conn.recv1()
     assert last["reason"] == "error_settled" and "deposit" not in last
     assert receipt["deposit_released_msat"] == DEP
-    assert ledger.calls == ["check", "deposit", "reserve", "fee:rel-1:2000", "release:dep"]
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "fee:rel-1:2000",
+        "release:dep",
+    ]
     assert "charge:dep" not in ledger.calls
 
 
-@pytest.mark.parametrize("usage", [{"refused": "other", "choices": []}, {"refused": True}])
+@pytest.mark.parametrize(
+    "usage", [{"refused": "other", "choices": []}, {"refused": True}]
+)
 def test_an_unknown_refusal_kind_is_not_a_refusal(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], usage: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    usage: dict[str, Any],
 ) -> None:
     """Only the two refusals of §5.4 settle for the fee: anything else that
     reaches billing without token usage is priced as usage (here: none)."""
     ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
-    frames = [_request_ok(1, "2"), _released(1), _attest(1, "2"), _usage(1, "2", usage=usage)]
+    frames = [
+        _request_ok(1, "2"),
+        _released(1),
+        _attest(1, "2"),
+        _usage(1, "2", usage=usage),
+    ]
     with _Conn(monkeypatch, lambda n: frames, "2") as conn:
         conn.open()
         conn.send(_request(**_FEE))
@@ -2051,7 +2078,9 @@ async def test_a_sidecar_that_dies_under_a_frame_is_a_sidecar_failure_whichever_
             await asyncio.Event().wait()
             return {}
 
-    async def run(last: dict[str, Any] | None) -> tuple[cws.SessionState, list[str], _Client]:
+    async def run(
+        last: dict[str, Any] | None,
+    ) -> tuple[cws.SessionState, list[str], _Client]:
         ledger = _Ledger(monkeypatch, deposit=DEP)
         state = cws.SessionState()
         state.framing, state.sid = "2", SID
@@ -2064,7 +2093,10 @@ async def test_a_sidecar_that_dies_under_a_frame_is_a_sidecar_failure_whichever_
     state, calls, client = await run(None)
     assert state.h2_fault == "sidecar_failure"
     assert calls == ["deposit", "release:dep"]
-    assert client.sent[-1]["fault"] == "node" and _deposit(client.sent[-1])[1] == "sidecar_failure"
+    assert (
+        client.sent[-1]["fault"] == "node"
+        and _deposit(client.sent[-1])[1] == "sidecar_failure"
+    )
     # The sidecar's own last frame arrived first: it decides (row 12).
     state, calls, client = await run({"type": "error", "reason": "proof pi_nk failed"})
     assert state.h2_fault is None and calls == ["deposit", "charge:dep"]
@@ -2083,7 +2115,7 @@ def test_a_deposit_that_cannot_be_released_at_the_first_settlement_is_kept_and_r
     inner = cws.release
     fails = {"left": 4}
 
-    async def release(billing: Any) -> int:
+    async def release(billing: Any) -> int | None:
         if billing.snapshot.release_id == "dep" and fails["left"] > 0:
             fails["left"] -= 1
             ledger.calls.append("release-failed:dep")
@@ -2106,7 +2138,9 @@ def test_a_deposit_that_cannot_be_released_at_the_first_settlement_is_kept_and_r
     assert m["status"] == 500 and m["fault"] == "node"
     assert m["detail"]["error"]["outcome"] == "charged_usage:12"
     assert _deposit(m) == ("released", "node_failure", DEP)
-    assert ledger.calls[-6:] == ["settle:rel-1"] + ["release-failed:dep"] * 4 + ["release:dep"]
+    assert ledger.calls[-6:] == ["settle:rel-1"] + ["release-failed:dep"] * 4 + [
+        "release:dep"
+    ]
 
 
 def test_requests_refused_in_a_row_end_the_connection(
@@ -2116,7 +2150,9 @@ def test_requests_refused_in_a_row_end_the_connection(
     the refusal after MAX_REFUSED_IN_A_ROW ends the connection (429) and a
     connection that carried only refused requests loses its deposit."""
     limit = cws.MAX_REFUSED_IN_A_ROW
-    errors = {i: conf.BillingError("Insufficient balance", 402) for i in range(1, limit + 2)}
+    errors = {
+        i: conf.BillingError("Insufficient balance", 402) for i in range(1, limit + 2)
+    }
     ledger = _Ledger(monkeypatch, deposit=DEP, reserve_errors=errors)
     with _Conn(monkeypatch, http="2") as conn:
         conn.open()
@@ -2128,7 +2164,9 @@ def test_requests_refused_in_a_row_end_the_connection(
         assert err["type"] == "error" and err["status"] == 429
         assert conn.closed()
     assert _deposit(err) == ("charged", "unused", DEP)
-    assert ledger.calls.count("reserve") == limit + 1 and ledger.calls[-1] == "charge:dep"
+    assert (
+        ledger.calls.count("reserve") == limit + 1 and ledger.calls[-1] == "charge:dep"
+    )
 
 
 def test_an_accepted_request_restarts_the_refusal_count(
@@ -2136,8 +2174,15 @@ def test_an_accepted_request_restarts_the_refusal_count(
 ) -> None:
     limit = cws.MAX_REFUSED_IN_A_ROW
     # Refusals 1..limit, then an accepted request, then limit refusals more.
-    errors = {i: conf.BillingError("Insufficient balance", 402) for i in range(1, limit + 1)}
-    errors.update({i: conf.BillingError("Insufficient balance", 402) for i in range(limit + 2, 2 * limit + 2)})
+    errors = {
+        i: conf.BillingError("Insufficient balance", 402) for i in range(1, limit + 1)
+    }
+    errors.update(
+        {
+            i: conf.BillingError("Insufficient balance", 402)
+            for i in range(limit + 2, 2 * limit + 2)
+        }
+    )
     _Ledger(monkeypatch, deposit=DEP, reserve_errors=errors)
     with _Conn(monkeypatch, lambda n: _settled(n, "2"), "2") as conn:
         conn.open()
@@ -2168,7 +2213,9 @@ def test_a_provider_close_after_client_frames_on_an_unused_connection_is_not_the
     assert ledger.calls == ["check", "deposit", "charge:dep"]
 
 
-def _holder(addr: str, idle_since: float | None, settled: int = 1, busy: bool = False) -> cws.SessionState:
+def _holder(
+    addr: str, idle_since: float | None, settled: int = 1, busy: bool = False
+) -> cws.SessionState:
     s = cws.SessionState()
     s.addr_key = addr
     s.h2_settled = settled
@@ -2212,7 +2259,11 @@ async def test_a_full_node_evicts_the_longest_idle_used_connection(
     # Every slot freed once, whatever ended first.
     for s in [*states, newcomer]:
         cws._free_slot(s)
-    assert cws._active_sessions == 0 and cws._active_by_ip == {} and cws._slot_holders == {}
+    assert (
+        cws._active_sessions == 0
+        and cws._active_by_ip == {}
+        and cws._slot_holders == {}
+    )
 
 
 async def test_an_address_has_a_total_limit_and_evicts_its_own_idle_connection(

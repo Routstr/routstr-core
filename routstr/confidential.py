@@ -1432,7 +1432,7 @@ class BillingError(Exception):
         super().__init__(message)
         self.status = status
         # FastAPI-style detail, so clients parse it like a normal proxy error.
-        self.detail = detail if detail is not None else message
+        self.detail: Any = detail if detail is not None else message
 
 
 def _billing_error(exc: HTTPException) -> BillingError:
