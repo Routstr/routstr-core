@@ -490,12 +490,20 @@ async def _send_error(
 
 
 def _node_error(
-    state: "SessionState", status: int, reason: str, detail: Any = None
+    state: "SessionState",
+    status: int,
+    reason: str,
+    detail: Any = None,
+    *,
+    node_fault: bool = True,
 ) -> None:
-    """The node itself failed: its ``error`` frame becomes the connection's
-    last frame (sent by the session task, with the deposit's outcome)."""
+    """The node ends the connection: its ``error`` frame becomes the
+    connection's last frame (sent by the session task, with the deposit's
+    outcome). ``node_fault``: the node itself failed (``fault: "node"``);
+    false when the node ends it for the client's doing."""
     frame = _error_frame(status, reason, detail)
-    frame["fault"] = "node"
+    if node_fault:
+        frame["fault"] = "node"
     state.h2_node_error = state.h2_node_error or frame
     state.h2_moved.set()
 
@@ -780,7 +788,8 @@ async def _claim_slot(state: "SessionState") -> None:
         victim = _idle_used(key)
         if victim is None:
             raise SetupError(
-                429, f"too many confidential connections from this address (limit {per_addr})"
+                429,
+                f"too many confidential connections from this address (limit {per_addr})",
             )
         await _evict_idle(victim)
     while _active_sessions >= MAX_SESSIONS:
@@ -1333,7 +1342,12 @@ async def _settle(
                 state,
                 500,
                 "settlement failed",
-                {"error": {"type": "settlement_failed", "outcome": f"charged_usage:{cost}"}},
+                {
+                    "error": {
+                        "type": "settlement_failed",
+                        "outcome": f"charged_usage:{cost}",
+                    }
+                },
             )
             return
         receipt["deposit_released_msat"] = back["msat"]
@@ -1589,7 +1603,11 @@ async def _h2_finish_deposit(
                 logger.warning(
                     "confidential ws: could not finalize the connection deposit",
                     exc_info=True,
-                    extra={"sid": _short(state.sid), "charge": charge, "attempt": attempt},
+                    extra={
+                        "sid": _short(state.sid),
+                        "charge": charge,
+                        "attempt": attempt,
+                    },
                 )
                 if delay is None:
                     # Kept: the deposit is still the connection's, and a later
@@ -1649,8 +1667,13 @@ async def _h2_request_refused(state: SessionState) -> None:
     state.h2_n -= 1
     state.h2_refused += 1
     if state.h2_refused > MAX_REFUSED_IN_A_ROW:
-        _node_error(state, 429, f"more than {MAX_REFUSED_IN_A_ROW} refused requests in a row")
-        state.h2_node_error.pop("fault", None)  # the client's doing, not the node's
+        # The client's doing, not the node's: no ``fault``.
+        _node_error(
+            state,
+            429,
+            f"more than {MAX_REFUSED_IN_A_ROW} refused requests in a row",
+            node_fault=False,
+        )
     # The idle time still counts from ``head_written`` or the last
     # settlement: refused requests must not keep an unused connection (and
     # its session slot) alive past the deposit's lease.

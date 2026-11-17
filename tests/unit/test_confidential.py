@@ -17,7 +17,7 @@ import threading
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, cast
 
 import httpx
 import pytest
@@ -89,7 +89,7 @@ class MockSidecar:
     def _run(self) -> None:
         async def main() -> None:
             server = await websockets.serve(self._handler, "127.0.0.1", 0)
-            self.port = server.sockets[0].getsockname()[1]
+            self.port = next(iter(server.sockets)).getsockname()[1]
             self._ready.set()
             while not self._stop.is_set():
                 await asyncio.sleep(0.05)
@@ -1012,7 +1012,9 @@ async def test_matching_usage_model_settles_without_a_warning(
     monkeypatch.setattr(cws, "settle", settle)
     seen = _capture_warnings(monkeypatch, cws.logger)
     out = await cws._apply_settlement(
-        _Billing(), {"model": "test-model", "usage": {}}, "test-model"
+        cast(cws.Billing, _Billing()),
+        {"model": "test-model", "usage": {}},
+        "test-model",
     )
     assert out == (3, 1) and seen == []
 
@@ -2910,8 +2912,9 @@ def test_error_status_classes() -> None:
 def test_request_rejects_bad_fee_fields() -> None:
     for name in ("session_fee_msat", "abandon_fee_msat"):
         for bad in (-1, "2000", 1.5, True):
+            over: dict[str, Any] = {name: bad}
             with pytest.raises(cws.SetupError):
-                cws.validate_h2_request(_request(**{name: bad}), 4096, 1)
+                cws.validate_h2_request(_request(**over), 4096, 1)
     cws.validate_h2_request(_request(session_fee_msat=0, abandon_fee_msat=0), 4096, 1)
 
 
@@ -3395,7 +3398,13 @@ def test_setup_shape() -> None:
     cws.validate_h2_setup(_setup("1.1", armed=True))
     no_armed = {k: v for k, v in _SETUP.items() if k != "armed"}
     cws.validate_h2_setup(no_armed)
-    for bad in ({**_SETUP, "armed": "yes"}, {**_SETUP, "type": "request"}, [], None):
+    bads: tuple[Any, ...] = (
+        {**_SETUP, "armed": "yes"},
+        {**_SETUP, "type": "request"},
+        [],
+        None,
+    )
+    for bad in bads:
         with pytest.raises(cws.SetupError):
             cws.validate_h2_setup(bad)
 
@@ -3404,7 +3413,7 @@ def test_setup_shape() -> None:
 # confidential image generation (kind "images")
 # ---------------------------------------------------------------------------
 
-_IMAGES_EP = {
+_IMAGES_EP: dict[str, Any] = {
     "head_template": "POST /api/v1/image/generate HTTP/1.1\r\n\r\n",
     "billing": "flat",
     "response_shape": "venice",
