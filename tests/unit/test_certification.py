@@ -727,3 +727,37 @@ class TestFixedPricingCostRow:
         )
         assert row["status"] == STATUS_OK, row["detail"]
         assert row["evidence"]["expected_total_msats"] == 3000 + 3500
+
+    async def test_flat_request_pricing_node_certifies_ok(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from routstr.core.settings import settings
+        from routstr.payment import price as price_module
+        from routstr.payment.cost_calculation import calculate_cost
+
+        monkeypatch.setattr(settings, "fixed_pricing", True)
+        monkeypatch.setattr(settings, "fixed_cost_per_request", 7)
+        monkeypatch.setattr(settings, "fixed_per_1k_input_tokens", 0)
+        monkeypatch.setattr(settings, "fixed_per_1k_output_tokens", 0)
+        monkeypatch.setattr(price_module, "SATS_USD_PRICE", 0.0005)
+
+        model = TestCostPromptCompletion()._model()
+        payload = {
+            "model": "test-model",
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 500, "cost": 0.5},
+        }
+        cost_data = await calculate_cost(
+            payload, 1_000_000, model_obj=model, provider_fee=1.0
+        )
+
+        row = cost_prompt_completion_row(
+            model=model,
+            probe=_probe(chat_status=200, chat_payload=payload),
+            cost_data=cost_data,
+            provider_fee=1.0,
+            sats_to_usd=0.0005,
+        )
+        assert row["status"] == STATUS_OK, row["detail"]
+        assert row["evidence"]["basis"] == "fixed_request_pricing"
+        assert row["evidence"]["expected_total_msats"] == 7000
+        assert row["evidence"]["actual_total_msats"] == 7000
