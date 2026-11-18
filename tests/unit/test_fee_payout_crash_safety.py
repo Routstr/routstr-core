@@ -44,6 +44,27 @@ def _mock_lightning_payout_history() -> Generator[
         yield record, settle
 
 
+@pytest.fixture(autouse=True)
+def _mock_owner_surplus() -> Generator[AsyncMock, None, None]:
+    """Default to an owner surplus that covers the whole accrued fee.
+
+    Tests that care about the cap override the return value (see
+    ``test_fee_payout_caps_at_owner_surplus``).
+    """
+    with (
+        patch(
+            "routstr.wallet._owner_balance_for_mint_and_unit",
+            new_callable=AsyncMock,
+            return_value=10**9,
+        ) as surplus,
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            AsyncMock(side_effect=lambda proofs, _wallet: proofs),
+        ),
+    ):
+        yield surplus
+
+
 @pytest.mark.asyncio
 async def test_fee_payout_checkpoint_is_atomic_and_durable() -> None:
     engine = create_async_engine("sqlite+aiosqlite://")
@@ -780,3 +801,98 @@ async def test_fee_payout_releases_db_connection_during_send(tmp_path: object) -
             assert fee.total_paid_msats == 5_000_000
     finally:
         await engine.dispose()
+
+
+def _accrued_fee(msats: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        accumulated_msats=msats,
+        payout_in_progress_msats=0,
+        payout_started_at=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_fee_payout_caps_at_owner_surplus() -> None:
+    """The dev cut may only spend owner funds, never user-backed proofs."""
+    session = Mock()
+    fee = _accrued_fee(5_000_000)  # 5,000 sats accrued
+    reset = AsyncMock(return_value=True)
+    complete = AsyncMock(return_value=True)
+    sent: dict[str, object] = {}
+
+    async def send(*_args: object, **kwargs: object) -> int:
+        sent.update(kwargs)
+        checkpoint_quote = kwargs["on_melt_quote"]
+        await checkpoint_quote("quote-1", "lnbc1payout")  # type: ignore[operator]
+        return int(kwargs["amount"])
+
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 500),
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch(
+            "routstr.wallet.asyncio.sleep",
+            AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+        ),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
+        patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
+        patch("routstr.wallet.db.reset_routstr_fee", reset),
+        patch("routstr.wallet.db.complete_routstr_fee_payout", complete),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
+        patch(
+            "routstr.wallet._owner_balance_for_mint_and_unit",
+            new_callable=AsyncMock,
+            return_value=1_200,
+        ),
+        patch("routstr.wallet.raw_send_to_lnurl", side_effect=send),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    # 1,200 sats of owner surplus caps the 5,000 sats accrued: the rest stays
+    # owed and is retried on a later run.
+    assert sent["amount"] == 1_200
+    reset.assert_awaited_once_with(
+        session, 1_200_000, "quote-1", wallet.settings.primary_mint, "sat"
+    )
+    complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fee_payout_holds_when_owner_surplus_is_below_floor() -> None:
+    """A mint whose proofs only back user balances must not pay the dev cut."""
+    session = Mock()
+    fee = _accrued_fee(5_000_000)
+    reset = AsyncMock()
+    send = AsyncMock()
+
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 500),
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch(
+            "routstr.wallet.asyncio.sleep",
+            AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+        ),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
+        patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
+        patch("routstr.wallet.db.reset_routstr_fee", reset),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
+        patch(
+            "routstr.wallet._owner_balance_for_mint_and_unit",
+            new_callable=AsyncMock,
+            return_value=12,
+        ),
+        patch("routstr.wallet.raw_send_to_lnurl", send),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    send.assert_not_awaited()
+    reset.assert_not_awaited()
