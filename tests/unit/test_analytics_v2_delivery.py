@@ -637,7 +637,7 @@ async def test_delivery_commits_before_network_and_retries_exact_bytes_after_res
     first, _ = _open_versions()
     await enqueue_signed_event(session_factory, first, stored_at_ms=3)
     seen_frames: dict[str, list[bytes]] = {}
-    group_b_attempts = 0
+    first_pass_attempts = 0
 
     async def sender(
         target: RelayTarget,
@@ -645,19 +645,20 @@ async def test_delivery_commits_before_network_and_retries_exact_bytes_after_res
         frame: bytes,
         is_active: Callable[[], Awaitable[bool]],
     ) -> RelaySendResult:
-        nonlocal group_b_attempts
+        nonlocal first_pass_attempts
         async with session_factory() as session:
             row = await session.get(AnalyticsV2Outbox, event_id)
         assert row is not None and bytes(row.frame) == frame
         assert row.first_send_attempt_at_ms == 4
         assert row.attempt_count >= 1
         seen_frames.setdefault(target.url, []).append(frame)
+        # Nothing is stored on the first pass, so the row must stay pending and
+        # be re-sent byte-for-byte after a restart.
+        if first_pass_attempts < len(RELAYS):
+            first_pass_attempts += 1
+            return RelaySendResult(False, False)
         if target.url == RELAYS[1]:
             return RelaySendResult(False, False)
-        if target.url == RELAYS[2]:
-            group_b_attempts += 1
-            if group_b_attempts == 1:
-                return RelaySendResult(False, False)
         return RelaySendResult(True, True)
 
     delivery = AnalyticsV2Delivery(
@@ -679,7 +680,7 @@ async def test_delivery_commits_before_network_and_retries_exact_bytes_after_res
     second_pass = await delivery.deliver_pending_once(at_ms=5)
     assert second_pass == delivery_module.DeliveryPassResult(1, 1)
 
-    assert seen_frames["wss://relay-c.valid.net"] == [first.frame, first.frame]
+    assert seen_frames["wss://relay-a.valid.net"] == [first.frame, first.frame]
     async with session_factory() as session:
         row = await session.get(AnalyticsV2Outbox, first.event_id)
         receipts_result = await session.exec(
@@ -1123,3 +1124,106 @@ async def test_unavailable_relay_information_keeps_a_bounded_default_frame_limit
         session_factory, operator_relays=RELAYS, relay_limit_reader=reader
     )
     assert await delivery.frame_limit() == 96 * 1024
+
+
+@pytest.mark.asyncio
+async def test_one_accepting_relay_is_enough_to_mark_delivered(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A single stored copy must not be withheld for lack of a second relay.
+
+    Two of three configured relays reject the frame. The relay that accepted it
+    and served back the exact bytes proves the event is retrievable, so the row
+    is delivered and the remaining relays stop being a blocking precondition.
+    """
+    await _activate(session_factory)
+    first, _ = _open_versions()
+    await enqueue_signed_event(session_factory, first, stored_at_ms=3)
+
+    async def sender(
+        target: RelayTarget,
+        event_id: str,
+        frame: bytes,
+        is_active: Callable[[], Awaitable[bool]],
+    ) -> RelaySendResult:
+        if target.url != RELAYS[0]:
+            return RelaySendResult(False, False)
+        return RelaySendResult(True, True)
+
+    delivery = AnalyticsV2Delivery(
+        session_factory,
+        operator_relays=RELAYS,
+        retry_seconds=0,
+        sender=sender,
+        relay_limit_reader=_no_advertised_limit,
+    )
+    assert await delivery.deliver_pending_once(at_ms=4) == (
+        delivery_module.DeliveryPassResult(1, 1)
+    )
+    async with session_factory() as session:
+        row = await session.get(AnalyticsV2Outbox, first.event_id)
+        receipts_result = await session.exec(
+            select(AnalyticsV2RelayReceipt).where(
+                col(AnalyticsV2RelayReceipt.event_id) == first.event_id
+            )
+        )
+    assert row is not None and row.status == "delivered"
+    # Delivery stamps the wall clock, not the injected pass time.
+    assert row.delivered_at_ms is not None and row.delivered_at_ms >= 4
+    assert {receipt.relay_url for receipt in receipts_result.all()} == {RELAYS[0]}
+
+
+@pytest.mark.asyncio
+async def test_accepted_without_readback_does_not_count_as_delivered(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Relaxing the relay count must not relax what a receipt means.
+
+    An `OK` alone is not proof of storage: the relay has to serve the identical
+    signed event back. Without readback the row stays pending for retry.
+    """
+    await _activate(session_factory)
+    first, _ = _open_versions()
+    await enqueue_signed_event(session_factory, first, stored_at_ms=3)
+
+    async def sender(
+        target: RelayTarget,
+        event_id: str,
+        frame: bytes,
+        is_active: Callable[[], Awaitable[bool]],
+    ) -> RelaySendResult:
+        return RelaySendResult(True, False)
+
+    delivery = AnalyticsV2Delivery(
+        session_factory,
+        operator_relays=RELAYS,
+        retry_seconds=0,
+        sender=sender,
+        relay_limit_reader=_no_advertised_limit,
+    )
+    assert await delivery.deliver_pending_once(at_ms=4) == (
+        delivery_module.DeliveryPassResult(1, 0)
+    )
+    async with session_factory() as session:
+        row = await session.get(AnalyticsV2Outbox, first.event_id)
+        receipts_result = await session.exec(
+            select(AnalyticsV2RelayReceipt).where(
+                col(AnalyticsV2RelayReceipt.event_id) == first.event_id
+            )
+        )
+    assert row is not None and row.status == "pending"
+    assert row.delivered_at_ms is None
+    assert receipts_result.all() == []
+
+
+def test_frame_sizing_is_decoupled_from_delivery_quorum(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Durability needs one relay; frame sizing still respects the second.
+
+    A single relay advertising a small maximum must not force the producer to
+    fold aggressively, but no target is ever asked for more than it accepts.
+    """
+    delivery = AnalyticsV2Delivery(session_factory, operator_relays=RELAYS)
+    assert delivery._quorum == 1
+    assert delivery._frame_limit_relays == 2

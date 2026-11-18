@@ -6,7 +6,7 @@ from openai import OpenAI
 # and the base_url points to a compatible proxy like Routstr.
 client = OpenAI(
     api_key=os.environ.get("TOKEN"),
-    base_url=os.environ.get("API_URL", "https://api.routstr.com/v1"),
+    base_url=os.environ["API_URL"],
 )
 
 response = client.responses.create(

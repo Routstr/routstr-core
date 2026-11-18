@@ -14,6 +14,7 @@ from sqlalchemy import delete
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from ..nostr.analytics_runtime import analytics_status
 from ..payment.models import (
     REQUIRED_PRICING_FIELDS,
     Model,
@@ -256,6 +257,13 @@ async def get_settings(request: Request) -> dict:
     if "nsec" in data:
         data["nsec"] = "[REDACTED]" if data["nsec"] else ""
     return data
+
+
+@admin_router.get(
+    "/api/analytics-sharing/status", dependencies=[Depends(require_admin_api)]
+)
+async def get_analytics_sharing_status() -> dict[str, object]:
+    return analytics_status()
 
 
 class SettingsUpdate(RootModel[dict[str, object]]):

@@ -99,7 +99,10 @@ async def test_capped_payout_recovers_all_change_with_real_cashu_sdk(
     paid_amount = 0
 
     async def mint_melt(
-        quote_id: str, inputs: list[Proof], outputs: list[BlindedMessage]
+        quote_id: str,
+        inputs: list[Proof],
+        outputs: list[BlindedMessage],
+        prefer_async: bool | None = None,
     ) -> PostMeltQuoteResponse:
         nonlocal selected_total, returned_change, blank_count, paid_amount
         q = quotes[quote_id]

@@ -53,6 +53,12 @@ def _render(element: Any, dialect: Any) -> str:
     return str(element.compile(dialect=dialect))
 
 
+# Columns added after the widening migration, already BIGINT in their own.
+BORN_WIDE_COLUMNS = {
+    ("cashu_transactions", "recover_after"),
+    ("cashu_transactions", "refund_amount"),
+    ("cashu_transactions", "settlement_at"),
+}
 # Tables created after the widening migration, whose own migration already
 # declares BIGINT; there is nothing for the ALTER list to widen.
 BORN_WIDE_TABLES = {
@@ -102,6 +108,7 @@ def test_migration_and_models_widen_the_same_columns() -> None:
         if table.name not in BORN_WIDE_TABLES
         for column in table.columns
         if isinstance(column.type, BigInteger)
+        and (table.name, column.name) not in BORN_WIDE_COLUMNS
     }
     assert in_models - declared == set(), "widened in models but not in migration"
     assert declared - in_models == set(), "widened in migration but not in models"
@@ -115,6 +122,7 @@ def test_migration_and_models_widen_the_same_columns() -> None:
         ("api_keys", "total_spent"),
         ("api_keys", "total_requests"),
         ("cashu_transactions", "amount"),
+        ("cashu_transactions", "refund_amount"),
         ("lightning_invoices", "amount_sats"),
         ("refunds", "amount_msats"),
         ("reservation_releases", "reserved_msats"),
@@ -144,6 +152,8 @@ def test_money_columns_are_64_bit_on_postgresql(
         ("api_keys", "reserved_at"),
         ("api_keys", "validity_date"),
         ("cashu_transactions", "created_at"),
+        ("cashu_transactions", "recover_after"),
+        ("cashu_transactions", "settlement_at"),
         ("cli_tokens", "expires_at"),
         ("lightning_invoices", "expires_at"),
         ("lightning_invoices", "paid_at"),
@@ -167,6 +177,8 @@ def test_timestamp_columns_survive_2038_on_postgresql(
 NARROW_INTEGER_COLUMNS = {
     ("analytics_v2_delivery_state", "id"),
     ("analytics_v2_outbox", "kind"),
+    ("lightning_invoices", "mint_counter"),
+    ("lightning_invoices", "mint_outputs"),
     ("model_paths", "id"),
     ("model_paths", "upstream_provider_id"),
     ("models", "upstream_provider_id"),

@@ -47,7 +47,20 @@ from .analytics_v2 import (
 
 logger = get_logger(__name__)
 
-ANALYTICS_RELAY_QUORUM = 2
+# How many configured relays must accept a frame *and* serve it back before the
+# outbox row is considered delivered. One is enough: the receipt already proves
+# the relay stored the exact signed bytes, and a relay that later goes away does
+# not justify withholding publication from the relays that did take it. Extra
+# receipts are still recorded for every accepting relay, so redundancy is
+# observed and auditable without being a precondition for progress.
+ANALYTICS_RELAY_QUORUM = 1
+
+# Frame sizing is a separate concern from durability. A frame must fit the
+# relays we actually send to, so its size is bounded by the advertised limits of
+# this many relays, best first. Keeping this above 1 stops a single relay with a
+# small maximum from forcing unnecessarily aggressive `_other` folding, while
+# still never asking a target for more bytes than it said it accepts.
+ANALYTICS_FRAME_LIMIT_RELAYS = 2
 PUBLIC_HISTORY_DAYS = 365
 NIP11_MAX_DOCUMENT_BYTES = 65_536
 
@@ -1078,6 +1091,7 @@ class AnalyticsV2Delivery:
             raise AnalyticsV2DeliveryError("At least one analytics relay is required")
         self._targets = tuple(RelayTarget(url) for url in sorted(relays))
         self._quorum = min(ANALYTICS_RELAY_QUORUM, len(self._targets))
+        self._frame_limit_relays = min(ANALYTICS_FRAME_LIMIT_RELAYS, len(self._targets))
         self._retry_ms = int(retry_seconds * 1000)
         self._timeout_seconds = timeout_seconds
         self._sender = sender or self._send_to_relay
@@ -1096,7 +1110,7 @@ class AnalyticsV2Delivery:
             ),
             reverse=True,
         )
-        return min(DEFAULT_MAX_FRAME_BYTES, limits[self._quorum - 1])
+        return min(DEFAULT_MAX_FRAME_BYTES, limits[self._frame_limit_relays - 1])
 
     async def _load_relay_limits(self, targets: Sequence[RelayTarget]) -> None:
         async def read_limit(target: RelayTarget) -> int | None:

@@ -8,7 +8,7 @@ if not token:
     print("Please set TOKEN environment variable with a Cashu token")
     exit(1)
 
-base_url = os.environ.get("API_URL", "https://api.routstr.com/v1")
+base_url = os.environ["API_URL"]
 
 resp = httpx.get(f"{base_url}/balance/create", params={"initial_balance_token": token})
 

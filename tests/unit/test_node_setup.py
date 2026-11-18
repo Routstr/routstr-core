@@ -342,7 +342,7 @@ class NodeSetupTests(unittest.TestCase):
         config = (SCRIPT.parent.parent / "compose.node.yml").read_text()
         self.assertIn('"127.0.0.1:${ROUTSTR_NODE_PORT:-8000}:8000"', config)
         self.assertIn('AUTO_GENERATE_NSEC: "true"', config)
-        self.assertIn('ENABLE_ANALYTICS_SHARING: "false"', config)
+        self.assertIn('ENABLE_ANALYTICS_SHARING: "true"', config)
         self.assertNotIn("HS_ROUTER", config)
 
 

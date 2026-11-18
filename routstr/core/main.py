@@ -18,7 +18,7 @@ from ..auth import (
     periodic_stale_reservation_sweep,
 )
 from ..balance import balance_router, deprecated_wallet_router
-from ..cashu_compat import install_cashu_httpx_shim
+from ..cashu_compat import install_cashu_httpx_shim, install_cashu_mint_compat
 from ..foreign_mint_swap import periodic_swap_reconcile
 from ..lightning import (
     lightning_router,
@@ -37,6 +37,10 @@ from ..nostr.analytics_runtime import (
 from ..nostr.discovery import providers_router
 from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
+from ..payment.x_cashu_settlement import (
+    drain_settlements,
+    periodic_x_cashu_recovery,
+)
 from ..proxy import (
     initialize_upstreams,
     proxy_router,
@@ -111,13 +115,15 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     swap_reconcile_task = None
     routstr_fee_task = None
     invoice_watcher_task = None
+    x_cashu_recovery_task = None
 
     try:
-        # cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28.
+        # cashu 0.21.x passes the `proxies` kwarg httpx removed in 0.28.
         # routstr.wallet and routstr.payment.lnurl also install this at import;
         # repeating it here keeps startup correct for any future module that
         # reaches cashu's mint client without going through those two.
         install_cashu_httpx_shim()
+        install_cashu_mint_compat()
 
         # Apply litellm-wide settings (drop_params, chat-completions URL,
         # debug logging) before any upstream provider dispatches a request.
@@ -224,6 +230,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         swap_reconcile_task = asyncio.create_task(periodic_swap_reconcile())
         routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
         invoice_watcher_task = asyncio.create_task(periodic_invoice_watcher())
+        x_cashu_recovery_task = asyncio.create_task(periodic_x_cashu_recovery())
 
         yield
 
@@ -275,6 +282,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             routstr_fee_task.cancel()
         if invoice_watcher_task is not None:
             invoice_watcher_task.cancel()
+        if x_cashu_recovery_task is not None:
+            x_cashu_recovery_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -314,6 +323,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(routstr_fee_task)
             if invoice_watcher_task is not None:
                 tasks_to_wait.append(invoice_watcher_task)
+            if x_cashu_recovery_task is not None:
+                tasks_to_wait.append(x_cashu_recovery_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)
@@ -324,6 +335,15 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
         finally:
+            try:
+                # Refunds started by cancelled requests outlive their request
+                # task; let them finish while the wallet and database are up.
+                await drain_settlements(global_settings.request_cleanup_timeout_seconds)
+            except Exception as e:
+                logger.error(
+                    "Error draining X-Cashu settlements",
+                    extra={"error": str(e), "error_type": type(e).__name__},
+                )
             try:
                 await close_upstream_http_client()
             except Exception as e:

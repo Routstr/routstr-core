@@ -20,13 +20,21 @@ This repo contains Routstr Core: a FastAPI-based reverse proxy that sits in fron
 
 If you are a user/developer, you just point an OpenAI-compatible SDK at a Routstr node and pay with a Cashu token.
 
+Choose a node from the [provider directory](https://routstr.com/providers). Replace
+`https://provider.example` below with that node's URL; it is a placeholder, not a
+hosted endpoint. Append `/v1` for the OpenAI-compatible base URL. Check the node's
+`/v1/models` endpoint before sending payment.
+
+For the runnable Python scripts, follow the [examples setup](examples/README.md)
+and set `API_URL` explicitly.
+
 ### OpenAI SDK
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://api.routstr.com/v1",
+    base_url="https://provider.example/v1",
     api_key="cashuBo2FteCJodHRwczovL21...",
 )
 
@@ -41,7 +49,7 @@ print(response.choices[0].message.content)
 ### cURL
 
 ```bash
-curl https://api.routstr.com/v1/chat/completions \
+curl https://provider.example/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "x-cashu: cashuBo2FteCJodHRwczovL21..." \
   -d '{
@@ -83,7 +91,7 @@ python3 scripts/node_setup.py check --public-url https://node.example
 ```
 
 - `compose.node.yml` binds the API to `127.0.0.1` only, starts no Tor service, and
-  starts with analytics off. Your reverse proxy fronts it.
+  starts with analytics sharing on. Your reverse proxy fronts it.
 - Private mode (`python3 scripts/node_setup.py start --private`) keeps the node
   loopback-only and publishes nothing until you set a public URL later.
 - Port 8000 taken? Pass `--port 18080` and point the proxy at it.

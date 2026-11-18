@@ -76,6 +76,20 @@ export type CertificationRow = z.infer<typeof CertificationRowSchema>;
 export type CertificationGoal = z.infer<typeof CertificationGoalSchema>;
 export type ProviderCertification = z.infer<typeof ProviderCertificationSchema>;
 
+export type AnalyticsSharingStatus = {
+  state:
+    | 'off'
+    | 'no_identity'
+    | 'paused'
+    | 'publishing'
+    | 'starting'
+    | 'stopped';
+  reason: string | null;
+  provider_id: string | null;
+  relays: string[];
+  retry_in_seconds: number | null;
+};
+
 export type CertifyProviderRequest = {
   model_id?: string;
   model_path?: string;
@@ -861,6 +875,12 @@ export class AdminService {
 
   static async getSettings(): Promise<Record<string, unknown>> {
     return await apiClient.get<Record<string, unknown>>('/admin/api/settings');
+  }
+
+  static async getAnalyticsSharingStatus(): Promise<AnalyticsSharingStatus> {
+    return await apiClient.get<AnalyticsSharingStatus>(
+      '/admin/api/analytics-sharing/status'
+    );
   }
 
   static async updateSettings(

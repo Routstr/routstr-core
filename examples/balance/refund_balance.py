@@ -4,7 +4,7 @@ import httpx
 
 # Use your Cashu token or API key as the Bearer token
 headers = {"Authorization": f"Bearer {os.environ.get('TOKEN')}"}
-base_url = os.environ.get("API_URL", "https://api.routstr.com/v1")
+base_url = os.environ["API_URL"]
 
 resp = httpx.post(f"{base_url}/balance/refund", headers=headers)
 
