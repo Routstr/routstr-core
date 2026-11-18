@@ -824,7 +824,9 @@ async def test_fee_payout_caps_at_owner_surplus() -> None:
         sent.update(kwargs)
         checkpoint_quote = kwargs["on_melt_quote"]
         await checkpoint_quote("quote-1", "lnbc1payout")  # type: ignore[operator]
-        return int(kwargs["amount"])
+        amount = kwargs["amount"]
+        assert isinstance(amount, int)
+        return amount
 
     with (
         patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 500),
