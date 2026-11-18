@@ -26,6 +26,11 @@ from .cashu_compat import install_cashu_httpx_shim
 from .checkstate import filter_unspent_proofs
 from .core import db, get_logger
 from .core.settings import settings
+from .melt_change import (
+    forget_melt_change_outputs,
+    record_melt_change_outputs,
+    settle_melt_change,
+)
 from .mint import (
     MINT_TRANSPORT_EXCEPTIONS,
     MintError,
@@ -1024,6 +1029,9 @@ async def _execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, st
         raise Bolt11PaymentNotAttempted(f"Coin selection failed: {e}") from e
 
     await plan.wallet.set_reserved_for_send(selected, reserved=True)
+    await record_melt_change_outputs(
+        plan.wallet, plan.quote.quote, plan.quote.fee_reserve
+    )
 
     try:
         result = await asyncio.wait_for(
@@ -1065,11 +1073,14 @@ async def _execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, st
         paid = sum(proof.amount for proof in selected) - sum(
             int(item.amount) for item in change
         )
+        # cashu's melt stored the change itself.
+        await forget_melt_change_outputs(plan.quote.quote)
         return paid, plan.mint_url, plan.unit
 
     if state == "unpaid":
         # The mint is telling us it did not pay, so the proofs are ours again.
         await plan.wallet.set_reserved_for_send(selected, reserved=False)
+        await forget_melt_change_outputs(plan.quote.quote)
         raise Bolt11PaymentNotAttempted("Cashu mint reported the melt as unpaid")
 
     raise Bolt11PaymentAmbiguous(
@@ -1108,6 +1119,8 @@ async def _check_bolt11_payment_status_locked(
         return "unknown"
     if quote is None:
         return "unknown"
+    # get_melt_quote settles the inputs but not the change of a late paid melt.
+    await settle_melt_change(wallet, quote)
     state = str(getattr(quote, "state", "")).lower().rsplit(".", 1)[-1]
     if state in ("paid", "unpaid", "pending"):
         return state

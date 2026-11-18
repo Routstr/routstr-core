@@ -585,6 +585,29 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     )
 
 
+class MeltChangeOutputs(SQLModel, table=True):  # type: ignore
+    """The blank outputs a melt derived for its fee reserve change.
+
+    cashu only unblinds change when the melt itself answers paid. A melt that
+    settles later is checked with ``get_melt_quote``, which drops the change,
+    so the counter range is kept here until the quote is final.
+    """
+
+    __tablename__ = "melt_change_outputs"
+
+    quote_id: str = Field(primary_key=True, description="Melt quote id")
+    mint_url: str = Field(description="Mint URL the quote was melted at")
+    unit: str = Field(description="Unit of the melting wallet")
+    keyset_id: str = Field(description="Keyset the blank outputs were derived for")
+    counter: int = Field(description="First secret counter of the blank outputs")
+    count: int = Field(description="Number of blank outputs")
+    created_at: int = Field(
+        default_factory=lambda: int(time.time()),
+        sa_type=UnixTimestamp,
+        description="Unix timestamp",
+    )
+
+
 class CashuTransaction(SQLModel, table=True):  # type: ignore
     __tablename__ = "cashu_transactions"
     __table_args__ = (
