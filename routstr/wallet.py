@@ -2030,6 +2030,15 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
         available_balance = await _owner_balance_for_mint_and_unit(
             mint_url, unit, sum(proof.amount for proof in proofs)
         )
+        if mint_url == settings.primary_mint and unit == "sat":
+            # The accrued platform fee is paid from this same surplus
+            # (periodic_routstr_fee_payout). Leave it in place, or this loop
+            # drains the surplus first and the fee payout starves.
+            async with db.create_session() as session:
+                fee = await db.get_routstr_fee(session)
+            available_balance = max(
+                0, available_balance - _msats_to_sats_ceil(fee.accumulated_msats)
+            )
     except Exception as e:
         logger.error(
             f"Error in periodic payout cycle: {type(e).__name__}",
