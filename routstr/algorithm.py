@@ -266,6 +266,9 @@ def create_model_mappings(
                         },
                     )
                     continue
+                # An override replaces the price, not how the upstream bills
+                # its variants, so the discovered multipliers carry over.
+                model_to_use.usage_multipliers = model.usage_multipliers
             else:
                 model_to_use = model
 

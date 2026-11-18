@@ -954,6 +954,69 @@ async def test_messages_streaming_bills_cumulative_usage_once() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("event", ["message_start", "message_delta"])
+async def test_messages_streaming_keeps_pricing_dimensions_from_either_event(
+    event: str,
+) -> None:
+    """Fast mode and US inference bill at a multiple, so the stream must keep
+    ``speed``/``inference_geo`` whichever usage event carries them."""
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+    dims = '"speed":"fast","inference_geo":"us"'
+    start_dims = f",{dims}" if event == "message_start" else ""
+    delta_dims = f",{dims}" if event == "message_delta" else ""
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield (
+            'event: message_start\ndata: {"type":"message_start","message":'
+            '{"model":"test","usage":{"input_tokens":4,"output_tokens":1'
+            f"{start_dims}}}}}}}\n\n"
+        ).encode()
+        yield (
+            'event: message_delta\ndata: {"type":"message_delta","delta":{},'
+            f'"usage":{{"output_tokens":9{delta_dims}}}}}\n\n'
+        ).encode()
+        yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+    upstream_response = MagicMock(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = f"messages-dims-{event}"
+    key.balance = 10_000
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    usage: dict = {}
+
+    async def adjust(
+        fresh_key: object, data: dict, *args: object, **kwargs: object
+    ) -> dict:
+        usage.update(data["usage"])
+        return {"total_msats": 0, "total_usd": 0.0}
+
+    with (
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+    ):
+        response = await provider.handle_streaming_messages_completion(
+            response=upstream_response,
+            key=key,
+            max_cost_for_model=500,
+        )
+        async for _ in response.body_iterator:
+            pass
+
+    assert usage["speed"] == "fast"
+    assert usage["inference_geo"] == "us"
+
+
+@pytest.mark.asyncio
 async def test_responses_streaming_duplicate_publishes_zero_settled_cost() -> None:
     provider = BaseUpstreamProvider(
         base_url="https://api.example.com", api_key="test-key"
@@ -1986,3 +2049,150 @@ async def test_responses_failed_finalizer_keeps_usage_if_settlement_is_cancelled
         assert billing_data["usage"]["input_tokens"] == input_tokens
         assert billing_data["usage"]["output_tokens"] == 0
     upstream.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reported_by", ["stream", "request"])
+async def test_messages_disconnect_before_usage_bills_fast_mode(
+    reported_by: str,
+) -> None:
+    """A fast-mode stream cut before ``message_delta`` bills its estimate at
+    the 2x floor the hold was scaled by, not at the base rate."""
+    engine = await _engine()
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key", provider_fee=1.0
+    )
+    hashed_key = f"messages-fast-disconnect-{reported_by}"
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        key = ApiKey(hashed_key=hashed_key, balance=1_000)
+        session.add(key)
+        await session.commit()
+        await pay_for_request(key, 500, session)
+        snapshot = await get_reservation_snapshot(key, session)
+
+    start_usage = '"input_tokens":3,"output_tokens":1'
+    if reported_by == "stream":
+        start_usage += ',"speed":"fast"'
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield (
+            'event: message_start\ndata: {"type":"message_start","message":'
+            f'{{"model":"test-model","usage":{{{start_usage}}}}}}}\n\n'
+        ).encode()
+        yield (
+            b'event: content_block_delta\ndata: {"type":"content_block_delta",'
+            b'"index":0,"delta":{"type":"text_delta","text":"hi there"}}\n\n'
+        )
+        yield b'event: ping\ndata: {"type":"ping"}\n\n'
+
+    upstream_response = MagicMock(
+        status_code=200, headers={"content-type": "text/event-stream"}
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    upstream_response.aclose = AsyncMock()
+
+    model = Model(
+        id="test-model",
+        name="test-model",
+        created=0,
+        description="",
+        context_length=8_192,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="unknown",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.01, completion=0.02),
+        sats_pricing=Pricing(prompt=0.01, completion=0.02),
+    )
+    body: dict = {
+        "model": model.id,
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    if reported_by == "request":
+        body["speed"] = "fast"
+
+    try:
+        with (
+            patch(
+                "routstr.upstream.base.create_session",
+                side_effect=lambda: AsyncSession(engine, expire_on_commit=False),
+            ),
+            patch(
+                "routstr.upstream.base.adjust_payment_for_tokens",
+                auth_module.adjust_payment_for_tokens,
+            ),
+            patch("routstr.upstream.count_tokens._count_with_litellm", return_value=3),
+            patch(
+                "routstr.upstream.count_tokens._count_text_with_litellm",
+                return_value=2,
+            ),
+            patch(
+                "routstr.payment.cost_calculation.sats_usd_price",
+                return_value=5.0e-5,
+            ),
+        ):
+            response = await provider.handle_streaming_messages_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                model_obj=model,
+                reservation_snapshot=snapshot,
+                request_body=json.dumps(body).encode(),
+            )
+            iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
+            await iterator.__anext__()  # message_start
+            await iterator.__anext__()  # first text delta
+            await iterator.aclose()  # client aborts before message_delta
+    finally:
+        await auth_module._stop_reservation_heartbeat(snapshot.release_id)
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        final_key = await session.get(ApiKey, hashed_key)
+
+    assert final_key is not None
+    assert final_key.reserved_balance == 0
+    # (3 input × 10 + 2 output × 20 msats) × 2 for fast mode.
+    assert final_key.total_spent == 140
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_messages_without_usage_bills_requested_fast_mode() -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+    upstream_response = MagicMock(status_code=200, headers={})
+    upstream_response.aread = AsyncMock(
+        return_value=json.dumps(
+            {"model": "test", "content": [{"type": "text", "text": "hi"}]}
+        ).encode()
+    )
+    usage: dict = {}
+
+    async def adjust(
+        fresh_key: object, data: dict, *args: object, **kwargs: object
+    ) -> dict:
+        usage.update(data["usage"])
+        return {"total_msats": 0, "total_usd": 0.0}
+
+    with (
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch.object(provider, "inject_cost_metadata"),
+    ):
+        await provider.handle_non_streaming_messages_completion(
+            response=upstream_response,
+            key=MagicMock(spec=ApiKey),
+            session=MagicMock(),
+            deducted_max_cost=500,
+            request_body=json.dumps(
+                {"model": "test", "messages": [], "speed": "fast"}
+            ).encode(),
+        )
+
+    assert usage["estimated"] is True
+    assert usage["speed"] == "fast"
