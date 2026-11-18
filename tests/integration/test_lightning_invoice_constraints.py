@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from cashu.core.base import Proof
@@ -25,10 +27,28 @@ from routstr.core.db import ApiKey, LightningInvoice
 from routstr.lightning import _create_api_key_record
 
 
+@asynccontextmanager
+async def _connect() -> AsyncIterator[Mock]:
+    yield Mock()
+
+
+async def _mint_outputs(
+    wallet: MagicMock, outputs: list[int], quote: str, _signature: object
+) -> list[Proof]:
+    """The mint call for explicit outputs, answered by the test's ``wallet.mint``."""
+    return await wallet.mint(sum(outputs), quote_id=quote, split=outputs)
+
+
 def _configure_quote_proof_wallet(wallet: MagicMock) -> None:
     wallet.proofs = []
-    wallet.keysets = {}
+    wallet.keyset_id = "keyset-1"
     wallet.load_proofs = AsyncMock()
+    wallet.db = Mock(connect=_connect)
+    wallet.generate_secrets_from_to = AsyncMock(return_value=([], [], []))
+    wallet._construct_outputs = Mock(
+        side_effect=lambda amounts, *_, **__: (amounts, [])
+    )
+    wallet._construct_proofs = AsyncMock(side_effect=lambda promises, *_: promises)
 
 
 def _make_invoice(**kwargs: object) -> LightningInvoice:
@@ -49,12 +69,21 @@ def _make_invoice(**kwargs: object) -> LightningInvoice:
 
 @pytest.fixture(autouse=True)
 def mock_wallet_mint() -> object:
-    with patch("routstr.lightning.get_wallet") as mock_get_wallet:
+    with (
+        patch("routstr.lightning.get_wallet") as mock_get_wallet,
+        patch("routstr.lightning.bump_secret_derivation", AsyncMock(return_value=0)),
+        patch("routstr.lightning.get_bolt11_mint_quote", AsyncMock(return_value=None)),
+        patch("routstr.lightning.update_proof", AsyncMock()),
+        patch(
+            "routstr.lightning.LedgerAPI.mint",
+            new_callable=AsyncMock,
+            side_effect=_mint_outputs,
+        ),
+    ):
         wallet = AsyncMock()
-        wallet.proofs = []
-        wallet.load_proofs = AsyncMock()
+        _configure_quote_proof_wallet(wallet)
 
-        async def mint(amount: int, quote_id: str) -> list[Proof]:
+        async def mint(amount: int, quote_id: str, split: list[int]) -> list[Proof]:
             proofs = [Proof(amount=amount, mint_id=quote_id)]
             wallet.proofs.extend(proofs)
             return proofs

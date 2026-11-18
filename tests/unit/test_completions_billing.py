@@ -1,4 +1,6 @@
+import asyncio
 import json
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,6 +14,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 import routstr.auth as auth_module
 from routstr.auth import ReservationSnapshot, get_reservation_snapshot, pay_for_request
 from routstr.core.db import ApiKey, ReservationRelease
+from routstr.core.settings import settings
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream.base import BaseUpstreamProvider
 
@@ -116,11 +119,13 @@ async def _forward(
     path: str,
     body: dict,
     upstream: httpx.Response,
+    native_messages: bool = False,
 ) -> tuple[bytes, ReservationSnapshot, AsyncMock]:
     """Reserve, forward through the real ``forward_request`` and settle."""
     provider = BaseUpstreamProvider(
         base_url="http://upstream", api_key="k", provider_fee=1.0
     )
+    provider.supports_anthropic_messages = native_messages
     request = MagicMock()
     request.method = "POST"
     request.query_params = {}
@@ -144,7 +149,12 @@ async def _forward(
                 auth_module.adjust_payment_for_tokens,
             ),
         ):
-            response = await provider.forward_request(
+            forward = (
+                provider.forward_responses_request
+                if path.endswith("responses")
+                else provider.forward_request
+            )
+            response = await forward(
                 request,
                 path,
                 {},
@@ -327,6 +337,193 @@ async def test_chat_completion_aliases_are_charged(path: str) -> None:
     await engine.dispose()
 
 
+ERROR_BODY = {"error": {"message": "Provider returned error"}}
+FAILED_RESPONSE = {
+    "id": "resp_1",
+    "object": "response",
+    "status": "failed",
+    "error": {"code": "server_error", "message": "Provider returned error"},
+    "output": [],
+}
+ANTHROPIC_ERROR = {
+    "type": "error",
+    "error": {"type": "overloaded_error", "message": "Overloaded"},
+}
+MESSAGES_BODY = {
+    "model": MODEL.id,
+    "max_tokens": 100,
+    "messages": [{"role": "user", "content": "hi"}],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "body", "stream", "content", "content_type"),
+    [
+        (
+            "v1/chat/completions",
+            CHAT_BODY,
+            False,
+            json.dumps(ERROR_BODY).encode(),
+            "application/json",
+        ),
+        (
+            "v1/chat/completions",
+            CHAT_BODY,
+            True,
+            _sse(
+                [
+                    {
+                        "id": "gen-1",
+                        "object": "chat.completion.chunk",
+                        "model": MODEL.id,
+                        "error": {"code": 502, "message": "Provider returned error"},
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": ""},
+                                "finish_reason": "error",
+                            }
+                        ],
+                    }
+                ]
+            ),
+            "text/event-stream",
+        ),
+        (
+            "v1/chat/completions",
+            CHAT_BODY,
+            False,
+            json.dumps(
+                {
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion",
+                    "model": MODEL.id,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": None},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": None,
+                }
+            ).encode(),
+            "application/json",
+        ),
+        (
+            "v1/responses",
+            {"model": MODEL.id, "input": "hi"},
+            False,
+            json.dumps(FAILED_RESPONSE).encode(),
+            "application/json",
+        ),
+        (
+            "v1/responses",
+            {"model": MODEL.id, "input": "hi"},
+            False,
+            json.dumps({**FAILED_RESPONSE, "usage": None}).encode(),
+            "application/json",
+        ),
+        (
+            "v1/responses",
+            {"model": MODEL.id, "input": "hi"},
+            True,
+            _sse([{"type": "response.failed", "response": FAILED_RESPONSE}]),
+            "text/event-stream",
+        ),
+        (
+            "v1/messages",
+            MESSAGES_BODY,
+            False,
+            json.dumps(ANTHROPIC_ERROR).encode(),
+            "application/json",
+        ),
+        (
+            "v1/messages",
+            MESSAGES_BODY,
+            True,
+            b"event: error\ndata: " + json.dumps(ANTHROPIC_ERROR).encode() + b"\n\n",
+            "text/event-stream",
+        ),
+    ],
+)
+async def test_reply_with_no_output_and_no_usage_is_free(
+    path: str, body: dict, stream: bool, content: bytes, content_type: str
+) -> None:
+    """Nothing generated and no usage reported: no charge, as with X-Cashu."""
+    engine = await _engine()
+    _, snapshot, _ = await _forward(
+        engine,
+        path,
+        {**body, "stream": stream},
+        _upstream(content, content_type),
+        native_messages=path.endswith("messages"),
+    )
+
+    balance, spent, reserved, _ = await _ledger(engine, snapshot)
+    assert (balance, spent, reserved) == (BALANCE, 0, 0)
+    await engine.dispose()
+
+
+class _StallAfter(httpx.AsyncByteStream):
+    def __init__(self, first: bytes) -> None:
+        self.first = first
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield self.first
+        await asyncio.sleep(10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "body", "first"),
+    [
+        (
+            "v1/chat/completions",
+            CHAT_BODY,
+            b'data: {"id": "c1", "object": "chat.completion.chunk", "choices": '
+            b'[{"index": 0, "delta": {"role": "assistant", "content": ""}}]}\n\n',
+        ),
+        (
+            "v1/responses",
+            {"model": MODEL.id, "input": "hi"},
+            b'data: {"type": "response.created", "response": {"id": "resp_1"}}\n\n',
+        ),
+        (
+            "v1/messages",
+            MESSAGES_BODY,
+            b'event: message_start\ndata: {"type": "message_start", '
+            b'"message": {"id": "m", "content": []}}\n\n',
+        ),
+    ],
+)
+async def test_stall_with_no_output_still_pays_the_prompt(
+    monkeypatch: pytest.MonkeyPatch, path: str, body: dict, first: bytes
+) -> None:
+    """The node's idle timeout cut the upstream off after it read the prompt."""
+    monkeypatch.setattr(settings, "upstream_stream_idle_timeout_seconds", 0.05)
+    engine = await _engine()
+    upstream = httpx.Response(
+        200,
+        stream=_StallAfter(first),
+        headers={"content-type": "text/event-stream"},
+        request=httpx.Request("POST", "http://upstream"),
+    )
+    _, snapshot, _ = await _forward(
+        engine,
+        path,
+        {**body, "stream": True},
+        upstream,
+        native_messages=path.endswith("messages"),
+    )
+
+    balance, spent, reserved, _ = await _ledger(engine, snapshot)
+    assert 0 < spent < RESERVED
+    assert (balance + spent, reserved) == (BALANCE, 0)
+    await engine.dispose()
+
+
 def test_stream_usage_option_is_scoped_to_completion_endpoints() -> None:
     provider = BaseUpstreamProvider(base_url="http://upstream", api_key="k")
     body = json.dumps({"prompt": "draw this", "stream": True}).encode()
@@ -382,3 +579,292 @@ async def test_x_cashu_streaming_completion_requests_usage() -> None:
 
     forwarded = json.loads(send.call_args.args[0].content)
     assert forwarded["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [{}, {"x": 7}])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_native_messages_tool_output_without_usage_is_billed(
+    arguments: dict, stream: bool
+) -> None:
+    tool = {"type": "tool_use", "id": "toolu_1", "name": "calc", "input": arguments}
+    content = (
+        _sse(
+            [
+                {"type": "content_block_start", "index": 0, "content_block": tool},
+                {"type": "message_stop"},
+            ]
+        )
+        if stream
+        else json.dumps(
+            {"type": "message", "content": [tool], "stop_reason": "tool_use"}
+        ).encode()
+    )
+    engine = await _engine()
+    out, snapshot, _ = await _forward(
+        engine,
+        "v1/messages",
+        {**MESSAGES_BODY, "stream": stream},
+        _upstream(content, "text/event-stream" if stream else "application/json"),
+        native_messages=True,
+    )
+
+    balance, spent, reserved, status = await _ledger(engine, snapshot)
+    assert b"toolu_1" in out
+    assert spent > 0
+    assert (balance, reserved, status) == (BALANCE - spent, 0, "charged")
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("separator", [b"data:", b"data: "])
+@pytest.mark.parametrize("multiline", [False, True])
+async def test_native_messages_sse_data_fields_are_billed(
+    separator: bytes, multiline: bool
+) -> None:
+    payload = json.dumps(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "hello"},
+        }
+    ).encode()
+    if multiline:
+        payload = payload.replace(b', "index"', b',\n"index"', 1)
+    content = (
+        b"event: content_block_delta\nid: delta-1\n"
+        + b"".join(separator + line + b"\n" for line in payload.split(b"\n"))
+        + b"\n"
+    )
+    engine = await _engine()
+    out, snapshot, _ = await _forward(
+        engine,
+        "v1/messages",
+        {**MESSAGES_BODY, "stream": True},
+        _upstream(content, "text/event-stream"),
+        native_messages=True,
+    )
+
+    balance, spent, reserved, status = await _ledger(engine, snapshot)
+    assert b"hello" in out
+    assert b"event: content_block_delta\nid: delta-1\ndata:" in out
+    assert spent > 0
+    assert (balance, reserved, status) == (BALANCE - spent, 0, "charged")
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_tokens", [None, 0, 400])
+async def test_responses_failed_preserves_usage_and_single_terminal_event(
+    input_tokens: int | None,
+) -> None:
+    failed = dict(FAILED_RESPONSE)
+    if input_tokens is not None:
+        failed["usage"] = {
+            "input_tokens": input_tokens,
+            "output_tokens": 0,
+            "total_tokens": input_tokens,
+        }
+    event = {"type": "response.failed", "response": failed}
+    content = b"event: response.failed\nid: failed-1\n" + _sse([event])
+    engine = await _engine()
+    out, snapshot, _ = await _forward(
+        engine,
+        "v1/responses",
+        {"model": MODEL.id, "input": "hi", "stream": True},
+        _upstream(content, "text/event-stream"),
+    )
+
+    events = [
+        json.loads(line[6:])
+        for line in out.splitlines()
+        if line.startswith(b"data: ") and line != b"data: [DONE]"
+    ]
+    assert [item["type"] for item in events] == ["response.failed"]
+    assert events[0]["response"]["status"] == "failed"
+    assert events[0]["response"]["error"] == failed["error"]
+    assert b"event: response.failed\nid: failed-1\ndata:" in out
+    assert out.count(b"data: [DONE]") == 1
+    if input_tokens is not None:
+        assert events[0]["response"]["usage"]["input_tokens"] == input_tokens
+    balance, spent, reserved, status = await _ledger(engine, snapshot)
+    assert (balance, spent, reserved, status) == (
+        BALANCE - (input_tokens or 0),
+        input_tokens or 0,
+        0,
+        "charged",
+    )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage_event", ["message_start", "message_delta", "both"])
+@pytest.mark.parametrize("content_type", ["tool_use", "text"])
+async def test_native_messages_stream_explicit_zero_usage_wins_over_estimate(
+    usage_event: str, content_type: str
+) -> None:
+    start: dict = {"type": "message_start", "message": {"content": []}}
+    delta: dict = {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}
+    if usage_event in ("message_start", "both"):
+        start["message"]["usage"] = {"input_tokens": 0, "output_tokens": 0}
+    if usage_event in ("message_delta", "both"):
+        delta["usage"] = {"output_tokens": 0}
+    block = (
+        {"type": "tool_use", "id": "toolu_1", "name": "calc", "input": {}}
+        if content_type == "tool_use"
+        else {"type": "text", "text": "hello"}
+    )
+    engine = await _engine()
+    out, snapshot, _ = await _forward(
+        engine,
+        "v1/messages",
+        {**MESSAGES_BODY, "stream": True},
+        _upstream(
+            _sse(
+                [
+                    start,
+                    {"type": "content_block_start", "index": 0, "content_block": block},
+                    delta,
+                    {"type": "message_stop"},
+                ]
+            ),
+            "text/event-stream",
+        ),
+        native_messages=True,
+    )
+
+    assert (b"toolu_1" if content_type == "tool_use" else b"hello") in out
+    assert await _ledger(engine, snapshot) == (BALANCE, 0, 0, "charged")
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", [b"", b"\n", b"\r", b"\r\n"])
+async def test_native_messages_rewrite_preserves_unterminated_sse_tail(
+    ending: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chunks: list[bytes] = []
+
+    async def collect_chunks(response: Any) -> bytes:
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    monkeypatch.setattr(f"{__name__}._drain", collect_chunks)
+    content = (
+        b"data: "
+        + json.dumps(
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "hello"},
+            }
+        ).encode()
+        + ending
+    )
+    engine = await _engine()
+    _, snapshot, _ = await _forward(
+        engine,
+        "v1/messages",
+        {**MESSAGES_BODY, "stream": True},
+        _upstream(content, "text/event-stream"),
+        native_messages=True,
+    )
+
+    # The guard normalizes CRLF, but does not complete an unterminated event.
+    assert chunks[0][len(chunks[0].rstrip(b"\r\n")) :] == ending.replace(b"\r\n", b"\n")
+    assert not chunks[0].endswith(b"\n\n")
+    assert json.loads(chunks[0][len(b"data: ") :])["delta"]["text"] == "hello"
+    assert (await _ledger(engine, snapshot))[2:] == (0, "charged")
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_tokens", [None, 0, 400])
+@pytest.mark.parametrize("interruption", ["protocol_error", "client_cancel"])
+async def test_responses_failed_settles_and_emits_before_stream_interruption(
+    input_tokens: int | None, interruption: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failed = dict(FAILED_RESPONSE)
+    if input_tokens is not None:
+        failed["usage"] = {
+            "input_tokens": input_tokens,
+            "output_tokens": 0,
+            "total_tokens": input_tokens,
+        }
+    event = {"type": "response.failed", "response": failed}
+    content = (
+        b"event: response.failed\nid: failed-1\ndata: "
+        + json.dumps(event).encode()
+        + b"\n\n"
+    )
+    resumed = False
+    closed = 0
+
+    class InterruptedStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncGenerator[bytes, None]:
+            nonlocal resumed
+            yield content
+            resumed = True
+            raise httpx.RemoteProtocolError("incomplete chunked read")
+
+        async def aclose(self) -> None:
+            nonlocal closed
+            closed += 1
+
+    if interruption == "client_cancel":
+
+        async def cancel_downstream(response: Any) -> bytes:
+            emitted: list[bytes] = []
+
+            async def receive() -> dict[str, str]:
+                return {"type": "http.disconnect"}
+
+            async def send(message: dict) -> None:
+                if message["type"] == "http.response.body":
+                    emitted.append(message["body"])
+                    raise asyncio.CancelledError
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0", "spec_version": "2.4"},
+                "method": "POST",
+                "path": "/v1/responses",
+                "headers": [],
+            }
+            with pytest.raises(asyncio.CancelledError):
+                await response(scope, receive, send)
+            return b"".join(emitted)
+
+        monkeypatch.setattr(f"{__name__}._drain", cancel_downstream)
+
+    engine = await _engine()
+    adjust = AsyncMock(wraps=auth_module.adjust_payment_for_tokens)
+    with patch.object(auth_module, "adjust_payment_for_tokens", adjust):
+        out, snapshot, _ = await _forward(
+            engine,
+            "v1/responses",
+            {"model": MODEL.id, "input": "hi", "stream": True},
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=InterruptedStream(),
+                request=httpx.Request("POST", "http://upstream"),
+            ),
+        )
+
+    events = _sse_objects(out)
+    assert [item["type"] for item in events] == ["response.failed"]
+    assert events[0]["response"]["status"] == "failed"
+    assert events[0]["response"]["error"] == failed["error"]
+    assert b"event: response.failed\nid: failed-1\ndata:" in out
+    assert b"[DONE]" not in out
+    adjust.assert_awaited_once()
+    assert resumed is (interruption == "protocol_error")
+    assert closed == 1
+    assert await _ledger(engine, snapshot) == (
+        BALANCE - (input_tokens or 0),
+        input_tokens or 0,
+        0,
+        "charged",
+    )
+    await engine.dispose()

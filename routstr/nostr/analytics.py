@@ -15,19 +15,13 @@ from typing import Any
 from ..core import get_logger
 from ..core.log_manager import log_manager
 from ..core.settings import settings
-from .listing import nsec_to_keypair, publish_to_relay
+from .listing import DEFAULT_RELAY_URLS, nsec_to_keypair, publish_to_relay
 from .sdk import create_signed_event
 
 logger = get_logger(__name__)
 
 ANALYTICS_KIND = 38422
 ANALYTICS_SCHEMA = "routstr.analytics.snapshot.v1"
-DEFAULT_RELAYS = [
-    "wss://relay.nostr.band",
-    "wss://relay.damus.io",
-    "wss://relay.routstr.com",
-    "wss://nos.lol",
-]
 PUBLISH_INTERVAL_SECONDS = 15 * 60
 DISABLED_POLL_SECONDS = 60
 DASHBOARD_WINDOW_HOURS = 24
@@ -69,7 +63,7 @@ def _resolve_endpoint_urls() -> list[str]:
 
 def _resolve_relays() -> list[str]:
     configured = [url.strip() for url in settings.relays if url.strip()]
-    return configured if configured else list(DEFAULT_RELAYS)
+    return configured if configured else list(DEFAULT_RELAY_URLS)
 
 
 def _to_int(value: Any) -> int:

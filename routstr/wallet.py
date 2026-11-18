@@ -14,6 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from cashu.core.base import MeltQuote, Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
+from cashu.core.settings import settings as cashu_settings
 from cashu.wallet.crud import get_keysets as get_cashu_keysets
 from cashu.wallet.crud import get_proofs as get_cashu_proofs
 from cashu.wallet.helpers import deserialize_token_from_string
@@ -39,7 +40,7 @@ from .mint import (
 )
 from .payment.lnurl import MeltUnpaidError, raw_send_to_lnurl
 
-# cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28; see the module
+# cashu 0.21.x passes the `proxies` kwarg httpx removed in 0.28; see the module
 # docstring. Installed at import so no mint call can run before the patch.
 install_cashu_httpx_shim()
 
@@ -650,6 +651,41 @@ async def _recieve_token_locked(
     return amount, unit, mint_url
 
 
+def _largest_proofs_first(
+    wallet: Wallet, proofs: list[Proof], amount: int
+) -> list[Proof]:
+    """Try exact coins first, then a largest-first candidate covering the swap fee."""
+    eligible = sorted(
+        wallet.active_proofs(proofs), key=lambda p: p.amount, reverse=True
+    )
+    limit = cashu_settings.mint_max_request_length
+    selected: list[Proof] = []
+    remaining = amount
+    # Binary denominations admit greedy exact selection; custom amounts may miss
+    # an exact combination and fall through to the swap candidate below.
+    for proof in eligible:
+        if len(selected) >= limit:
+            break
+        if proof.amount <= remaining:
+            selected.append(proof)
+            remaining -= proof.amount
+            if remaining == 0:
+                return selected
+
+    selected = []
+    total = 0
+    for proof in eligible[:limit]:
+        selected.append(proof)
+        total += proof.amount
+        if total == amount or total >= amount + wallet.get_fees_for_proofs(selected):
+            return selected
+    raise ValueError(
+        "Too many small coins: selected proofs cover "
+        f"{total - wallet.get_fees_for_proofs(selected)} {wallet.unit.name} "
+        "after swap fees"
+    )
+
+
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
     """Create a token from the preferred mint or another funded trusted mint."""
     async with wallet_operation_guard():
@@ -704,9 +740,16 @@ async def _send_locked(
     # Reserve proofs only after serialization succeeds — if serialize_proofs or
     # swap_to_send fails mid-way, proofs stay unreserved so dashboard balance
     # doesn't go negative.
-    send_proofs, _ = await wallet.select_to_send(
-        proofs, amount, set_reserved=False, include_fees=False
-    )
+    try:
+        send_proofs, _ = await wallet.select_to_send(
+            proofs, amount, set_reserved=False, include_fees=False
+        )
+    except RecursionError:
+        # cashu's coinselect recurses once per coin it picks, so a large send
+        # from thousands of small coins overflows the stack before any swap.
+        send_proofs = _largest_proofs_first(wallet, proofs, amount)
+        if sum(proof.amount for proof in send_proofs) != amount:
+            _, send_proofs = await wallet.split(send_proofs, amount)
     try:
         token = await wallet.serialize_proofs(
             send_proofs, include_dleq=False, legacy=False, memo=None
@@ -1987,6 +2030,15 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
         available_balance = await _owner_balance_for_mint_and_unit(
             mint_url, unit, sum(proof.amount for proof in proofs)
         )
+        if mint_url == settings.primary_mint and unit == "sat":
+            # The accrued platform fee is paid from this same surplus
+            # (periodic_routstr_fee_payout). Leave it in place, or this loop
+            # drains the surplus first and the fee payout starves.
+            async with db.create_session() as session:
+                fee = await db.get_routstr_fee(session)
+            available_balance = max(
+                0, available_balance - _msats_to_sats_ceil(fee.accumulated_msats)
+            )
     except Exception as e:
         logger.error(
             f"Error in periodic payout cycle: {type(e).__name__}",
@@ -2354,7 +2406,6 @@ async def periodic_routstr_fee_payout() -> None:
 
             if accumulated_sats < ROUTSTR_FEE_DEFAULT_PAYOUT:
                 continue
-            paid_msats = _sats_to_msats(accumulated_sats)
 
             # Serialize proof refresh, quote creation, checkpointing, sending,
             # and finalization with every other wallet mutation across workers.
@@ -2365,6 +2416,28 @@ async def periodic_routstr_fee_payout() -> None:
                 proofs = get_proofs_per_mint_and_unit(
                     wallet, settings.primary_mint, "sat", not_reserved=True
                 )
+                proofs = await slow_filter_spend_proofs(proofs, wallet)
+                proofs_balance = sum(proof.amount for proof in proofs)
+                # The platform fee is a claim on owner funds only. Cap the run
+                # at the same conservative owner surplus the operator payout
+                # path uses (_payout_mint_and_unit), so paying the dev cut can
+                # never melt proofs that back user balances and drive a mint's
+                # owner balance negative. Whatever is left stays accrued and is
+                # retried once the surplus covers it.
+                owner_surplus_sats = await _owner_balance_for_mint_and_unit(
+                    settings.primary_mint, "sat", proofs_balance
+                )
+                payout_sats = min(accumulated_sats, owner_surplus_sats)
+                if payout_sats < ROUTSTR_FEE_DEFAULT_PAYOUT:
+                    logger.info(
+                        "Routstr fee payout held: owner surplus below payout floor",
+                        extra={
+                            "accumulated_sats": accumulated_sats,
+                            "owner_surplus_sats": owner_surplus_sats,
+                        },
+                    )
+                    continue
+                paid_msats = _sats_to_msats(payout_sats)
 
                 attempt_quote_id: str | None = None
 
@@ -2384,7 +2457,7 @@ async def periodic_routstr_fee_payout() -> None:
                     await _record_payout_history(
                         quote_id=quote_id,
                         bolt11=bolt11,
-                        amount_sats=accumulated_sats,
+                        amount_sats=payout_sats,
                         mint_url=settings.primary_mint,
                         destination=ROUTSTR_LN_ADDRESS,
                     )
@@ -2395,7 +2468,7 @@ async def periodic_routstr_fee_payout() -> None:
                         proofs,
                         ROUTSTR_LN_ADDRESS,
                         "sat",
-                        amount=accumulated_sats,
+                        amount=payout_sats,
                         on_melt_quote=checkpoint_quote,
                     )
                 except _RoutstrFeePayoutAlreadyClaimed:
@@ -2463,6 +2536,8 @@ async def periodic_routstr_fee_payout() -> None:
                     "Routstr fee payout sent",
                     extra={
                         "accumulated_sats": accumulated_sats,
+                        "payout_sats": payout_sats,
+                        "owner_surplus_sats": owner_surplus_sats,
                         "amount_received": amount_received,
                     },
                 )

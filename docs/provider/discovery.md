@@ -58,11 +58,14 @@ identity with `AUTO_GENERATE_NSEC=true` (see above).
 
 ### Default Relays
 
-If not configured, Routstr publishes to:
+If not configured, Routstr publishes to and reads from:
 
 - `wss://relay.damus.io`
-- `wss://relay.nostr.band`
+- `wss://relay.routstr.com`
 - `wss://nos.lol`
+
+A relay belongs in this list only while it completes reads: one relay that
+never sends `EOSE` makes provider-id lookup fail and pauses stats publication.
 
 ---
 

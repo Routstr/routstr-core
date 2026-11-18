@@ -138,7 +138,9 @@ def _count_text_with_litellm(model: str, text: str) -> int:
     )
 
 
-def _generated_text(value: object) -> list[str]:
+def _generated_text(
+    value: object, *, count_native_tool_output: bool = False
+) -> list[str]:
     """Extract generated text/tool arguments without counting response metadata."""
     generated_keys = {
         "arguments",
@@ -163,6 +165,11 @@ def _generated_text(value: object) -> list[str]:
                 walk(child, key)
             return
         if isinstance(item, dict):
+            if count_native_tool_output and item.get("type") == "tool_use":
+                # A tool invocation is output even when its arguments are empty.
+                parts.append(str(item.get("name", "")))
+                parts.append(json.dumps(item.get("input", {})))
+                return
             for child_key, child in item.items():
                 walk(child, child_key)
 
@@ -232,7 +239,16 @@ class MissingUsageEstimator:
     authorization ceiling, not an input to usage measurement.
     """
 
-    def __init__(self, request_body: bytes | None, model_obj: Model | None) -> None:
+    def __init__(
+        self,
+        request_body: bytes | None,
+        model_obj: Model | None,
+        *,
+        count_native_tool_output: bool = False,
+    ) -> None:
+        # LiteLLM can synthesize identical zero usage for missing and measured
+        # usage; only native Messages opts into structured tool estimation.
+        self._count_native_tool_output = count_native_tool_output
         self.body = _parse_request_body(request_body)
         self.model_name = _model_name(model_obj, self.body)
         self._output_parts: list[str] = []
@@ -272,13 +288,20 @@ class MissingUsageEstimator:
     def observe(self, response_data: object) -> None:
         if isinstance(response_data, dict):
             event_type = response_data.get("type")
-            if event_type in ("response.completed", "response.incomplete"):
+            if event_type in (
+                "response.completed",
+                "response.incomplete",
+                "response.failed",
+            ):
                 response = response_data.get("response")
                 if isinstance(response, dict) and isinstance(
                     response.get("output"), list
                 ):
                     # Terminal output is a snapshot, not another text delta.
-                    self._output_parts = _generated_text(response["output"])
+                    self._output_parts = _generated_text(
+                        response["output"],
+                        count_native_tool_output=self._count_native_tool_output,
+                    )
                     return
             if isinstance(event_type, str) and event_type.endswith(".done"):
                 # Responses API ``*.done`` events repeat text already streamed
@@ -286,7 +309,12 @@ class MissingUsageEstimator:
                 return
         if _is_input_only_response(response_data):
             self._input_only = True
-        self._output_parts.extend(_generated_text(response_data))
+        self._output_parts.extend(
+            _generated_text(
+                response_data,
+                count_native_tool_output=self._count_native_tool_output,
+            )
+        )
 
     def estimated_usage(self, model: str | None = None) -> dict[str, Any] | None:
         """Local usage estimate, or None when a text upstream generated nothing."""
@@ -299,7 +327,8 @@ class MissingUsageEstimator:
         response_data: dict[str, Any] | None,
         model: str | None = None,
     ) -> dict[str, Any]:
-        """Use measured usage when present, otherwise return a local estimate."""
+        """Use measured usage when present, otherwise a local estimate (none
+        when the upstream generated nothing)."""
         if isinstance(response_data, dict):
             usage = response_data.get("usage")
             if not isinstance(usage, dict):
@@ -312,7 +341,10 @@ class MissingUsageEstimator:
                 }
             if not self._output_parts:
                 self.observe(response_data)
-        return self.response_data(model)
+        return {
+            "model": model or self.model_name or "unknown",
+            "usage": self.estimated_usage(model),
+        }
 
     def response_data(self, model: str | None = None) -> dict[str, Any]:
         text = self.output_text

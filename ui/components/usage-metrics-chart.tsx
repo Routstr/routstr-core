@@ -1,5 +1,7 @@
 'use client';
 
+import { parseBucketDate } from '@/lib/usage-time';
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -60,19 +62,22 @@ export function UsageMetricsChart({
 
   const hasMultipleDays = useMemo(() => {
     const daySet = new Set(
-      data.map((item) => new Date(item.timestamp).toDateString())
+      data.map((item) =>
+        parseBucketDate(item.timestamp)?.toISOString().slice(0, 10)
+      )
     );
     return daySet.size > 1;
   }, [data]);
 
   const formatAxisTick = (timestamp: string): string => {
-    const date = new Date(timestamp);
-    if (Number.isNaN(date.getTime())) {
+    const date = parseBucketDate(timestamp);
+    if (!date) {
       return '';
     }
 
     if (hasMultipleDays) {
       return date.toLocaleString([], {
+        timeZone: 'UTC',
         month: 'short',
         day: 'numeric',
         hour: '2-digit',
@@ -80,12 +85,14 @@ export function UsageMetricsChart({
     }
 
     return date.toLocaleTimeString([], {
+      timeZone: 'UTC',
       hour: '2-digit',
       minute: '2-digit',
     });
   };
 
-  const formatMetricValue = (value: number): string => {
+  const formatMetricValue = (value: number | null): string => {
+    if (value === null) return 'Unavailable';
     const formatted = compactNumber.format(value);
     return metricType === 'currency'
       ? `${formatted} ${currencyUnitLabel}`
@@ -93,9 +100,9 @@ export function UsageMetricsChart({
   };
 
   const metricTotals = useMemo(() => {
-    const fallbackTotals = dataKeys.reduce<Record<string, number>>(
+    const fallbackTotals = dataKeys.reduce<Record<string, number | null>>(
       (acc, dataKey) => {
-        acc[dataKey.key] = 0;
+        acc[dataKey.key] = null;
         return acc;
       },
       {}
@@ -104,10 +111,12 @@ export function UsageMetricsChart({
     for (const point of data) {
       for (const dataKey of dataKeys) {
         const rawValue = point?.[dataKey.key];
+        if (rawValue === null || rawValue === undefined) continue;
         const value =
           typeof rawValue === 'number' ? rawValue : Number(rawValue || 0);
         if (Number.isFinite(value)) {
-          fallbackTotals[dataKey.key] += value;
+          fallbackTotals[dataKey.key] =
+            (fallbackTotals[dataKey.key] ?? 0) + value;
         }
       }
     }
@@ -119,7 +128,11 @@ export function UsageMetricsChart({
     const mergedTotals = { ...fallbackTotals };
     for (const dataKey of dataKeys) {
       const rawTotal = totals[dataKey.key];
-      if (typeof rawTotal === 'number' && Number.isFinite(rawTotal)) {
+      if (
+        mergedTotals[dataKey.key] !== null &&
+        typeof rawTotal === 'number' &&
+        Number.isFinite(rawTotal)
+      ) {
         mergedTotals[dataKey.key] = rawTotal;
       }
     }
@@ -131,9 +144,7 @@ export function UsageMetricsChart({
     () =>
       dataKeys.map((dataKey) => ({
         ...dataKey,
-        value: Number.isFinite(metricTotals[dataKey.key])
-          ? metricTotals[dataKey.key]
-          : 0,
+        value: metricTotals[dataKey.key],
       })),
     [dataKeys, metricTotals]
   );
@@ -351,13 +362,45 @@ export function UsageMetricsChart({
               />
               <ChartTooltip
                 cursor={false}
-                content={
-                  <ChartTooltipContent
-                    labelFormatter={(label) =>
-                      new Date(String(label)).toLocaleString()
-                    }
-                  />
-                }
+                filterNull={false}
+                content={(props) => {
+                  const timestamp =
+                    parseBucketDate(String(props.label))?.toLocaleString([], {
+                      timeZone: 'UTC',
+                      timeZoneName: 'short',
+                    }) ?? String(props.label ?? '');
+                  if (
+                    props.active &&
+                    props.payload?.length &&
+                    props.payload.every((entry) => entry.value === null)
+                  ) {
+                    return (
+                      <div className='border-border/50 bg-background rounded-lg border px-2.5 py-2 text-xs shadow-xl'>
+                        <p>{timestamp}</p>
+                        <p className='text-muted-foreground'>
+                          No collection data for this interval.
+                        </p>
+                      </div>
+                    );
+                  }
+                  return (
+                    <ChartTooltipContent
+                      active={props.active}
+                      payload={props.payload}
+                      label={props.label}
+                      labelFormatter={() => {
+                        const coverage = props.payload?.[0]?.payload?.coverage;
+                        const note =
+                          coverage === 'partial'
+                            ? ' (partial collection)'
+                            : coverage === 'updating'
+                              ? ' (still updating)'
+                              : '';
+                        return `${timestamp}${note}`;
+                      }}
+                    />
+                  );
+                }}
               />
               {visibleDataKeys.map((dataKey) => (
                 <Area
@@ -369,7 +412,7 @@ export function UsageMetricsChart({
                   fill={`url(#color${dataKey.key})`}
                   name={dataKey.name}
                   strokeWidth={2}
-                  connectNulls
+                  connectNulls={false}
                   animationDuration={1000}
                 />
               ))}

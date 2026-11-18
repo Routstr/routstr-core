@@ -109,8 +109,12 @@ function getRangeHours(range?: DateRange): number | null {
   }
 
   const normalized = normalizeDateRange(range);
-  const fromTime = normalized.from?.getTime();
-  const toTime = normalized.to?.getTime();
+  const from = normalized.from;
+  const to = normalized.to;
+  const fromTime =
+    from && Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+  const toTime =
+    to && Date.UTC(to.getFullYear(), to.getMonth(), to.getDate() + 1);
 
   if (fromTime === undefined || toTime === undefined) {
     return null;
@@ -136,6 +140,9 @@ function formatCompactDateRangeLabel(range?: DateRange): string {
   }
 
   const sameMonth = format(from, 'yyyy-MM') === format(to, 'yyyy-MM');
+  if (format(from, 'yyyy-MM-dd') === format(to, 'yyyy-MM-dd')) {
+    return format(from, 'MMM d, yyyy');
+  }
   if (sameMonth) {
     return `${format(from, 'MMM d')} - ${format(to, 'd')}`;
   }
@@ -543,7 +550,34 @@ export default function DashboardPage() {
       ? customRangeHours
       : activePreset.hours;
   const safeQueryHours = Math.min(queryHours, MAX_USAGE_RANGE_HOURS);
+  const queryRange =
+    isCustomRangeActive && customRange?.from && customRange.to
+      ? (() => {
+          const normalized = normalizeDateRange(customRange);
+          const from = normalized.from!;
+          const to = normalized.to!;
+          const end = Date.UTC(
+            to.getFullYear(),
+            to.getMonth(),
+            to.getDate() + 1
+          );
+          const start = Math.max(
+            Date.UTC(from.getFullYear(), from.getMonth(), from.getDate()),
+            end - MAX_USAGE_RANGE_HOURS * 3600000
+          );
+          return {
+            start: new Date(start).toISOString(),
+            end: new Date(end).toISOString(),
+          };
+        })()
+      : undefined;
   const isUsageRangeCapped = safeQueryHours < queryHours;
+  const today = new Date();
+  const latestCalendarDay = new Date(
+    today.getUTCFullYear(),
+    today.getUTCMonth(),
+    today.getUTCDate()
+  );
   const autoInterval = getAutoIntervalMinutes(safeQueryHours);
   const usageRefetchIntervalMs = useMemo(() => {
     if (safeQueryHours > 90 * 24) {
@@ -576,11 +610,24 @@ export default function DashboardPage() {
   const {
     data: usageDashboardData,
     isLoading: usageDashboardLoading,
+    error: usageDashboardError,
     refetch: refetchUsageDashboard,
   } = useQuery({
-    queryKey: ['usage-dashboard', autoInterval, safeQueryHours],
+    queryKey: [
+      'usage-dashboard',
+      autoInterval,
+      safeQueryHours,
+      queryRange?.start,
+      queryRange?.end,
+    ],
     queryFn: () =>
-      AdminService.getUsageDashboard(safeQueryHours, autoInterval, 100, 20),
+      AdminService.getUsageDashboard(
+        safeQueryHours,
+        autoInterval,
+        100,
+        20,
+        queryRange
+      ),
     enabled: isAuthenticated,
     refetchInterval: usageRefetchIntervalMs,
     staleTime: 30_000,
@@ -590,6 +637,10 @@ export default function DashboardPage() {
   const summaryData = usageDashboardData?.summary;
   const errorData = usageDashboardData?.error_details;
   const modelUsageMixData = usageDashboardData?.model_usage_mix;
+  const ledgerMode =
+    usageDashboardData?.analytics_source === 'terminal_outcomes';
+  const ledgerCoverage = usageDashboardData?.ledger_coverage;
+  const diagnosticsAvailable = ledgerCoverage?.diagnostic_available !== false;
   const hasModelUsageMixMetrics =
     Array.isArray(modelUsageMixData?.metrics) &&
     modelUsageMixData.metrics.length > 0;
@@ -620,11 +671,14 @@ export default function DashboardPage() {
     const revenuePoints = metricsData.metrics.map(
       (metric: UsageMetricData) => ({
         ...metric,
-        revenue_display: convertRevenueMsats(metric.revenue_msats),
+        revenue_display:
+          metric.revenue_msats === null
+            ? null
+            : convertRevenueMsats(metric.revenue_msats),
       })
     ) as ChartDatum[];
 
-    return [
+    const configs: ChartConfig[] = [
       {
         id: 'revenue',
         title: 'Revenue Over Time',
@@ -649,7 +703,9 @@ export default function DashboardPage() {
         id: 'requests',
         title: 'Request Volume',
         mobileTitle: 'Requests',
-        description: 'Understand traffic and completion reliability over time.',
+        description: ledgerMode
+          ? 'Logged requests and failures are diagnostics; recorded outcomes come from the ledger. These populations may differ and do not form a success-rate breakdown.'
+          : 'Understand traffic and completion reliability over time.',
         data: metricPoints,
         metricType: 'count',
         totals: metricsTotals
@@ -663,17 +719,17 @@ export default function DashboardPage() {
         dataKeys: [
           {
             key: 'total_requests',
-            name: 'Total Requests',
+            name: ledgerMode ? 'Logged Requests' : 'Total Requests',
             color: 'var(--chart-1)',
           },
           {
             key: 'successful_chat_completions',
-            name: 'Successful',
+            name: ledgerMode ? 'Recorded Outcomes' : 'Successful',
             color: 'var(--chart-2)',
           },
           {
             key: 'failed_requests',
-            name: 'Failed',
+            name: ledgerMode ? 'Logged Failures' : 'Failed',
             color: 'var(--chart-5)',
           },
         ],
@@ -764,7 +820,18 @@ export default function DashboardPage() {
         ],
       },
     ];
-  }, [metricsData, metricsTotals, revenueDisplayUnit, usdPerSat]);
+    return configs.filter(
+      (config) =>
+        diagnosticsAvailable || ['revenue', 'tokens'].includes(config.id)
+    );
+  }, [
+    metricsData,
+    metricsTotals,
+    revenueDisplayUnit,
+    usdPerSat,
+    diagnosticsAvailable,
+    ledgerMode,
+  ]);
 
   useEffect(() => {
     if (chartConfigs.length === 0) {
@@ -859,8 +926,7 @@ export default function DashboardPage() {
 
     // DayPicker may emit from===to on the first click in range mode.
     // Keep waiting until the user explicitly picks a second (end) date.
-    const isSameDay = to ? from.getTime() === to.getTime() : false;
-    if (!hasPreviousStart || !to || isSameDay) {
+    if (!hasPreviousStart || !to) {
       setPendingCustomRange({ from, to: undefined });
       return;
     }
@@ -903,17 +969,39 @@ export default function DashboardPage() {
               <h2 className='text-base leading-snug font-semibold tracking-tight sm:text-lg'>
                 Usage Analytics
               </h2>
+              {(ledgerCoverage?.complete === false ||
+                metricsData?.bucket_fill_complete === false ||
+                modelUsageMixData?.bucket_fill_complete === false) && (
+                <span
+                  className='text-muted-foreground text-xs'
+                  title='This period has incomplete coverage.'
+                >
+                  Partial data
+                </span>
+              )}
             </div>
             <p className='text-muted-foreground text-xs sm:text-sm'>
               All cards and charts in this section update from the selected
-              range.
+              range. Chart times and calendar dates are UTC.
             </p>
+            {ledgerMode && !diagnosticsAvailable && (
+              <p className='text-muted-foreground text-xs sm:text-sm'>
+                Logged request, failure, latency, and error diagnostics are
+                unavailable for calendar ranges. Choose a preset range to view
+                them. Ledger outcomes, tokens, and revenue remain available.
+              </p>
+            )}
             {isUsageRangeCapped ? (
               <p className='text-muted-foreground text-[11px] sm:text-xs'>
                 Usage analytics are capped to the last{' '}
                 {MAX_USAGE_RANGE_HOURS / 24} days for server safety.
               </p>
             ) : null}
+            {usageDashboardError && (
+              <p role='alert' className='text-destructive text-sm'>
+                Stats could not be loaded. Try Refresh to retry this period.
+              </p>
+            )}
           </div>
 
           <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
@@ -929,8 +1017,9 @@ export default function DashboardPage() {
                       variant='ghost'
                       size='icon'
                       id='dashboard-date-range'
+                      disabled={!ledgerMode}
                       className='text-muted-foreground hover:bg-muted/50 hover:text-foreground dark:hover:bg-input/50 h-full w-8 rounded-none border-0 bg-transparent p-0 sm:w-9'
-                      aria-label='Open custom date range'
+                      aria-label='Open custom UTC date range'
                     >
                       <CalendarIcon className='h-3.5 w-3.5' />
                     </Button>
@@ -939,8 +1028,12 @@ export default function DashboardPage() {
                     align='start'
                     className='w-auto overflow-hidden p-0'
                   >
+                    <p className='text-muted-foreground px-3 pt-3 text-xs'>
+                      Select UTC calendar days. The current UTC day is partial.
+                    </p>
                     <Calendar
                       mode='range'
+                      disabled={{ after: latestCalendarDay }}
                       selected={pendingCustomRange}
                       onSelect={handleCustomRangeSelect}
                       defaultMonth={pendingCustomRange?.from}
@@ -1036,6 +1129,8 @@ export default function DashboardPage() {
           {!metricsLoading && modelUsageMixData && hasModelUsageMixMetrics ? (
             <TopModelsUsageChart
               mix={modelUsageMixData}
+              ledgerMode={ledgerMode}
+              completeCoverage={ledgerCoverage?.complete}
               displayUnit={displayUnit}
               usdPerSat={usdPerSat}
             />
@@ -1044,16 +1139,21 @@ export default function DashboardPage() {
           {summaryLoading ? (
             <SectionLoading label='summary' />
           ) : summaryData ? (
-            <UsageSummaryCards summary={summaryData} />
+            <UsageSummaryCards
+              summary={summaryData}
+              ledgerMode={ledgerMode}
+              diagnosticsAvailable={diagnosticsAvailable}
+            />
           ) : null}
 
           <DashboardInsights summary={summaryData} isMobile={isMobile} />
 
-          {errorLoading ? (
-            <SectionLoading label='errors' />
-          ) : errorData ? (
-            <ErrorDetailsTable errors={errorData.errors} />
-          ) : null}
+          {diagnosticsAvailable &&
+            (errorLoading ? (
+              <SectionLoading label='errors' />
+            ) : errorData ? (
+              <ErrorDetailsTable errors={errorData.errors} />
+            ) : null)}
         </section>
       </div>
     </AppPageShell>

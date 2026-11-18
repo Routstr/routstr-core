@@ -11,6 +11,8 @@ import json
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream import count_tokens as count_tokens_module
 from routstr.upstream.count_tokens import MissingUsageEstimator, count_tokens_locally
@@ -308,3 +310,33 @@ def test_responses_tool_results_use_fallback_instead_of_empty_messages() -> None
 
     counter.assert_not_called()
     assert usage["input_tokens"] > 100
+
+
+@pytest.mark.parametrize("arguments", [{}, {"x": 7}, {"text": "hello"}])
+def test_missing_usage_estimator_counts_native_tool_name_and_structured_input(
+    arguments: dict,
+) -> None:
+    estimator = MissingUsageEstimator(b"{}", None, count_native_tool_output=True)
+    estimator.observe(
+        {"type": "tool_use", "name": "calc", "input": arguments, "id": "toolu_1"}
+    )
+    assert estimator.output_text == "calc" + json.dumps(arguments)
+    assert estimator.estimated_usage() is not None
+    assert estimator.billing_data({"usage": {"input_tokens": 0, "output_tokens": 0}})[
+        "usage"
+    ] == {"input_tokens": 0, "output_tokens": 0}
+
+
+def test_missing_usage_estimator_does_not_count_arbitrary_input_metadata() -> None:
+    estimator = MissingUsageEstimator(b"{}", None)
+    estimator.observe({"name": "calc", "input": {"x": 7}, "id": "toolu_1"})
+    assert estimator.estimated_usage() is None
+
+
+@pytest.mark.parametrize("arguments", [{}, {"x": 7}])
+def test_missing_usage_estimator_keeps_structured_tool_detection_native_only(
+    arguments: dict,
+) -> None:
+    estimator = MissingUsageEstimator(b"{}", None)
+    estimator.observe({"type": "tool_use", "name": "calc", "input": arguments})
+    assert estimator.estimated_usage() is None

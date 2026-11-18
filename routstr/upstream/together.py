@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ..core.logging import get_logger
-from ..payment.image_pricing import ImagePricing
+from ..payment.image_pricing import ImagePricing, produces_images
 from ..payment.models import Architecture, Model, Pricing, TopProvider
 from ..payment.rates import coerce_rate
 from .base import BaseUpstreamProvider
@@ -191,6 +191,34 @@ class TogetherUpstreamProvider(BaseUpstreamProvider):
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("together/")
 
+    def prepare_request_body(
+        self,
+        body: bytes | None,
+        model_obj: Model,
+        include_stream_usage: bool = False,
+    ) -> bytes | None:
+        """Ask Together for image bytes unless the client asked for a link.
+
+        Together answers with a link by default and names the bytes option
+        ``base64``, not OpenAI's ``b64_json``. Its links expire and carry no
+        CORS headers, so a browser client can neither show nor keep them.
+        """
+        body = super().prepare_request_body(body, model_obj, include_stream_usage)
+        if not body or not produces_images(model_obj):
+            return body
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return body
+        if (
+            isinstance(data, dict)
+            and "prompt" in data
+            and data.get("response_format", "b64_json") == "b64_json"
+        ):
+            data["response_format"] = "base64"
+            return json.dumps(data).encode()
+        return body
+
     def image_book(
         self, model_id: str, pricing_raw: dict[str, Any] | None = None
     ) -> ImagePricing | None:
@@ -226,6 +254,9 @@ class TogetherUpstreamProvider(BaseUpstreamProvider):
             if isinstance(payload, list)
             else []
         )
+
+    def _catalog_settings(self) -> dict[str, object]:
+        return {"image_prices": self.image_prices}
 
     async def fetch_models(self) -> list[Model]:
         try:

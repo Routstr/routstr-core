@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import inspect
 import json
 import re
@@ -6,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from sqlmodel import select
+from sqlmodel import col, select
 
 from .algorithm import create_model_mappings
 from .auth import (
@@ -49,6 +50,7 @@ from .payment.image_pricing import (
 )
 from .payment.models import Model, is_decision_model
 from .payment.price import sats_usd_price
+from .payment.pricing_trail import build_pricing_trail
 from .upstream import BaseUpstreamProvider
 from .upstream.cooldown import (
     candidate_model_identity,
@@ -80,6 +82,12 @@ MODEL_PATH_HEADER = "x-routstr-model-path"
 proxy_router = APIRouter()
 
 _upstreams: list[BaseUpstreamProvider] = []
+# Fingerprint of the provider rows `_upstreams` was built from. Each worker keeps
+# its own provider objects, so an admin change made through one worker reaches
+# the others when their sync loop sees the fingerprint move.
+_upstreams_config_version: str | None = None
+_upstreams_lock = asyncio.Lock()
+PROVIDER_SYNC_INTERVAL_SECONDS = 5
 _provider_map: dict[
     str, list[tuple[Model, BaseUpstreamProvider]]
 ] = {}  # All aliases -> sorted [(candidate Model, its Provider)]
@@ -93,23 +101,71 @@ async def _finish_read_transaction(session: AsyncSession) -> None:
         await commit_result
 
 
+async def _provider_config_version() -> str:
+    async with create_session() as session:
+        result = await session.exec(
+            select(UpstreamProviderRow).order_by(col(UpstreamProviderRow.id))
+        )
+        rows = [row.model_dump() for row in result.all()]
+    return hashlib.sha256(
+        json.dumps(rows, sort_keys=True, default=str).encode()
+    ).hexdigest()
+
+
+async def _load_upstreams() -> None:
+    global _upstreams, _upstreams_config_version
+    # Read before loading: a change landing during the load then shows up as a
+    # newer fingerprint on the next sync instead of being recorded as applied.
+    version = await _provider_config_version()
+    _upstreams = await init_upstreams()
+    _upstreams_config_version = version
+
+
 async def initialize_upstreams() -> None:
     """Initialize upstream providers from database during application startup."""
-    global _upstreams
-    _upstreams = await init_upstreams()
+    async with _upstreams_lock:
+        await _load_upstreams()
     logger.info(f"Initialized {len(_upstreams)} upstream providers")
     await refresh_model_maps()
 
 
 async def reinitialize_upstreams() -> None:
     """Re-initialize upstream providers from database (called after admin changes)."""
-    global _upstreams
-    _upstreams = await init_upstreams()
+    async with _upstreams_lock:
+        await _load_upstreams()
     logger.info(
         "Re-initialized upstream providers from admin action",
         extra={"provider_count": len(_upstreams)},
     )
     await refresh_model_maps()
+
+
+async def sync_upstreams_with_database() -> bool:
+    """Rebuild the providers if their rows changed since this worker loaded them."""
+    async with _upstreams_lock:
+        if await _provider_config_version() == _upstreams_config_version:
+            return False
+        await _load_upstreams()
+    logger.info(
+        "Re-initialized upstream providers after a configuration change",
+        extra={"provider_count": len(_upstreams)},
+    )
+    await refresh_model_maps()
+    return True
+
+
+async def sync_upstreams_periodically() -> None:
+    while True:
+        try:
+            await asyncio.sleep(PROVIDER_SYNC_INTERVAL_SECONDS)
+            await sync_upstreams_with_database()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(
+                "Error syncing upstream providers",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
 
 
 def get_upstreams() -> list[BaseUpstreamProvider]:
@@ -368,6 +424,16 @@ async def refresh_model_maps_periodically() -> None:
 # permission has to come from this table rather than from the client-supplied
 # path: an upstream's key-management, organization, or billing routes live
 # under the same origin and must never be reachable through the proxy.
+#
+# Keep this table mirrored in the routstrd-remote auth proxy, which
+# re-implements it as ``AuthProxy.INFERENCE_ENDPOINTS`` in ``src/proxy.ts`` to
+# decide which routes a client API key may reach. That copy is method-aware and
+# carries every entry here except ``attestation`` and ``tee/attestation``, which
+# are forwarded unauthenticated (see ``_select_unauthenticated_get_upstreams``)
+# and are therefore out of scope for a client-key capability list. ``models`` is
+# listed there for parity even though it is also a public path. Adding,
+# removing or changing a method here without updating it silently widens or
+# narrows what client keys can call.
 _ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
     "chat/completions": frozenset({"POST"}),
     "completions": frozenset({"POST"}),
@@ -702,7 +768,9 @@ async def _proxy(
                 request=request,
             )
     else:
-        request_body_dict = parse_request_body_json(request_body, path)
+        request_body_dict = parse_request_body_json(
+            request_body, path, headers.get("content-type", "")
+        )
         if is_responses_api:
             model_id = extract_model_from_responses_request(request_body_dict)
         else:
@@ -836,11 +904,17 @@ async def _proxy(
                 or not request_body_dict
                 or not is_openrouter_base_url(pinned[1].base_url)
                 or _canonical_api_path(path)
-                not in {"chat/completions", "completions", "responses"}
+                not in {"chat/completions", "completions", "responses", "messages"}
+                # Messages translated through LiteLLM lose the ``provider``
+                # field, so only a native Messages upstream can honour the pin.
+                or (
+                    _canonical_api_path(path) == "messages"
+                    and not pinned[1].supports_anthropic_messages
+                )
             ):
                 return create_error_response(
                     "unsupported_request",
-                    "Endpoint pinning requires an OpenRouter completion or Responses JSON request",
+                    "Endpoint pinning requires an OpenRouter completion, Responses, or Messages JSON request",
                     400,
                     request=request,
                 )
@@ -984,11 +1058,18 @@ async def _proxy(
     _max_cost_for_model = await get_max_cost_for_model(
         model=model_id, session=session, model_obj=model_obj
     )
+    pricing_trail = build_pricing_trail(model_obj, _max_cost_for_model)
     max_cost_for_model = await calculate_discounted_max_cost(
-        _max_cost_for_model, request_body_dict, model_obj=model_obj, path=path
+        _max_cost_for_model,
+        request_body_dict,
+        model_obj=model_obj,
+        path=path,
+        pricing_trail=pricing_trail,
     )
 
-    check_token_balance(headers, request_body_dict, max_cost_for_model)
+    check_token_balance(
+        headers, request_body_dict, max_cost_for_model, pricing=pricing_trail
+    )
 
     if x_cashu := headers.get("x-cashu", None):
         last_error = None
@@ -1071,7 +1152,13 @@ async def _proxy(
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(
-            headers, path, session, auth, max_cost_for_model, model_id
+            headers,
+            path,
+            session,
+            auth,
+            max_cost_for_model,
+            model_id,
+            pricing=pricing_trail,
         )
         mark(request, "auth")
 
@@ -1140,7 +1227,9 @@ async def _proxy(
 
     reservation_snapshot: ReservationSnapshot | None = None
     if is_ehbp or request_body_dict:
-        reservation_snapshot = await pay_for_request(key, max_cost_for_model, session)
+        reservation_snapshot = await pay_for_request(
+            key, max_cost_for_model, session, model=model_id, pricing=pricing_trail
+        )
         # pay_for_request refreshes the key after committing the reservation.
         # End that read transaction before waiting on upstream response headers.
         await _finish_read_transaction(session)
@@ -1160,8 +1249,13 @@ async def _proxy(
             candidate_max = await get_max_cost_for_model(
                 model=model_id, session=session, model_obj=model_obj
             )
+            candidate_pricing = build_pricing_trail(model_obj, candidate_max)
             candidate_max = await calculate_discounted_max_cost(
-                candidate_max, request_body_dict, model_obj=model_obj, path=path
+                candidate_max,
+                request_body_dict,
+                model_obj=model_obj,
+                path=path,
+                pricing_trail=candidate_pricing,
             )
             if candidate_max > max_cost_for_model:
                 await revert_pay_for_request(
@@ -1169,18 +1263,27 @@ async def _proxy(
                 )
                 try:
                     reservation_snapshot = await pay_for_request(
-                        key, candidate_max, session
+                        key,
+                        candidate_max,
+                        session,
+                        model=model_id,
+                        pricing=candidate_pricing,
                     )
                 except HTTPException:
                     if i == len(candidates) - 1:
                         raise
                     reservation_snapshot = await pay_for_request(
-                        key, max_cost_for_model, session
+                        key,
+                        max_cost_for_model,
+                        session,
+                        model=model_id,
+                        pricing=pricing_trail,
                     )
                     await _finish_read_transaction(session)
                     continue
                 await _finish_read_transaction(session)
                 max_cost_for_model = candidate_max
+                pricing_trail = candidate_pricing
 
         # Only once the candidate is actually tried: a fallback skipped for its
         # reservation must not take over the last attempted upstream's line.
@@ -1474,6 +1577,8 @@ async def get_bearer_token_key(
     auth: str,
     min_cost: int = 0,
     model_id: str = "unknown",
+    *,
+    pricing: dict | None = None,
 ) -> ApiKey:
     """Handle bearer token authentication proxy requests."""
     parts = auth.split()
@@ -1544,6 +1649,16 @@ async def get_bearer_token_key(
         detail: dict[str, Any] = error.detail if isinstance(error.detail, dict) else {}
         raw_error = detail.get("error")
         error_info = raw_error if isinstance(raw_error, dict) else {}
+        # This early check knows only min_cost, but the proxy already computed
+        # the request's reservation. Enrich only our local balance error.
+        if (
+            error.status_code == 402
+            and error_info.get("code") == "insufficient_balance"
+            and isinstance(error_info.get("details"), dict)
+        ):
+            error_info["details"]["model"] = model_id
+            if pricing is not None:
+                error_info["details"]["pricing"] = pricing
         logger.warning(
             "Bearer token rejected",
             extra={
@@ -1586,11 +1701,38 @@ def extract_model_from_responses_request(request_body_dict: dict[str, Any]) -> s
     return "unknown"
 
 
-def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:
+def parse_request_body_json(
+    request_body: bytes, path: str, content_type: str = ""
+) -> dict[str, Any]:
+    # Multipart uploads (OpenAI images.edit) are not JSON; refuse them by name
+    # rather than letting json.loads fail as a 500.
+    if request_body and content_type.lower().startswith("multipart/"):
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "unsupported_media_type",
+                    "message": "Multipart request bodies are not supported; "
+                    "send a JSON body with images as base64 or URLs.",
+                }
+            },
+        )
     request_body_dict = {}
     if request_body:
         try:
             request_body_dict = json.loads(request_body)
+            if not isinstance(request_body_dict, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "invalid_json",
+                            "message": "Request body must be a JSON object",
+                        }
+                    },
+                )
 
             if "max_tokens" in request_body_dict:
                 max_tokens_value = request_body_dict["max_tokens"]
@@ -1611,7 +1753,7 @@ def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:
                     "model": request_body_dict.get("model", "not_specified"),
                 },
             )
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.error(
                 "Invalid JSON in request body",
                 extra={

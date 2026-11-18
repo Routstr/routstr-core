@@ -6,6 +6,7 @@ import httpx
 from ..core.exceptions import UpstreamError
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
+from .usage_multiplier_sources import get_usage_multiplier_source
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -215,6 +216,15 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
                 seen_cursors.add(cursor)
                 params["after_id"] = cursor
 
+    def _catalog_settings(self) -> dict[str, object]:
+        return {"workspace_id": self.workspace_id}
+
+    def _restore_catalog_state(self, models: list[Model]) -> None:
+        # Native discovery stores its authoritative ID as the sole alias.
+        self._native_model_names = {
+            model.id: model.alias_ids[0] for model in models if model.alias_ids
+        }
+
     async def fetch_models(self) -> list[Model]:
         # Native IDs are authoritative; OpenRouter supplies pricing, not API names.
         # Models keep their catalog ID so saved overrides stay keyed as before;
@@ -223,7 +233,6 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
         native_ids = await self._fetch_native_model_ids()
         models_data = await async_fetch_openrouter_models(source_filter="anthropic")
         models: list[Model] = []
-        mappings: dict[str, str] = {}
         for data in models_data:
             model = Model(**data)
             candidates = (
@@ -234,8 +243,24 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
             native_id = next((name for name in candidates if name in native_ids), None)
             if native_id is None:
                 continue
-            mappings[model.id] = native_id
             model.alias_ids = [native_id]
             models.append(model)
-        self._native_model_names = mappings
+        self._restore_catalog_state(models)
+        await self._attach_usage_multipliers(models)
         return models
+
+    async def _attach_usage_multipliers(self, models: list[Model]) -> None:
+        """Fill fast-mode / US-inference multipliers from the configured source.
+
+        A model the source has no answer for this round keeps the value it was
+        last cached with, so a failed lookup cannot drop it to the base rate.
+        """
+        source = get_usage_multiplier_source("anthropic")
+        if source is None:
+            return
+        fetched = await source.fetch(f"anthropic/{model.id}" for model in models)
+        previous = {model.id: model.usage_multipliers for model in self._models_cache}
+        for model in models:
+            model.usage_multipliers = fetched.get(
+                f"anthropic/{model.id}", previous.get(model.id)
+            )

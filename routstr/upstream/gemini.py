@@ -7,7 +7,6 @@ from .base import BaseUpstreamProvider
 from .clients.gemini import GeminiClient
 
 if TYPE_CHECKING:
-    from ..core.db import UpstreamProviderRow
     from ..payment.models import Model
 
 from ..core.logging import get_logger
@@ -49,16 +48,6 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
         if self._client is None:
             self._client = GeminiClient(api_key=self.api_key)
         return self._client
-
-    @classmethod
-    def _build_from_row(
-        cls, provider_row: "UpstreamProviderRow"
-    ) -> "GeminiUpstreamProvider":
-        return cls(
-            base_url=provider_row.base_url,
-            api_key=provider_row.api_key,
-            provider_fee=provider_row.provider_fee,
-        )
 
     @classmethod
     def get_provider_metadata(cls) -> dict[str, object]:

@@ -754,3 +754,43 @@ async def test_admin_routstr_topup_does_not_duplicate_invoice_on_upstream_failur
         assert mock_client.calls == 1
     finally:
         admin_sessions.pop(admin_token, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_provider_update_keeps_key_when_placeholder_is_sent_back(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    provider = UpstreamProviderRow(
+        provider_type="routstr",
+        base_url="https://node.example",
+        api_key="sk-upstream-test",
+        enabled=True,
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    try:
+        shown = await integration_client.get(
+            f"/admin/api/upstream-providers/{provider.id}"
+        )
+        response = await integration_client.patch(
+            f"/admin/api/upstream-providers/{provider.id}",
+            json={
+                "provider_type": "routstr",
+                "base_url": "https://node.example",
+                "api_key": shown.json()["api_key"],
+            },
+        )
+
+        assert response.status_code == 200
+        await integration_session.refresh(provider)
+        assert provider.api_key == "sk-upstream-test"
+    finally:
+        admin_sessions.pop(admin_token, None)

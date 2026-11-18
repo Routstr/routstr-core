@@ -1,0 +1,38 @@
+# Opt-in PostgreSQL for the node. Layer it on either stack:
+#
+#   docker compose -f compose.yml -f compose.postgres.yml up -d
+#   docker compose -f compose.node.yml -f compose.postgres.yml up -d
+#
+# Set POSTGRES_PASSWORD in .env first (URL-safe, it is part of DATABASE_URL:
+# `openssl rand -hex 32`). On the first boot an existing ./keys.db is copied into
+# the empty database once and renamed to keys.db.imported-<timestamp>; keep
+# ROUTSTR_SECRET_KEY unchanged. See docs/provider/configuration.md.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-routstr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-routstr}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  routstr:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-routstr}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-routstr}
+      # The SQLite file the node used until now, through the existing `.:/app`
+      # mount. Imported only into an empty database; ignored once imported.
+      # `SQLITE_IMPORT_PATH=` (empty) in .env turns the import off.
+      SQLITE_IMPORT_PATH: ${SQLITE_IMPORT_PATH-/app/keys.db}
+
+volumes:
+  postgres-data:

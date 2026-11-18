@@ -57,6 +57,31 @@ legacy status behavior.
 | 502 | Bad Gateway | Gateway-level failure |
 | 503 | Service Unavailable | Temporary outage |
 
+### Paid inference settlement failure
+
+For paid `POST /v1/chat/completions` and `POST /v1/responses` requests, this
+specific `503` is not safe to retry with the same payment:
+
+```http
+HTTP/1.1 503 Service Unavailable
+X-Routstr-Error-Scope: node
+Content-Type: application/json
+
+{
+  "error": {
+    "type": "internal_error",
+    "message": "The payment could not be settled, so the response was withheld. Claim the refund at /v1/balance/refund with the original X-Cashu token.",
+    "code": "payment_settlement_failed"
+  },
+  "request_id": "req-123"
+}
+```
+
+The original `X-Cashu` token was already spent. Do not resend it. Retain it and
+claim the refund with `POST /v1/balance/refund`; the original token identifies
+the stored refund. For EHBP requests, this is a plaintext router-generated
+response and does not include `Ehbp-Response-Nonce`.
+
 ### Upstream attribution (424 Failed Dependency)
 
 When an upstream provider fails, this node is still healthy, so the failure is
@@ -92,8 +117,9 @@ Two exceptions keep their own status:
   when the provider wrapped them in a 5xx.
 - **Provider-side 4xx** (`400`/`401`/`403`/`404`/`422`) passes through unchanged.
 
-Node faults (unreachable mint, database failure, internal exception) still
-answer `500` with **no** `X-Routstr-Error-Scope` header.
+Outside the paid inference settlement failure above, node faults (unreachable
+mint, database failure, internal exception) answer `500` with **no**
+`X-Routstr-Error-Scope` header.
 
 ## Error Types
 
@@ -175,29 +201,99 @@ Keys are node-local; an `sk-` key issued by another node is not accepted here.
 
 ### Payment Errors
 
-#### Insufficient Balance
+#### Insufficient Balance (402 Payment Required)
+
+Top-level `error` is canonical. `detail.error` is a permanent, identical
+compatibility mirror; `request_id` remains top-level.
 
 ```json
 {
   "error": {
-    "type": "insufficient_balance",
+    "type": "insufficient_quota",
+    "code": "insufficient_balance",
     "message": "Insufficient balance for request",
-    "code": "payment_required",
     "details": {
-      "balance": 100,
-      "required": 154,
-      "shortfall": 54,
-      "estimated_tokens": {
-        "prompt": 50,
-        "completion": 150
+      "unit": "msat",
+      "required_msats": 28989,
+      "available_msats": 21000,
+      "shortfall_msats": 7989,
+      "reserved_msats": 4000,
+      "model": "gpt-4o",
+      "pricing": {
+        "base_source": "unavailable",
+        "formula": "unavailable",
+        "required_msats": 28989,
+        "error": "Request pricing context was not supplied to this balance check"
       }
     }
-  }
+  },
+  "detail": {
+    "error": {
+      "type": "insufficient_quota",
+      "code": "insufficient_balance",
+      "message": "Insufficient balance for request",
+      "details": {
+        "unit": "msat",
+        "required_msats": 28989,
+        "available_msats": 21000,
+        "shortfall_msats": 7989,
+        "reserved_msats": 4000,
+        "model": "gpt-4o",
+        "pricing": {
+          "base_source": "unavailable",
+          "formula": "unavailable",
+          "required_msats": 28989,
+          "error": "Request pricing context was not supplied to this balance check"
+        }
+      }
+    }
+  },
+  "request_id": "req-example"
 }
 ```
 
-**Status:** 402  
-**Resolution:** Top up API key balance
+| `error.details` field | Meaning |
+| --- | --- |
+| `unit` | Always `msat`; numeric amounts are millisatoshis, not sats. |
+| `required_msats` | Actual request reservation requirement (integer). |
+| `available_msats` | `max(0, balance - reserved)` (integer). |
+| `shortfall_msats` | `max(0, required - available)` (integer). |
+| `reserved_msats` | Present when nonzero; in-flight reservations. |
+| `model` | Present when known. |
+| `pricing` | Reservation audit trail; see below. |
+
+X-Cashu shortfalls use `code: "minimum_balance_required"` and the same canonical
+`type`. Their original `detail.reason`, `detail.amount_required_msat`,
+`detail.model`, and `detail.type` remain. Concurrent depletion also retains
+`error.available_balance`.
+
+`pricing.base_source` is `fixed_pricing`, `fallback_fixed`,
+`model_sats_pricing`, or `unavailable`. `formula` is a convenience alias for
+`max_cost_formula` on model-priced requests:
+
+| Formula | USD ceiling from current model inputs |
+| --- | --- |
+| `context_plus_completion` | `(context - completion_limit) * prompt + completion_limit * completion` |
+| `context_le_completion` | `context * max(prompt, completion)` (unchanged pricing behavior) |
+| `context_only` | Provider context times the larger token rate |
+| `completion_only` | Provider completion limit times completion rate |
+| `model_context_only` | Model context times the larger token rate |
+| `flat_estimate` | Weighted rates; coefficients included in `max_cost_inputs` |
+| `fixed_request_cost` | Fixed sats per request, floored at the minimum |
+| `unavailable` | No request context or unusable pricing; `error` explains why |
+
+The trail records `base_max_cost_msats`, final `required_msats`, minimum floor,
+and actual `discounts` (prompt/image estimates, largest completion cap, deltas,
+or image reservation). Model trails also include `max_cost_inputs` and
+`max_cost_computed`. Cached sat pricing is authoritative: USD formula values
+are explicitly labeled as calculations from current model inputs, not a
+reconstruction of the cached reservation. The cache does not retain historical
+FX, so no current exchange rate is substituted. Direct bearer validation knows
+only the minimum cost and reports `unavailable`; the proxy enriches early balance
+rejection with the model and reservation trail it already computed.
+
+**Resolution:** Top up the API key by at least `shortfall_msats`. Do not extract
+amounts from the human-readable message when structured details are present.
 
 ### Cashu Token Redemption Errors
 
@@ -489,6 +585,10 @@ def retry_with_backoff(
             if attempt == max_retries - 1:
                 raise
             
+            # A settlement failure spent the token and must be claimed, not retried
+            if getattr(e, 'code', None) == 'payment_settlement_failed':
+                raise
+
             # Check if error is retryable
             if hasattr(e, 'status_code'):
                 if e.status_code in [424, 429, 502, 503, 504]:

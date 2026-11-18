@@ -99,7 +99,9 @@ async def typesafe_provider_maps(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["systemone", "systemone/"])
 async def test_systemone_forwarded_and_billed_from_usage(
+    path: str,
     authenticated_client: AsyncClient,
     typesafe_provider_maps: _StaticTypeSafeProvider,
     integration_session: AsyncSession,
@@ -128,7 +130,7 @@ async def test_systemone_forwarded_and_billed_from_usage(
         ),
     ):
         response = await authenticated_client.post(
-            "/v1/systemone",
+            f"/v1/{path}",
             json=SYSTEMONE_REQUEST,
         )
 
@@ -142,7 +144,7 @@ async def test_systemone_forwarded_and_billed_from_usage(
     # provider's model spelling.
     assert len(sent_requests) == 1
     sent = sent_requests[0]
-    assert str(sent.url) == "https://api.typesafe.ai/v1/systemone"
+    assert str(sent.url) == f"https://api.typesafe.ai/v1/{path}"
     assert json.loads(sent.content)["model"] == "jev-latest"
 
     # Billed from usage: 1000 input tokens at 0.001 sats/token = 1000 msats;

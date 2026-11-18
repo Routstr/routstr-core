@@ -15,6 +15,7 @@ from routstr.core.error_scope import (
     ERROR_SCOPE_UPSTREAM,
     UPSTREAM_UNAVAILABLE,
 )
+from routstr.payment.models import Pricing
 from routstr.upstream.model_paths import decode_model_path, encode_model_path
 
 from .proxy_test_utils import mock_request_stream, patch_proxy_session
@@ -291,6 +292,152 @@ async def test_endpoint_tag_pins_the_upstream_subprovider() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [200, 400, 429, 502])
+async def test_messages_endpoint_pin_preserves_body_pricing_and_no_fallback(
+    status_code: int,
+) -> None:
+    upstream = _make_upstream(1, status_code)
+    upstream.base_url = "https://openrouter.ai/api/v1"
+    fallback = _make_upstream(2)
+    model, priced_model = MagicMock(), MagicMock()
+    body = {
+        "model": MODEL_ID,
+        "max_tokens": 32,
+        "stream": True,
+        "system": [{"type": "text", "text": "System instructions"}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi"}]}],
+        "provider": {
+            "order": ["other"],
+            "allow_fallbacks": True,
+            "data_collection": "deny",
+        },
+    }
+    request = _make_request(
+        {
+            "authorization": "Bearer key",
+            "x-routstr-model-path": encode_model_path(
+                upstream.base_url, MODEL_ID, "cloudflare"
+            ),
+        },
+        json.dumps(body).encode(),
+    )
+    with patch.object(
+        proxy_module, "_price_pinned_endpoint", AsyncMock(return_value=priced_model)
+    ) as price:
+        response = await _run_proxy(
+            request, [(model, upstream), (model, fallback)], "v1/messages"
+        )
+    assert response.status_code == status_code
+    price.assert_awaited_once()
+    assert price.await_args is not None
+    assert price.await_args.args[2:] == (model, upstream)
+    upstream.forward_request.assert_awaited_once()
+    args = upstream.forward_request.await_args.args
+    assert args[1] == "v1/messages"
+    assert json.loads(args[3]) == {
+        **body,
+        "provider": {
+            "order": ["cloudflare"],
+            "allow_fallbacks": False,
+            "data_collection": "deny",
+        },
+    }
+    assert priced_model in args
+    fallback.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_messages_endpoint_pin_uses_native_openrouter_transport(
+    stream: bool,
+) -> None:
+    import httpx
+    from fastapi.responses import Response
+
+    from routstr.upstream.openrouter import OpenRouterUpstreamProvider
+
+    upstream = OpenRouterUpstreamProvider(api_key="upstream-key")
+    upstream.db_id = 1
+    model = MagicMock(id=MODEL_ID, forwarded_model_id=None, canonical_slug=None)
+    fallback = _make_upstream(2)
+    body = {
+        "model": MODEL_ID,
+        "max_tokens": 32,
+        "stream": stream,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi"}]}],
+    }
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "text/event-stream" if stream else "application/json"
+            },
+            content=b"",
+        )
+
+    request = _make_request(
+        {
+            "authorization": "Bearer key",
+            "x-routstr-model-path": encode_model_path(
+                upstream.base_url, MODEL_ID, "cloudflare"
+            ),
+        },
+        json.dumps(body).encode(),
+    )
+    request.query_params = {}
+    handler = (
+        "handle_streaming_messages_completion"
+        if stream
+        else "handle_non_streaming_messages_completion"
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with (
+            patch(
+                "routstr.upstream.base.acquire_upstream_http_client",
+                return_value=client,
+            ),
+            patch.object(
+                upstream, "_forward_messages_via_litellm", AsyncMock()
+            ) as translate,
+            patch.object(
+                upstream, handler, AsyncMock(return_value=Response(status_code=200))
+            ) as settle,
+            patch.object(
+                upstream, "prepare_request_body", wraps=upstream.prepare_request_body
+            ) as prepare,
+        ):
+            # Avoid unrelated model metadata mocks altering body preparation.
+            model.image_pricing = None
+            model.architecture.output_modalities = ["text"]
+            model.pricing = MagicMock(
+                prompt=1e-6, completion=2e-6, request=0.0, image=0.0
+            )
+            response = await _run_proxy(
+                request, [(model, upstream), (model, fallback)], "v1/messages"
+            )
+    assert response.status_code == 200
+    assert len(sent) == 1
+    assert str(sent[0].url) == "https://openrouter.ai/api/v1/messages"
+    forwarded = json.loads(sent[0].content)
+    assert forwarded["messages"] == body["messages"]
+    assert forwarded["stream"] == stream
+    max_price = forwarded["provider"].pop("max_price")
+    assert set(max_price) == {"prompt", "completion", "request", "image"}
+    assert forwarded["provider"] == {"order": ["cloudflare"], "allow_fallbacks": False}
+    assert "x-routstr-model-path" not in sent[0].headers
+    prepare.assert_called_once()
+    translate.assert_not_awaited()
+    settle.assert_awaited_once()
+    assert settle.await_args is not None
+    assert settle.await_args.kwargs["model_obj"] is model
+    assert settle.await_args.kwargs["reservation_snapshot"] is not None
+    fallback.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "raw",
     ["", " ", "url=http://localhost&provider-id=1&model-id=test-model&provider-id=2"],
@@ -349,6 +496,7 @@ async def test_endpoint_pin_cannot_be_stripped_on_retry() -> None:
     "path,handler",
     [
         ("v1/chat/completions", "handle_x_cashu"),
+        ("v1/messages", "handle_x_cashu"),
         ("v1/responses", "handle_x_cashu_responses"),
     ],
 )
@@ -397,7 +545,7 @@ def test_model_path_header_is_not_forwarded() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["v1/chat/completions", "v1/responses"])
+@pytest.mark.parametrize("path", ["v1/chat/completions", "v1/responses", "v1/messages"])
 @pytest.mark.parametrize(
     "status_code,client_status",
     [(200, 200), (429, 429), (502, 424)],
@@ -422,7 +570,12 @@ async def test_cashu_pin_reaches_http_transport(
         return httpx.Response(status_code, json={"error": "test"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-    model = MagicMock(id=MODEL_ID, forwarded_model_id=None, canonical_slug=None)
+    model = MagicMock(
+        id=MODEL_ID,
+        forwarded_model_id=None,
+        canonical_slug=None,
+        pricing=Pricing(prompt=0.0, completion=0.0),
+    )
     request = _make_request(
         {
             "x-cashu": "test-token",
@@ -463,9 +616,11 @@ async def test_cashu_pin_reaches_http_transport(
     redeem.assert_awaited_once()
     assert len(sent) == 1
     assert sent[0].url.host == "openrouter.ai"
+    assert sent[0].url.path == "/api/" + path
     assert json.loads(sent[0].content)["provider"] == {
         "order": ["deepinfra/fp8"],
         "allow_fallbacks": False,
+        "max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0},
     }
     assert "x-routstr-model-path" not in sent[0].headers
     fallback.handle_x_cashu.assert_not_awaited()
@@ -512,7 +667,13 @@ async def test_pinned_exception_does_not_fall_back() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "path,is_ehbp", [("v1/messages", False), ("v1/chat/completions", True)]
+    "path,is_ehbp",
+    [
+        ("v1/embeddings", False),
+        ("v1/messages/count_tokens", False),
+        ("v1/chat/completions", True),
+        ("v1/messages", True),
+    ],
 )
 async def test_unsupported_endpoint_pins_fail_before_payment(
     path: str, is_ehbp: bool
@@ -540,6 +701,49 @@ async def test_unsupported_endpoint_pins_fail_before_payment(
     assert json.loads(response.body)["error"]["type"] == "unsupported_request"
     payment.assert_not_called()
     upstream.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_messages_pin_rejected_when_upstream_translates_messages() -> None:
+    """A generic provider at openrouter.ai translates Messages through LiteLLM,
+    whose field allowlist drops ``provider``. Accepting the pin would bill the
+    endpoint price while OpenRouter routes freely, so it must fail closed."""
+    from routstr.upstream.generic import GenericUpstreamProvider
+
+    upstream = GenericUpstreamProvider(
+        base_url="https://openrouter.ai/api/v1", api_key="upstream-key"
+    )
+    upstream.db_id = 1
+    request = _make_request(
+        {
+            "x-cashu": "test-token",
+            "x-routstr-model-path": encode_model_path(
+                upstream.base_url, MODEL_ID, "cloudflare"
+            ),
+        },
+        json.dumps(
+            {
+                "model": MODEL_ID,
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "Hi"}],
+            }
+        ).encode(),
+    )
+    with (
+        patch.object(proxy_module, "check_token_balance") as payment,
+        patch.object(
+            proxy_module, "get_candidates", return_value=[(MagicMock(), upstream)]
+        ),
+        patch.object(upstream, "forward_request", AsyncMock()) as forward,
+        patch.object(upstream, "forward_x_cashu_request", AsyncMock()) as x_cashu,
+        patch_proxy_session(MagicMock()),
+    ):
+        response = await proxy_module.proxy(request, "v1/messages")
+    assert response.status_code == 400
+    assert json.loads(response.body)["error"]["type"] == "unsupported_request"
+    payment.assert_not_called()
+    forward.assert_not_awaited()
+    x_cashu.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -621,7 +825,7 @@ async def test_model_fallback_list_is_rejected_when_pinned() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", [None, "deepinfra/fp8"])
-@pytest.mark.parametrize("path", ["v1/chat/completions", "v1/responses"])
+@pytest.mark.parametrize("path", ["v1/chat/completions", "v1/responses", "v1/messages"])
 @pytest.mark.parametrize("final_status", [200, 429])
 async def test_pinned_recovery_stays_on_selected_provider(
     endpoint: str | None, path: str, final_status: int

@@ -12,6 +12,23 @@ from .logging import get_logger
 logger = get_logger(__name__)
 
 
+def local_log_timestamp_utc(value: str) -> str | None:
+    """Expose an unambiguous UTC companion without changing legacy timestamps.
+
+    Old logs contain server-local wall time with no offset. A repeated DST hour
+    cannot be recovered; retain the existing fold=0 interpretation on both paths.
+    """
+    try:
+        return (
+            datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+            .astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 class UsageAnalyticsStore:
     """
     Incremental usage analytics index backed by SQLite.
@@ -783,7 +800,7 @@ class UsageAnalyticsStore:
             """
             SELECT
                 datetime(
-                    (CAST(strftime('%s', minute_ts) AS INTEGER) / ?) * ?,
+                    (CAST(strftime('%s', minute_ts, 'utc') AS INTEGER) / ?) * ?,
                     'unixepoch'
                 ) AS bucket_ts,
                 COALESCE(SUM(total_requests), 0) AS total_requests,
@@ -1038,6 +1055,7 @@ class UsageAnalyticsStore:
             "errors": [
                 {
                     "timestamp": str(row["timestamp"]),
+                    "timestamp_utc": local_log_timestamp_utc(str(row["timestamp"])),
                     "message": str(row["message"]),
                     "error_type": str(row["error_type"]),
                     "pathname": str(row["pathname"]),
@@ -1185,7 +1203,7 @@ class UsageAnalyticsStore:
             """
             SELECT
                 datetime(
-                    (CAST(strftime('%s', minute_ts) AS INTEGER) / ?) * ?,
+                    (CAST(strftime('%s', minute_ts, 'utc') AS INTEGER) / ?) * ?,
                     'unixepoch'
                 ) AS bucket_ts,
                 COALESCE(SUM(successful), 0) AS total_successful,
@@ -1240,7 +1258,7 @@ class UsageAnalyticsStore:
                 f"""
                 SELECT
                     datetime(
-                        (CAST(strftime('%s', minute_ts) AS INTEGER) / ?) * ?,
+                        (CAST(strftime('%s', minute_ts, 'utc') AS INTEGER) / ?) * ?,
                         'unixepoch'
                     ) AS bucket_ts,
                     model,
@@ -1300,8 +1318,9 @@ class UsageAnalyticsStore:
         }
 
     def _cutoff_timestamp(self, hours_back: int) -> str:
+        # Stored minutes are server-local log stamps, so the cutoff must be too.
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
-        return cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        return cutoff.astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
     def _minute_key(self, timestamp: Any) -> str | None:
         if not isinstance(timestamp, str) or len(timestamp) != 19:

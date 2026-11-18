@@ -1,6 +1,6 @@
 [project]
 name = "routstr"
-version = "0.5.0"
+version = "0.5.1"
 description = "Payment proxy for your LLM endpoint using cashu and nostr."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -8,20 +8,21 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi[standard-no-fastapi-cloud-cli]>=0.141",
     "aiosqlite>=0.20",
+    "asyncpg>=0.30",     # PostgreSQL backend for DATABASE_URL=postgresql+asyncpg://
     "sqlmodel>=0.0.42",  # Python 3.14 deferred-annotation support
     "httpx[socks]>=0.28.1",
     "h11>=0.16",
     "greenlet>=3.2.1",
     "alembic>=1.13",
     "python-json-logger>=2.0.0",
-    "cashu>=0.20",
+    "cashu>=0.21",
     "marshmallow>=3.13,<4.0",
     "websockets>=12.0",
     "nostr-sdk>=0.45.1,<0.46",
     "mdurl==0.1.2",
     "pillow>=13.0.0",
     "openai>=1.98.0",
-    "litellm>=1.101.2,<1.102",
+    "litellm>=1.101.3,<1.102",
     "backoff>=2.2",  # litellm's native Anthropic-messages streaming (e.g. deepseek/) imports litellm.proxy, which needs it
     "orjson>=3.10",
 ]
@@ -93,7 +94,7 @@ disallow_untyped_decorators = true
 [tool.uv.sources]
 routstr = { workspace = true }
 
-# Security floors. cashu 0.20.x caps httpx, h11, fastapi, cryptography,
+# Security floors. cashu 0.21.x caps httpx, h11, fastapi, cryptography,
 # setuptools and wheel below their patched versions. routstr uses only cashu's
 # wallet modules, not its server paths, so the caps are safe to lift here.
 [tool.uv]
@@ -110,12 +111,20 @@ override-dependencies = [
     "cryptography>=49.0.0",
     "setuptools>=84.1.0",
     "wheel>=0.46.2",
+    # cashu 0.21 caps breez-sdk-spark<0.18, which has no Python 3.14 wheels.
+    # breez is only imported by cashu's Spark mint backend, which routstr never loads.
+    "breez-sdk-spark>=0.17.0",
 ]
+
+# cashu 0.21 declares ecdsa but never imports it. ecdsa has an unpatched P-256
+# timing advisory (GHSA-wj6h-64fc-37mp), so keep it out of the tree entirely.
+exclude-dependencies = ["ecdsa"]
 
 # Transitive deps whose dependents allow the patched version but don't require
 # it. Constraints raise the floor without bypassing any upstream pin.
 constraint-dependencies = [
     "certifi>=2026.10.19",
+    "dnspython>=2.9.0",
     "aiohttp>=3.14.4",
     "brotli>=1.2.1",
     "filelock>=4.2.1",

@@ -116,7 +116,7 @@ python3 scripts/node_setup.py start --private
 - Report ref/version, port, reachability and model count.
 
 `start` prepares `.env` (never clobbering existing values), starts
-`compose.node.yml` (loopback only, no Tor, analytics off on first boot), waits for the local
+`compose.node.yml` (loopback only, no Tor, analytics sharing on by default), waits for the local
 `/v1/info` and `/v1/models`, generates the master key and Nostr identity, and — in
 public mode — publishes the listing (approved by O1). It also mints a long-lived
 CLI token and writes it to `~/.routstr/config.json` (0600) for the Routstr CLI;

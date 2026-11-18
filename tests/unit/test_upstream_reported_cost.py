@@ -121,3 +121,25 @@ async def test_billed_total_is_reproducible_from_the_reported_cost() -> None:
     assert isinstance(cost, CostData)
     assert cost.total_msats == math.ceil(cost.upstream_usd * 1.03 / 5.0e-5 * 1000)
     assert cost.total_msats == 2534
+
+
+@pytest.mark.asyncio
+async def test_upstream_routstr_node_charge_is_the_reported_cost() -> None:
+    """A node reselling another Routstr node bills what that node charged it."""
+    response = _response(
+        {
+            "input_tokens": 13506,
+            "output_tokens": 143,
+            "cache_read_input_tokens": 2839,
+            "cache_creation_input_tokens": 10661,
+            "cost": {"total_msats": 2460, "total_usd": 0.000123},
+        }
+    )
+
+    cost = await calculate_cost(
+        response, max_cost=999999, model_obj=_model(), provider_fee=1.03
+    )
+
+    assert isinstance(cost, CostData)
+    assert cost.upstream_usd == pytest.approx(0.000123)
+    assert cost.total_msats == 2534

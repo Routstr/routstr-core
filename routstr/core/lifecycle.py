@@ -29,6 +29,19 @@ request_lifetime: ContextVar[RequestLifetime | None] = ContextVar(
 )
 
 
+_request_work: set[asyncio.Future[None]] = set()
+
+
+async def drain_request_work() -> bool:
+    """Wait for request cleanup that outlived its outer ASGI invocation."""
+    if not _request_work:
+        return True
+    _, pending = await asyncio.wait(
+        _request_work.copy(), timeout=settings.request_cleanup_timeout_seconds
+    )
+    return not pending
+
+
 class RequestLifecycleMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -84,6 +97,8 @@ class RequestLifecycleMiddleware:
         work: asyncio.Future[None] = asyncio.ensure_future(
             self.app(scope, downstream_receive, downstream_send)
         )
+        _request_work.add(work)
+        work.add_done_callback(_request_work.discard)
         gone = asyncio.create_task(disconnected.wait())
         timed_out = False
         try:
@@ -97,7 +112,9 @@ class RequestLifecycleMiddleware:
                 # funds already. Let it reach its own settlement before closing.
                 done, _ = await asyncio.wait(
                     (work,),
-                    timeout=max(0, lifetime.deadline - asyncio.get_running_loop().time()),
+                    timeout=max(
+                        0, lifetime.deadline - asyncio.get_running_loop().time()
+                    ),
                 )
             if work in done:
                 try:
@@ -126,9 +143,16 @@ class RequestLifecycleMiddleware:
                     lambda t: t.exception() if not t.cancelled() else None
                 )
             request_lifetime.reset(token)
-        if timed_out and work.done() and not disconnected.is_set() and not response_started:
+        if (
+            timed_out
+            and work.done()
+            and not disconnected.is_set()
+            and not response_started
+        ):
             async with asyncio.timeout(settings.downstream_send_timeout_seconds):
-                await send({"type": "http.response.start", "status": 504, "headers": []})
+                await send(
+                    {"type": "http.response.start", "status": 504, "headers": []}
+                )
                 await send(
                     {"type": "http.response.body", "body": b"Request deadline exceeded"}
                 )

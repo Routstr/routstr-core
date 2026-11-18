@@ -18,7 +18,7 @@ from ..auth import (
     periodic_stale_reservation_sweep,
 )
 from ..balance import balance_router, deprecated_wallet_router
-from ..cashu_compat import install_cashu_httpx_shim
+from ..cashu_compat import install_cashu_httpx_shim, install_cashu_mint_compat
 from ..foreign_mint_swap import periodic_swap_reconcile
 from ..lightning import (
     lightning_router,
@@ -28,12 +28,25 @@ from ..lightning import (
 from ..nostr import (
     announce_provider,
     providers_cache_refresher,
-    publish_usage_analytics,
+)
+from ..nostr.analytics_runtime import (
+    prepare_analytics,
+    run_analytics,
+    shutdown_analytics,
 )
 from ..nostr.discovery import providers_router
 from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
-from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
+from ..payment.x_cashu_settlement import (
+    drain_settlements,
+    periodic_x_cashu_recovery,
+)
+from ..proxy import (
+    initialize_upstreams,
+    proxy_router,
+    refresh_model_maps_periodically,
+    sync_upstreams_periodically,
+)
 from ..refund import periodic_refund_reconcile
 from ..upstream.auto_topup import periodic_auto_topup
 from ..upstream.http_client import close_upstream_http_client
@@ -53,10 +66,11 @@ from .exceptions import (
 )
 from .lifecycle import RequestLifecycleMiddleware
 from .logging import get_logger, setup_logging
-from .middleware import LoggingMiddleware
+from .middleware import LoggingMiddleware, NoStoreMiddleware
 from .not_found import _NOT_FOUND_HTML, not_found_catch_all  # noqa: F401
 from .settings import Settings, SettingsService, bootstrap_secrets
 from .settings import settings as global_settings
+from .sqlite_import import import_sqlite_on_startup
 from .version import __version__
 
 # Initialize logging first
@@ -91,6 +105,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     providers_task = None
     models_refresh_task = None
     model_maps_refresh_task = None
+    upstreams_sync_task = None
     model_paths_refresh_task = None
     stale_reservation_task = None
     dead_key_prune_task = None
@@ -100,17 +115,23 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     swap_reconcile_task = None
     routstr_fee_task = None
     invoice_watcher_task = None
+    x_cashu_recovery_task = None
 
     try:
-        # cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28.
+        # cashu 0.21.x passes the `proxies` kwarg httpx removed in 0.28.
         # routstr.wallet and routstr.payment.lnurl also install this at import;
         # repeating it here keeps startup correct for any future module that
         # reaches cashu's mint client without going through those two.
         install_cashu_httpx_shim()
+        install_cashu_mint_compat()
 
         # Apply litellm-wide settings (drop_params, chat-completions URL,
         # debug logging) before any upstream provider dispatches a request.
         configure_litellm()
+
+        # One-time copy of SQLITE_IMPORT_PATH into an empty PostgreSQL database.
+        # Raises when it cannot complete: the node must not start without it.
+        await import_sqlite_on_startup()
 
         # Run database migrations on startup
         run_migrations()
@@ -132,6 +153,13 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             s = await SettingsService.initialize(session)
             await release_leaked_reservations_on_startup(session, s)
 
+        try:
+            await prepare_analytics()
+        except Exception:
+            logger.exception(
+                "Stats collection could not start; requests remain available"
+            )
+
         # Apply app metadata from settings
         try:
             app.title = s.name
@@ -149,9 +177,24 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         _initialize_upstreams_task = asyncio.create_task(initialize_upstreams())
 
         # ensure both setup tasks complete
-        await asyncio.gather(
+        startup_results = await asyncio.gather(
             _update_prices_task, _initialize_upstreams_task, return_exceptions=True
         )
+        for step, outcome in zip(
+            ("price update", "upstream initialization"), startup_results
+        ):
+            if isinstance(outcome, BaseException):
+                # A worker that fails here keeps serving, so the cause has to be
+                # visible: an unexpected exception otherwise leaves it with no
+                # upstreams and every model request answered 400.
+                logger.error(
+                    "Startup task failed",
+                    extra={
+                        "step": step,
+                        "error": str(outcome),
+                        "error_type": type(outcome).__name__,
+                    },
+                )
 
         btc_price_task = asyncio.create_task(update_prices_periodically())
         pricing_task = asyncio.create_task(update_sats_pricing())
@@ -163,6 +206,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 refresh_upstreams_models_periodically(get_upstreams)
             )
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
+        upstreams_sync_task = asyncio.create_task(sync_upstreams_periodically())
         # Always started: the loop re-reads the enable flag and interval every
         # iteration, so 0 -> N (or re-enabling) takes effect without a restart.
         from ..upstream.model_paths import refresh_model_paths_periodically
@@ -175,7 +219,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # it every iteration, so a key saved (or cleared) through the admin UI
         # takes effect without a restart.
         nip91_task = asyncio.create_task(announce_provider())
-        analytics_task = asyncio.create_task(publish_usage_analytics())
+        analytics_task = asyncio.create_task(run_analytics())
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
         stale_reservation_task = asyncio.create_task(periodic_stale_reservation_sweep())
@@ -186,6 +230,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         swap_reconcile_task = asyncio.create_task(periodic_swap_reconcile())
         routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
         invoice_watcher_task = asyncio.create_task(periodic_invoice_watcher())
+        x_cashu_recovery_task = asyncio.create_task(periodic_x_cashu_recovery())
 
         yield
 
@@ -217,6 +262,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             models_refresh_task.cancel()
         if model_maps_refresh_task is not None:
             model_maps_refresh_task.cancel()
+        if upstreams_sync_task is not None:
+            upstreams_sync_task.cancel()
         if model_paths_refresh_task is not None:
             model_paths_refresh_task.cancel()
         if stale_reservation_task is not None:
@@ -235,6 +282,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             routstr_fee_task.cancel()
         if invoice_watcher_task is not None:
             invoice_watcher_task.cancel()
+        if x_cashu_recovery_task is not None:
+            x_cashu_recovery_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -254,6 +303,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(models_refresh_task)
             if model_maps_refresh_task is not None:
                 tasks_to_wait.append(model_maps_refresh_task)
+            if upstreams_sync_task is not None:
+                tasks_to_wait.append(upstreams_sync_task)
             if model_paths_refresh_task is not None:
                 tasks_to_wait.append(model_paths_refresh_task)
             if stale_reservation_task is not None:
@@ -272,6 +323,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(routstr_fee_task)
             if invoice_watcher_task is not None:
                 tasks_to_wait.append(invoice_watcher_task)
+            if x_cashu_recovery_task is not None:
+                tasks_to_wait.append(x_cashu_recovery_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)
@@ -283,12 +336,24 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             )
         finally:
             try:
+                # Refunds started by cancelled requests outlive their request
+                # task; let them finish while the wallet and database are up.
+                await drain_settlements(global_settings.request_cleanup_timeout_seconds)
+            except Exception as e:
+                logger.error(
+                    "Error draining X-Cashu settlements",
+                    extra={"error": str(e), "error_type": type(e).__name__},
+                )
+            try:
                 await close_upstream_http_client()
             except Exception as e:
                 logger.error(
                     "Error closing upstream HTTP connection pools",
                     extra={"error": str(e), "error_type": type(e).__name__},
                 )
+        # ASGI lifespan shutdown follows request draining. Background tasks
+        # have also stopped; only now may collection close its clean run.
+        await shutdown_analytics(serving_stopped=True)
 
 
 class _ImmutableStaticFiles(StaticFiles):
@@ -332,6 +397,8 @@ app.add_middleware(
         "Ehbp-Encapsulated-Key",
     ],
 )
+
+app.add_middleware(NoStoreMiddleware)
 
 # Add logging middleware
 app.add_middleware(LoggingMiddleware)

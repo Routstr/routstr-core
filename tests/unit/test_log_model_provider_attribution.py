@@ -219,7 +219,12 @@ def routing(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return max_costs.get(getattr(model_obj, "id", ""), 100)
 
     async def discounted(
-        cost: int, body: object, model_obj: object = None, path: str = ""
+        cost: int,
+        body: object,
+        model_obj: object = None,
+        path: str = "",
+        *,
+        pricing_trail: dict[str, Any] | None = None,
     ) -> int:
         return cost
 
@@ -233,7 +238,7 @@ def routing(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     )
     monkeypatch.setattr(proxy_module, "get_max_cost_for_model", max_cost)
     monkeypatch.setattr(proxy_module, "calculate_discounted_max_cost", discounted)
-    monkeypatch.setattr(proxy_module, "check_token_balance", lambda *_a: None)
+    monkeypatch.setattr(proxy_module, "check_token_balance", lambda *_a, **_k: None)
     monkeypatch.setattr(
         proxy_module,
         "get_bearer_token_key",
