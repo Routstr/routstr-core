@@ -149,6 +149,10 @@ class _XCashuRefundError(Exception):
         self.token = token
 
 
+class _XCashuRefundNotCreated(HTTPException):
+    """send_token raised, so no refund token exists."""
+
+
 class _XCashuRefundUnavailable(Exception):
     """Another settlement of this payment already owns its refund."""
 
@@ -159,6 +163,7 @@ class _XCashuRefund:
         self.token: str | None = None
         self.error: Exception | None = None
         self.claimed = False
+        self.reopened = False
         self.served = False
         self._minting: asyncio.Future[str] | None = None
 
@@ -189,12 +194,21 @@ class _XCashuRefund:
                 amount, unit, mint, request_id=request_id
             )
         except Exception as error:
-            # Minting may have consumed proofs; only the database write is retryable.
+            # Once a token exists it is never minted again; only a refund that
+            # created no token is retryable.
             self.error = error
             if isinstance(error, _XCashuRefundError):
                 self.token = error.token
+            if self.claimed and isinstance(error, _XCashuRefundNotCreated):
+                self.reopened = await x_cashu_settlement.reopen_unminted_refund(
+                    request_id
+                )
+            elif self.claimed:
+                await x_cashu_settlement.finish_refund(request_id, refunded=False)
             logger.error(
-                "X-Cashu refund failed; operator reconciliation required",
+                "X-Cashu refund failed; will retry"
+                if self.reopened
+                else "X-Cashu refund failed; operator reconciliation required",
                 extra={
                     "request_id": request_id,
                     "amount": amount,
@@ -203,8 +217,6 @@ class _XCashuRefund:
                     "error_type": type(error).__name__,
                 },
             )
-            if self.claimed:
-                await x_cashu_settlement.finish_refund(request_id, refunded=False)
             raise
         await x_cashu_settlement.finish_refund(request_id, refunded=True)
         return self.token
@@ -266,10 +278,14 @@ class _XCashuRefund:
                 {
                     "error": {
                         "message": (
-                            "Refund failed; contact the operator with this request_id. "
-                            "Do not resend the original payment token."
-                            if failed
-                            else "Payment succeeded but the upstream request failed"
+                            "Payment succeeded but the upstream request failed"
+                            if not failed
+                            else "Refund failed; claim it later at /v1/balance/refund "
+                            "with the original X-Cashu token. Do not resend it as "
+                            "payment."
+                            if self.reopened
+                            else "Refund failed; contact the operator with this "
+                            "request_id. Do not resend the original payment token."
                         ),
                         "type": "internal_error" if failed else "upstream_error",
                         "code": "refund_failed"
@@ -4937,7 +4953,7 @@ class BaseUpstreamProvider:
                     "mint": mint,
                 },
             )
-            raise HTTPException(
+            raise _XCashuRefundNotCreated(
                 status_code=401,
                 detail={
                     "error": {
