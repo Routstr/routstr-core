@@ -2397,7 +2397,6 @@ async def periodic_routstr_fee_payout() -> None:
 
             if accumulated_sats < ROUTSTR_FEE_DEFAULT_PAYOUT:
                 continue
-            paid_msats = _sats_to_msats(accumulated_sats)
 
             # Serialize proof refresh, quote creation, checkpointing, sending,
             # and finalization with every other wallet mutation across workers.
@@ -2408,6 +2407,28 @@ async def periodic_routstr_fee_payout() -> None:
                 proofs = get_proofs_per_mint_and_unit(
                     wallet, settings.primary_mint, "sat", not_reserved=True
                 )
+                proofs = await slow_filter_spend_proofs(proofs, wallet)
+                proofs_balance = sum(proof.amount for proof in proofs)
+                # The platform fee is a claim on owner funds only. Cap the run
+                # at the same conservative owner surplus the operator payout
+                # path uses (_payout_mint_and_unit), so paying the dev cut can
+                # never melt proofs that back user balances and drive a mint's
+                # owner balance negative. Whatever is left stays accrued and is
+                # retried once the surplus covers it.
+                owner_surplus_sats = await _owner_balance_for_mint_and_unit(
+                    settings.primary_mint, "sat", proofs_balance
+                )
+                payout_sats = min(accumulated_sats, owner_surplus_sats)
+                if payout_sats < ROUTSTR_FEE_DEFAULT_PAYOUT:
+                    logger.info(
+                        "Routstr fee payout held: owner surplus below payout floor",
+                        extra={
+                            "accumulated_sats": accumulated_sats,
+                            "owner_surplus_sats": owner_surplus_sats,
+                        },
+                    )
+                    continue
+                paid_msats = _sats_to_msats(payout_sats)
 
                 attempt_quote_id: str | None = None
 
@@ -2427,7 +2448,7 @@ async def periodic_routstr_fee_payout() -> None:
                     await _record_payout_history(
                         quote_id=quote_id,
                         bolt11=bolt11,
-                        amount_sats=accumulated_sats,
+                        amount_sats=payout_sats,
                         mint_url=settings.primary_mint,
                         destination=ROUTSTR_LN_ADDRESS,
                     )
@@ -2438,7 +2459,7 @@ async def periodic_routstr_fee_payout() -> None:
                         proofs,
                         ROUTSTR_LN_ADDRESS,
                         "sat",
-                        amount=accumulated_sats,
+                        amount=payout_sats,
                         on_melt_quote=checkpoint_quote,
                     )
                 except _RoutstrFeePayoutAlreadyClaimed:
@@ -2506,6 +2527,8 @@ async def periodic_routstr_fee_payout() -> None:
                     "Routstr fee payout sent",
                     extra={
                         "accumulated_sats": accumulated_sats,
+                        "payout_sats": payout_sats,
+                        "owner_surplus_sats": owner_surplus_sats,
                         "amount_received": amount_received,
                     },
                 )
