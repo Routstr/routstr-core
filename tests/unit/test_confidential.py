@@ -1965,6 +1965,8 @@ def _ctx_model() -> Any:
         top_provider=SimpleNamespace(
             context_length=100_000, max_completion_tokens=None
         ),
+        # ``Model`` has it (None: no priced variants); billing reads it.
+        usage_multipliers=None,
         sats_pricing=SimpleNamespace(
             prompt=0.01,
             completion=0.1,
