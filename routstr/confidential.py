@@ -582,6 +582,24 @@ def filtered_out(model: Any, supports: set[str], priced: set[str]) -> str | None
     return None
 
 
+def has_priced_variants(model: Any) -> bool:
+    """Whether ``model`` lists a usage multiplier above 1 (``Model.usage_multipliers``:
+    a price that depends on what the response reports it ran as, such as
+    fast mode). The confidential offer signs one rate per model and the node
+    cannot see the request, so such a model is not offered."""
+    multipliers = getattr(model, "usage_multipliers", None)
+    if not isinstance(multipliers, dict):
+        return False
+    return any(
+        isinstance(values, dict)
+        and any(
+            isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate != 1
+            for rate in values.values()
+        )
+        for values in multipliers.values()
+    )
+
+
 def provider_model_id(cand: Candidate) -> str | None:
     """The model id the plain path sends this candidate's provider: the
     provider's ``transform_model_name`` of the model's own id. ``None`` if it
@@ -630,6 +648,11 @@ def offered_models(side_offer: dict[str, Any]) -> dict[str, Candidate]:
         ):
             continue
         if (supports or priced) and filtered_out(cand.model, supports, priced):
+            continue
+        # The offer freezes one rate per model; a model the provider bills at
+        # a higher rate for a variant the private body may select (fast mode,
+        # US-only inference) would be under-billed, so it is not offered.
+        if has_priced_variants(model) or has_priced_variants(cand.model):
             continue
         provider_id = provider_model_id(cand)
         if provider_id is None or not model_allowed(provider_id, allowlist):
@@ -2045,6 +2068,25 @@ def _warn_completion_overshoot(billing: Billing, usage: Any) -> None:
         )
 
 
+def _warn_priced_variant(billing: Billing, usage: Any) -> None:
+    """Log usage that reports a priced variant (fast mode, US-only inference).
+
+    The charge stays at the frozen rates the client accepted: the offer
+    leaves out models with known multipliers, so this is a provider billing
+    a variant the node did not know it had, and the node pays the difference.
+    """
+    from .payment.usage_multipliers import pricing_dimensions, usage_multiplier
+
+    if not isinstance(usage, dict):
+        return
+    dimensions = pricing_dimensions(usage)
+    if dimensions and usage_multiplier(None, dimensions, warn=False) != 1.0:
+        logger.warning(
+            "confidential: usage reports a priced variant; charged at the frozen rates",
+            extra={"model": billing.model_id, **dimensions},
+        )
+
+
 async def settle(billing: Billing, usage_event: dict[str, Any]) -> dict[str, Any]:
     """Charge the π_C3S-verified usage at the frozen rates, plus the session
     fee the request owes (0 after the connection's first settlement).
@@ -2054,6 +2096,7 @@ async def settle(billing: Billing, usage_event: dict[str, Any]) -> dict[str, Any
     is charged the reservation. Raises if nothing was finalized.
     """
     _warn_completion_overshoot(billing, usage_event.get("usage"))
+    _warn_priced_variant(billing, usage_event.get("usage"))
     usage_cost = frozen_cost_msats(
         billing.rates, usage_event.get("usage"), billing.reserved_msats
     )

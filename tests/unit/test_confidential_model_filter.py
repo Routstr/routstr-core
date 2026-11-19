@@ -243,3 +243,34 @@ def test_no_filter_block_filters_nothing() -> None:
     assert conf.chat_model_filter({}) == (set(), set())
     assert conf.chat_model_filter({"chat_model_filter": {}}) == (set(), set())
     assert conf.filtered_out(SimpleNamespace(), set(), set()) is None
+
+
+def test_a_model_with_priced_variants_is_not_offered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model with a usage multiplier (fast mode, US-only inference) costs
+    more for a variant the private body may select; the offer signs one rate
+    per model, so it is not offered. Multipliers of 1 change nothing."""
+    rows = [_raw("plain"), _raw("fast"), _raw("neutral")]
+    rows[1]["usage_multipliers"] = {"speed": {"fast": 6.0}}
+    rows[2]["usage_multipliers"] = {"inference_geo": {"global": 1.0}}
+    assert _offered(monkeypatch, rows) == {"plain", "neutral"}
+
+
+def test_usage_with_a_priced_variant_is_charged_at_the_frozen_rates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settlement bills the frozen rates whatever variant the usage reports
+    (the client accepted those) and logs the variant for the operator."""
+    logged: list[str] = []
+    monkeypatch.setattr(
+        conf.logger, "warning", lambda msg, *a, **kw: logged.append(msg)
+    )
+    billing = SimpleNamespace(model_id="m")
+    conf._warn_priced_variant(billing, {"speed": "standard"})  # type: ignore[arg-type]
+    assert logged == []
+    conf._warn_priced_variant(billing, {"speed": "fast"})  # type: ignore[arg-type]
+    assert len(logged) == 1 and "priced variant" in logged[0]
+    rates = {"in": 1000.0, "cached_in": 1000.0, "out": 2000.0}
+    usage = {"prompt_tokens": 10, "completion_tokens": 5, "speed": "fast"}
+    assert conf.frozen_cost_msats(rates, usage, 10**9) == 20
