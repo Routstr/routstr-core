@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import random
 import re
 from typing import Any
 
@@ -354,6 +355,20 @@ def _select_unauthenticated_get_upstreams(
     return upstreams
 
 
+def _model_maps_refresh_interval_seconds() -> float:
+    """Current model-maps interval, re-read every loop so changes apply live.
+
+    A non-positive interval, or a false ``enable_model_maps_refresh``, disables
+    the loop by returning 0.
+    """
+    if not getattr(settings, "enable_model_maps_refresh", True):
+        return 0.0
+    try:
+        return float(getattr(settings, "model_maps_refresh_interval_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 async def refresh_model_maps() -> None:
     """Refresh global model and provider maps using the cost-based algorithm."""
     from sqlalchemy.orm import selectinload
@@ -402,12 +417,36 @@ async def refresh_model_maps() -> None:
 
 
 async def refresh_model_maps_periodically() -> None:
-    """Background task to refresh model maps every minute."""
-    import asyncio
+    """Background task keeping the routing maps in sync with their sources.
+
+    Cadence follows ``MODEL_MAPS_REFRESH_INTERVAL_SECONDS`` and the
+    ``ENABLE_MODEL_MAPS_REFRESH`` kill switch, both re-read every iteration so a
+    runtime change (including 0 -> N) applies without a restart.
+
+    Why a timer at all: admin mutations refresh immediately, but only in the
+    worker that served the request. Another worker sharing the database sees
+    no change from the 5s upstream sync either, because that fingerprints
+    provider rows only -- DB ``ModelRow`` edits (override pricing, enabled,
+    forwarded IDs, aliases) surface here or not at all. This loop also re-runs
+    the sats conversion, which keeps billed rates current after a BTC price
+    move without re-fetching every upstream catalog.
+
+    The sleep carries up to 10% jitter so workers sharing one database do not
+    rebuild in lockstep.
+    """
+    _DISABLED_POLL_SECONDS = 60.0
 
     while True:
+        interval = _model_maps_refresh_interval_seconds()
+        if interval <= 0:
+            try:
+                await asyncio.sleep(_DISABLED_POLL_SECONDS)
+            except asyncio.CancelledError:
+                break
+            continue
+
         try:
-            await asyncio.sleep(60)
+            await asyncio.sleep(interval + random.uniform(0, max(0.0, interval * 0.1)))
             await refresh_model_maps()
         except asyncio.CancelledError:
             break

@@ -197,11 +197,25 @@ class Settings(BaseSettings):
     models_refresh_interval_seconds: int = Field(
         default=360, env="MODELS_REFRESH_INTERVAL_SECONDS"
     )
+    # How often the in-memory routing maps (``_provider_map`` / ``_unique_models``)
+    # are rebuilt from the provider catalogs and stored model rows. This is the
+    # only propagation path for DB ``ModelRow`` edits between workers: the 5s
+    # upstream sync fingerprints provider rows only, so override pricing,
+    # enable/disable, forwarded IDs and aliases written by one worker are
+    # otherwise invisible to its siblings. Keep it non-zero on multi-worker
+    # deployments. It also re-applies the sats conversion, so it refreshes
+    # billing rates after a BTC price move without re-fetching upstream catalogs.
+    model_maps_refresh_interval_seconds: int = Field(
+        default=60, env="MODEL_MAPS_REFRESH_INTERVAL_SECONDS"
+    )
     model_paths_refresh_interval_seconds: int = Field(
         default=600, env="MODEL_PATHS_REFRESH_INTERVAL_SECONDS"
     )
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
+    enable_model_maps_refresh: bool = Field(
+        default=True, env="ENABLE_MODEL_MAPS_REFRESH"
+    )
     enable_model_paths_refresh: bool = Field(
         default=True, env="ENABLE_MODEL_PATHS_REFRESH"
     )

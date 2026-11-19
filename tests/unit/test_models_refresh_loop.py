@@ -175,3 +175,27 @@ async def test_worker_with_models_waits_the_full_interval(
 ) -> None:
     delays = await _loop_delays(monkeypatch, [["m"], ["m"]])
     assert delays == [360, 360]
+
+
+@pytest.mark.asyncio
+async def test_refresh_loop_honours_the_models_refresh_kill_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ENABLE_MODELS_REFRESH`` used to be read nowhere, so an operator could
+    only disarm catalog fetching by zeroing the interval -- which the sibling
+    loops share."""
+    from routstr.core.settings import settings as global_settings
+    from routstr.upstream.helpers import refresh_upstreams_models_periodically
+
+    monkeypatch.setattr(global_settings, "enable_models_refresh", False, raising=False)
+    monkeypatch.setattr(
+        global_settings, "models_refresh_interval_seconds", 360, raising=False
+    )
+
+    upstream = _make_fake_upstream("never-refreshed")
+
+    await asyncio.wait_for(
+        refresh_upstreams_models_periodically(lambda: [upstream]),
+        timeout=1.0,
+    )
+    upstream.refresh_models_cache.assert_not_awaited()  # type: ignore[attr-defined]

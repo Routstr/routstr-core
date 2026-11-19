@@ -198,13 +198,19 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
         btc_price_task = asyncio.create_task(update_prices_periodically())
         pricing_task = asyncio.create_task(update_sats_pricing())
-        if global_settings.models_refresh_interval_seconds > 0:
+        if (
+            global_settings.models_refresh_interval_seconds > 0
+            and global_settings.enable_models_refresh
+        ):
             # Pass the accessor (not its current value) so the loop sees providers
             # added/changed via reinitialize_upstreams() instead of staying pinned
             # to the startup snapshot.
             models_refresh_task = asyncio.create_task(
                 refresh_upstreams_models_periodically(get_upstreams)
             )
+        # Always started: it self-gates on ``enable_model_maps_refresh`` /
+        # ``model_maps_refresh_interval_seconds`` and re-reads them every
+        # iteration, so pausing or retuning it never needs a restart.
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
         upstreams_sync_task = asyncio.create_task(sync_upstreams_periodically())
         # Always started: the loop re-reads the enable flag and interval every
