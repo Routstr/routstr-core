@@ -7,7 +7,9 @@ target logic.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from typing import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -31,7 +33,10 @@ from routstr.upstream.tinfoil import (
     TinfoilModel,
     TinfoilUpstreamProvider,
 )
-from routstr.upstream.tinfoil_trailer import TrailerResponse
+from routstr.upstream.tinfoil_trailer import (
+    StreamedTrailerResponse,
+    TrailerResponse,
+)
 
 from .proxy_test_utils import patch_proxy_session
 
@@ -1613,6 +1618,24 @@ class TestPlaintextReasoningEffortTranslation:
 # ---------------------------------------------------------------------------
 
 
+def _as_streamed(resp: TrailerResponse) -> StreamedTrailerResponse:
+    """Adapt a buffered TrailerResponse to the streaming client's interface."""
+
+    async def _body() -> AsyncIterator[bytes]:
+        yield resp.body
+
+    future: asyncio.Future[list[tuple[str, str]]] = (
+        asyncio.get_running_loop().create_future()
+    )
+    future.set_result(resp.trailers)
+    return StreamedTrailerResponse(
+        status_code=resp.status_code,
+        headers=resp.headers,
+        body=_body(),
+        trailers=future,
+    )
+
+
 def _key_config_trailer_response(
     status_code: int = 422,
     content_type: str = "application/problem+json",
@@ -1807,6 +1830,10 @@ async def test_bearer_key_config_422_releases_reservation_and_passes_through() -
             "routstr.upstream.ehbp.forward_with_trailer",
             AsyncMock(return_value=upstream_resp),
         ),
+        patch(
+            "routstr.upstream.ehbp.stream_with_trailer",
+            AsyncMock(side_effect=lambda **kw: _as_streamed(upstream_resp)),
+        ),
         patch_proxy_session(session),
     ):
         response = await proxy_module.proxy(request, "v1/chat/completions")
@@ -1921,6 +1948,9 @@ async def test_proxy_reaches_the_enclaves_versioned_route_for_both_spellings(
     # A 422 key-config response short-circuits the billing path while still
     # exercising the URL the request was actually sent to.
     forward_mock = AsyncMock(return_value=_key_config_trailer_response())
+    stream_mock = AsyncMock(
+        side_effect=lambda **kw: _as_streamed(forward_mock.return_value)
+    )
 
     with (
         patch.object(
@@ -1945,12 +1975,13 @@ async def test_proxy_reaches_the_enclaves_versioned_route_for_both_spellings(
             proxy_module, "revert_pay_for_request", AsyncMock(return_value=True)
         ),
         patch("routstr.upstream.ehbp.forward_with_trailer", forward_mock),
+        patch("routstr.upstream.ehbp.stream_with_trailer", stream_mock),
         patch_proxy_session(session),
     ):
         await proxy_module.proxy(request, client_path)
 
-    assert forward_mock.await_args is not None
-    assert (
-        forward_mock.await_args.kwargs["url"]
-        == "https://inference.tinfoil.sh/v1/chat/completions"
-    )
+    # Either transport may serve the request; whichever ran must have used the
+    # enclave's version-prefixed route.
+    used = stream_mock.await_args or forward_mock.await_args
+    assert used is not None
+    assert used.kwargs["url"] == "https://inference.tinfoil.sh/v1/chat/completions"

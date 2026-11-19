@@ -8,6 +8,8 @@ that lets the EHBP client decrypt the real failure.
 
 from __future__ import annotations
 
+import asyncio
+from typing import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,10 +24,31 @@ from routstr.upstream.ehbp import (
     _is_ehbp_encrypted_response,
     _passthrough_encrypted_response,
 )
-from routstr.upstream.tinfoil_trailer import TrailerResponse
+from routstr.upstream.tinfoil_trailer import (
+    StreamedTrailerResponse,
+    TrailerResponse,
+)
 
 _CIPHERTEXT = b"\x00\x00\x00\x02cb"
 _NONCE = "ab" * 32
+
+
+def _as_streamed(resp: TrailerResponse) -> StreamedTrailerResponse:
+    """Adapt a buffered TrailerResponse to the streaming client's interface."""
+
+    async def _body() -> AsyncIterator[bytes]:
+        yield resp.body
+
+    future: asyncio.Future[list[tuple[str, str]]] = (
+        asyncio.get_running_loop().create_future()
+    )
+    future.set_result(resp.trailers)
+    return StreamedTrailerResponse(
+        status_code=resp.status_code,
+        headers=resp.headers,
+        body=_body(),
+        trailers=future,
+    )
 
 
 def _encrypted_response(
@@ -152,10 +175,16 @@ async def test_bearer_encrypted_error_is_handed_to_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An encrypted non-200 must keep its ciphertext and nonce for decoding."""
+    upstream_response = _encrypted_response()
     monkeypatch.setattr(
         ehbp_module,
         "forward_with_trailer",
-        AsyncMock(return_value=_encrypted_response()),
+        AsyncMock(return_value=upstream_response),
+    )
+    monkeypatch.setattr(
+        ehbp_module,
+        "stream_with_trailer",
+        AsyncMock(side_effect=lambda **kw: _as_streamed(upstream_response)),
     )
     upstream, model_obj = _ehbp_upstream_mocks()
     key = MagicMock()
@@ -193,10 +222,16 @@ async def test_bearer_plaintext_error_keeps_the_proxy_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-encrypted non-200 still surfaces as a structured upstream error."""
+    upstream_response = _plaintext_response()
     monkeypatch.setattr(
         ehbp_module,
         "forward_with_trailer",
-        AsyncMock(return_value=_plaintext_response()),
+        AsyncMock(return_value=upstream_response),
+    )
+    monkeypatch.setattr(
+        ehbp_module,
+        "stream_with_trailer",
+        AsyncMock(side_effect=lambda **kw: _as_streamed(upstream_response)),
     )
     upstream, model_obj = _ehbp_upstream_mocks()
     key = MagicMock()
