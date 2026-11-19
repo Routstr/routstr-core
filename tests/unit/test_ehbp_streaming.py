@@ -10,10 +10,12 @@ post-body ``X-Tinfoil-Usage-Metrics`` trailer.
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncIterator
+from typing import AsyncGenerator, AsyncIterator, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import Response
+from fastapi.responses import StreamingResponse
 
 from routstr.core.terminal_outcomes import TerminalOutcomeContext
 from routstr.upstream import ehbp as ehbp_module
@@ -25,6 +27,28 @@ _USAGE_TRAILER = "prompt=10,completion=20,total=30"
 def _outcome() -> TerminalOutcomeContext:
     """A real context: the settle helpers ``replace()`` it, so it cannot be None."""
     return TerminalOutcomeContext(outcome_id="req-stream", model_identifier="m")
+
+
+def _streaming(response: Response) -> StreamingResponse:
+    """Narrow the forwarder's union return type to the streaming branch."""
+    assert isinstance(response, StreamingResponse)
+    return response
+
+
+def _body(response: Response) -> AsyncGenerator[bytes, None]:
+    """The response body as a concrete async iterator.
+
+    Starlette types ``body_iterator`` as a bare ``AsyncIterable``, which has no
+    ``anext``/``aclose``; the streaming relay always provides an async generator,
+    so narrow it here rather than sprinkling casts through the tests.
+    """
+    return cast(AsyncGenerator[bytes, None], _streaming(response).body_iterator)
+
+
+def _settle_kwargs(settle: AsyncMock) -> dict:
+    """The kwargs the streaming relay handed to settlement."""
+    assert settle.await_args is not None
+    return dict(settle.await_args.kwargs)
 
 
 def _request() -> MagicMock:
@@ -131,7 +155,7 @@ async def test_streamed_body_reaches_client_before_upstream_finishes(
     )
 
     assert response.status_code == 200
-    iterator = response.body_iterator
+    iterator = _body(response)
     first = await anext(iterator)
     # Only the first frame has been pulled: the relay must not pre-drain.
     assert consumed_count(streamed) == 1
@@ -169,12 +193,11 @@ async def test_streaming_settles_from_the_usage_trailer(
         model_obj=model_obj,
     )
 
-    async for _ in response.body_iterator:
+    async for _ in _body(response):
         pass
 
     settle.assert_awaited_once()
-    kwargs = settle.await_args.kwargs
-    assert kwargs["resp"] is streamed
+    assert _settle_kwargs(settle)["resp"] is streamed
 
 
 @pytest.mark.asyncio
@@ -202,7 +225,7 @@ async def test_streaming_settles_even_when_the_client_disconnects(
         model_obj=model_obj,
     )
 
-    iterator = response.body_iterator
+    iterator = _body(response)
     await anext(iterator)
     await iterator.aclose()  # what Starlette does when the client goes away
 
@@ -234,7 +257,7 @@ async def test_streaming_without_usage_trailer_releases_the_reservation(
         model_obj=model_obj,
     )
 
-    async for _ in response.body_iterator:
+    async for _ in _body(response):
         pass
 
     settle.assert_awaited_once()
@@ -322,7 +345,7 @@ async def test_buffered_mode_is_still_available(
         reservation_snapshot=MagicMock(),
     )
 
-    body = b"".join([chunk async for chunk in response.body_iterator])
+    body = b"".join([bytes(chunk) async for chunk in _body(response)])
     assert body == b"all-at-once"
     stream_mock.assert_not_awaited()
     forward_mock.assert_awaited_once()
