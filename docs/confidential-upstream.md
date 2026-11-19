@@ -374,6 +374,10 @@ signed.
   is shorter, so the stale-reservation sweeper never releases one mid-way.
 - Not offered under `FIXED_PRICING`: a flat per-request price cannot cover an
   opaque request of up to the model's full context.
+- Not offered for a model whose price depends on a variant the client
+  picks in the private body (a `usage_multipliers` entry other than 1, such
+  as fast mode): the node cannot see the choice, and the offer signs one rate
+  per model.
 - The signed offers, the live connections and the per-address counts are kept
   per process: run the node as a single worker process (one uvicorn worker,
   with `--ws-ping-timeout 300`). The node refuses to start when its launcher
