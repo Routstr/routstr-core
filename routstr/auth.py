@@ -6,7 +6,7 @@ import uuid
 from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from fastapi import HTTPException
 from sqlalchemy import case, inspect
@@ -240,13 +240,29 @@ def _validate_existing_cashu_key(
     return existing_key
 
 
+def _decode_cashu_token(bearer_key: str) -> Any:
+    try:
+        return deserialize_token_from_string(bearer_key)
+    except Exception as decode_error:
+        # A malformed token is a bad token (400 invalid_cashu_token via the
+        # shared taxonomy), not an auth failure (401) — otherwise it would
+        # fall through to the generic "Invalid API key" handler.
+        raise redemption_error_to_http_exception(
+            ValueError(f"Invalid Cashu token: could not decode token ({decode_error})")
+        ) from decode_error
+
+
 async def validate_bearer_key(
     bearer_key: str,
     session: AsyncSession,
     refund_address: Optional[str] = None,
     key_expiry_time: Optional[int] = None,
     min_cost: int = 0,
+    wallet_lock_timeout_s: Optional[float] = None,
 ) -> ApiKey:
+    """``wallet_lock_timeout_s`` bounds the wait for the wallet lock before a
+    first-use Cashu token is redeemed (``wallet.WalletBusyError`` past it);
+    ``None`` waits as long as it takes."""
     if bearer_key.startswith("cashu"):
         hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
         with session.no_autoflush:
@@ -262,7 +278,16 @@ async def validate_bearer_key(
         # concurrent creation must not hold SQLite writes while waiting to
         # mutate proofs. The locked path re-checks existence before redeeming.
         await session.commit()
-        async with wallet_operation_guard():
+        # Decoding touches no proofs: a token that does not decode is refused
+        # here, with the error the locked path would give, without queueing
+        # for the lock.
+        _decode_cashu_token(bearer_key)
+        guard = (
+            wallet_operation_guard()
+            if wallet_lock_timeout_s is None
+            else wallet_operation_guard(acquire_timeout_s=wallet_lock_timeout_s)
+        )
+        async with guard:
             return await _validate_bearer_key_locked(
                 bearer_key,
                 session,
@@ -402,17 +427,7 @@ async def _validate_bearer_key_locked(
 
         try:
             hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
-            try:
-                token_obj = deserialize_token_from_string(bearer_key)
-            except Exception as decode_error:
-                # A malformed token is a bad token (400 invalid_cashu_token via
-                # the shared taxonomy), not an auth failure (401) — otherwise it
-                # would fall through to the generic "Invalid API key" handler.
-                raise redemption_error_to_http_exception(
-                    ValueError(
-                        f"Invalid Cashu token: could not decode token ({decode_error})"
-                    )
-                ) from decode_error
+            token_obj = _decode_cashu_token(bearer_key)
             logger.debug(
                 "Generated token hash", extra={"hash_preview": hashed_key[:16] + "..."}
             )
@@ -977,6 +992,10 @@ def _start_reservation_heartbeat(snapshot: ReservationSnapshot) -> None:
 
     lifetime = request_lifetime.get()
     deadline = asyncio.get_running_loop().time() + settings.max_request_lifetime_seconds
+    if lifetime is not None:
+        # A request whose owner set a longer lifetime than the HTTP default
+        # (a confidential session) keeps its lease for that whole lifetime.
+        deadline = max(deadline, lifetime.deadline)
 
     async def beat() -> None:
         try:
