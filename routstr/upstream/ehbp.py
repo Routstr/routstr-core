@@ -73,7 +73,12 @@ from .terminal_outcome_tracking import (
     record_x_cashu_terminal_outcome,
     terminal_outcome_context,
 )
-from .tinfoil_trailer import TrailerResponse, forward_with_trailer
+from .tinfoil_trailer import (
+    StreamedTrailerResponse,
+    TrailerResponse,
+    forward_with_trailer,
+    stream_with_trailer,
+)
 
 logger = get_logger(__name__)
 
@@ -1088,6 +1093,400 @@ def _msats_to_unit_amount(msats: int, unit: str) -> int:
     raise ValueError(f"Invalid unit: {unit}")
 
 
+async def _drain_streamed_response(
+    resp: StreamedTrailerResponse,
+) -> TrailerResponse:
+    """Read a streamed response to completion and return it buffered.
+
+    Used only on the error path, where the whole (encrypted) body must be
+    relayed so the EHBP client can decrypt the failure reason.
+    """
+    chunks: list[bytes] = []
+    try:
+        async for chunk in resp.body:
+            chunks.append(chunk)
+    finally:
+        try:
+            trailers = await resp.trailers
+        except Exception:  # noqa: BLE001 - error paths must not mask the status
+            trailers = []
+    return TrailerResponse(
+        status_code=resp.status_code,
+        headers=resp.headers,
+        body=b"".join(chunks),
+        trailers=trailers,
+    )
+
+
+def _relay_ehbp_error_response(
+    resp: TrailerResponse,
+    *,
+    model_obj: Model,
+    provider_type: str,
+    path: str,
+) -> Response:
+    """Relay an EHBP upstream failure exactly as the buffered path does.
+
+    An EHBP enclave encrypts error bodies too, so this relay cannot decode
+    them. Decoding the bytes as UTF-8 would log and return mojibake, hiding the
+    real failure from the caller.
+    """
+    encrypted_response = _is_ehbp_encrypted_response(resp)
+    body_preview = (
+        f"<{len(resp.body)} bytes of EHBP ciphertext>"
+        if encrypted_response
+        else resp.body.decode("utf-8", errors="ignore").strip()[:500]
+    )
+    logger.error(
+        "EHBP upstream %s returned %s for model=%s path=%s: %s",
+        provider_type,
+        resp.status_code,
+        model_obj.id,
+        path,
+        body_preview or "<empty>",
+        extra={
+            "provider": provider_type,
+            "model": model_obj.id,
+            "status_code": resp.status_code,
+            "path": path,
+            "body_preview": body_preview,
+            "encrypted": encrypted_response,
+        },
+    )
+    # Key-config mismatch (stale client HPKE key): return the enclave's 422
+    # problem+json directly so the SDK's KeyConfigMismatchError detection fires
+    # and triggers re-attestation. Wrapping it as application/json would destroy
+    # the signal and cause permanent failure.
+    if _is_ehbp_key_config_response(resp):
+        logger.warning(
+            "EHBP upstream %s returned key-config mismatch for model=%s, "
+            "passing through for client re-attestation",
+            provider_type,
+            model_obj.id,
+            extra={"provider": provider_type, "model": model_obj.id, "path": path},
+        )
+        return _passthrough_key_config_response(resp)
+
+    if encrypted_response:
+        # Only the EHBP client holds the session keys for this body. Keep it
+        # intact so proxy.py can relay it after failover, and keep the
+        # ciphertext out of the error message and logs.
+        logger.warning(
+            "EHBP upstream %s returned encrypted %s for model=%s "
+            "path=%s; passing the ciphertext through for the client to decrypt",
+            provider_type,
+            resp.status_code,
+            model_obj.id,
+            path,
+            extra={
+                "provider": provider_type,
+                "model": model_obj.id,
+                "status_code": resp.status_code,
+                "path": path,
+            },
+        )
+        raise EhbpEncryptedUpstreamError(
+            f"EHBP upstream {provider_type} returned "
+            f"{resp.status_code} for model {model_obj.id}",
+            status_code=resp.status_code,
+            response=_passthrough_encrypted_response(resp),
+        )
+
+    raise UpstreamError(
+        f"EHBP upstream {provider_type} returned {resp.status_code} "
+        f"for model {model_obj.id}: {body_preview[:200] or '<empty>'}",
+        status_code=resp.status_code,
+        from_upstream_response=True,
+    )
+
+
+async def _forward_ehbp_streaming(
+    *,
+    request: Request,
+    path: str,
+    target_url: str,
+    upstream_headers: dict[str, str],
+    request_body: bytes | None,
+    upstream: object,
+    key: ApiKey,
+    max_cost_for_model: int,
+    session: AsyncSession,
+    model_obj: Model,
+    reservation_snapshot: ReservationSnapshot | None,
+    terminal_outcome: TerminalOutcomeContext,
+    provider_type: str,
+    profile: "ConfidentialInferenceProfile | None",
+) -> Response:
+    """Relay an EHBP response without buffering it.
+
+    The enclave answers with SSE that it encrypts as a chunked EHBP stream. The
+    EHBP client decrypts frame by frame, so each ciphertext frame can be handed
+    to it as it arrives; buffering only adds the upstream's full generation time
+    to every client's time-to-first-token.
+
+    Usage settles *after* the body drains: ``X-Tinfoil-Usage-Metrics`` arrives as
+    a trailer, so cost is known only at ``EndOfMessage``. The authorization was
+    already reserved by ``pay_for_request`` before dispatch, so deferring the
+    settlement cannot overspend - it only moves the ledger write later. If the
+    client disconnects mid-stream the generator is closed, the trailers future
+    resolves to whatever arrived, and settlement still runs.
+    """
+    usage_header_name = (
+        profile.usage_response_header if profile else _RESPONSE_USAGE_HEADER
+    )
+
+    resp: StreamedTrailerResponse = await stream_with_trailer(
+        method=request.method,
+        url=target_url,
+        headers=upstream_headers,
+        body=request_body or b"",
+    )
+
+    try:
+        if resp.status_code != 200:
+            # Error bodies must be relayed whole: an EHBP enclave encrypts them
+            # too, so they cannot be decoded here and the client needs the
+            # ciphertext intact to read the reason. Drain the stream we already
+            # opened rather than re-issuing the request, which would double
+            # bill the upstream.
+            buffered = await _drain_streamed_response(resp)
+            return _relay_ehbp_error_response(
+                buffered,
+                model_obj=model_obj,
+                provider_type=provider_type,
+                path=path,
+            )
+
+        response_headers: dict[str, str] = {}
+        for k, v in resp.headers:
+            if k.lower() not in _HOP_BY_HOP_RESPONSE_HEADERS:
+                response_headers[k] = v
+
+        # Cost headers are unknown until the trailers arrive, so the client
+        # gets a reservation ceiling up front and the settled figure is
+        # written to the ledger. Advertising a ceiling as a final cost would be
+        # a lie; these headers therefore track the settlement that follows.
+        response_headers.pop("content-length", None)
+
+        logger.info(
+            "EHBP upstream response streaming",
+            extra={
+                "model": model_obj.id,
+                "provider": provider_type,
+                "target_url": target_url,
+                "status_code": resp.status_code,
+                "path": path,
+                "key_hash": key.hashed_key[:8] + "...",
+            },
+        )
+
+        async def _stream_body() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in resp.body:
+                    yield chunk
+            finally:
+                # Runs on completion and on client disconnect alike, so the
+                # reservation is always settled exactly once.
+                await _settle_streamed_ehbp(
+                    resp=resp,
+                    usage_header_name=usage_header_name,
+                    terminal_outcome=terminal_outcome,
+                    model_obj=model_obj,
+                    provider_type=provider_type,
+                    key=key,
+                    session=session,
+                    max_cost_for_model=max_cost_for_model,
+                    reservation_snapshot=reservation_snapshot,
+                    path=path,
+                )
+
+        return StreamingResponse(
+            _stream_body(),
+            status_code=resp.status_code,
+            headers=response_headers,
+        )
+    except UpstreamError:
+        await resp.aclose()
+        raise
+    except Exception:
+        await resp.aclose()
+        raise
+
+
+async def _settle_streamed_ehbp(
+    *,
+    resp: StreamedTrailerResponse,
+    usage_header_name: str | None,
+    terminal_outcome: TerminalOutcomeContext,
+    model_obj: Model,
+    provider_type: str,
+    key: ApiKey,
+    session: AsyncSession,
+    max_cost_for_model: int,
+    reservation_snapshot: ReservationSnapshot | None,
+    path: str,
+) -> None:
+    """Settle a streamed EHBP request from its post-body usage trailer."""
+    try:
+        trailers = await resp.trailers
+    except Exception as exc:  # noqa: BLE001 - settlement must still run
+        logger.warning(
+            "EHBP stream ended before trailers arrived; releasing reservation",
+            extra={
+                "model": model_obj.id,
+                "provider": provider_type,
+                "path": path,
+                "error": str(exc),
+            },
+        )
+        trailers = []
+
+    usage_header = _extract_usage_from_response(
+        resp.headers, trailers, usage_header_name
+    )
+    terminal_outcome = _context_with_presence(
+        terminal_outcome, _tinfoil_usage_presence(usage_header)
+    )
+    usage_dict = parse_tinfoil_usage_metrics(usage_header)
+
+    try:
+        if usage_dict is not None:
+            await _settle_ehbp_usage_measured(
+                usage_header=usage_header,
+                usage_dict=usage_dict,
+                usage_source="trailer",
+                terminal_outcome=terminal_outcome,
+                model_obj=model_obj,
+                provider_type=provider_type,
+                key=key,
+                session=session,
+                max_cost_for_model=max_cost_for_model,
+                reservation_snapshot=reservation_snapshot,
+            )
+        else:
+            await _settle_ehbp_usage_unmeasured(
+                usage_header=usage_header,
+                terminal_outcome=terminal_outcome,
+                model_obj=model_obj,
+                provider_type=provider_type,
+                key=key,
+                session=session,
+                max_cost_for_model=max_cost_for_model,
+                reservation_snapshot=reservation_snapshot,
+            )
+    except Exception as exc:  # noqa: BLE001 - response already on the wire
+        logger.error(
+            "EHBP streaming settlement failed",
+            extra={
+                "model": model_obj.id,
+                "provider": provider_type,
+                "path": path,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+        )
+
+
+async def _settle_ehbp_usage_measured(
+    *,
+    usage_header: str | None,
+    usage_dict: Mapping[str, object],
+    usage_source: str,
+    terminal_outcome: TerminalOutcomeContext,
+    model_obj: Model,
+    provider_type: str,
+    key: ApiKey,
+    session: AsyncSession,
+    max_cost_for_model: int,
+    reservation_snapshot: ReservationSnapshot | None,
+) -> tuple[dict, TerminalOutcomeContext]:
+    """Settle a EHBP request whose usage came from headers or trailers."""
+    logger.info(
+        "EHBP usage metrics received, finalizing with actual token cost",
+        extra={
+            "model": model_obj.id,
+            "provider": provider_type,
+            "usage": usage_dict,
+            "usage_source": usage_source,
+            "key_hash": key.hashed_key[:8] + "...",
+        },
+    )
+    cost_info = await _compute_ehbp_actual_cost(
+        usage_header, model_obj, max_cost_for_model
+    )
+    billing_model = cost_info.pop("actual_model", None) or model_obj.id
+    terminal_outcome = _context_with_served_model(terminal_outcome, cost_info)
+    computed_msats = int(cost_info["total_msats"])
+    charged_msats = await _record_ehbp_settlement(
+        finalize_ehbp_actual_cost_payment(
+            key,
+            session,
+            max_cost_for_model,
+            billing_model,
+            cost_info,
+            reservation_snapshot,
+            terminal_outcome,
+        ),
+        key=key,
+        model_id=billing_model,
+        settlement_type="ehbp_usage",
+    )
+    cost_data = {
+        **cost_info,
+        "total_msats": charged_msats,
+        "charged_msats": charged_msats,
+        "total_usd": cost_info.get("total_usd", 0.0),
+    }
+    if computed_msats != charged_msats:
+        cost_data["computed_msats"] = computed_msats
+    return cost_data, terminal_outcome
+
+
+async def _settle_ehbp_usage_unmeasured(
+    *,
+    usage_header: str | None,
+    terminal_outcome: TerminalOutcomeContext,
+    model_obj: Model,
+    provider_type: str,
+    key: ApiKey,
+    session: AsyncSession,
+    max_cost_for_model: int,
+    reservation_snapshot: ReservationSnapshot | None,
+) -> tuple[dict, TerminalOutcomeContext]:
+    """Release a reservation when the enclave never reported usage."""
+    logger.warning(
+        "EHBP usage metrics not found in headers or trailers; "
+        "releasing instead of charging the authorization ceiling",
+        extra={
+            "model": model_obj.id,
+            "provider": provider_type,
+            "key_hash": key.hashed_key[:8] + "...",
+        },
+    )
+    charged_msats = await _record_ehbp_settlement(
+        finalize_ehbp_max_cost_payment(
+            key,
+            session,
+            max_cost_for_model,
+            model_obj.id,
+            reservation_snapshot,
+            terminal_outcome,
+            usage_data=parse_tinfoil_usage_metrics(usage_header, allow_partial=True),
+        ),
+        key=key,
+        model_id=model_obj.id,
+        settlement_type="ehbp_unmeasured_release",
+    )
+    cost_data = {
+        "total_msats": charged_msats,
+        "charged_msats": charged_msats,
+        "total_usd": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+    }
+    return cost_data, terminal_outcome
+
+
 async def forward_ehbp_request(
     *,
     request: Request,
@@ -1139,6 +1538,24 @@ async def forward_ehbp_request(
     )
 
     try:
+        if settings.ehbp_stream_upstream_responses:
+            return await _forward_ehbp_streaming(
+                request=request,
+                path=path,
+                target_url=target_url,
+                upstream_headers=upstream_headers,
+                request_body=request_body,
+                upstream=upstream,
+                key=key,
+                max_cost_for_model=max_cost_for_model,
+                session=session,
+                model_obj=model_obj,
+                reservation_snapshot=reservation_snapshot,
+                terminal_outcome=terminal_outcome,
+                provider_type=provider_type,
+                profile=profile,
+            )
+
         resp = await forward_with_trailer(
             method=request.method,
             url=target_url,
@@ -1260,77 +1677,29 @@ async def forward_ehbp_request(
         )
 
         if usage_dict is not None:
-            logger.info(
-                "EHBP usage metrics received, finalizing with actual token cost",
-                extra={
-                    "model": model_obj.id,
-                    "provider": provider_type,
-                    "usage": usage_dict,
-                    "usage_source": usage_source,
-                    "key_hash": key.hashed_key[:8] + "...",
-                },
-            )
-            cost_info = await _compute_ehbp_actual_cost(
-                usage_header, model_obj, max_cost_for_model
-            )
-            billing_model = cost_info.pop("actual_model", None) or model_obj.id
-            terminal_outcome = _context_with_served_model(terminal_outcome, cost_info)
-            computed_msats = int(cost_info["total_msats"])
-            charged_msats = await _record_ehbp_settlement(
-                finalize_ehbp_actual_cost_payment(
-                    key,
-                    session,
-                    max_cost_for_model,
-                    billing_model,
-                    cost_info,
-                    reservation_snapshot,
-                    terminal_outcome,
-                ),
+            cost_data, terminal_outcome = await _settle_ehbp_usage_measured(
+                usage_header=usage_header,
+                usage_dict=usage_dict,
+                usage_source=usage_source,
+                terminal_outcome=terminal_outcome,
+                model_obj=model_obj,
+                provider_type=provider_type,
                 key=key,
-                model_id=billing_model,
-                settlement_type="ehbp_usage",
+                session=session,
+                max_cost_for_model=max_cost_for_model,
+                reservation_snapshot=reservation_snapshot,
             )
-            cost_data = {
-                **cost_info,
-                "total_msats": charged_msats,
-                "charged_msats": charged_msats,
-                "total_usd": cost_info.get("total_usd", 0.0),
-            }
-            if computed_msats != charged_msats:
-                cost_data["computed_msats"] = computed_msats
         else:
-            logger.warning(
-                "EHBP usage metrics not found in headers or trailers; "
-                "releasing instead of charging the authorization ceiling",
-                extra={
-                    "model": model_obj.id,
-                    "provider": provider_type,
-                    "key_hash": key.hashed_key[:8] + "...",
-                },
-            )
-            charged_msats = await _record_ehbp_settlement(
-                finalize_ehbp_max_cost_payment(
-                    key,
-                    session,
-                    max_cost_for_model,
-                    model_obj.id,
-                    reservation_snapshot,
-                    terminal_outcome,
-                    usage_data=parse_tinfoil_usage_metrics(
-                        usage_header, allow_partial=True
-                    ),
-                ),
+            cost_data, terminal_outcome = await _settle_ehbp_usage_unmeasured(
+                usage_header=usage_header,
+                terminal_outcome=terminal_outcome,
+                model_obj=model_obj,
+                provider_type=provider_type,
                 key=key,
-                model_id=model_obj.id,
-                settlement_type="ehbp_unmeasured_release",
+                session=session,
+                max_cost_for_model=max_cost_for_model,
+                reservation_snapshot=reservation_snapshot,
             )
-            cost_data = {
-                "total_msats": charged_msats,
-                "charged_msats": charged_msats,
-                "total_usd": 0.0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-            }
 
         # Build the cost_info dict from measured usage or the unmeasured-release
         # fallback. Fields match CostData/MaxCostData.dict().

@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     upstream_stream_idle_timeout_seconds: float = Field(
         default=0.0, ge=0, env="UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS"
     )
+    # EHBP bodies are opaque ciphertext, but the EHBP client decrypts them
+    # incrementally, so a node can relay chunks as they arrive instead of
+    # buffering the whole response. Buffering is only needed to put a refund
+    # amount in a response header (X-Cashu) before the body starts; the bearer
+    # path reserves up front and settles from the usage trailer afterwards, so
+    # it can stream. Enabled by default because the buffered path makes every
+    # token arrive at completion, which reads as a hung request to a client.
+    ehbp_stream_upstream_responses: bool = Field(
+        default=True, env="EHBP_STREAM_UPSTREAM_RESPONSES"
+    )
     # Circuit breaker: timeouts/5xx per (provider, model) within a minute that
     # take the pair out of candidate selection. 0 seconds disables it.
     upstream_allowed_fails: int = Field(default=3, ge=1, env="UPSTREAM_ALLOWED_FAILS")

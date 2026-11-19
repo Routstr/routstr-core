@@ -113,16 +113,17 @@ async def test_bearer_timeout_propagates_424(
     error into ``UpstreamError(..., status_code=500)``. The ``except
     UpstreamError: raise`` above it is the only thing preserving the upstream
     timeout status that ``proxy.py`` returns to the client, so this test pins
-    that handler.
+    that handler. Both transports are patched so the assertion holds whichever
+    one the EHBP streaming setting selects.
     """
+    timeout_error = EhbpTimeoutError(
+        "EHBP upstream inference.tinfoil.sh timed out after 600s connecting"
+    )
     monkeypatch.setattr(
-        ehbp_module,
-        "forward_with_trailer",
-        AsyncMock(
-            side_effect=EhbpTimeoutError(
-                "EHBP upstream inference.tinfoil.sh timed out after 600s connecting"
-            )
-        ),
+        ehbp_module, "forward_with_trailer", AsyncMock(side_effect=timeout_error)
+    )
+    monkeypatch.setattr(
+        ehbp_module, "stream_with_trailer", AsyncMock(side_effect=timeout_error)
     )
     upstream, model_obj = _ehbp_upstream_mocks()
     key = MagicMock()
@@ -153,20 +154,21 @@ async def test_bearer_connection_error_propagates_upstream_scope(
 ) -> None:
     """A connect failure must stay upstream-scoped instead of becoming a 500.
 
-    ``forward_with_trailer`` classifies TLS/connection failures as
+    The trailer clients classify TLS/connection failures as
     :class:`EhbpConnectionError`; ``forward_ehbp_request``'s ``except
     UpstreamError: raise`` must let it through so ``proxy.py`` answers 424 with
-    the upstream scope header rather than a node-scoped 500.
+    the upstream scope header rather than a node-scoped 500. Both transports are
+    patched so the assertion holds whichever one the setting selects.
     """
+    connection_error = EhbpConnectionError(
+        "Unable to connect to EHBP upstream inference.tinfoil.sh: "
+        "ConnectionAbortedError"
+    )
     monkeypatch.setattr(
-        ehbp_module,
-        "forward_with_trailer",
-        AsyncMock(
-            side_effect=EhbpConnectionError(
-                "Unable to connect to EHBP upstream inference.tinfoil.sh: "
-                "ConnectionAbortedError"
-            )
-        ),
+        ehbp_module, "forward_with_trailer", AsyncMock(side_effect=connection_error)
+    )
+    monkeypatch.setattr(
+        ehbp_module, "stream_with_trailer", AsyncMock(side_effect=connection_error)
     )
     upstream, model_obj = _ehbp_upstream_mocks()
     key = MagicMock()
