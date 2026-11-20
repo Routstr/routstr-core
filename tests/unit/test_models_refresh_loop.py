@@ -182,8 +182,7 @@ async def test_refresh_loop_honours_the_models_refresh_kill_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``ENABLE_MODELS_REFRESH`` used to be read nowhere, so an operator could
-    only disarm catalog fetching by zeroing the interval -- which the sibling
-    loops share."""
+    only disarm catalog fetching by zeroing the interval."""
     from routstr.core.settings import settings as global_settings
     from routstr.upstream.helpers import refresh_upstreams_models_periodically
 

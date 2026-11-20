@@ -430,16 +430,23 @@ switch. An interval of `0` pauses that refresh without stopping the others.
 | Routing maps (which provider serves which model, and in what order) | `MODEL_MAPS_REFRESH_INTERVAL_SECONDS` | `ENABLE_MODEL_MAPS_REFRESH` |
 | Model path discovery (`/v1/models/paths`) | `MODEL_PATHS_REFRESH_INTERVAL_SECONDS` | `ENABLE_MODEL_PATHS_REFRESH` |
 
-Changed values take effect without a restart: each loop re-reads its settings on
-every iteration, including re-enabling after `0`.
+The routing-map and path-discovery loops re-read their settings on every
+iteration, so changes (including re-enabling after `0`) take effect without a
+restart. Catalog refresh settings are read once at startup, so changing them
+requires a restart. Changes made through the admin API apply only to the worker
+that served the request; other workers do not reload settings.
 
 Admin edits (pricing overrides, enable/disable, aliases) refresh the routing map
 immediately, but only in the worker that served the request. On a multi-worker
-deployment `MODEL_MAPS_REFRESH_INTERVAL_SECONDS` is what carries those edits to
-the sibling workers, so leaving it at `0` means workers can disagree about a
-model's price until they restart. The routing rebuild also re-applies the sats
-conversion, so billed rates track the BTC price even when upstream catalogs are
-disabled.
+deployment the routing-map rebuild carries those edits to the sibling workers.
+The sats pricing refresh and the upstream catalog refresh also rebuild the map
+whenever they re-price models. With `MODEL_MAPS_REFRESH_INTERVAL_SECONDS` at
+`0`, workers can disagree about a model's price until the next pricing or
+catalog refresh, or indefinitely if both of those are off too. The routing
+rebuild also re-applies the sats conversion to database override rows, so their
+billed rates track the BTC price even when upstream catalogs are disabled;
+catalog models keep their cached sats pricing until the next pricing or catalog
+refresh.
 
 Model path discovery is refreshed in the background and exposed through
 `/v1/models/paths`. The response groups each client-visible model ID with the

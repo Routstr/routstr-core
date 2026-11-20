@@ -419,20 +419,10 @@ async def refresh_model_maps() -> None:
 async def refresh_model_maps_periodically() -> None:
     """Background task keeping the routing maps in sync with their sources.
 
-    Cadence follows ``MODEL_MAPS_REFRESH_INTERVAL_SECONDS`` and the
-    ``ENABLE_MODEL_MAPS_REFRESH`` kill switch, both re-read every iteration so a
-    runtime change (including 0 -> N) applies without a restart.
-
-    Why a timer at all: admin mutations refresh immediately, but only in the
-    worker that served the request. Another worker sharing the database sees
-    no change from the 5s upstream sync either, because that fingerprints
-    provider rows only -- DB ``ModelRow`` edits (override pricing, enabled,
-    forwarded IDs, aliases) surface here or not at all. This loop also re-runs
-    the sats conversion, which keeps billed rates current after a BTC price
-    move without re-fetching every upstream catalog.
-
-    The sleep carries up to 10% jitter so workers sharing one database do not
-    rebuild in lockstep.
+    Interval and kill switch are re-read every iteration. Admin edits refresh
+    only the serving worker and the 5s upstream sync ignores ``ModelRow``
+    edits, so this loop (or a pricing or catalog refresh that re-prices models)
+    carries them to sibling workers. Up to 10% jitter keeps workers from rebuilding in lockstep.
     """
     _DISABLED_POLL_SECONDS = 60.0
 

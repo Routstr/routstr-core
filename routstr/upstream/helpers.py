@@ -162,9 +162,8 @@ async def refresh_upstreams_models_periodically(
 
     # ``enable_models_refresh`` is the kill switch for fetching upstream
     # catalogs: without it an operator could only disarm this by setting the
-    # interval to 0, which also stops the sibling loops that share it. Both
-    # values are read once here, matching the startup gate in
-    # ``core.main.lifespan``.
+    # interval to 0. Both values are read once here, matching the startup gate
+    # in ``core.main.lifespan``.
     if not getattr(settings, "enable_models_refresh", True):
         logger.info("Provider models refresh disabled (ENABLE_MODELS_REFRESH=false)")
         return
