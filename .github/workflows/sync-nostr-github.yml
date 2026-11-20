@@ -1,0 +1,103 @@
+# Keeps this repo the same on nostr (ngit) and GitHub, in both directions.
+# Same file in every Routstr repo on ngit; only vars.NOSTR_REPO differs.
+# Fast-forward only: it never force-pushes and never deletes a branch or tag.
+#
+#   nostr ahead   -> the app pushes the branch (or new branch, or tag) to GitHub
+#   GitHub ahead  -> the bot signs a new nostr state (only branches nostr already has)
+#   both changed  -> that branch is left alone and the run fails; fix by hand
+#
+# Settings (org level once, or per repo):
+#   vars.NOSTR_REPO         <lead npub>/<grasp host>/<identifier>
+#   vars.SYNC_APP_ID        GitHub App allowed to push protected branches
+#   secrets.SYNC_APP_KEY    that app's private key
+#   secrets.NOSTR_BOT_NSEC  co-maintainer bot key; without it GitHub -> nostr is skipped
+name: Sync nostr and GitHub
+
+on:
+  push:
+    branches: ["**"]
+  schedule:
+    # Away from :00 and :30, when GitHub delays and drops scheduled runs.
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-nostr-github
+
+env:
+  NGIT_VERSION: v3.0.3
+  NGIT_SHA256: d0022122370c8e3982fce0b4c185b060139fc1a74de1637e7c005ffffcaab024
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch nostr branches and tags
+        env:
+          NOSTR_REPO: ${{ vars.NOSTR_REPO }}
+        run: |
+          npub=${NOSTR_REPO%%/*} rest=${NOSTR_REPO#*/}
+          grasp="https://${rest%%/*}/$npub/${rest#*/}.git"
+          git fetch --no-tags "$grasp" "+refs/heads/*:refs/remotes/nostr/*" "refs/tags/*:refs/tags/*"
+          git ls-remote --tags "$grasp" | awk '!/\^\{\}$/{print $2}' | sort > "$RUNNER_TEMP/nostr-tags"
+          git ls-remote --tags origin | awk '!/\^\{\}$/{print $2}' | sort > "$RUNNER_TEMP/github-tags"
+
+      - name: Compare
+        id: cmp
+        run: |
+          to_github=() to_nostr=() diverged=()
+          for b in $(git for-each-ref --format='%(refname:lstrip=3)' refs/remotes/nostr/); do
+            case $b in pr/*) continue ;; esac
+            ns=$(git rev-parse "refs/remotes/nostr/$b")
+            gh=$(git rev-parse -q --verify "refs/remotes/origin/$b" || true)
+            if [ "$gh" = "$ns" ]; then continue
+            elif [ -z "$gh" ] || git merge-base --is-ancestor "$gh" "$ns"; then to_github+=("refs/remotes/nostr/$b:refs/heads/$b")
+            elif git merge-base --is-ancestor "$ns" "$gh"; then to_nostr+=("$b")
+            else diverged+=("$b"); fi
+          done
+          to_github+=($(comm -23 "$RUNNER_TEMP/nostr-tags" "$RUNNER_TEMP/github-tags"))
+          echo "to GitHub: ${to_github[*]} | to nostr: ${to_nostr[*]} | both changed: ${diverged[*]}"
+          { echo "to_github=${to_github[*]}"; echo "to_nostr=${to_nostr[*]}"; echo "diverged=${diverged[*]}"; } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        id: app
+        if: steps.cmp.outputs.to_github != ''
+        with:
+          app-id: ${{ vars.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_KEY }}
+
+      - name: nostr -> GitHub
+        if: steps.cmp.outputs.to_github != ''
+        env:
+          TOKEN: ${{ steps.app.outputs.token }}
+          REFS: ${{ steps.cmp.outputs.to_github }}
+        run: git push "https://x-access-token:$TOKEN@github.com/${{ github.repository }}.git" $REFS
+
+      - name: GitHub -> nostr
+        if: steps.cmp.outputs.to_nostr != ''
+        env:
+          NSEC: ${{ secrets.NOSTR_BOT_NSEC }}
+          NOSTR_REPO: ${{ vars.NOSTR_REPO }}
+        run: |
+          if [ -z "$NSEC" ]; then echo "GitHub is ahead and no bot key is set, skipping"; exit 0; fi
+          curl -fsSLo ngit.tgz "https://github.com/DanConwayDev/ngit-cli/releases/download/$NGIT_VERSION/ngit-$NGIT_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          echo "$NGIT_SHA256  ngit.tgz" | sha256sum -c -
+          sudo tar xzf ngit.tgz -C /usr/local/bin && rm ngit.tgz
+          git remote add nostr "nostr://$NOSTR_REPO"
+          ngit sync --trust-server --nsec "${NSEC//[[:space:]]/}" --defaults
+
+      - name: Both sides changed
+        if: steps.cmp.outputs.diverged != ''
+        env:
+          BRANCHES: ${{ steps.cmp.outputs.diverged }}
+        run: |
+          echo "::error::$BRANCHES changed on both nostr and GitHub. Nothing was pushed for them; merge by hand and push to nostr."
+          exit 1

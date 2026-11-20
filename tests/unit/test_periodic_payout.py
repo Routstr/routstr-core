@@ -37,6 +37,16 @@ def empty_cross_wallet_proofs() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def no_accrued_platform_fee() -> Iterator[None]:
+    """Nothing is reserved for the platform fee on the primary mint."""
+    with patch(
+        "routstr.wallet.db.get_routstr_fee",
+        AsyncMock(return_value=MagicMock(accumulated_msats=0)),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def isolate_wallet_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "routstr.wallet._WALLET_OPERATION_LOCK", tmp_path / "wallet.lock"

@@ -193,3 +193,47 @@ async def test_payout_sends_the_smaller_wallets_surplus() -> None:
         await _payout_mint_and_unit(MINT_B, "sat")
     assert send.await_args is not None
     assert send.await_args.kwargs["amount"] == 236
+
+
+@contextmanager
+def _primary_payout(accrued_fee_msats: int, send: AsyncMock) -> Iterator[None]:
+    with (
+        _liabilities({MINT_A: 216, MINT_B: 34}, total_sats=250),
+        patch.object(settings, "min_payout_sat", 50),
+        patch.object(settings, "max_payout_sat", 250_000),
+        _wallet_db({MINT_A: 400, MINT_B: 270}),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            Mock(return_value=[Mock(amount=400)]),
+        ),
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            AsyncMock(side_effect=lambda proofs, wallet: proofs),
+        ),
+        patch(
+            "routstr.wallet.db.get_routstr_fee",
+            AsyncMock(return_value=Mock(accumulated_msats=accrued_fee_msats)),
+        ),
+        patch("routstr.wallet.asyncio.sleep", AsyncMock()),
+        patch("routstr.wallet.raw_send_to_lnurl", send),
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_primary_mint_payout_leaves_the_accrued_platform_fee() -> None:
+    """The fee payout draws on the same surplus; the operator must not drain it."""
+    send = AsyncMock(return_value=83_000)
+    with _primary_payout(accrued_fee_msats=100_500, send=send):
+        await _payout_mint_and_unit(MINT_A, "sat")
+    assert send.await_args is not None
+    # 184 sats of surplus minus 101 sats of accrued fee (rounded up).
+    assert send.await_args.kwargs["amount"] == 83
+
+
+@pytest.mark.asyncio
+async def test_primary_mint_payout_holds_when_the_fee_covers_the_surplus() -> None:
+    send = AsyncMock()
+    with _primary_payout(accrued_fee_msats=150_000, send=send):
+        await _payout_mint_and_unit(MINT_A, "sat")
+    send.assert_not_awaited()

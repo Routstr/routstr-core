@@ -40,6 +40,7 @@ from .responses_input import (
     input_image_part_to_image_url,
     responses_input_to_messages,
 )
+from .usage_multipliers import pricing_dimensions, usage_multiplier
 
 logger = get_logger(__name__)
 
@@ -357,6 +358,25 @@ async def calculate_discounted_max_cost(
             discounts["completion_delta_msats"] = delta
             adjusted = adjusted - delta
 
+    # Settlement scales every token rate when the response reports fast mode
+    # or US-only inference, so the hold scales by the same factor up front.
+    multiplier = usage_multiplier(
+        getattr(model_obj, "usage_multipliers", None),
+        pricing_dimensions(body),
+        model,
+        warn=False,
+    )
+    if multiplier != 1.0:
+        adjusted = math.ceil(adjusted * multiplier)
+
+    # Searches are billed per request on top of tokens, so the token ceiling
+    # alone lets a low balance run searches whose charge is then written off.
+    web_searches = reserved_web_searches(body)
+    if web_searches and model_pricing.web_search > 0:
+        adjusted += math.ceil(
+            web_searches * model_pricing.web_search * 1000 * tol_factor
+        )
+
     logger.debug(
         "Discounted max cost computed",
         extra={
@@ -368,6 +388,37 @@ async def calculate_discounted_max_cost(
     )
 
     return finish(max(settings.min_request_msat, adjusted), adjusted)
+
+
+def reserved_web_searches(body: dict) -> int:
+    """Searches a request's web_search tools may run, for the reservation.
+
+    A tool without a valid ``max_uses`` is uncapped upstream and counts as
+    ``web_search_default_max_uses``.
+    """
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return 0
+    total = 0
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        tool_type = tool.get("type")
+        if not (
+            (isinstance(tool_type, str) and tool_type.startswith("web_search"))
+            or tool.get("name") == "web_search"
+        ):
+            continue
+        max_uses = tool.get("max_uses")
+        if (
+            isinstance(max_uses, int)
+            and not isinstance(max_uses, bool)
+            and max_uses > 0
+        ):
+            total += max_uses
+        else:
+            total += settings.web_search_default_max_uses
+    return total
 
 
 def estimate_tokens(messages: list) -> int:

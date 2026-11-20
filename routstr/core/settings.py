@@ -136,6 +136,11 @@ class Settings(BaseSettings):
     exchange_fee: float = Field(default=1.005, env="EXCHANGE_FEE")
     upstream_provider_fee: float = Field(default=1.05, env="UPSTREAM_PROVIDER_FEE")
     tolerance_percentage: float = Field(default=1.0, env="TOLERANCE_PERCENTAGE")
+    # Searches reserved for a web_search tool that sets no ``max_uses``; the
+    # upstream then imposes no cap, so this bounds what the reservation covers.
+    web_search_default_max_uses: int = Field(
+        default=8, ge=0, env="WEB_SEARCH_DEFAULT_MAX_USES"
+    )
     # Minimum per-request charge in millisatoshis when model pricing is free/zero
     min_request_msat: int = Field(default=1, env="MIN_REQUEST_MSAT")
     # Release reservations with an expired lease (left behind by a crashed or
@@ -212,6 +217,11 @@ class Settings(BaseSettings):
     )
     enable_model_paths_refresh: bool = Field(
         default=True, env="ENABLE_MODEL_PATHS_REFRESH"
+    )
+    # Where per-model usage multipliers (fast mode, US-only inference) come
+    # from: "openrouter" or "none".
+    usage_multiplier_source: str = Field(
+        default="openrouter", env="USAGE_MULTIPLIER_SOURCE"
     )
     # Uncollected refund tokens are swept after ~6 months (180 days).
     # Fixed for now: not configurable via env or the settings DB/admin API

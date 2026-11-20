@@ -3,6 +3,9 @@
 # Auto-update script for Docker Compose projects
 # This script checks for new commits and updates Docker Compose when changes are detected
 
+# Make piped commands (cmd | tee) report the failure of cmd rather than tee
+set -o pipefail
+
 # Configuration - can be overridden by environment variables with sensible defaults
 REPO_DIR="${REPO_DIR:-/home/ubuntu/proxy}"
 LOG_FILE="${LOG_FILE:-/home/ubuntu/proxy/update.log}"
@@ -81,16 +84,14 @@ if [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
     if git pull origin $(git branch --show-current) 2>&1 | tee -a "$LOG_FILE"; then
         log_message "Successfully pulled latest changes"
         
-        # Stop current containers
-        log_message "Stopping current containers..."
-        sudo $DOCKER_COMPOSE_CMD down 2>&1 | tee -a "$LOG_FILE"
-        
-        # Build and start updated containers
+        # Build and start updated containers. Running containers are only
+        # replaced after a successful build, so a failed build leaves them up;
+        # --remove-orphans keeps the cleanup the old "down" step did.
         log_message "Building and starting updated containers..."
-        if sudo $DOCKER_COMPOSE_CMD up -d --build 2>&1 | tee -a "$LOG_FILE"; then
+        if sudo $DOCKER_COMPOSE_CMD up -d --build --remove-orphans 2>&1 | tee -a "$LOG_FILE"; then
             log_message "Successfully updated and restarted containers"
         else
-            log_message "ERROR: Failed to start containers"
+            log_message "ERROR: Failed to build or start containers"
             exit 1
         fi
     else
