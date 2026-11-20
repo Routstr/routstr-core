@@ -289,6 +289,10 @@ Use environment variables for:
 | `RELAYS`             | Nostr relays (comma-separated)    | (default set)                        |
 | `MODEL_PATHS_REFRESH_INTERVAL_SECONDS` | How often to refresh `/v1/models/paths` discovery data; set `0` to pause the refresh (previously discovered paths keep being served) | `600` |
 | `ENABLE_MODEL_PATHS_REFRESH` | Kill switch for the background model-path refresh (OpenRouter endpoint fan-out) | `true` |
+| `MODELS_REFRESH_INTERVAL_SECONDS` | How often to re-fetch each provider's model catalog. `0` pauses catalog fetching (the served catalog stays as last fetched) | `360` |
+| `ENABLE_MODELS_REFRESH` | Kill switch for fetching upstream model catalogs | `true` |
+| `MODEL_MAPS_REFRESH_INTERVAL_SECONDS` | How often the in-memory routing maps are rebuilt from the catalogs and stored model rows. This is also how a pricing/enable/alias edit made on one worker reaches the others, so keep it non-zero on multi-worker deployments | `60` |
+| `ENABLE_MODEL_MAPS_REFRESH` | Kill switch for the periodic routing-map rebuild. Admin edits still refresh the map immediately in the worker that served them | `true` |
 
 Mint HTTP 429 responses create a per-mint cooldown. Operations that already hold
 Routstr's wallet mutation lock fail fast during that cooldown instead of waiting
@@ -414,6 +418,35 @@ Manage which AI models you offer:
    - **Create aliases** — friendly names for models
 
 See [Pricing](pricing.md) for per-model pricing strategies.
+
+### Refresh cadences
+
+The three caches below are independent, and each has an interval plus a kill
+switch. An interval of `0` pauses that refresh without stopping the others.
+
+| What is refreshed | Interval | Kill switch |
+| ----------------- | -------- | ----------- |
+| Upstream model catalogs (fetched from each provider) | `MODELS_REFRESH_INTERVAL_SECONDS` | `ENABLE_MODELS_REFRESH` |
+| Routing maps (which provider serves which model, and in what order) | `MODEL_MAPS_REFRESH_INTERVAL_SECONDS` | `ENABLE_MODEL_MAPS_REFRESH` |
+| Model path discovery (`/v1/models/paths`) | `MODEL_PATHS_REFRESH_INTERVAL_SECONDS` | `ENABLE_MODEL_PATHS_REFRESH` |
+
+The routing-map and path-discovery loops re-read their settings on every
+iteration, so changes (including re-enabling after `0`) take effect without a
+restart. Catalog refresh settings are read once at startup, so changing them
+requires a restart. Changes made through the admin API apply only to the worker
+that served the request; other workers do not reload settings.
+
+Admin edits (pricing overrides, enable/disable, aliases) refresh the routing map
+immediately, but only in the worker that served the request. On a multi-worker
+deployment the routing-map rebuild carries those edits to the sibling workers.
+The sats pricing refresh and the upstream catalog refresh also rebuild the map
+whenever they re-price models. With `MODEL_MAPS_REFRESH_INTERVAL_SECONDS` at
+`0`, workers can disagree about a model's price until the next pricing or
+catalog refresh, or indefinitely if both of those are off too. The routing
+rebuild also re-applies the sats conversion to database override rows, so their
+billed rates track the BTC price even when upstream catalogs are disabled;
+catalog models keep their cached sats pricing until the next pricing or catalog
+refresh.
 
 Model path discovery is refreshed in the background and exposed through
 `/v1/models/paths`. The response groups each client-visible model ID with the

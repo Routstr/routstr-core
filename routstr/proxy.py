@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import random
 import re
 from typing import Any
 
@@ -354,6 +355,20 @@ def _select_unauthenticated_get_upstreams(
     return upstreams
 
 
+def _model_maps_refresh_interval_seconds() -> float:
+    """Current model-maps interval, re-read every loop so changes apply live.
+
+    A non-positive interval, or a false ``enable_model_maps_refresh``, disables
+    the loop by returning 0.
+    """
+    if not getattr(settings, "enable_model_maps_refresh", True):
+        return 0.0
+    try:
+        return float(getattr(settings, "model_maps_refresh_interval_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 async def refresh_model_maps() -> None:
     """Refresh global model and provider maps using the cost-based algorithm."""
     from sqlalchemy.orm import selectinload
@@ -402,12 +417,26 @@ async def refresh_model_maps() -> None:
 
 
 async def refresh_model_maps_periodically() -> None:
-    """Background task to refresh model maps every minute."""
-    import asyncio
+    """Background task keeping the routing maps in sync with their sources.
+
+    Interval and kill switch are re-read every iteration. Admin edits refresh
+    only the serving worker and the 5s upstream sync ignores ``ModelRow``
+    edits, so this loop (or a pricing or catalog refresh that re-prices models)
+    carries them to sibling workers. Up to 10% jitter keeps workers from rebuilding in lockstep.
+    """
+    _DISABLED_POLL_SECONDS = 60.0
 
     while True:
+        interval = _model_maps_refresh_interval_seconds()
+        if interval <= 0:
+            try:
+                await asyncio.sleep(_DISABLED_POLL_SECONDS)
+            except asyncio.CancelledError:
+                break
+            continue
+
         try:
-            await asyncio.sleep(60)
+            await asyncio.sleep(interval + random.uniform(0, max(0.0, interval * 0.1)))
             await refresh_model_maps()
         except asyncio.CancelledError:
             break
