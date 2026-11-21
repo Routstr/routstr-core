@@ -1,11 +1,8 @@
-import asyncio
 import base64
 import json
 import math
-import socket
 from io import BytesIO
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import HTTPException, Response
@@ -26,7 +23,7 @@ from ..core.errors import build_payment_required_error
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..core.settings import settings
-from ..net_guard import is_blocked_address as _is_blocked_address
+from ..net_guard import validated_fetch_target as _validated_fetch_target
 from ..wallet import (
     UntrustedSourceMintError,
     classify_redemption_error,
@@ -499,47 +496,6 @@ def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
             extra={"error": str(e)},
         )
         return (512, 512)
-
-
-async def _validated_fetch_target(url: str) -> tuple[str, str]:
-    """Return the URL to request and its ``Host`` header.
-
-    Cost estimation runs on the unauthenticated request body, so a caller can
-    otherwise aim the node at internal hosts. HTTP is rewritten to the resolved
-    address so the name cannot rebind between check and connect; HTTPS keeps its
-    hostname because certificate validation already binds the connection.
-    """
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https"):
-        raise ValueError(f"unsupported scheme: {parts.scheme or 'none'}")
-    host = parts.hostname
-    if not host:
-        raise ValueError("missing host")
-
-    default_port = 443 if parts.scheme == "https" else 80
-    port = parts.port or default_port
-    host_header = f"[{host}]" if ":" in host else host
-    if parts.port is not None:
-        host_header = f"{host_header}:{parts.port}"
-
-    infos = await asyncio.get_running_loop().getaddrinfo(
-        host, port, proto=socket.IPPROTO_TCP
-    )
-    if not infos:
-        raise ValueError("host did not resolve")
-    for info in infos:
-        if _is_blocked_address(str(info[4][0])):
-            raise ValueError("host resolves to a blocked address")
-
-    if parts.scheme == "https":
-        return url, host_header
-
-    family, _, _, _, sockaddr = infos[0]
-    address = str(sockaddr[0])
-    pinned = f"[{address}]" if family == socket.AF_INET6 else address
-    if parts.port is not None:
-        pinned = f"{pinned}:{parts.port}"
-    return urlunsplit((parts.scheme, pinned, parts.path, parts.query, "")), host_header
 
 
 async def _fetch_image_from_url(url: str) -> bytes | None:

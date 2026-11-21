@@ -394,6 +394,7 @@ async def test_provider_health_check_skips_internal_hosts() -> None:
     assert paths == []
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_providers_endpoint_duplicate_urls(
     integration_client: AsyncClient,
