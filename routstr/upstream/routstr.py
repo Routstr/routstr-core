@@ -172,9 +172,36 @@ class RoutstrUpstreamProvider(BaseUpstreamProvider):
                 response = await client.post(url, headers=headers, timeout=30.0)
                 response.raise_for_status()
                 return response.json()
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    "Failed to request refund from upstream Routstr",
+                    extra={"url": url, "error": str(e)},
+                )
+                return {"error": _refund_refusal(e.response, str(e))}
             except Exception as e:
                 logger.error(
                     "Failed to request refund from upstream Routstr",
                     extra={"url": url, "error": str(e)},
                 )
                 return {"error": str(e)}
+
+
+def _refund_refusal(response: httpx.Response, fallback: str) -> dict[str, str]:
+    """Keep the upstream's refusal reason so callers can tell "no balance to
+    refund" apart from a real failure. Newer nodes answer
+    ``{"detail": {"error": {"message", "code"}}}``, older ones a bare
+    ``{"detail": "<message>"}``."""
+    try:
+        body = response.json()
+    except ValueError:
+        return {"message": fallback}
+    detail = body.get("detail", body) if isinstance(body, dict) else None
+    if isinstance(detail, str):
+        return {"message": detail}
+    error = detail.get("error") if isinstance(detail, dict) else None
+    if not isinstance(error, dict):
+        return {"message": fallback}
+    refusal = {"message": str(error.get("message") or fallback)}
+    if error.get("code"):
+        refusal["code"] = str(error["code"])
+    return refusal

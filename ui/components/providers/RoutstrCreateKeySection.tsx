@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Image from 'next/image';
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { Copy, Loader2, Zap, KeyRound } from 'lucide-react';
@@ -50,6 +50,18 @@ export function RoutstrCreateKeySection({
   const [cashuToken, setCashuToken] = useState('');
   const [isCreatingCashu, setIsCreatingCashu] = useState(false);
 
+  // The upstream creates the key when the invoice settles, so the poll keeps
+  // running after unmount (dialog closed) and still hands the paid key to
+  // onApiKeyCreated. Only this section's own state and toasts are skipped
+  // once it is gone.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   if (!baseUrl) {
     return (
       <div className='bg-muted/30 rounded-lg border p-4'>
@@ -72,6 +84,10 @@ export function RoutstrCreateKeySection({
     let attempts = 0;
     const maxAttempts = 60;
 
+    const scheduleNextPoll = () => {
+      setTimeout(poll, 5000);
+    };
+
     const poll = async () => {
       try {
         const resp = await fetch(
@@ -83,6 +99,7 @@ export function RoutstrCreateKeySection({
 
         if (status.status === 'paid' && status.api_key) {
           onApiKeyCreated(status.api_key);
+          if (!isMountedRef.current) return;
           setLnInvoice(null);
           setLnQrCode('');
           setIsWaitingLn(false);
@@ -92,6 +109,7 @@ export function RoutstrCreateKeySection({
         }
 
         if (status.status === 'expired' || status.status === 'cancelled') {
+          if (!isMountedRef.current) return;
           toast.error('Invoice expired or cancelled');
           setIsWaitingLn(false);
           return;
@@ -99,16 +117,16 @@ export function RoutstrCreateKeySection({
 
         attempts++;
         if (attempts < maxAttempts) {
-          setTimeout(poll, 5000);
-        } else {
+          scheduleNextPoll();
+        } else if (isMountedRef.current) {
           toast.error('Payment timeout');
           setIsWaitingLn(false);
         }
       } catch {
         attempts++;
         if (attempts < maxAttempts) {
-          setTimeout(poll, 5000);
-        } else {
+          scheduleNextPoll();
+        } else if (isMountedRef.current) {
           setIsWaitingLn(false);
         }
       }
@@ -173,12 +191,14 @@ export function RoutstrCreateKeySection({
 
       const data = await resp.json();
       onApiKeyCreated(data.api_key);
+      if (!isMountedRef.current) return;
       setCashuToken('');
       toast.success('API key created');
     } catch (e) {
+      if (!isMountedRef.current) return;
       toast.error(e instanceof Error ? e.message : 'Failed to create key');
     } finally {
-      setIsCreatingCashu(false);
+      if (isMountedRef.current) setIsCreatingCashu(false);
     }
   };
 
