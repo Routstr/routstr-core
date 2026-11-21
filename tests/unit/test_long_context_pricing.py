@@ -106,6 +106,27 @@ def test_time_window_overrides_are_not_applied_as_tiers() -> None:
     assert pricing.overrides == []
 
 
+def test_tier_with_an_unusable_rate_is_dropped_not_the_model() -> None:
+    """A boolean would bill $1/token and a negative rate would disqualify the model."""
+    pricing = Pricing.parse_obj(
+        {
+            "prompt": "0.0000001",
+            "completion": "0.0000005",
+            "overrides": [
+                {"min_prompt_tokens": 100000, "prompt": True},
+                {"min_prompt_tokens": 150000, "completion": "-0.000001"},
+                {"min_prompt_tokens": 175000, "input_cache_read": "NaN"},
+                {"min_prompt_tokens": 200000, "prompt": "0.0000003"},
+            ],
+        }
+    )
+
+    assert [tier.min_prompt_tokens for tier in pricing.overrides] == [200000]
+    assert pricing.overrides[0].prompt == pytest.approx(3e-7)
+    assert has_usable_pricing(pricing)
+    assert pricing.for_prompt_tokens(150001).prompt == pytest.approx(1e-7)
+
+
 def test_for_prompt_tokens_threshold_is_exclusive() -> None:
     pricing = Pricing.parse_obj(HAIKU_OPENROUTER_PRICING)
 

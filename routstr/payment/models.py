@@ -74,6 +74,8 @@ def parse_pricing_tiers(value: object) -> list[PricingTier]:
 
     A malformed or condition-bearing entry is dropped, never raised: one bad
     override must not make the whole model unparseable and empty its route.
+    Each tier rate goes through ``coerce_rate``, so a boolean, negative or
+    non-finite rate drops its tier instead of disqualifying the model.
     """
     if not isinstance(value, list):
         return []
@@ -88,8 +90,15 @@ def parse_pricing_tiers(value: object) -> list[PricingTier]:
         conditions -= set(TIER_RATE_FIELDS) | _OVERRIDE_EXTRA_RATE_KEYS
         if conditions:
             continue
+        rates = {
+            field: coerce_rate(entry[field])
+            for field in TIER_RATE_FIELDS
+            if entry.get(field) is not None
+        }
+        if None in rates.values():
+            continue
         try:
-            tier = PricingTier.parse_obj(entry)
+            tier = PricingTier.parse_obj({**entry, **rates})
         except Exception:
             continue
         if tier.min_prompt_tokens > 0:
