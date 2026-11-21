@@ -281,6 +281,45 @@ async def test_discounted_max_cost_uses_tier_rate_before_fast_multiplier() -> No
     assert fast == 140_000
 
 
+async def test_discounted_max_cost_prices_context_limit_at_its_tier() -> None:
+    """A full 200k window crosses the 100k threshold, so its ceiling is the tier's."""
+    from routstr.payment.helpers import (
+        calculate_discounted_max_cost,
+        estimate_prompt_tokens,
+    )
+    from routstr.payment.models import Pricing, PricingTier, TopProvider
+
+    pricing = Pricing(
+        prompt=0.001,
+        completion=0.002,
+        max_prompt_cost=1000.0,
+        max_completion_cost=400.0,
+        overrides=[
+            PricingTier(min_prompt_tokens=100_000, prompt=0.005, completion=0.01)
+        ],
+    )
+    model_obj = Mock(
+        sats_pricing=pricing,
+        top_provider=TopProvider(context_length=200_000),
+        context_length=200_000,
+        usage_multipliers=None,
+    )
+    body = {"model": "test-model", "prompt": list(range(10_000))}
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        adjusted = await calculate_discounted_max_cost(1_500_000, body, model_obj)
+
+    # Prompt ceiling 200k x 0.005 = 1000 sats (base rate would give 200); the
+    # ~10k-token estimate stays under the threshold, at the 0.001 base rate.
+    estimated = estimate_prompt_tokens(body)
+    assert estimated < 100_000
+    assert adjusted == 1_500_000 - math.floor((1000 - estimated * 0.001) * 1000)
+
+
 async def test_discounted_max_cost_follows_model_multipliers_above_floor() -> None:
     """A sourced multiplier above the published 2x scales the hold with it, so
     the reservation still covers what settlement will charge."""

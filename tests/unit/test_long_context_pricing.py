@@ -9,6 +9,7 @@ reservation ceiling, and the token-priced settlement.
 """
 
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -32,6 +33,8 @@ from routstr.payment.models import (
     litellm_pricing_tiers,
 )
 from routstr.payment.pricing_trail import build_pricing_trail
+from routstr.upstream.certification import _expected_token_msats
+from routstr.upstream.pricing_resolver import _from_litellm, _from_openrouter
 
 # Verbatim shape of OpenRouter's anthropic/claude-haiku-5.5 pricing.
 HAIKU_OPENROUTER_PRICING = {
@@ -287,6 +290,71 @@ async def test_cached_tokens_count_toward_the_threshold() -> None:
     assert isinstance(result, CostData)
     # 10k uncached at 5 msats + 110k cache reads at the tier's 0.5 msats.
     assert result.total_msats == 10000 * 5 + 110000 * 0.5
+
+
+@pytest.mark.asyncio
+async def test_cache_writes_count_toward_the_threshold() -> None:
+    """Anthropic-native usage: 10k uncached + 100k cache writes is a 110k prompt."""
+    response = {
+        "model": "anthropic/claude-haiku-5.5",
+        "usage": {
+            "input_tokens": 10000,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 100000,
+        },
+    }
+
+    result = await calculate_cost(response, 10**9, model_obj=_sats_model())
+
+    assert isinstance(result, CostData)
+    # 10k uncached at the tier's 5 msats + 100k cache writes at its 6.25 msats.
+    assert result.total_msats == 10000 * 5 + 100000 * 6.25
+
+
+def test_certification_expects_the_long_context_tier() -> None:
+    sats_pricing = _sats_model().sats_pricing
+    usage = SimpleNamespace(
+        input_tokens=150000,
+        output_tokens=1000,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+    )
+
+    total, input_msats, output_msats = _expected_token_msats(sats_pricing, usage)
+
+    # Same 5x tier the engine bills (test_long_prompt_bills_long_context_tier).
+    assert total == 150000 * 5 + 1000 * 25
+    assert output_msats == 1000 * 25
+    assert input_msats == 150000 * 5
+
+
+def test_pricing_resolver_keeps_litellm_tiers() -> None:
+    info = {
+        "input_cost_per_token": 3e-6,
+        "output_cost_per_token": 1.5e-5,
+        "input_cost_per_token_above_200k_tokens": 6e-6,
+        "output_cost_per_token_above_200k_tokens": 2.25e-5,
+    }
+
+    with patch("routstr.payment.models.litellm_cost_entry", return_value=info):
+        resolved = _from_litellm("claude-sonnet-4-5")
+
+    assert resolved is not None
+    assert len(resolved.overrides) == 1
+    assert resolved.overrides[0].min_prompt_tokens == 200000
+    assert resolved.overrides[0].prompt == 6e-6
+    assert resolved.overrides[0].completion == 2.25e-5
+
+
+def test_pricing_resolver_keeps_openrouter_overrides() -> None:
+    feed = [{"id": "anthropic/claude-haiku-5.5", "pricing": HAIKU_OPENROUTER_PRICING}]
+
+    resolved = _from_openrouter("anthropic/claude-haiku-5.5", feed)
+
+    assert resolved is not None
+    assert len(resolved.overrides) == 1
+    assert resolved.overrides[0].min_prompt_tokens == 100000
+    assert resolved.overrides[0].prompt == pytest.approx(5e-7)
 
 
 def test_litellm_above_k_keys_become_tiers() -> None:
