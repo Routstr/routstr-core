@@ -202,11 +202,19 @@ class Settings(BaseSettings):
     models_refresh_interval_seconds: int = Field(
         default=360, env="MODELS_REFRESH_INTERVAL_SECONDS"
     )
+    # Routing-map rebuild cadence; carries DB ``ModelRow`` edits to sibling
+    # workers. See docs/provider/configuration.md "Refresh cadences".
+    model_maps_refresh_interval_seconds: int = Field(
+        default=60, env="MODEL_MAPS_REFRESH_INTERVAL_SECONDS"
+    )
     model_paths_refresh_interval_seconds: int = Field(
         default=600, env="MODEL_PATHS_REFRESH_INTERVAL_SECONDS"
     )
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
+    enable_model_maps_refresh: bool = Field(
+        default=True, env="ENABLE_MODEL_MAPS_REFRESH"
+    )
     enable_model_paths_refresh: bool = Field(
         default=True, env="ENABLE_MODEL_PATHS_REFRESH"
     )

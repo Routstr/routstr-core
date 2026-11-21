@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Make the periodic routing-map rebuild configurable. It was a hardcoded 60s
+  loop started unconditionally, so setting `MODELS_REFRESH_INTERVAL_SECONDS=0`
+  to pause model refresh still left every worker rebuilding the full mapping
+  table once a minute — a provider/model `selectinload` plus a cost ranking over
+  the whole catalog, for data that changes rarely. Add
+  `MODEL_MAPS_REFRESH_INTERVAL_SECONDS` (default `60`, unchanged behaviour) and
+  `ENABLE_MODEL_MAPS_REFRESH`; both are re-read every iteration, so pausing and
+  resuming take effect without a restart. Wire up `ENABLE_MODELS_REFRESH`, which
+  was defined but read nowhere, as the kill switch for fetching upstream model
+  catalogs.
 - Keep the accrued platform fee out of the primary mint's operator payout.
   Both payouts draw on the same owner surplus, so the operator loop could
   drain it every cycle and leave the capped fee payout held indefinitely.
