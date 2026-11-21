@@ -722,11 +722,16 @@ async def list_models(
     return models
 
 
-def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
+def _calculate_usd_max_costs(
+    model: Model, *, at_peak_tier: bool = True
+) -> tuple[float, float, float]:
     """Calculate max costs in USD based on model context/token limits.
 
     Args:
         model: Model object
+        at_peak_tier: Price at ``Pricing.peak()`` (the reservation ceiling).
+            ``False`` prices at the base rates, which routing ranks on so a
+            provider that publishes long-context tiers is not ranked on them.
 
     Returns:
         Tuple of (max_prompt_cost, max_completion_cost, max_cost) in USD
@@ -735,9 +740,9 @@ def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
     min_req_usd = float(min_req_msat) / 1_000_000.0
 
     # A full context window crosses every long-context threshold.
-    peak = model.pricing.peak()
-    prompt_price = peak.prompt
-    completion_price = peak.completion
+    rates = model.pricing.peak() if at_peak_tier else model.pricing
+    prompt_price = rates.prompt
+    completion_price = rates.completion
 
     if model.top_provider and (
         model.top_provider.context_length or model.top_provider.max_completion_tokens

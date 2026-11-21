@@ -17,6 +17,7 @@ os.environ.setdefault("UPSTREAM_BASE_URL", "http://test")
 os.environ.setdefault("UPSTREAM_API_KEY", "test")
 os.environ.setdefault("LIGHTNING_ADDRESS", "test@stm.to")
 
+from routstr.algorithm import calculate_model_reservation_score
 from routstr.core.settings import settings
 from routstr.payment.cost_calculation import CostData, calculate_cost
 from routstr.payment.models import (
@@ -168,6 +169,19 @@ def test_max_cost_reserves_at_the_long_context_rate() -> None:
 
     assert max_prompt == pytest.approx(200000 * 5e-7)
     assert max_cost == pytest.approx(200000 * 2.5e-6)
+
+
+def test_routing_ranks_tiered_provider_on_its_base_rate() -> None:
+    """Most prompts stay under the threshold, so the cheaper base must win."""
+    tiered = _model(Pricing.parse_obj(HAIKU_OPENROUTER_PRICING))
+    untiered = _model(Pricing(prompt=2e-7, completion=1e-6))
+
+    assert calculate_model_reservation_score(tiered) == pytest.approx(200000 * 5e-7)
+    assert calculate_model_reservation_score(
+        tiered
+    ) < calculate_model_reservation_score(untiered)
+    # The reservation ceiling still covers the peak tier.
+    assert _calculate_usd_max_costs(tiered)[2] > _calculate_usd_max_costs(untiered)[2]
 
 
 def test_unusable_tier_rate_disqualifies_pricing() -> None:

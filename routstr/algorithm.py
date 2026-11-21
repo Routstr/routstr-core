@@ -64,12 +64,14 @@ def calculate_model_reservation_score(model: "Model") -> float:
 
     The balance gate reserves on ``sats_pricing.max_cost``, which scales with
     ``context_length``. Ranking on the same ceiling keeps the advertised,
-    routed, and reserved candidate consistent. Lower is better.
+    routed, and reserved candidate consistent. Lower is better. It ranks on
+    the base rates: most prompts stay under any long-context threshold, so a
+    provider publishing tiers is not ranked on its peak tier.
     """
     from .payment.models import _calculate_usd_max_costs
 
     try:
-        _, _, max_cost = _calculate_usd_max_costs(model)
+        _, _, max_cost = _calculate_usd_max_costs(model, at_peak_tier=False)
         return float(max_cost)
     except Exception:
         # Pricing shape missing/invalid; per-token score keeps order deterministic
