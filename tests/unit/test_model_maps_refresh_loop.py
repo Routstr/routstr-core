@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from collections.abc import Callable
 
 import pytest
 
@@ -18,7 +19,7 @@ from routstr import proxy
 
 
 @pytest.fixture
-def fast_sleep(monkeypatch: pytest.MonkeyPatch):
+def fast_sleep(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], list[float]]:
     """Install a sleep that records requested delays and stops after ``limit``."""
 
     def _install(limit: int) -> list[float]:
@@ -49,7 +50,9 @@ def rebuilds(monkeypatch: pytest.MonkeyPatch) -> list[None]:
 
 @pytest.mark.asyncio
 async def test_loop_uses_the_configured_interval(
-    monkeypatch: pytest.MonkeyPatch, fast_sleep, rebuilds
+    monkeypatch: pytest.MonkeyPatch,
+    fast_sleep: Callable[[int], list[float]],
+    rebuilds: list[None],
 ) -> None:
     from routstr.core.settings import settings
 
@@ -69,7 +72,9 @@ async def test_loop_uses_the_configured_interval(
 
 @pytest.mark.asyncio
 async def test_zero_interval_idles_instead_of_rebuilding(
-    monkeypatch: pytest.MonkeyPatch, fast_sleep, rebuilds
+    monkeypatch: pytest.MonkeyPatch,
+    fast_sleep: Callable[[int], list[float]],
+    rebuilds: list[None],
 ) -> None:
     """``0`` must pause the refresh, and must not exit the task: an operator
     raising it back to N later has to take effect without a restart."""
@@ -89,7 +94,9 @@ async def test_zero_interval_idles_instead_of_rebuilding(
 
 @pytest.mark.asyncio
 async def test_kill_switch_pauses_the_loop(
-    monkeypatch: pytest.MonkeyPatch, fast_sleep, rebuilds
+    monkeypatch: pytest.MonkeyPatch,
+    fast_sleep: Callable[[int], list[float]],
+    rebuilds: list[None],
 ) -> None:
     from routstr.core.settings import settings
 
@@ -107,7 +114,9 @@ async def test_kill_switch_pauses_the_loop(
 
 @pytest.mark.asyncio
 async def test_loop_rereads_the_interval_each_iteration(
-    monkeypatch: pytest.MonkeyPatch, fast_sleep, rebuilds
+    monkeypatch: pytest.MonkeyPatch,
+    fast_sleep: Callable[[int], list[float]],
+    rebuilds: list[None],
 ) -> None:
     """A run-time change to the interval (including 0 -> N) applies live."""
     from routstr.core.settings import settings
