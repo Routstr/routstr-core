@@ -257,9 +257,7 @@ async def test_discounted_max_cost_uses_tier_rate_before_fast_multiplier() -> No
         completion=0.002,
         max_prompt_cost=50.0,
         max_completion_cost=40.0,
-        overrides=[
-            PricingTier(min_prompt_tokens=1, prompt=0.005, completion=0.01)
-        ],
+        overrides=[PricingTier(min_prompt_tokens=1, prompt=0.005, completion=0.01)],
     )
     model_obj = Mock(
         sats_pricing=pricing,
