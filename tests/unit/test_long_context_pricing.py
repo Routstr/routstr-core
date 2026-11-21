@@ -31,6 +31,7 @@ from routstr.payment.models import (
     has_usable_pricing,
     litellm_pricing_tiers,
 )
+from routstr.payment.pricing_trail import build_pricing_trail
 
 # Verbatim shape of OpenRouter's anthropic/claude-haiku-5.5 pricing.
 HAIKU_OPENROUTER_PRICING = {
@@ -182,6 +183,29 @@ def test_routing_ranks_tiered_provider_on_its_base_rate() -> None:
     ) < calculate_model_reservation_score(untiered)
     # The reservation ceiling still covers the peak tier.
     assert _calculate_usd_max_costs(tiered)[2] > _calculate_usd_max_costs(untiered)[2]
+
+
+def test_pricing_trail_reports_the_peak_rates_max_cost_used() -> None:
+    trail = build_pricing_trail(_sats_model(), 1000)
+
+    inputs = trail["max_cost_inputs"]
+    assert trail["formula"] == "context_only"
+    assert inputs["prompt_price_usd_per_token"] == pytest.approx(5e-7)
+    assert inputs["completion_price_usd_per_token"] == pytest.approx(2.5e-6)
+    # context_only: cl * max(completion_price, prompt_price) reproduces the total.
+    assert trail["max_cost_computed"]["max_cost_usd"] == pytest.approx(
+        inputs["context_length"] * inputs["completion_price_usd_per_token"]
+    )
+
+
+def test_pricing_trail_reports_base_rates_for_untiered_model() -> None:
+    usd = Pricing(prompt=1e-7, completion=5e-7)
+    model = _update_model_sats_pricing(_model(usd), sats_to_usd=1e-4)
+
+    inputs = build_pricing_trail(model, 1000)["max_cost_inputs"]
+
+    assert inputs["prompt_price_usd_per_token"] == 1e-7
+    assert inputs["completion_price_usd_per_token"] == 5e-7
 
 
 def test_unusable_tier_rate_disqualifies_pricing() -> None:

@@ -285,6 +285,12 @@ Only set when `base_source == "model_sats_pricing"`. The six branches of
 | `model_context_only` | no `top_provider` limits; `model.context_length` exists | `model.context_length * max(completion_price, prompt_price)` |
 | `flat_estimate` | no limits anywhere (`top_provider` absent/empty and `context_length` falsy) | `max(prompt*1_000_000 + completion*32_000 + request*100_000 + image*100 + web_search*1000 + internal_reasoning*100, min_req_usd)` |
 
+For a model with long-context tiers (`pricing.overrides`), `prompt_price` and
+`completion_price` are the peak rates across the base and every tier
+(`Pricing.peak()`), since a full context window crosses every threshold. The
+`max_cost_inputs` `*_price_usd_per_token` fields report those peak rates, so
+they reproduce `max_cost_computed`. Untiered models report their base rates.
+
 Notes on reachability (verified against the upstream classes):
 
 - `completion_only` is real but unusual: `venice.py` and `model_paths.py` set
