@@ -2776,9 +2776,9 @@ async def refund_routstr_provider_balance(provider_id: str) -> dict[str, object]
             # Request refund from upstream
             data = await provider.refund_balance()
             if "error" in data:
-                # If the upstream returned an OpenAI-style error (like the model unknown error)
-                # it means the request likely didn't even reach the refund endpoint handler
-                # but was intercepted by the proxy layer.
+                # Either the node's own refund refusal (e.g. no balance, ongoing
+                # requests) or a transport/proxy-layer failure that never
+                # reached the refund handler.
                 error_info = data.get("error", {})
                 message = (
                     error_info.get("message")
@@ -2815,7 +2815,7 @@ async def refund_routstr_provider_balance(provider_id: str) -> dict[str, object]
                 return {"ok": False, "message": "Upstream did not return a token"}
 
             # Receive token into local wallet
-            from ..wallet import recieve_token
+            from ..wallet import classify_redemption_error, recieve_token
 
             try:
                 # Use current wallet to receive
@@ -2825,6 +2825,19 @@ async def refund_routstr_provider_balance(provider_id: str) -> dict[str, object]
                     "message": "Successfully received refund from upstream provider",
                 }
             except Exception as e:
+                classified = classify_redemption_error(e)
+                if classified and classified[3] == "cashu_token_already_spent":
+                    # Upstream replays its persisted refund token for an emptied
+                    # key; an earlier refund already collected it.
+                    logger.warning(
+                        "Upstream refund token already spent; treating as collected",
+                        extra={"provider_id": provider_id},
+                    )
+                    return {
+                        "ok": True,
+                        "no_balance": True,
+                        "message": "Refund already collected",
+                    }
                 logger.error(f"Failed to receive refund token: {e}")
                 return {
                     "ok": False,

@@ -450,8 +450,8 @@ export default function ProvidersPage() {
                 onOverrideModel={(model) =>
                   handleOverrideModel(provider.id, model)
                 }
-                onUpdateApiKey={(newKey) => {
-                  updateMutation.mutate({
+                onUpdateApiKey={async (newKey) => {
+                  await updateMutation.mutateAsync({
                     id: provider.id,
                     data: { api_key: newKey },
                   });
