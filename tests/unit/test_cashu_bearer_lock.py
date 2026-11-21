@@ -271,6 +271,61 @@ def held_wallet_lock(
         os.close(fd)
 
 
+async def test_wallet_guard_zero_timeout_acquires_free_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import routstr.wallet as wallet
+
+    monkeypatch.setattr(
+        wallet, "_WALLET_OPERATION_LOCK", tmp_path / ".routstr-operation.lock"
+    )
+
+    entered = False
+    async with wallet.wallet_operation_guard(acquire_timeout_s=0):
+        entered = True
+
+    assert entered
+
+
+async def test_wallet_guard_releases_retry_acquired_after_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    import routstr.wallet as wallet
+
+    now = 100.0
+    acquisition_attempts = 0
+    releases = 0
+
+    def preempt_retry_past_deadline(fd: int, operation: int) -> None:
+        nonlocal acquisition_attempts, now, releases
+        if operation == fcntl.LOCK_UN:
+            releases += 1
+            return
+        acquisition_attempts += 1
+        if acquisition_attempts == 1:
+            raise BlockingIOError
+        now += 0.021
+
+    async def resume_immediately(delay: float) -> None:
+        assert delay == pytest.approx(0.02)
+
+    monkeypatch.setattr(
+        wallet, "_WALLET_OPERATION_LOCK", tmp_path / ".routstr-operation.lock"
+    )
+    monkeypatch.setattr(wallet, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(wallet.fcntl, "flock", preempt_retry_past_deadline)
+    monkeypatch.setattr(wallet, "_scheduler_sleep", resume_immediately)
+
+    with pytest.raises(wallet.WalletBusyError):
+        async with wallet.wallet_operation_guard(acquire_timeout_s=0.02):
+            pytest.fail("entered the guard after the retry acquisition deadline")
+
+    assert acquisition_attempts == 2
+    assert releases == 1
+
+
 async def test_wallet_guard_does_not_acquire_after_timeout_sleep(
     held_wallet_lock: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:

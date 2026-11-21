@@ -110,14 +110,16 @@ async def wallet_operation_guard(
     deadline = (
         None if acquire_timeout_s is None else time.monotonic() + acquire_timeout_s
     )
+    contended = False
     try:
         while not acquired:
-            if deadline is not None and time.monotonic() >= deadline:
+            if contended and deadline is not None and time.monotonic() >= deadline:
                 raise WalletBusyError(acquire_timeout_s or 0.0) from None
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
             except BlockingIOError:
+                contended = True
                 wait_s = 0.05
                 if deadline is not None:
                     remaining_s = deadline - time.monotonic()
@@ -125,6 +127,9 @@ async def wallet_operation_guard(
                         raise WalletBusyError(acquire_timeout_s or 0.0) from None
                     wait_s = min(wait_s, remaining_s)
                 await _scheduler_sleep(wait_s)
+            if contended and acquired and deadline is not None:
+                if time.monotonic() >= deadline:
+                    raise WalletBusyError(acquire_timeout_s or 0.0) from None
         depth_token = _wallet_operation_depth.set(1)
         async with fail_fast_mint_operations():
             yield
