@@ -193,6 +193,25 @@ async def test_long_prompt_bills_long_context_tier() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fast_mode_multiplies_selected_long_context_tier() -> None:
+    model = _sats_model()
+    model.usage_multipliers = {"speed": {"fast": 2.0}}
+    response = {
+        "model": "anthropic/claude-haiku-5.5",
+        "usage": {
+            "prompt_tokens": 150000,
+            "completion_tokens": 1000,
+            "speed": "fast",
+        },
+    }
+
+    result = await calculate_cost(response, 10**9, model_obj=model)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == 2 * (150000 * 5 + 1000 * 25)
+
+
+@pytest.mark.asyncio
 async def test_cached_tokens_count_toward_the_threshold() -> None:
     """Anthropic counts cache reads/writes in the prompt size the tier keys on."""
     response = {

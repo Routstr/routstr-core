@@ -218,6 +218,7 @@ async def test_discounted_max_cost_scales_with_fast_mode_and_us_inference() -> N
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.002
     pricing.max_prompt_cost = 50.0
@@ -247,12 +248,48 @@ async def test_discounted_max_cost_scales_with_fast_mode_and_us_inference() -> N
     assert fast_us >= math.ceil(fast * 1.1)
 
 
+async def test_discounted_max_cost_uses_tier_rate_before_fast_multiplier() -> None:
+    from routstr.payment.helpers import calculate_discounted_max_cost
+    from routstr.payment.models import Pricing, PricingTier
+
+    pricing = Pricing(
+        prompt=0.001,
+        completion=0.002,
+        max_prompt_cost=50.0,
+        max_completion_cost=40.0,
+        overrides=[
+            PricingTier(min_prompt_tokens=1, prompt=0.005, completion=0.01)
+        ],
+    )
+    model_obj = Mock(
+        sats_pricing=pricing,
+        top_provider=None,
+        context_length=None,
+        usage_multipliers={"speed": {"fast": 2.0}},
+    )
+    body = {"model": "test-model", "prompt": list(range(10_000)), "max_tokens": 2_000}
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        base = await calculate_discounted_max_cost(90_000, body, model_obj)
+        fast = await calculate_discounted_max_cost(
+            90_000, {**body, "speed": "fast"}, model_obj
+        )
+
+    assert base == 70_000
+    assert fast == 140_000
+
+
 async def test_discounted_max_cost_follows_model_multipliers_above_floor() -> None:
     """A sourced multiplier above the published 2x scales the hold with it, so
     the reservation still covers what settlement will charge."""
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.002
     pricing.max_prompt_cost = 50.0
