@@ -3,7 +3,7 @@ import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import AsyncGenerator, cast
+from typing import AsyncGenerator, Generator, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -247,3 +247,167 @@ async def test_new_key_holds_no_write_lock_during_redemption(
     finally:
         await other.dispose()
     assert key.balance == 100_000
+
+
+@pytest.fixture
+def held_wallet_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Generator[int, None, None]:
+    """The wallet operation lock, held by another open file (as another
+    worker or a slow payout would hold it)."""
+    import fcntl
+    import os
+
+    import routstr.wallet as wallet
+
+    path = tmp_path / ".routstr-operation.lock"
+    monkeypatch.setattr(wallet, "_WALLET_OPERATION_LOCK", path)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        yield fd
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+async def test_wallet_guard_zero_timeout_acquires_free_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import routstr.wallet as wallet
+
+    monkeypatch.setattr(
+        wallet, "_WALLET_OPERATION_LOCK", tmp_path / ".routstr-operation.lock"
+    )
+
+    entered = False
+    async with wallet.wallet_operation_guard(acquire_timeout_s=0):
+        entered = True
+
+    assert entered
+
+
+async def test_wallet_guard_releases_retry_acquired_after_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    import routstr.wallet as wallet
+
+    now = 100.0
+    acquisition_attempts = 0
+    releases = 0
+
+    def preempt_retry_past_deadline(fd: int, operation: int) -> None:
+        nonlocal acquisition_attempts, now, releases
+        if operation == fcntl.LOCK_UN:
+            releases += 1
+            return
+        acquisition_attempts += 1
+        if acquisition_attempts == 1:
+            raise BlockingIOError
+        now += 0.021
+
+    async def resume_immediately(delay: float) -> None:
+        assert delay == pytest.approx(0.02)
+
+    monkeypatch.setattr(
+        wallet, "_WALLET_OPERATION_LOCK", tmp_path / ".routstr-operation.lock"
+    )
+    monkeypatch.setattr(wallet, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(wallet.fcntl, "flock", preempt_retry_past_deadline)
+    monkeypatch.setattr(wallet, "_scheduler_sleep", resume_immediately)
+
+    with pytest.raises(wallet.WalletBusyError):
+        async with wallet.wallet_operation_guard(acquire_timeout_s=0.02):
+            pytest.fail("entered the guard after the retry acquisition deadline")
+
+    assert acquisition_attempts == 2
+    assert releases == 1
+
+
+async def test_wallet_guard_does_not_acquire_after_timeout_sleep(
+    held_wallet_lock: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    import routstr.wallet as wallet
+
+    now = 100.0
+    sleep_delays: list[float] = []
+
+    async def cross_deadline(delay: float) -> None:
+        nonlocal now
+        sleep_delays.append(delay)
+        now += 0.021
+        fcntl.flock(held_wallet_lock, fcntl.LOCK_UN)
+
+    monkeypatch.setattr(wallet, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(wallet, "_scheduler_sleep", cross_deadline)
+
+    with pytest.raises(wallet.WalletBusyError):
+        async with wallet.wallet_operation_guard(acquire_timeout_s=0.02):
+            pytest.fail("entered the guard after the acquisition deadline")
+
+    assert len(sleep_delays) == 1
+    assert sleep_delays[0] == pytest.approx(0.02)
+
+
+async def test_wallet_guard_wait_can_be_bounded(held_wallet_lock: int) -> None:
+    import fcntl
+
+    from routstr.wallet import WalletBusyError, wallet_operation_guard
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(WalletBusyError):
+        async with wallet_operation_guard(acquire_timeout_s=0.2):
+            pytest.fail("entered the guard while the lock is held")
+    assert asyncio.get_running_loop().time() - started < 2.0
+
+    # Without a bound the guard waits for the lock, as before.
+    entered = asyncio.Event()
+
+    async def unbounded() -> None:
+        async with wallet_operation_guard():
+            entered.set()
+
+    task = asyncio.create_task(unbounded())
+    await asyncio.sleep(0.3)
+    assert not entered.is_set()
+    fcntl.flock(held_wallet_lock, fcntl.LOCK_UN)
+    await asyncio.wait_for(task, 2.0)
+    assert entered.is_set()
+
+
+async def test_first_use_token_wait_for_the_wallet_lock_is_bounded(
+    session: AsyncSession, held_wallet_lock: int
+) -> None:
+    from routstr.wallet import WalletBusyError
+
+    with (
+        patch(
+            "routstr.auth.deserialize_token_from_string",
+            return_value=SimpleNamespace(mint="http://mint:3338", unit="sat"),
+        ),
+        patch("routstr.auth.credit_balance", new_callable=AsyncMock) as redeem,
+    ):
+        with pytest.raises(WalletBusyError):
+            await validate_bearer_key(TOKEN, session, wallet_lock_timeout_s=0.2)
+    redeem.assert_not_awaited()
+    # A wait that ended without the lock is no redemption failure.
+    assert redemption_negative_cache.get(KEY_HASH) is None
+
+
+async def test_undecodable_token_is_refused_without_the_wallet_lock(
+    session: AsyncSession,
+) -> None:
+    guard = CountingGuard()
+    with (
+        patch("routstr.auth.wallet_operation_guard", guard),
+        patch("routstr.auth.credit_balance", new_callable=AsyncMock) as redeem,
+    ):
+        with pytest.raises(HTTPException) as refused:
+            await validate_bearer_key("cashuAnot-a-token", session)
+    assert refused.value.status_code == 400
+    assert guard.entries == 0
+    redeem.assert_not_awaited()
