@@ -271,6 +271,33 @@ def held_wallet_lock(
         os.close(fd)
 
 
+async def test_wallet_guard_does_not_acquire_after_timeout_sleep(
+    held_wallet_lock: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    import routstr.wallet as wallet
+
+    now = 100.0
+    sleep_delays: list[float] = []
+
+    async def cross_deadline(delay: float) -> None:
+        nonlocal now
+        sleep_delays.append(delay)
+        now += 0.021
+        fcntl.flock(held_wallet_lock, fcntl.LOCK_UN)
+
+    monkeypatch.setattr(wallet, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(wallet, "_scheduler_sleep", cross_deadline)
+
+    with pytest.raises(wallet.WalletBusyError):
+        async with wallet.wallet_operation_guard(acquire_timeout_s=0.02):
+            pytest.fail("entered the guard after the acquisition deadline")
+
+    assert len(sleep_delays) == 1
+    assert sleep_delays[0] == pytest.approx(0.02)
+
+
 async def test_wallet_guard_wait_can_be_bounded(held_wallet_lock: int) -> None:
     import fcntl
 
