@@ -42,7 +42,11 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { Check, Copy, Loader2, Plus } from 'lucide-react';
 import { toast } from 'sonner';
-import { AdminService, type AdminModel } from '@/lib/api/services/admin';
+import {
+  AdminService,
+  type AdminModel,
+  type AdminModelPricing,
+} from '@/lib/api/services/admin';
 
 const listFromString = (value: string): string[] =>
   value
@@ -356,10 +360,11 @@ export function AddProviderModelDialog({
         }
       }
 
-      // An image model's generation price lives outside the form; carry it
-      // through so saving the dialog does not unprice the model.
+      // An image model's generation price and a model's long-context tiers
+      // live outside the form; carry them through so saving the dialog does
+      // not unprice the model or bill long prompts at the base rate.
       const initialPricing = initialData?.pricing as
-        | Record<string, number>
+        | AdminModelPricing
         | undefined;
       const adminModel: AdminModel = {
         id: data.id,
@@ -391,6 +396,9 @@ export function AddProviderModelDialog({
           max_prompt_cost: data.max_prompt_cost,
           max_completion_cost: data.max_completion_cost,
           max_cost: data.max_cost,
+          ...(initialPricing?.overrides?.length
+            ? { overrides: initialPricing.overrides }
+            : {}),
         },
         per_request_limits: perRequestLimits,
         top_provider:
