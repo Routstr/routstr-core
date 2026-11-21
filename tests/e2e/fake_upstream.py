@@ -2,7 +2,8 @@
 
 Requests whose ``user`` field is ``"slow"`` hang for ``FAKE_UPSTREAM_DELAY``
 seconds, standing in for a long generation that a restart interrupts; ``"greedy"``
-reports more usage than the payment covers, so all of it is charged. Every
+reports more usage than the payment covers, so all of it is charged; and
+``"usage=<json>"`` reports that JSON object as the completion's usage. Every
 accepted completion is appended to ``FAKE_UPSTREAM_LOG`` so tests can tell when
 a request reached the upstream.
 """
@@ -50,6 +51,9 @@ async def models(_: Request) -> Response:
 
 
 def _usage(body: dict) -> dict:
+    user = body.get("user")
+    if isinstance(user, str) and user.startswith("usage="):
+        return dict(json.loads(user.removeprefix("usage=")))
     completion = 100_000 if body.get("user") == "greedy" else 2
     return {
         "prompt_tokens": 3,
