@@ -75,7 +75,8 @@ def parse_pricing_tiers(value: object) -> list[PricingTier]:
     A malformed or condition-bearing entry is dropped, never raised: one bad
     override must not make the whole model unparseable and empty its route.
     Each tier rate goes through ``coerce_rate``, so a boolean, negative or
-    non-finite rate drops its tier instead of disqualifying the model.
+    non-finite rate drops its tier instead of disqualifying the model. A
+    dropped tier bills long prompts at the base rate, so each drop is logged.
     """
     if not isinstance(value, list):
         return []
@@ -85,25 +86,48 @@ def parse_pricing_tiers(value: object) -> list[PricingTier]:
             tiers.append(entry)
             continue
         if not isinstance(entry, dict):
+            _warn_dropped_tier(None, "entry is not an object")
             continue
+        min_prompt_tokens = entry.get("min_prompt_tokens")
         conditions = set(entry) - {"min_prompt_tokens"}
         conditions -= set(TIER_RATE_FIELDS) | _OVERRIDE_EXTRA_RATE_KEYS
         if conditions:
+            _warn_dropped_tier(
+                min_prompt_tokens,
+                f"unsupported conditions {sorted(map(str, conditions))}",
+            )
+            continue
+        # Pydantic v1 coerces ``True`` to ``1``, a tier that applies to nearly
+        # every prompt.
+        if isinstance(min_prompt_tokens, bool):
+            _warn_dropped_tier(min_prompt_tokens, "boolean min_prompt_tokens")
             continue
         rates = {
             field: coerce_rate(entry[field])
             for field in TIER_RATE_FIELDS
             if entry.get(field) is not None
         }
-        if None in rates.values():
+        invalid_rates = sorted(f for f, rate in rates.items() if rate is None)
+        if invalid_rates:
+            _warn_dropped_tier(min_prompt_tokens, f"invalid rates {invalid_rates}")
             continue
         try:
             tier = PricingTier.parse_obj({**entry, **rates})
         except Exception:
+            _warn_dropped_tier(min_prompt_tokens, "invalid min_prompt_tokens")
             continue
-        if tier.min_prompt_tokens > 0:
-            tiers.append(tier)
+        if tier.min_prompt_tokens <= 0:
+            _warn_dropped_tier(min_prompt_tokens, "non-positive min_prompt_tokens")
+            continue
+        tiers.append(tier)
     return sorted(tiers, key=lambda tier: tier.min_prompt_tokens)
+
+
+def _warn_dropped_tier(min_prompt_tokens: object, reason: str) -> None:
+    logger.warning(
+        "Dropping long-context pricing tier",
+        extra={"min_prompt_tokens": repr(min_prompt_tokens), "reason": reason},
+    )
 
 
 class Pricing(BaseModel):
