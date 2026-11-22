@@ -204,6 +204,7 @@ export interface AdminModelAsModel {
   has_own_api_key: boolean;
   api_key_type: string;
   alias_ids?: string[] | null;
+  pricing_overrides?: AdminModelPricing['overrides'];
 }
 
 export interface AdminModelGroup {
@@ -310,6 +311,8 @@ export class AdminService {
       has_own_api_key: false,
       api_key_type: 'group',
       alias_ids: adminModel.alias_ids,
+      pricing_overrides: (adminModel.pricing as AdminModelPricing | undefined)
+        ?.overrides,
     };
   }
 

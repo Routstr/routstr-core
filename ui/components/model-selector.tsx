@@ -78,6 +78,9 @@ const toAdminModelFromModel = (
       image: 0,
       web_search: 0,
       internal_reasoning: 0,
+      ...(model.pricing_overrides?.length
+        ? { overrides: model.pricing_overrides }
+        : {}),
     },
     per_request_limits: null,
     top_provider: null,
