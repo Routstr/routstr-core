@@ -431,9 +431,12 @@ Changing `sats_pricing.max_cost` changes more than the 402 body:
 - `calculate_model_reservation_score()` in `algorithm.py`, which calls
   `_calculate_usd_max_costs()` to rank same-model provider candidates.
 
-Because routing scores and reservations move together, the change is internally
-consistent — but it is a real pricing change and must not be smuggled into the
-402 formatting PR.
+For untiered providers, routing scores and reservations move together, so the
+change is internally consistent — but it is a real pricing change and must not
+be smuggled into the 402 formatting PR. Providers with long-context tiers are
+the exception: they are ranked on their base rate, but their hold is sized at
+the peak tier. A tight balance may therefore get a 402 even when an untiered
+candidate could have served the request.
 
 #### Tests
 
