@@ -92,9 +92,8 @@ def parse_pricing_tiers(value: object) -> list[PricingTier]:
         conditions = set(entry) - {"min_prompt_tokens"}
         conditions -= set(TIER_RATE_FIELDS) | _OVERRIDE_EXTRA_RATE_KEYS
         if conditions:
-            # Condition-bearing overrides are off-peak discounts (``utc_*``
-            # windows), so dropping one bills the higher base rate. Raw
-            # endpoint metadata is reparsed per request, hence debug.
+            # Time-window overrides (``utc_*``) are a known, unsupported case;
+            # raw endpoint metadata is reparsed per request, hence debug.
             reason = f"unsupported conditions {sorted(map(str, conditions))}"
             logger.debug(
                 "Dropping long-context pricing tier",

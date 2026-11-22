@@ -97,7 +97,7 @@ def test_openrouter_overrides_parse_into_tiers() -> None:
 
 
 def test_time_window_overrides_are_not_applied_as_tiers() -> None:
-    """DeepSeek's off-peak entries carry ``utc_*`` conditions, not a threshold."""
+    """DeepSeek's time-window entries carry ``utc_*`` conditions, not a threshold."""
     pricing = Pricing.parse_obj(
         {
             "prompt": "0.00000015",
@@ -150,8 +150,8 @@ def test_boolean_min_prompt_tokens_drops_its_tier() -> None:
 def test_dropped_tier_is_logged_with_its_reason() -> None:
     """A dropped tier bills long prompts at base rate; the operator must see it.
 
-    A dropped condition-bearing (off-peak) tier bills the higher base rate and
-    is reparsed per request, so it logs at debug instead.
+    A dropped time-window (``utc_*``) tier is a known, unsupported case and is
+    reparsed per request, so it logs at debug instead.
     """
     with patch("routstr.payment.models.logger") as logger:
         tiers = parse_pricing_tiers(
