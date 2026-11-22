@@ -10,7 +10,8 @@ reservation ceiling, and the token-priced settlement.
 
 import os
 from types import SimpleNamespace
-from unittest.mock import patch
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -31,9 +32,11 @@ from routstr.payment.models import (
     _update_model_sats_pricing,
     has_usable_pricing,
     litellm_pricing_tiers,
+    parse_pricing_tiers,
 )
 from routstr.payment.pricing_trail import build_pricing_trail
 from routstr.upstream.certification import _expected_token_msats
+from routstr.upstream.generic import GenericUpstreamProvider
 from routstr.upstream.pricing_resolver import _from_litellm, _from_openrouter
 
 # Verbatim shape of OpenRouter's anthropic/claude-haiku-5.5 pricing.
@@ -130,6 +133,47 @@ def test_tier_with_an_unusable_rate_is_dropped_not_the_model() -> None:
     assert pricing.overrides[0].prompt == pytest.approx(3e-7)
     assert has_usable_pricing(pricing)
     assert pricing.for_prompt_tokens(150001).prompt == pytest.approx(1e-7)
+
+
+def test_boolean_min_prompt_tokens_drops_its_tier() -> None:
+    """Pydantic would read ``True`` as 1 and tier nearly every prompt."""
+    tiers = parse_pricing_tiers(
+        [
+            {"min_prompt_tokens": True, "prompt": "0.0000005"},
+            {"min_prompt_tokens": 200000, "prompt": "0.0000003"},
+        ]
+    )
+
+    assert [tier.min_prompt_tokens for tier in tiers] == [200000]
+
+
+def test_dropped_tier_is_logged_with_its_reason() -> None:
+    """A dropped tier bills long prompts at base rate; the operator must see it."""
+    with patch("routstr.payment.models.logger") as logger:
+        tiers = parse_pricing_tiers(
+            [
+                {"min_prompt_tokens": 100000, "prompt": "-0.000001"},
+                {"min_prompt_tokens": True, "prompt": "0.0000005"},
+                {"min_prompt_tokens": 1000, "utc_start": 100, "prompt": "1e-7"},
+                {"min_prompt_tokens": 0, "prompt": "0.0000005"},
+                {"min_prompt_tokens": 200000, "prompt": "0.0000003"},
+            ]
+        )
+
+    assert [tier.min_prompt_tokens for tier in tiers] == [200000]
+    assert {call.args for call in logger.warning.call_args_list} == {
+        ("Dropping long-context pricing tier",)
+    }
+    drops = [
+        (call.kwargs["extra"]["min_prompt_tokens"], call.kwargs["extra"]["reason"])
+        for call in logger.warning.call_args_list
+    ]
+    assert drops == [
+        ("100000", "invalid rates ['prompt']"),
+        ("True", "boolean min_prompt_tokens"),
+        ("1000", "unsupported conditions ['utc_start']"),
+        ("0", "non-positive min_prompt_tokens"),
+    ]
 
 
 def test_for_prompt_tokens_threshold_is_exclusive() -> None:
@@ -328,6 +372,24 @@ def test_certification_expects_the_long_context_tier() -> None:
     assert input_msats == 150000 * 5
 
 
+def test_certification_counts_cache_tokens_toward_the_threshold() -> None:
+    """50k uncached is under the 100k threshold; with 100k cached it is over."""
+    sats_pricing = _sats_model().sats_pricing
+    usage = SimpleNamespace(
+        input_tokens=50000,
+        output_tokens=1000,
+        cache_read_tokens=60000,
+        cache_write_tokens=40000,
+    )
+
+    total, _, output_msats = _expected_token_msats(sats_pricing, usage)
+
+    # Tier rates in msats/token: input 5, cache read 0.5, cache write 6.25,
+    # output 25. Base rates would give 50000 + 6000 + 50000 + 5000.
+    assert total == 50000 * 5 + 60000 * 0.5 + 40000 * 6.25 + 1000 * 25
+    assert output_msats == 1000 * 25
+
+
 def test_pricing_resolver_keeps_litellm_tiers() -> None:
     info = {
         "input_cost_per_token": 3e-6,
@@ -355,6 +417,44 @@ def test_pricing_resolver_keeps_openrouter_overrides() -> None:
     assert len(resolved.overrides) == 1
     assert resolved.overrides[0].min_prompt_tokens == 100000
     assert resolved.overrides[0].prompt == pytest.approx(5e-7)
+
+
+class _ModelsEndpointClient:
+    """Stand-in for ``httpx.AsyncClient`` serving one bare ``/models`` entry."""
+
+    async def __aenter__(self) -> "_ModelsEndpointClient":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def get(self, url: str, headers: dict[str, str] | None = None) -> Any:
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"data": [{"id": "example/tiered-haiku"}]},
+        )
+
+
+@pytest.mark.asyncio
+async def test_generic_fetch_models_keeps_resolved_tiers() -> None:
+    """The resolver's tiers must reach the imported model's pricing."""
+    feed = [{"id": "example/tiered-haiku", "pricing": HAIKU_OPENROUTER_PRICING}]
+
+    with (
+        patch(
+            "routstr.upstream.generic.httpx.AsyncClient",
+            lambda *args, **kwargs: _ModelsEndpointClient(),
+        ),
+        patch(
+            "routstr.payment.models.async_fetch_openrouter_models",
+            AsyncMock(return_value=feed),
+        ),
+    ):
+        models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    [model] = models
+    assert [tier.min_prompt_tokens for tier in model.pricing.overrides] == [100000]
+    assert model.pricing.overrides[0].prompt == pytest.approx(5e-7)
 
 
 def test_litellm_above_k_keys_become_tiers() -> None:
