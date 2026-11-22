@@ -78,6 +78,9 @@ const toAdminModelFromModel = (
       image: 0,
       web_search: 0,
       internal_reasoning: 0,
+      ...(model.pricing_overrides?.length
+        ? { overrides: model.pricing_overrides }
+        : {}),
     },
     per_request_limits: null,
     top_provider: null,
@@ -488,18 +491,35 @@ export function ModelSelector({
     });
   };
 
-  const handleEditModelClick = (model: Model) => {
+  // The stored row carries fields `Model` lacks, such as pricing tiers in
+  // `pricing.overrides`; saving from a `Model`-only copy would drop them.
+  const loadDialogInitialData = async (
+    model: Model,
+    providerId: number
+  ): Promise<AdminModel | null> => {
+    try {
+      return await AdminService.getProviderModel(providerId, model.id);
+    } catch (fetchError: unknown) {
+      const error = fetchError as { message?: string; status?: number };
+      if (error.message?.includes('404') || error.status === 404) {
+        return toAdminModelFromModel(model, providerId, model.isEnabled);
+      }
+      const errorMessage =
+        fetchError instanceof Error ? fetchError.message : 'Unknown error';
+      toast.error(`Failed to load model: ${errorMessage}`);
+      return null;
+    }
+  };
+
+  const handleEditModelClick = async (model: Model) => {
     if (!model.provider_id) {
       toast.error('Provider ID missing for model');
       return;
     }
     const providerId = parseInt(model.provider_id);
 
-    const adminModel = toAdminModelFromModel(
-      model,
-      providerId,
-      model.isEnabled
-    );
+    const adminModel = await loadDialogInitialData(model, providerId);
+    if (!adminModel) return;
 
     setModelDialogState({
       isOpen: true,
@@ -509,18 +529,15 @@ export function ModelSelector({
     });
   };
 
-  const handleOverrideModelClick = (model: Model) => {
+  const handleOverrideModelClick = async (model: Model) => {
     if (!model.provider_id) {
       toast.error('Provider ID missing for model');
       return;
     }
     const providerId = parseInt(model.provider_id);
 
-    const adminModel = toAdminModelFromModel(
-      model,
-      providerId,
-      model.isEnabled
-    );
+    const adminModel = await loadDialogInitialData(model, providerId);
+    if (!adminModel) return;
 
     setModelDialogState({
       isOpen: true,

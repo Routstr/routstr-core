@@ -63,13 +63,17 @@ def calculate_model_reservation_score(model: "Model") -> float:
     """Context-based reservation ceiling for ranking same-model candidates.
 
     The balance gate reserves on ``sats_pricing.max_cost``, which scales with
-    ``context_length``. Ranking on the same ceiling keeps the advertised,
-    routed, and reserved candidate consistent. Lower is better.
+    ``context_length``. Lower is better. For an untiered provider this is the
+    ceiling it reserves. A provider publishing long-context tiers is ranked on
+    its base rates, since most prompts stay under any threshold, but its hold
+    is sized at the peak tier. So a tiered winner can hold more than an
+    untiered alternative would, and a tight balance may get a 402 even when
+    that alternative could have served the request.
     """
     from .payment.models import _calculate_usd_max_costs
 
     try:
-        _, _, max_cost = _calculate_usd_max_costs(model)
+        _, _, max_cost = _calculate_usd_max_costs(model, at_peak_tier=False)
         return float(max_cost)
     except Exception:
         # Pricing shape missing/invalid; per-token score keeps order deterministic

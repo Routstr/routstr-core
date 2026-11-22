@@ -42,7 +42,11 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { Check, Copy, Loader2, Plus } from 'lucide-react';
 import { toast } from 'sonner';
-import { AdminService, type AdminModel } from '@/lib/api/services/admin';
+import {
+  AdminService,
+  type AdminModel,
+  type AdminModelPricing,
+} from '@/lib/api/services/admin';
 
 const listFromString = (value: string): string[] =>
   value
@@ -108,6 +112,11 @@ export function AddProviderModelDialog({
   const [isPresetOpen, setIsPresetOpen] = useState(false);
   const [selectedPresetLabel, setSelectedPresetLabel] =
     useState('Select a preset');
+  // Tiers of the applied preset; `null` until one is applied. A preset sets
+  // the base rates, so its tiers (or none) replace those of `initialData`.
+  const [presetOverrides, setPresetOverrides] = useState<
+    AdminModelPricing['overrides'] | null
+  >(null);
   const { copied: forwardedModelIdCopied, copy } = useCopyToClipboard(1500);
 
   const form = useForm<FormData>({
@@ -155,6 +164,7 @@ export function AddProviderModelDialog({
   });
 
   useEffect(() => {
+    setPresetOverrides(null);
     if (initialData) {
       const architecture = initialData.architecture as Record<string, unknown>;
       const pricing = initialData.pricing as Record<string, number>;
@@ -258,6 +268,9 @@ export function AddProviderModelDialog({
 
   const applyModelToForm = (model: AdminModel) => {
     setSelectedPresetLabel(`${model.id} — ${model.name}`);
+    setPresetOverrides(
+      (model.pricing as AdminModelPricing | undefined)?.overrides ?? []
+    );
     const architecture = model.architecture as Record<string, unknown>;
     const pricing = model.pricing as Record<string, number>;
     const topProvider = model.top_provider as Record<string, unknown> | null;
@@ -356,11 +369,13 @@ export function AddProviderModelDialog({
         }
       }
 
-      // An image model's generation price lives outside the form; carry it
-      // through so saving the dialog does not unprice the model.
+      // An image model's generation price and a model's long-context tiers
+      // live outside the form; carry them through so saving the dialog does
+      // not unprice the model or bill long prompts at the base rate.
       const initialPricing = initialData?.pricing as
-        | Record<string, number>
+        | AdminModelPricing
         | undefined;
+      const overrides = presetOverrides ?? initialPricing?.overrides;
       const adminModel: AdminModel = {
         id: data.id,
         name: data.name,
@@ -391,6 +406,7 @@ export function AddProviderModelDialog({
           max_prompt_cost: data.max_prompt_cost,
           max_completion_cost: data.max_completion_cost,
           max_cost: data.max_cost,
+          ...(overrides?.length ? { overrides } : {}),
         },
         per_request_limits: perRequestLimits,
         top_provider:

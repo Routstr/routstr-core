@@ -60,7 +60,7 @@ class TestPricingUpdateTask:
             # Compute sats pricing once using the same logic as the background task
             # Run the pricing update logic once directly
             sats_to_usd = mock_sats_usd
-            _pdict = {k: v / sats_to_usd for k, v in test_model.pricing.dict().items()}
+            _pdict = test_model.pricing.scaled(1 / sats_to_usd).dict()
             test_model.sats_pricing = Pricing(
                 prompt=_pdict.get("prompt", 0.0),
                 completion=_pdict.get("completion", 0.0),
@@ -163,7 +163,7 @@ class TestPricingUpdateTask:
             return_value=0.00002,
         ):
             sats_to_usd = 0.00002
-            _pdict = {k: v / sats_to_usd for k, v in test_model.pricing.dict().items()}
+            _pdict = test_model.pricing.scaled(1 / sats_to_usd).dict()
             test_model.sats_pricing = Pricing(
                 prompt=_pdict.get("prompt", 0.0),
                 completion=_pdict.get("completion", 0.0),

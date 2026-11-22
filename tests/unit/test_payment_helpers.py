@@ -132,6 +132,7 @@ async def test_discounted_max_cost_floors_at_min_request_msat() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 100.0
@@ -191,6 +192,7 @@ async def test_discount_counts_legacy_token_id_prompt() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.0
     pricing.max_prompt_cost = 50.0
@@ -216,6 +218,7 @@ async def test_discounted_max_cost_scales_with_fast_mode_and_us_inference() -> N
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.002
     pricing.max_prompt_cost = 50.0
@@ -245,12 +248,85 @@ async def test_discounted_max_cost_scales_with_fast_mode_and_us_inference() -> N
     assert fast_us >= math.ceil(fast * 1.1)
 
 
+async def test_discounted_max_cost_uses_tier_rate_before_fast_multiplier() -> None:
+    from routstr.payment.helpers import calculate_discounted_max_cost
+    from routstr.payment.models import Pricing, PricingTier
+
+    pricing = Pricing(
+        prompt=0.001,
+        completion=0.002,
+        max_prompt_cost=50.0,
+        max_completion_cost=40.0,
+        overrides=[PricingTier(min_prompt_tokens=1, prompt=0.005, completion=0.01)],
+    )
+    model_obj = Mock(
+        sats_pricing=pricing,
+        top_provider=None,
+        context_length=None,
+        usage_multipliers={"speed": {"fast": 2.0}},
+    )
+    body = {"model": "test-model", "prompt": list(range(10_000)), "max_tokens": 2_000}
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        base = await calculate_discounted_max_cost(90_000, body, model_obj)
+        fast = await calculate_discounted_max_cost(
+            90_000, {**body, "speed": "fast"}, model_obj
+        )
+
+    assert base == 70_000
+    assert fast == 140_000
+
+
+async def test_discounted_max_cost_prices_context_limit_at_its_tier() -> None:
+    """A full 200k window crosses the 100k threshold, so its ceiling is the tier's."""
+    from routstr.payment.helpers import (
+        calculate_discounted_max_cost,
+        estimate_prompt_tokens,
+    )
+    from routstr.payment.models import Pricing, PricingTier, TopProvider
+
+    pricing = Pricing(
+        prompt=0.001,
+        completion=0.002,
+        max_prompt_cost=1000.0,
+        max_completion_cost=400.0,
+        overrides=[
+            PricingTier(min_prompt_tokens=100_000, prompt=0.005, completion=0.01)
+        ],
+    )
+    model_obj = Mock(
+        sats_pricing=pricing,
+        top_provider=TopProvider(context_length=200_000),
+        context_length=200_000,
+        usage_multipliers=None,
+    )
+    body = {"model": "test-model", "prompt": list(range(10_000))}
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        adjusted = await calculate_discounted_max_cost(1_500_000, body, model_obj)
+
+    # Prompt ceiling 200k x 0.005 = 1000 sats (base rate would give 200); the
+    # ~10k-token estimate stays under the threshold, at the 0.001 base rate.
+    estimated = estimate_prompt_tokens(body)
+    assert estimated < 100_000
+    assert adjusted == 1_500_000 - math.floor((1000 - estimated * 0.001) * 1000)
+
+
 async def test_discounted_max_cost_follows_model_multipliers_above_floor() -> None:
     """A sourced multiplier above the published 2x scales the hold with it, so
     the reservation still covers what settlement will charge."""
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.002
     pricing.max_prompt_cost = 50.0
@@ -288,6 +364,7 @@ async def test_discount_cannot_be_dodged_by_hiding_prompt_in_tools() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.5
     pricing.completion = 0.01
     pricing.max_prompt_cost = 100.0
@@ -369,6 +446,7 @@ async def test_discounted_max_cost_counts_responses_input_images() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 100.0
@@ -538,6 +616,7 @@ async def test_responses_transform_failure_falls_back_to_worst_case() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 100.0
@@ -584,6 +663,7 @@ async def test_discounted_max_cost_body_max_output_tokens_fallback() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 0.0
@@ -611,6 +691,7 @@ async def test_discounted_max_cost_body_max_completion_tokens_fallback() -> None
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 0.0
@@ -643,6 +724,7 @@ async def test_discounted_max_cost_uses_largest_completion_cap() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 0.0
@@ -675,6 +757,7 @@ async def test_discounted_max_cost_invalid_completion_cap_ignored() -> None:
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
+    pricing.for_prompt_tokens.return_value = pricing
     pricing.prompt = 0.001
     pricing.completion = 0.001
     pricing.max_prompt_cost = 0.0

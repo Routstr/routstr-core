@@ -96,6 +96,16 @@ export type CertifyProviderRequest = {
   check_cache?: boolean;
 };
 
+// A long-context tier, in USD per token like the API stores it. The per-1M
+// display conversions leave tiers untouched, so they round-trip unchanged.
+export const AdminModelPricingTierSchema = z.object({
+  min_prompt_tokens: z.number(),
+  prompt: z.number().nullable().optional(),
+  completion: z.number().nullable().optional(),
+  input_cache_read: z.number().nullable().optional(),
+  input_cache_write: z.number().nullable().optional(),
+});
+
 export const AdminModelPricingSchema = z.object({
   prompt: z.number().optional(),
   completion: z.number().optional(),
@@ -106,6 +116,7 @@ export const AdminModelPricingSchema = z.object({
   internal_reasoning: z.number().optional(),
   input_cache_read: z.number().optional(),
   input_cache_write: z.number().optional(),
+  overrides: z.array(AdminModelPricingTierSchema).optional(),
 });
 
 export const AdminModelArchitectureSchema = z.object({
@@ -193,6 +204,7 @@ export interface AdminModelAsModel {
   has_own_api_key: boolean;
   api_key_type: string;
   alias_ids?: string[] | null;
+  pricing_overrides?: AdminModelPricing['overrides'];
 }
 
 export interface AdminModelGroup {
@@ -299,6 +311,8 @@ export class AdminService {
       has_own_api_key: false,
       api_key_type: 'group',
       alias_ids: adminModel.alias_ids,
+      pricing_overrides: (adminModel.pricing as AdminModelPricing | undefined)
+        ?.overrides,
     };
   }
 

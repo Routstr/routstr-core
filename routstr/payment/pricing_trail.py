@@ -53,6 +53,9 @@ def _build_pricing_trail(model: Model | None, base_msats: int) -> dict[str, Any]
     trail.update(
         base_source="model_sats_pricing", formula=formula, max_cost_formula=formula
     )
+    # The rates ``_calculate_usd_max_costs`` prices with: a tiered model's
+    # ceiling uses its peak tier, so the reported inputs reproduce the total.
+    rates = model.pricing.peak()
     trail["max_cost_inputs"] = {
         "context_length": cl,
         "max_completion_tokens": mct,
@@ -60,7 +63,7 @@ def _build_pricing_trail(model: Model | None, base_msats: int) -> dict[str, Any]
         **{
             f"{field}_price_usd_per_token"
             if field in ("prompt", "completion")
-            else f"{field}_price_usd": getattr(model.pricing, field)
+            else f"{field}_price_usd": getattr(rates, field)
             for field in (
                 "prompt",
                 "completion",

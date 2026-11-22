@@ -285,6 +285,12 @@ Only set when `base_source == "model_sats_pricing"`. The six branches of
 | `model_context_only` | no `top_provider` limits; `model.context_length` exists | `model.context_length * max(completion_price, prompt_price)` |
 | `flat_estimate` | no limits anywhere (`top_provider` absent/empty and `context_length` falsy) | `max(prompt*1_000_000 + completion*32_000 + request*100_000 + image*100 + web_search*1000 + internal_reasoning*100, min_req_usd)` |
 
+For a model with long-context tiers (`pricing.overrides`), `prompt_price` and
+`completion_price` are the peak rates across the base and every tier
+(`Pricing.peak()`), since a full context window crosses every threshold. The
+`max_cost_inputs` `*_price_usd_per_token` fields report those peak rates, so
+they reproduce `max_cost_computed`. Untiered models report their base rates.
+
 Notes on reachability (verified against the upstream classes):
 
 - `completion_only` is real but unusual: `venice.py` and `model_paths.py` set
@@ -425,9 +431,12 @@ Changing `sats_pricing.max_cost` changes more than the 402 body:
 - `calculate_model_reservation_score()` in `algorithm.py`, which calls
   `_calculate_usd_max_costs()` to rank same-model provider candidates.
 
-Because routing scores and reservations move together, the change is internally
-consistent — but it is a real pricing change and must not be smuggled into the
-402 formatting PR.
+For untiered providers, routing scores and reservations move together, so the
+change is internally consistent — but it is a real pricing change and must not
+be smuggled into the 402 formatting PR. Providers with long-context tiers are
+the exception: they are ranked on their base rate, but their hold is sized at
+the peak tier. A tight balance may therefore get a 402 even when an untiered
+candidate could have served the request.
 
 #### Tests
 

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AdminModelPricingTierSchema } from '@/lib/api/services/admin';
 
 // Base model schema that defines common properties for all models
 export const ModelSchema = z.object({
@@ -32,6 +33,8 @@ export const ModelSchema = z.object({
   has_own_api_key: z.boolean(),
   api_key_type: z.string(), // "individual" or "group"
   alias_ids: z.array(z.string()).nullable().optional(),
+  // Long-context tiers in USD per token, unlike the per-1M input/output costs.
+  pricing_overrides: z.array(AdminModelPricingTierSchema).optional(),
 });
 
 // Schema for a model with additional provider-specific settings
