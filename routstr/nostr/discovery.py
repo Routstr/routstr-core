@@ -3,6 +3,7 @@ import json
 import random
 import string
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import websockets
@@ -10,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..core.logging import get_logger
 from ..core.settings import settings
+from ..net_guard import BlockedDestinationError, validated_fetch_target
 from .listing import DEFAULT_RELAY_URLS
 
 logger = get_logger(__name__)
@@ -309,11 +311,38 @@ async def providers_cache_refresher(
         await refresh_providers_cache(pubkey=pubkey)
 
 
+PROVIDER_FETCH_MAX_REDIRECTS = 5
+
+
+async def _get_announced_url(
+    client: httpx.AsyncClient, url: str, is_onion: bool
+) -> httpx.Response:
+    """GET a URL taken from a provider announcement, following redirects.
+
+    Redirects are followed here rather than by httpx so that every hop is
+    checked and clearnet HTTP connects to the address that was checked, with
+    relative locations resolved against the announced hostname instead of the
+    pinned address. Onion endpoints may only redirect to other onion hosts.
+    """
+    for _ in range(PROVIDER_FETCH_MAX_REDIRECTS + 1):
+        if is_onion:
+            if not (urlsplit(url).hostname or "").endswith(".onion"):
+                raise BlockedDestinationError("onion provider left the onion network")
+            response = await client.get(url)
+        else:
+            target, host_header = await validated_fetch_target(url)
+            response = await client.get(target, headers={"Host": host_header})
+        if not response.has_redirect_location:
+            return response
+        url = str(httpx.URL(url).join(response.headers["Location"]))
+    raise httpx.TooManyRedirects("too many redirects")
+
+
 async def fetch_provider_health(endpoint_url: str) -> dict[str, Any]:
     """Fetch provider health and info, preferring /v1/info for models and pricing."""
     try:
         # Determine if we need Tor proxy based on .onion domain
-        is_onion = ".onion" in endpoint_url
+        is_onion = (urlsplit(endpoint_url).hostname or "").endswith(".onion")
 
         # Set up client arguments conditionally
         proxy: str | None = None
@@ -326,13 +355,13 @@ async def fetch_provider_health(endpoint_url: str) -> dict[str, Any]:
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
-            follow_redirects=True,
+            follow_redirects=False,
             proxy=proxy,
         ) as client:
             # Prefer provider's /v1/info for full details
             info_url = f"{endpoint_url.rstrip('/')}/v1/info"
             try:
-                response = await client.get(info_url)
+                response = await _get_announced_url(client, info_url, is_onion)
                 if response.status_code == 200:
                     return {
                         "status_code": response.status_code,
@@ -345,7 +374,7 @@ async def fetch_provider_health(endpoint_url: str) -> dict[str, Any]:
             # Fallback to /v1/models
             models_url = f"{endpoint_url.rstrip('/')}/v1/models"
             try:
-                response = await client.get(models_url)
+                response = await _get_announced_url(client, models_url, is_onion)
                 if response.status_code == 200:
                     return {
                         "status_code": response.status_code,
@@ -356,7 +385,7 @@ async def fetch_provider_health(endpoint_url: str) -> dict[str, Any]:
                 pass
 
             # Fallback to root endpoint
-            response = await client.get(endpoint_url)
+            response = await _get_announced_url(client, endpoint_url, is_onion)
             return {
                 "status_code": response.status_code,
                 "endpoint": "root",

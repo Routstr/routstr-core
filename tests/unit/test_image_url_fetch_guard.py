@@ -7,12 +7,13 @@ from typing import Any, Callable, Iterator
 
 import pytest
 
+from routstr import net_guard
+from routstr.net_guard import is_blocked_address
 from routstr.payment import helpers
 from routstr.payment.helpers import (
     IMAGE_FETCH_MAX_BYTES,
     IMAGE_FETCH_MAX_PER_REQUEST,
     _fetch_image_from_url,
-    _is_blocked_address,
     _validated_fetch_target,
     estimate_image_tokens_in_messages,
 )
@@ -86,12 +87,12 @@ async def test_non_http_scheme_is_rejected() -> None:
     ],
 )
 def test_non_global_addresses_are_blocked(address: str) -> None:
-    assert _is_blocked_address(address) is True
+    assert is_blocked_address(address) is True
 
 
 @pytest.mark.parametrize("address", ["8.8.8.8", "2001:4860:4860::8888"])
 def test_global_addresses_are_allowed(address: str) -> None:
-    assert _is_blocked_address(address) is False
+    assert is_blocked_address(address) is False
 
 
 @pytest.mark.asyncio
@@ -102,7 +103,7 @@ async def test_http_target_is_pinned_to_validated_address(
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))]
 
     monkeypatch.setattr(
-        helpers.asyncio, "get_running_loop", lambda: _Loop(fake_getaddrinfo)
+        net_guard.asyncio, "get_running_loop", lambda: _Loop(fake_getaddrinfo)
     )
 
     target, host_header = await _validated_fetch_target("http://example.com/cat.png")
@@ -119,7 +120,7 @@ async def test_https_target_keeps_hostname_for_tls(
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
 
     monkeypatch.setattr(
-        helpers.asyncio, "get_running_loop", lambda: _Loop(fake_getaddrinfo)
+        net_guard.asyncio, "get_running_loop", lambda: _Loop(fake_getaddrinfo)
     )
 
     target, host_header = await _validated_fetch_target("https://example.com/cat.png")
