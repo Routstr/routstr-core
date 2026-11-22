@@ -43,7 +43,7 @@ async def _side() -> dict[str, Any]:
         "upstream_host": "api.numes.ai",
         "head_template": "x",
         "v": 3,
-        "twopc": "split-public-1",
+        "twopc": "split-public-2",
     }
 
 

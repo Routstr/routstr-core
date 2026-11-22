@@ -744,7 +744,7 @@ GET /v1/confidential/offer?v=3
 The node's Nostr-signed offer (the query is ignored; clients send it). Fields:
 `v` (`3`), `http` (the framings the sidecar serves now, `"2"` and/or `"1.1"`,
 in the operator's order), `h2` (only when `http` lists `"2"`), `twopc`
-(`"split-public-1"`), `connection_deposit_msat`, `idle_timeout_s`,
+(`"split-public-2"`), `connection_deposit_msat`, `idle_timeout_s`,
 `upstream_host`, `ws` (the session socket URL; relative when `HTTP_URL` is
 unset), `head_template`, `key_length`, `key_alphabet`, `suffix_keys`, `chat`
 (the pinned chat suffix), `max_tokens_cap`, `price_list` (per model `in`,
