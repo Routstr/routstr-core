@@ -148,7 +148,11 @@ def test_boolean_min_prompt_tokens_drops_its_tier() -> None:
 
 
 def test_dropped_tier_is_logged_with_its_reason() -> None:
-    """A dropped tier bills long prompts at base rate; the operator must see it."""
+    """A dropped tier bills long prompts at base rate; the operator must see it.
+
+    A dropped condition-bearing (off-peak) tier bills the higher base rate and
+    is reparsed per request, so it logs at debug instead.
+    """
     with patch("routstr.payment.models.logger") as logger:
         tiers = parse_pricing_tiers(
             [
@@ -171,9 +175,13 @@ def test_dropped_tier_is_logged_with_its_reason() -> None:
     assert drops == [
         ("100000", "invalid rates ['prompt']"),
         ("True", "boolean min_prompt_tokens"),
-        ("1000", "unsupported conditions ['utc_start']"),
         ("0", "non-positive min_prompt_tokens"),
     ]
+    debug_drops = [
+        (call.kwargs["extra"]["min_prompt_tokens"], call.kwargs["extra"]["reason"])
+        for call in logger.debug.call_args_list
+    ]
+    assert debug_drops == [("1000", "unsupported conditions ['utc_start']")]
 
 
 def test_for_prompt_tokens_threshold_is_exclusive() -> None:

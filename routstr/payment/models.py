@@ -92,9 +92,13 @@ def parse_pricing_tiers(value: object) -> list[PricingTier]:
         conditions = set(entry) - {"min_prompt_tokens"}
         conditions -= set(TIER_RATE_FIELDS) | _OVERRIDE_EXTRA_RATE_KEYS
         if conditions:
-            _warn_dropped_tier(
-                min_prompt_tokens,
-                f"unsupported conditions {sorted(map(str, conditions))}",
+            # Condition-bearing overrides are off-peak discounts (``utc_*``
+            # windows), so dropping one bills the higher base rate. Raw
+            # endpoint metadata is reparsed per request, hence debug.
+            reason = f"unsupported conditions {sorted(map(str, conditions))}"
+            logger.debug(
+                "Dropping long-context pricing tier",
+                extra={"min_prompt_tokens": repr(min_prompt_tokens), "reason": reason},
             )
             continue
         # Pydantic v1 coerces ``True`` to ``1``, a tier that applies to nearly
