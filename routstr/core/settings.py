@@ -120,9 +120,11 @@ class Settings(BaseSettings):
     # armed spares per process, one per pool key; the browser library one per
     # key; connections being opened are busy and not counted. So the default
     # is 5: a lone spare can lose its slot under pressure, never its deposit,
-    # and an address hoarding slots pays.
+    # and an address hoarding slots pays. At least 2: at 1 any setup could
+    # make another address's single spare pay, and the clients report such
+    # a charge as a deviation.
     confidential_evict_charge_from: int = Field(
-        default=5, ge=1, env="CONFIDENTIAL_EVICT_CHARGE_FROM"
+        default=5, ge=2, env="CONFIDENTIAL_EVICT_CHARGE_FROM"
     )
     # Pricing of confidential connections (fees off by default). A connection
     # moves ~16 MB of 2PC data and costs the node CPU before the provider

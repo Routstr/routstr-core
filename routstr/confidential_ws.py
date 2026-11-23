@@ -233,8 +233,12 @@ EVICT_WAIT_S = 5.0
 # its 2PC or proof channel moved a byte in the last ZK_QUIET_S while the
 # connection is younger than the sidecar's 2PC limit (TWOPC_LIMIT_S). The
 # handshake and 2PC protections are bounded, so moving bytes cannot keep an
-# unused connection out of reach.
+# unused connection out of reach. After ``head_written`` the connection is
+# safe for HEAD_GRACE_S more: in framing "2" the client sends its first
+# ``request`` only once it has read the provider's SETTINGS, and the
+# provider credential has just been used for it.
 HANDSHAKE_GRACE_S = 60.0
+HEAD_GRACE_S = 15.0
 ZK_QUIET_S = 15.0
 TWOPC_LIMIT_S = 180.0
 # Bounds on the setup steps that can be abandoned without a side effect, so
@@ -790,9 +794,12 @@ def _unused_busy(s: "SessionState", now: float) -> bool:
     """An unused connection whose setup or first request is still under way:
     a ``request`` queued, being reserved or in flight (from its acceptance to
     its settlement); the handshake (``HANDSHAKE_GRACE_S`` after the
-    ClientHello, until ``head_written``); the 2PC or proof channel moving
-    bytes (``ZK_QUIET_S``, while younger than ``TWOPC_LIMIT_S``)."""
+    ClientHello, until ``head_written``, and ``HEAD_GRACE_S`` after it, for
+    the first ``request`` to arrive); the 2PC or proof channel moving bytes
+    (``ZK_QUIET_S``, while younger than ``TWOPC_LIMIT_S``)."""
     if not s.h2_requests.empty() or s.h2_reserving or s.billing is not None:
+        return True
+    if s.h2_idle_since is not None and now - s.h2_idle_since < HEAD_GRACE_S:
         return True
     if (
         s.h2_hello_at is not None
@@ -1678,6 +1685,14 @@ async def _finalize_unsettled(
             # the request was open: not the client's doing, nothing is kept.
             balance = await release(billing)
             cost, outcome, reason = 0, "released", state.h2_fault or "sidecar_failure"
+        elif state.h2_evicted and state.h2_settled == 0:
+            # The connection was closed for a newer setup while this, its
+            # first request, was not yet written in full (the node does not
+            # pick a connection with a request in flight, so this is a race).
+            # Not the client's doing: nothing of the request is kept. The
+            # deposit has its own outcome (row 13).
+            balance = await release(billing)
+            cost, outcome, reason = 0, "released", "evicted"
         elif state.engaged and _fee(billing, "abandon_fee_msat") > 0:
             # π_WIN never verified, so the upstream never received a complete
             # request, but the sidecar ran the session (armed and never used,

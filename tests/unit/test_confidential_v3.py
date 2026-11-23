@@ -2761,7 +2761,10 @@ async def test_an_unused_connection_still_setting_up_or_with_a_request_is_not_ev
     assert not cws._unused_busy(mk(), now)
     assert cws._unused_busy(mk(h2_hello_at=now - 5), now)
     assert not cws._unused_busy(mk(h2_hello_at=now - 61), now)
-    assert not cws._unused_busy(mk(h2_hello_at=now - 5, h2_idle_since=now - 1), now)
+    # ``head_written``: the handshake is over, and the first ``request`` has
+    # ``HEAD_GRACE_S`` to arrive.
+    assert cws._unused_busy(mk(h2_hello_at=now - 5, h2_idle_since=now - 1), now)
+    assert not cws._unused_busy(mk(h2_hello_at=now - 30, h2_idle_since=now - 16), now)
     assert cws._unused_busy(mk(zk_active_at=now - 3), now)
     assert not cws._unused_busy(mk(zk_active_at=now - 20), now)
     assert not cws._unused_busy(mk(age=200.0, zk_active_at=now - 1), now)
@@ -2878,6 +2881,39 @@ async def test_an_evicted_hoarding_connection_is_charged_and_a_lone_spare_is_not
     assert last["deposit"]["evicted"] == {"unused_at_address": 1, "charge_from": 3}
     assert _verify_schnorr(last["deposit_json"], last["deposit_sig"], pub_hex)
     assert ledger.calls[-1] == "release:dep"
+
+
+async def test_a_first_request_cut_by_an_eviction_is_released_in_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An eviction that meets an accepted first request not yet written in
+    full (a race: the node picks no connection with a request in flight) is
+    not the client's doing: the request is released in full, also when the
+    offer has an abandon fee and the deposit is released (a lone spare)."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    monkeypatch.setattr(settings, "confidential_evict_charge_from", 3)
+    for charge in (False, True):
+        state = cws.SessionState()
+        state.framing, state.sid, state.h2_ready, state.h2_n = "2", SID, True, 1
+        state.h2_deposit = await cws.reserve_deposit("sk-x", SIG)
+        state.billing = await cws.reserve(
+            "sk-x", "test-model", 16, SIG, session_fee_due=True
+        )
+        state.engaged = True  # the sidecar accepted it (``request_ok``)
+        cws._evict_for_slot(state, 4 if charge else 1)
+        assert state.h2_evict_charge is charge
+        ledger.calls.clear()
+        deposit = await cws._h2_end_deposit(state, "evicted")
+        await cws._finalize(state)
+        assert deposit is not None
+        assert deposit["reason"] == ("evicted" if charge else "evicted_released")
+        assert state.h2_unsettled is not None
+        assert (state.h2_unsettled["outcome"], state.h2_unsettled["reason"]) == (
+            "released",
+            "evicted",
+        )
+        assert state.h2_unsettled["cost_msats"] == 0
+        assert not any(c.startswith("fee:") for c in ledger.calls), ledger.calls
 
 
 @pytest.mark.parametrize("http", ["1.1", "2"])
