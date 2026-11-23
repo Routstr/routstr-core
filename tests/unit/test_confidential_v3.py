@@ -2663,7 +2663,7 @@ async def test_an_evicted_idle_connection_closes_in_order(
 
 def _unused(addr: str, age: float, **kw: Any) -> cws.SessionState:
     """A slot holder with no settled request whose slot was claimed ``age``
-    seconds ago (set after ``_claim``)."""
+    seconds ago (set by ``_claim_aged``)."""
     s = _holder(addr, kw.pop("idle_since", None), settled=0)
     s._age = age  # type: ignore[attr-defined]
     for k, v in kw.items():
@@ -2678,57 +2678,75 @@ async def _claim_aged(states: list[cws.SessionState]) -> None:
         s.h2_slot_at = now - getattr(s, "_age", 0.0)
 
 
-async def test_a_full_node_evicts_the_oldest_unused_connection_past_the_minimum_age(
+def _eviction_limits(
+    monkeypatch: pytest.MonkeyPatch, unused: int = 0, per_addr: int = 0
+) -> None:
+    monkeypatch.setattr(cws, "EVICT_WAIT_S", 0.01)
+    monkeypatch.setattr(settings, "confidential_max_active_per_ip", per_addr)
+    monkeypatch.setattr(settings, "confidential_max_unused_per_ip", unused)
+    monkeypatch.setattr(settings, "confidential_evict_unused_after_s", 60)
+    monkeypatch.setattr(settings, "confidential_evict_charge_from", 3)
+
+
+async def test_a_full_node_evicts_an_unused_connection_of_the_address_holding_most(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Slot pressure (§8.4): with no idle used connection left, a setup on a
-    full node closes the oldest unused connection that is at least
-    ``confidential_evict_unused_after_s`` old; younger ones are safe, and
-    with the setting at 0 nothing unused is ever closed."""
-    monkeypatch.setattr(cws, "EVICT_WAIT_S", 0.01)
-    monkeypatch.setattr(settings, "confidential_max_active_per_ip", 0)
-    monkeypatch.setattr(settings, "confidential_max_unused_per_ip", 0)
-    monkeypatch.setattr(settings, "confidential_evict_unused_after_s", 60)
-    ages = [70.0, 200.0, 61.0] + [10.0] * (cws.MAX_SESSIONS - 3)
-    states = [_unused(f"198.51.100.{i}", a) for i, a in enumerate(ages)]
-    await _claim_aged(states)
+    """Slot pressure (§8.4) on a full node with no idle used connection: the
+    victim is an unused connection past the minimum age of the address that
+    holds the most of them (ties: the oldest), never of the asking address;
+    it is charged only when its address held ``confidential_evict_charge_from``
+    or more. Younger ones are safe; with the minimum age at 0 nothing unused is
+    closed."""
+    _eviction_limits(monkeypatch)
+    lone = _unused("198.51.100.1", 900.0)  # the oldest, alone at its address
+    hoard = [_unused("198.51.100.2", 100.0 + i) for i in range(3)]
+    young = [_unused(f"198.51.100.{10 + i}", 10.0) for i in range(cws.MAX_SESSIONS - 4)]
+    await _claim_aged([lone, *hoard, *young])
     await cws._claim_slot(_holder("203.0.113.9", None, settled=0))
-    # The oldest past the minimum age: 200 s.
-    assert [s.h2_evicted for s in states[:3]] == [False, True, False]
-    assert states[1] not in cws._slot_holders
+    # The hoarding address first, its oldest connection, charged (3 >= 3).
+    assert [s.h2_evicted for s in hoard] == [False, False, True]
+    assert hoard[2].h2_evict_charge and hoard[2].h2_evict_unused_at == 3
+    assert not lone.h2_evicted
+    # Two left there and one at the lone address: two first, then the oldest of a tie.
     await cws._claim_slot(_holder("203.0.113.10", None, settled=0))
-    assert states[0].h2_evicted and not states[2].h2_evicted
-    # Off: the 61 s one stays, the setup is refused.
-    monkeypatch.setattr(settings, "confidential_evict_unused_after_s", 0)
+    assert (
+        hoard[1].h2_evicted
+        and not hoard[1].h2_evict_charge
+        and hoard[1].h2_evict_unused_at == 2
+    )
+    await cws._claim_slot(_holder("203.0.113.11", None, settled=0))
+    assert lone.h2_evicted and not lone.h2_evict_charge  # 1 vs 1: the oldest
+    # The asking address's own unused connection is not evicted for a full node.
+    asker = hoard[0].addr_key
     with pytest.raises(cws.SetupError) as exc:
-        await cws._claim_slot(_holder("203.0.113.11", None, settled=0))
-    assert exc.value.status == 503 and not states[2].h2_evicted
+        await cws._claim_slot(_holder(asker, None, settled=0))
+    assert exc.value.status == 503 and not hoard[0].h2_evicted
+    monkeypatch.setattr(settings, "confidential_evict_unused_after_s", 0)
+    assert cws._unused_victim(None) is None
 
 
 async def test_an_idle_used_connection_goes_before_an_unused_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The victim order: the longest-idle used connection first (it holds no
+    """The order: the longest-idle used connection first (it holds no
     deposit), an unused one only when there is none."""
-    monkeypatch.setattr(cws, "EVICT_WAIT_S", 0.01)
-    monkeypatch.setattr(settings, "confidential_max_active_per_ip", 0)
-    monkeypatch.setattr(settings, "confidential_max_unused_per_ip", 0)
-    old_unused = _unused("198.51.100.200", 500.0)
-    used = [_holder(f"198.51.100.{i}", 100.0 + i) for i in range(cws.MAX_SESSIONS - 1)]
-    await _claim_aged([old_unused, *used])
+    _eviction_limits(monkeypatch)
+    old_unused = [_unused("198.51.100.200", 500.0 + i) for i in range(3)]
+    used = [_holder(f"198.51.100.{i}", 100.0 + i) for i in range(cws.MAX_SESSIONS - 3)]
+    await _claim_aged([*old_unused, *used])
     for s in used:
         cws._mark_used(s)
     await cws._claim_slot(_holder("203.0.113.9", None, settled=0))
-    assert used[0].h2_evicted and not old_unused.h2_evicted
+    assert used[0].h2_evicted and not any(s.h2_evicted for s in old_unused)
 
 
-async def test_an_unused_connection_still_setting_up_is_not_evicted(
+async def test_an_unused_connection_still_setting_up_or_with_a_request_is_not_evicted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Past the minimum age an unused connection is still safe while its
-    handshake runs, its 2PC moves bytes (up to the 2PC limit), a request is
-    queued or being reserved, or its first request is young for its body or
-    reached ``body_released``. Each protection is bounded."""
+    handshake runs, its 2PC moves bytes (up to the 2PC limit), or a request
+    is queued, being reserved or in flight (from its acceptance to its
+    settlement)."""
     monkeypatch.setattr(settings, "confidential_evict_unused_after_s", 60)
     loop = asyncio.get_running_loop()
     now = loop.time()
@@ -2741,68 +2759,82 @@ async def test_an_unused_connection_still_setting_up_is_not_evicted(
         return s
 
     assert not cws._unused_busy(mk(), now)
-    # Handshake: ClientHello relayed 5 s ago, head not written; not after 60 s.
     assert cws._unused_busy(mk(h2_hello_at=now - 5), now)
     assert not cws._unused_busy(mk(h2_hello_at=now - 61), now)
     assert not cws._unused_busy(mk(h2_hello_at=now - 5, h2_idle_since=now - 1), now)
-    # The 2PC moved a byte 3 s ago: busy, but only below the 2PC limit.
     assert cws._unused_busy(mk(zk_active_at=now - 3), now)
     assert not cws._unused_busy(mk(zk_active_at=now - 20), now)
     assert not cws._unused_busy(mk(age=200.0, zk_active_at=now - 1), now)
-    # A request being reserved or queued.
     assert cws._unused_busy(mk(h2_reserving=True), now)
     queued = mk()
     queued.h2_requests.put_nowait(({}, loop.create_future()))
     assert cws._unused_busy(queued, now)
-    # A first request in flight: young for its body, or the provider has it.
-    billing = object()
-    big = 8 << 20  # 262 s at the slow uplink, plus the 60 s
-    assert cws._unused_busy(
-        mk(billing=billing, h2_request_at=now - 30, h2_body_len=100), now
-    )
-    assert not cws._unused_busy(
-        mk(billing=billing, h2_request_at=now - 70, h2_body_len=100), now
-    )
-    assert cws._unused_busy(
-        mk(billing=billing, h2_request_at=now - 300, h2_body_len=big), now
-    )
-    assert not cws._unused_busy(
-        mk(billing=billing, h2_request_at=now - 330, h2_body_len=big), now
-    )
-    assert cws._unused_busy(
-        mk(billing=billing, h2_request_at=now - 500, body_released=True), now
-    )
+    # A request in flight, however long: accepted, released or not.
+    assert cws._unused_busy(mk(billing=object(), h2_request_at=now - 500), now)
+    assert cws._unused_busy(mk(billing=object(), body_released=True), now)
 
 
-async def test_an_address_at_its_unused_limit_evicts_its_own_oldest_unused(
+async def test_a_setup_that_is_refused_evicts_nobody(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The unused limit per address also yields to an unused connection of
-    that address past the minimum age, never one of another address."""
-    monkeypatch.setattr(cws, "EVICT_WAIT_S", 0.01)
-    monkeypatch.setattr(settings, "confidential_max_active_per_ip", 0)
-    monkeypatch.setattr(settings, "confidential_max_unused_per_ip", 2)
-    monkeypatch.setattr(settings, "confidential_evict_unused_after_s", 60)
-    other = _unused("198.51.100.1", 900.0)
-    mine = [_unused("203.0.113.1", 90.0), _unused("203.0.113.1", 30.0)]
-    await _claim_aged([other, *mine])
-    assert cws._unused_victim("203.0.113.1") is mine[0]
-    await cws._claim_slot(_holder("203.0.113.1", None, settled=0))
-    assert mine[0].h2_evicted and not other.h2_evicted and not mine[1].h2_evicted
-    assert cws._unused_by_ip["203.0.113.1"] == 2
+    """At its unused limit an address may close only its own evictable
+    unused connection; without one the setup is refused (429) and nothing
+    anywhere is closed, also on a full node."""
+    _eviction_limits(monkeypatch, unused=2)
+    mine = [_unused("203.0.113.1", 30.0), _unused("203.0.113.1", 20.0)]  # too young
+    others = [_unused(f"198.51.100.{i}", 900.0) for i in range(cws.MAX_SESSIONS - 2)]
+    await _claim_aged([*mine, *others])
     with pytest.raises(cws.SetupError) as exc:
         await cws._claim_slot(_holder("203.0.113.1", None, settled=0))
-    assert exc.value.status == 429 and "unused" in str(exc.value)
+    assert exc.value.status == 429
+    assert not any(s.h2_evicted for s in [*mine, *others])
 
 
-async def test_an_evicted_unused_connection_is_charged_its_deposit(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+async def test_concurrent_setups_evict_no_more_than_they_take(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The connection a setup closed while it held its slot unused ends with
-    ``closed`` reason ``evicted``, ``unused: true``, and a signed deposit
-    outcome: charged, reason ``evicted``."""
-    _secret, pub_hex = node_identity
+    """Setups claim one at a time: K setups from one address at its unused
+    limit each close at most one connection, only when it then takes the
+    slot; one whose limit stays full is refused having closed nothing."""
+    _eviction_limits(monkeypatch, unused=3)
+    mine = [_unused("203.0.113.1", 100.0 + i) for i in range(3)]
+    await _claim_aged(mine)
+    news = [_holder("203.0.113.1", None, settled=0) for _ in range(5)]
+    results = await asyncio.gather(
+        *(cws._claim_slot(n) for n in news), return_exceptions=True
+    )
+    taken = [n for n, r in zip(news, results) if r is None]
+    refused = [r for r in results if isinstance(r, cws.SetupError)]
+    evicted = [s for s in mine if s.h2_evicted]
+    # Three evictable victims: three setups take their slots, two are refused.
+    assert len(taken) == 3 and len(refused) == 2 and len(evicted) == 3
+    assert all(r.status == 429 for r in refused)
+    assert cws._unused_by_ip["203.0.113.1"] == 3
+
+
+async def test_an_address_at_its_unused_limit_evicts_its_own_and_pays_when_hoarding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-address unused limit yields to that address's oldest
+    evictable unused connection, never another address's; it is charged when
+    the address held ``confidential_evict_charge_from`` (3) or more."""
+    _eviction_limits(monkeypatch, unused=4)
+    other = _unused("198.51.100.1", 900.0)
+    mine = [_unused("203.0.113.1", 90.0 + i) for i in range(4)]
+    await _claim_aged([other, *mine])
+    await cws._claim_slot(_holder("203.0.113.1", None, settled=0))
+    victim = mine[3]
+    assert (
+        victim.h2_evicted and victim.h2_evict_charge and victim.h2_evict_unused_at == 4
+    )
+    assert not other.h2_evicted
+
+
+async def _run_evicted(
+    monkeypatch: pytest.MonkeyPatch, charge: bool
+) -> tuple[dict[str, Any], "_Ledger"]:
     ledger = _Ledger(monkeypatch, deposit=DEP)
+    monkeypatch.setattr(settings, "confidential_evict_charge_from", 3)
     state = cws.SessionState()
     state.framing, state.sid, state.h2_ready = "2", SID, True
     state.h2_idle_since = asyncio.get_running_loop().time()
@@ -2813,59 +2845,39 @@ async def test_an_evicted_unused_connection_is_charged_its_deposit(
 
     async def evict_soon() -> None:
         await asyncio.sleep(0.1)
-        await cws._evict_idle(state)
+        await cws._evict_idle(state, 4 if charge else 1)
 
     asyncio.ensure_future(evict_soon())
     loop = asyncio.get_running_loop()
     await cws._run_h2_session(client, sidecar, state, loop.time())  # type: ignore[arg-type]
-    last = client.sent[-1]
+    return client.sent[-1], ledger
+
+
+async def test_an_evicted_hoarding_connection_is_charged_and_a_lone_spare_is_not(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The signed outcome tells the two apart: ``closed`` ``evicted`` with
+    ``unused: true`` both times; the deposit charged (``evicted``) for an
+    address that held 3 or more, released (``evicted_released``) for fewer,
+    with the count and the threshold signed."""
+    _secret, pub_hex = node_identity
+    last, ledger = await _run_evicted(monkeypatch, charge=True)
     assert (
         last["type"] == "closed"
         and last["reason"] == "evicted"
         and last["unused"] is True
     )
     assert _deposit(last) == ("charged", "evicted", DEP)
+    assert last["deposit"]["evicted"] == {"unused_at_address": 4, "charge_from": 3}
     assert _verify_schnorr(last["deposit_json"], last["deposit_sig"], pub_hex)
-    assert "request_outcome" not in last
+    assert json.loads(last["deposit_json"])["evicted"]["unused_at_address"] == 4
     assert ledger.calls[-1] == "charge:dep"
-
-
-async def test_an_evicted_stalled_first_request_is_released_and_signed(
-    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
-) -> None:
-    """A first request accepted and never written in full, on a connection
-    evicted under pressure: the deposit is charged (``evicted``) and the
-    request's reservation released in full, both stated signed."""
-    _secret, pub_hex = node_identity
-    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
-    state = cws.SessionState()
-    state.framing, state.sid, state.h2_ready = "2", SID, True
-    loop = asyncio.get_running_loop()
-    state.h2_idle_since = loop.time()
-    state.h2_deposit = await cws.reserve_deposit("sk-x", SIG)
-    state.h2_deposit_msat = DEP
-    state.billing = await cws.reserve("sk-x", "m", 10, SIG, session_fee_due=True)
-    state.h2_n, state.engaged, state.h2_request_at = 1, True, loop.time()
-    sidecar = _QueueSidecar([], [])
-    client = _IdleClient()
-
-    async def evict_soon() -> None:
-        await asyncio.sleep(0.1)
-        await cws._evict_idle(state)
-
-    asyncio.ensure_future(evict_soon())
-    await cws._run_h2_session(client, sidecar, state, loop.time())  # type: ignore[arg-type]
-    last = client.sent[-1]
+    last, ledger = await _run_evicted(monkeypatch, charge=False)
     assert last["reason"] == "evicted" and last["unused"] is True
-    assert _deposit(last) == ("charged", "evicted", DEP)
-    out = last["request_outcome"]
-    assert out["outcome"] == "released" and out["reason"] == "evicted"
-    assert out["cost_msats"] == 0 and out["n"] == 1 and out["sid"] == SID
-    assert _verify_schnorr(
-        last["request_outcome_json"], last["request_outcome_sig"], pub_hex
-    )
-    assert json.loads(last["request_outcome_json"]) == out
-    assert ledger.calls[-2:] == ["charge:dep", "release:rel-1"]
+    assert _deposit(last) == ("released", "evicted_released", DEP)
+    assert last["deposit"]["evicted"] == {"unused_at_address": 1, "charge_from": 3}
+    assert _verify_schnorr(last["deposit_json"], last["deposit_sig"], pub_hex)
+    assert ledger.calls[-1] == "release:dep"
 
 
 @pytest.mark.parametrize("http", ["1.1", "2"])

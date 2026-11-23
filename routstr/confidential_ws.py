@@ -227,19 +227,16 @@ _slot_holders: dict["SessionState", None] = {}
 # session before it dials (the sidecar has its own session limit).
 EVICT_WAIT_S = 5.0
 # An unused connection past ``confidential_evict_unused_after_s`` is still
-# not evicted while its setup is under way (§8.4): its handshake runs (the
-# ClientHello was relayed, ``head_written`` not reached, for at most
-# HANDSHAKE_GRACE_S); its 2PC or proof channel moved a byte in the last
-# ZK_QUIET_S while the connection is younger than the sidecar's 2PC limit
-# (TWOPC_LIMIT_S); or its first request is accepted and younger than the
-# minimum age plus the time its body takes at SLOW_UPLINK_BYTES_PER_S (a
-# request that reached ``body_released`` is never evicted). Each protection
-# is bounded, so a client cannot keep an unused connection out of reach by
-# moving bytes.
+# not evicted while its setup or a request is under way (§8.4): a request is
+# queued, being reserved or in flight; its handshake runs (the ClientHello
+# was relayed, ``head_written`` not reached, for at most HANDSHAKE_GRACE_S);
+# its 2PC or proof channel moved a byte in the last ZK_QUIET_S while the
+# connection is younger than the sidecar's 2PC limit (TWOPC_LIMIT_S). The
+# handshake and 2PC protections are bounded, so moving bytes cannot keep an
+# unused connection out of reach.
 HANDSHAKE_GRACE_S = 60.0
 ZK_QUIET_S = 15.0
 TWOPC_LIMIT_S = 180.0
-SLOW_UPLINK_BYTES_PER_S = 32_000
 # Bounds on the setup steps that can be abandoned without a side effect, so
 # that a setup ends in ``ready`` or a refusal in finite time: reading the
 # sidecar's offer (its fetch has a per-phase HTTP timeout, not a total one),
@@ -472,9 +469,8 @@ class SessionState:
         # The longest a framing-"2" connection lives (the offer's
         # ``h2.max_lifetime_s``): the backstop of its proof channels.
         self.h2_max_lifetime = H2_CONN_MAX_S
-        # A newer setup needed this connection's slot (``_evict_idle``): an
-        # idle used one, or an unused one past the minimum age (its deposit
-        # is then charged, ``_unused_victim``).
+        # A newer setup needed this connection's slot (``_evict_for_slot``): an idle
+        # used one, or an unused one past the minimum age (``_unused_victim``).
         self.h2_evicted = False
         # Loop times for the eviction of unused connections: the slot was
         # claimed (the connection's age); the client's first record before
@@ -485,15 +481,18 @@ class SessionState:
         self.zk_active_at: float | None = None
         # A ``request`` is being validated and reserved (``_h2_reserve``).
         self.h2_reserving = False
-        # The request in flight's ``body_len`` (its upload time bounds how long
-        # a stalled first request protects an unused connection).
-        self.h2_body_len = 0
         # The request in flight was finalized without a receipt: its signed
         # outcome goes on the connection's last frame (§12.10).
         self.h2_unsettled: dict[str, Any] | None = None
         # The deposit was charged for the request in flight (row 9): the
         # request's reservation is released in full.
         self.h2_deposit_for_request = False
+        # An unused connection evicted under slot pressure: how many evictable
+        # unused connections its address held then, and whether that made its
+        # deposit charged (``_evict_for_slot``).
+        self.h2_evict_unused_at = 0
+        self.h2_evict_charge = False
+        self.h2_evict_charge_from = 0
         # Requests refused in a row on this connection (``MAX_REFUSED_IN_A_ROW``).
         self.h2_refused = 0
 
@@ -788,10 +787,12 @@ def _idle_used(addr_key: str | None) -> "SessionState | None":
 
 
 def _unused_busy(s: "SessionState", now: float) -> bool:
-    """An unused connection whose setup or first request is still moving
-    (the bounded protections of ``HANDSHAKE_GRACE_S`` and the rest)."""
-    if not s.h2_requests.empty() or s.h2_reserving:
-        # A ``request`` is queued or being reserved.
+    """An unused connection whose setup or first request is still under way:
+    a ``request`` queued, being reserved or in flight (from its acceptance to
+    its settlement); the handshake (``HANDSHAKE_GRACE_S`` after the
+    ClientHello, until ``head_written``); the 2PC or proof channel moving
+    bytes (``ZK_QUIET_S``, while younger than ``TWOPC_LIMIT_S``)."""
+    if not s.h2_requests.empty() or s.h2_reserving or s.billing is not None:
         return True
     if (
         s.h2_hello_at is not None
@@ -800,55 +801,63 @@ def _unused_busy(s: "SessionState", now: float) -> bool:
     ):
         return True
     age = now - (s.h2_slot_at or now)
-    if (
+    return (
         s.zk_active_at is not None
         and age < TWOPC_LIMIT_S
         and now - s.zk_active_at < ZK_QUIET_S
-    ):
-        return True
-    if s.billing is not None:
-        if s.body_released or s.finalized:
-            # The provider has the request: never evicted.
-            return True
-        grace = settings.confidential_evict_unused_after_s + (
-            s.h2_body_len / SLOW_UPLINK_BYTES_PER_S
-        )
-        if now - s.h2_request_at < grace:
-            return True
-    return False
+    )
 
 
-def _unused_victim(addr_key: str | None) -> "SessionState | None":
-    """The oldest unused slot holder (no settled request) of ``addr_key`` or
-    of any address that may be closed for a newer setup: at least
-    ``confidential_evict_unused_after_s`` old and not busy (``_unused_busy``).
-    Its deposit is charged when it ends (§8.4, §12.10 row 13). ``None`` when
-    the setting is 0 or there is none."""
+def _evictable_unused(now: float) -> "list[SessionState]":
+    """Unused slot holders (no settled request) that a newer setup may close:
+    at least ``confidential_evict_unused_after_s`` old and not busy
+    (``_unused_busy``). Empty when the setting is 0."""
     min_age = settings.confidential_evict_unused_after_s
     if min_age <= 0:
-        return None
+        return []
+    return [
+        s
+        for s in _slot_holders
+        if s.h2_settled == 0
+        and not s.h2_evicted
+        and s.h2_slot_at is not None
+        and now - s.h2_slot_at >= min_age
+        and not _unused_busy(s, now)
+    ]
+
+
+def _unused_victim(
+    addr_key: str | None, exclude: str | None = None
+) -> "tuple[SessionState, int] | None":
+    """The unused connection a setup closes, and how many evictable unused
+    connections its address holds (``_evictable_unused``): of ``addr_key``
+    only, or, with ``addr_key`` None, of any address but ``exclude`` (the
+    asking one). The address holding the most goes first; among its
+    connections, and between addresses holding as many, the oldest."""
     now = asyncio.get_running_loop().time()
-    best: SessionState | None = None
-    for s in _slot_holders:
-        if (
-            s.h2_settled == 0
-            and not s.h2_evicted
-            and s.h2_slot_at is not None
-            and now - s.h2_slot_at >= min_age
-            and (addr_key is None or s.addr_key == addr_key)
-            and not _unused_busy(s, now)
-            and (best is None or s.h2_slot_at < (best.h2_slot_at or 0.0))
-        ):
-            best = s
-    return best
+    by_addr: dict[str, list[SessionState]] = {}
+    for s in _evictable_unused(now):
+        if (addr_key is None and s.addr_key != exclude) or s.addr_key == addr_key:
+            by_addr.setdefault(s.addr_key, []).append(s)
+    if not by_addr:
+        return None
+    groups = [
+        (min(g, key=lambda x: x.h2_slot_at or 0.0), len(g)) for g in by_addr.values()
+    ]
+    return min(groups, key=lambda vg: (-vg[1], vg[0].h2_slot_at or 0.0))
 
 
-def _victim(addr_key: str | None) -> "SessionState | None":
+def _victim(
+    addr_key: str | None, exclude: str | None = None
+) -> "tuple[SessionState, int] | None":
     """Which connection a setup that finds no slot closes: the longest-idle
     used one first (it holds nothing, so closing it costs its client a new
-    handshake later and no money), else the oldest unused one past the
-    minimum age (its deposit is charged)."""
-    return _idle_used(addr_key) or _unused_victim(addr_key)
+    handshake later and no money; count 0), else an unused one past the
+    minimum age (``_unused_victim``)."""
+    used = _idle_used(addr_key)
+    if used is not None:
+        return used, 0
+    return _unused_victim(addr_key, exclude)
 
 
 def _free_slot(state: "SessionState") -> None:
@@ -866,12 +875,19 @@ def _free_slot(state: "SessionState") -> None:
         _active_by_ip.pop(state.addr_key, None)
 
 
-async def _evict_idle(victim: "SessionState") -> None:
+def _evict_for_slot(victim: "SessionState", unused_at_address: int = 0) -> None:
     """Close a connection to make room (``closed``, reason ``evicted``; an
-    unused one also ``unused: true``, and its deposit is charged) and wait,
-    briefly, for it to end its sidecar session. Its slot, and its place under
-    the address's unused limit, are free at once."""
+    unused one also ``unused: true``). Its slot, and its place under the
+    address's unused limit, are free at once. An unused one's deposit is
+    charged only when its address held at least
+    ``confidential_evict_charge_from`` evictable unused connections
+    (``unused_at_address``): an address hoarding slots pays, a lone spare
+    loses its slot but not its deposit (§8.4, §12.10 row 13)."""
     victim.h2_evicted = True
+    if victim.h2_settled == 0:
+        victim.h2_evict_unused_at = unused_at_address
+        victim.h2_evict_charge_from = settings.confidential_evict_charge_from
+        victim.h2_evict_charge = unused_at_address >= victim.h2_evict_charge_from
     _free_slot(victim)
     _mark_used(victim)
     victim.h2_moved.set()
@@ -881,55 +897,107 @@ async def _evict_idle(victim: "SessionState") -> None:
             "sid": _short(victim.sid),
             "settled": victim.h2_settled,
             "unused": victim.h2_settled == 0,
+            "unused_at_address": unused_at_address,
+            "charged": victim.h2_evict_charge,
         },
     )
+
+
+async def _evict_idle(victim: "SessionState", unused_at_address: int = 0) -> None:
+    """``_evict_for_slot`` and wait, briefly, for the victim to end its sidecar
+    session (the sidecar has its own session limit)."""
+    _evict_for_slot(victim, unused_at_address)
+    await _await_evicted(victim)
+
+
+async def _await_evicted(victim: "SessionState | None") -> None:
+    if victim is None:
+        return
     try:
         await asyncio.wait_for(victim.ended.wait(), EVICT_WAIT_S)
     except asyncio.TimeoutError:
         pass
 
 
+# Claiming a slot (the checks, the choice of a victim, the eviction and the
+# claim) runs one setup at a time, so that a setup that will be refused
+# evicts nobody and one setup evicts at most one connection. One lock per
+# event loop.
+_slot_lock_for: tuple[Any, asyncio.Lock] | None = None
+
+
+def _slot_lock() -> asyncio.Lock:
+    global _slot_lock_for
+    loop = asyncio.get_running_loop()
+    if _slot_lock_for is None or _slot_lock_for[0] is not loop:
+        _slot_lock_for = (loop, asyncio.Lock())
+    return _slot_lock_for[1]
+
+
 async def _claim_slot(state: "SessionState") -> None:
     """Count a reserved session against MAX_SESSIONS, the address's total
-    and its unused limit. A full address (``confidential_max_active_per_ip``)
-    or a full node first closes the longest-idle used connection (of that
-    address, or of any). Raises ``SetupError``; the caller then releases the
-    reservation (in full: the sidecar has not been dialed)."""
+    and its unused limit, closing at most one connection to make room
+    (§8.4). The victim must free every limit that is full:
+
+    1. the address's unused limit full: the oldest evictable unused
+       connection of that address;
+    2. else the address's total (``confidential_max_active_per_ip``) full:
+       the longest-idle used connection of that address, else its oldest
+       evictable unused one;
+    3. else the node full: the longest-idle used connection of any address,
+       else an evictable unused one of another address, the address holding
+       the most first (ties: the oldest connection).
+
+    Without a victim the setup is refused and nothing is closed. Raises
+    ``SetupError``; the caller then releases the reservation (in full: the
+    sidecar has not been dialed)."""
     global _active_sessions
     _release_pending(state)
     key = state.addr_key
     unused = settings.confidential_max_unused_per_ip
-    while unused > 0 and _unused_by_ip.get(key, 0) >= unused:
-        # Only an unused connection frees a place under the unused limit.
-        victim = _unused_victim(key)
-        if victim is None:
-            raise SetupError(
-                429, f"too many unused confidential sessions (limit {unused})"
-            )
-        await _evict_idle(victim)
     per_addr = settings.confidential_max_active_per_ip
-    while per_addr > 0 and _active_by_ip.get(key, 0) >= per_addr:
-        victim = _victim(key)
-        if victim is None:
-            raise SetupError(
-                429,
-                f"too many confidential connections from this address (limit {per_addr})",
-            )
-        await _evict_idle(victim)
-    while _active_sessions >= MAX_SESSIONS:
-        victim = _victim(None)
-        if victim is None:
+    victim: SessionState | None = None
+    async with _slot_lock():
+        if unused > 0 and _unused_by_ip.get(key, 0) >= unused:
+            found = _unused_victim(key)
+            if found is None:
+                raise SetupError(
+                    429, f"too many unused confidential sessions (limit {unused})"
+                )
+        elif per_addr > 0 and _active_by_ip.get(key, 0) >= per_addr:
+            found = _victim(key)
+            if found is None:
+                raise SetupError(
+                    429,
+                    f"too many confidential connections from this address (limit {per_addr})",
+                )
+        elif _active_sessions >= MAX_SESSIONS:
+            found = _victim(None, exclude=key)
+            if found is None:
+                raise SetupError(503, "too many confidential sessions")
+        else:
+            found = None
+        if found is not None:
+            victim, count = found
+            _evict_for_slot(victim, count)
+        # One victim frees every limit above (it is of this address, or the
+        # node alone was full); a slot freed meanwhile only helps.
+        if (
+            (unused > 0 and _unused_by_ip.get(key, 0) >= unused)
+            or (per_addr > 0 and _active_by_ip.get(key, 0) >= per_addr)
+            or _active_sessions >= MAX_SESSIONS
+        ):
             raise SetupError(503, "too many confidential sessions")
-        await _evict_idle(victim)
-    if unused > 0 and _unused_by_ip.get(key, 0) >= unused:
-        raise SetupError(429, f"too many unused confidential sessions (limit {unused})")
-    _active_sessions += 1
-    state.counted = True
-    state.h2_slot_at = asyncio.get_running_loop().time()
-    _slot_holders[state] = None
-    _active_by_ip[key] = _active_by_ip.get(key, 0) + 1
-    state.unused_ip = key
-    _unused_by_ip[key] = _unused_by_ip.get(key, 0) + 1
+        _active_sessions += 1
+        state.counted = True
+        state.h2_slot_at = asyncio.get_running_loop().time()
+        _slot_holders[state] = None
+        _active_by_ip[key] = _active_by_ip.get(key, 0) + 1
+        state.unused_ip = key
+        _unused_by_ip[key] = _unused_by_ip.get(key, 0) + 1
+    # The slot is this setup's; the victim lets go of its sidecar session
+    # before the setup dials (outside the lock).
+    await _await_evicted(victim)
 
 
 def _forget_sid(state: "SessionState") -> None:
@@ -1781,11 +1849,13 @@ def _h2_deposit_verdict(state: SessionState, ended: str) -> tuple[bool, str]:
         if state.upstream_refused:
             return False, "provider_refused"
     if ended == "evicted":
-        # Row 13, before rows 9 to 12: held a slot unused past the minimum
-        # age while the node or its address was full, the client's cost
-        # (§8.4). A first request still in flight had not reached the
-        # provider; it is released in full.
-        return True, "evicted"
+        # Row 13, before rows 9 to 12: closed for a newer setup while it held
+        # a slot unused past the minimum age (§8.4). Charged when its address
+        # hoarded (at least ``confidential_evict_charge_from`` evictable
+        # unused connections), else released.
+        if state.h2_evict_charge:
+            return True, "evicted"
+        return False, "evicted_released"
     if state.billing is not None:
         return True, "request_abandoned"
     return True, ended
@@ -2032,7 +2102,6 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
     state.upstream_refused = False
     state.attestation_hash = ""
     state.h2_n = msg["n"]
-    state.h2_body_len = msg["body_len"] if _is_int(msg.get("body_len")) else 0
     state.h2_unsettled = None
     state.h2_deposit_for_request = False
     state.h2_request_at = asyncio.get_running_loop().time()
@@ -2340,7 +2409,15 @@ async def _h2_end_deposit(state: SessionState, ended: str) -> dict[str, Any] | N
     if charge and state.billing is not None:
         state.engaged = False
         state.h2_deposit_for_request = True
-    return await _h2_finish_deposit(state, charge, reason)
+    out = await _h2_finish_deposit(state, charge, reason)
+    if out is not None and reason in ("evicted", "evicted_released"):
+        # Why: the evictable unused connections its address held, and the
+        # count from which an eviction charges (signed with the outcome).
+        out["evicted"] = {
+            "unused_at_address": state.h2_evict_unused_at,
+            "charge_from": state.h2_evict_charge_from,
+        }
+    return out
 
 
 # ---------------------------------------------------------------------------
