@@ -25,11 +25,18 @@ tls_size = "2Gi"
 mode = "password"
 
 [resources]
-cpu = "2"
-memory = "4Gi"
+cpu = "1"
+memory = "2Gi"
 
 [health]
 # routstr has no /health route; /v1/info is the unauthenticated liveness read.
 path = "/v1/info"
 interval = 30
 timeout = 5
+
+[egress]
+# The node talks to cashu mints, Nostr relays, LLM upstreams and BTC price APIs;
+# none of them can be enumerated up front, so an allowlist is not viable.
+# `restricted` (the default) blocks all of it. Private, link-local and metadata
+# ranges stay blocked and there is no general IPv6 egress.
+mode = "public_internet"
