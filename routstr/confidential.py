@@ -1618,6 +1618,11 @@ def cache_write_tokens(usage: dict[str, Any]) -> int:
     )
     found.append(usage.get("cache_creation_input_tokens"))
     for v in found:
+        # A whole number written as a float (``400.0``) is the same count: a
+        # JavaScript client reads it as one, and both must price the same
+        # usage the same way.
+        if isinstance(v, float) and v.is_integer() and 0 < v < 2**53:
+            v = int(v)
         if isinstance(v, int) and not isinstance(v, bool) and v > 0:
             return v
     return 0

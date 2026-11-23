@@ -187,7 +187,8 @@ EHBP), at rates fixed when the request is accepted:
 | error head, any other 4xx (a request the provider rejected) | the abandon fee |
 | error head, any other 5xx | the reservation (the provider may have billed work) |
 | accepted, and the connection ends before `body_released` (a failed π_WIN, the client leaves, the time limit) | the abandon fee; nothing when the deposit is charged for it (below), and nothing when the sidecar named the provider or itself as the cause (`fault`) |
-| before `body_released`, the provider answered and closed (`upstream_closed_early` with response bytes) | the session fee if still due |
+| before `body_released`, the provider answered and closed (`upstream_closed_early` with response bytes, not marked `client_caused`) | the session fee if still due |
+| before `body_released`, the provider closed after the client held the request back or had a control frame written inside it (the sidecar's `upstream_closed_early` carries `client_caused: true`) | as an abandoned request: the abandon fee, or the deposit on a connection with no settlement |
 | after `body_released` with no settlement | the reservation. (EHBP can charge nothing here because the node reads the usage itself; in this mode the client controls the disclosure.) |
 
 A usage disclosed before the sidecar's attestation, or a settlement the node

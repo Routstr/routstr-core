@@ -1954,6 +1954,28 @@ def test_frozen_cost_bills_cache_writes() -> None:
             },
         }
         assert conf.frozen_cost_msats(rates, odd, 10**9) == 9300
+    # A whole count written as a float is that count (a JavaScript client
+    # reads ``600.0`` as 600 and bounds the charge by the write rate).
+    whole = {
+        **venice,
+        "cache_creation_input_tokens": 600.0,
+        "prompt_tokens_details": {
+            "cached_tokens": 200,
+            "cache_creation_input_tokens": 600.0,
+        },
+    }
+    assert conf.frozen_cost_msats(rates, whole, 10**9) == 10_800
+    # A write rate below ``in``: the writes are billed at it, never at ``in``.
+    cheap = {"in": 1000.0, "cached_in": 100.0, "cache_write": 500.0, "out": 2000.0}
+    usage = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 10,
+        "prompt_tokens_details": {
+            "cached_tokens": 600,
+            "cache_creation_input_tokens": 400,
+        },
+    }
+    assert conf.frozen_cost_msats(cheap, usage, 10**9) == 280
 
 
 def _ctx_model() -> Any:

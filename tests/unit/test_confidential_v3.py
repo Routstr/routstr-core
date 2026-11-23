@@ -1457,6 +1457,39 @@ def test_deposit_when_the_provider_refused_the_first_request_early(
 
 
 @pytest.mark.parametrize("http", ["1.1", "2"])
+def test_deposit_when_the_client_held_the_request_back_until_the_provider_closed(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """Row 9, not row 8: the provider sent bytes and closed, but the sidecar
+    saw the client hold the rest of the request back (or have a control frame
+    written inside it) first. The deposit is charged, the reservation
+    released in full; no session fee stands in for it."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    frames = [
+        _request_ok(1, http),
+        {
+            "type": "upstream_closed_early",
+            "n": 1,
+            "response_bytes": 517,
+            "client_caused": True,
+        },
+        {"type": "error", "reason": "upstream closed the connection"},
+    ]
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        err = conn.until("error")
+    assert _deposit(err) == ("charged", "request_abandoned", DEP)
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "charge:dep",
+        "release:rel-1",
+    ]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
 @pytest.mark.parametrize(
     "ending",
     [

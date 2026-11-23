@@ -1119,14 +1119,23 @@ async def _on_sidecar_text(
         # The provider closed before the final body record was released. With
         # response bytes it answered first (a refusal from the head alone,
         # which the client cannot disclose); with none it never answered.
+        # ``client_caused``: the sidecar saw the client hold the rest of the
+        # request back, or have a control frame written inside it, before the
+        # close. That is an abandoned request, not the provider's refusal.
         n = msg.get("response_bytes")
-        if _is_int(n) and n > 0 and not state.body_released:
+        if (
+            _is_int(n)
+            and n > 0
+            and not state.body_released
+            and msg.get("client_caused") is not True
+        ):
             state.upstream_refused = True
         logger.info(
             "confidential ws: provider closed before the request was complete",
             extra={
                 "sid": _short(state.sid),
                 "response_bytes": n if _is_int(n) else None,
+                "client_caused": msg.get("client_caused") is True,
             },
         )
         return frame
