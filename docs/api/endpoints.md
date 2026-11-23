@@ -745,7 +745,8 @@ The node's Nostr-signed offer (the query is ignored; clients send it). Fields:
 `v` (`3`), `http` (the framings the sidecar serves now, `"2"` and/or `"1.1"`,
 in the operator's order), `h2` (only when `http` lists `"2"`), `twopc`
 (`"split-public-3"`), `connection_deposit_msat`, `idle_timeout_s`,
-`upstream_host`, `ws` (the session socket URL; relative when `HTTP_URL` is
+`evict_unused_after_s` (the minimum age of an unused connection before slot
+pressure may close it, its deposit then charged; 0: never), `upstream_host`, `ws` (the session socket URL; relative when `HTTP_URL` is
 unset), `head_template`, `key_length`, `key_alphabet`, `suffix_keys`, `chat`
 (the pinned chat suffix), `max_tokens_cap`, `price_list` (per model `in`,
 `cached_in`, `cache_write`, `out` in msats per 1k tokens, surcharge
