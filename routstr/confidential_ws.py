@@ -145,8 +145,10 @@ _SESSION_WS_MAX_SIZE = 12 << 20
 # the socket opens), a session's lifetime until the final body record is
 # released (counted from the WebSocket accept), the window after that release
 # for the response and the usage disclosure, and the largest request body a
-# setup may declare.
-MAX_SESSIONS = 32
+# setup may declare. ``CU_TEST_MAX_SESSIONS`` lowers the session limit for
+# the node gate's eviction cases (a test hook, as the sidecar's ``CU_TEST_*``;
+# never set it in production).
+MAX_SESSIONS = max(1, min(32, int(os.environ.get("CU_TEST_MAX_SESSIONS") or 32)))
 SETUP_TIMEOUT_S = 10.0
 SESSION_TIMEOUT_S = 600.0
 POST_RELEASE_TIMEOUT_S = 600.0
