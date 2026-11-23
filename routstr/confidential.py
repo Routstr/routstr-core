@@ -174,6 +174,15 @@ def connection_deposit_msat() -> int:
     return max(deposit, int(settings.min_request_msat))
 
 
+def evict_unused_after_s() -> int:
+    """The minimum age (seconds) of an unused connection before a newer
+    setup may close it under slot pressure; 0 never closes one."""
+    try:
+        return max(0, int(settings.confidential_evict_unused_after_s))
+    except (TypeError, ValueError):
+        return 0
+
+
 def idle_timeout_s(side: dict[str, Any]) -> int:
     """Seconds without a request in flight after which the node closes a
     framing-``"2"`` connection: the configured value (at least 10), never
@@ -431,6 +440,13 @@ async def cached_sidecar_offer() -> dict[str, Any]:
     if offer is not None and age < _SIDECAR_OFFER_STALE_S:
         return dict(offer)
     raise OfferError("confidential sidecar unavailable")
+
+
+def sidecar_last_fetch_failed() -> bool:
+    """The node's last attempt to fetch the sidecar's offer failed (a stale
+    offer may still be served): a setup then closes no other connection to
+    make room, since its own dial would likely fail too."""
+    return _SIDECAR_CACHE["failed_at"] is not None
 
 
 def model_allowlist(side_offer: dict[str, Any]) -> set[str]:
@@ -1087,6 +1103,9 @@ class OfferTerms:
     # signed. The client bounds ``reserved_msats`` with this number, so it is
     # frozen like the rates.
     context_lengths: dict[str, int] = dc_field(default_factory=dict)
+    # The minimum age (seconds) of an unused connection opened on this offer
+    # before a newer setup may close it under slot pressure (0: never).
+    evict_unused_after_s: int = 0
 
 
 # sig -> (monotonic time last served, terms), oldest first.
@@ -1111,6 +1130,7 @@ CONNECTION_FIELDS = (
     "h2",
     "connection_deposit_msat",
     "idle_timeout_s",
+    "evict_unused_after_s",
 )
 
 
@@ -1118,13 +1138,13 @@ CONNECTION_FIELDS = (
 # verified about the connection itself (the provider, the head the
 # credential is written in, the pinned suffix, the key schedule, the HTTP/2
 # rules): a live connection opened on another value of one of them takes no
-# further request once the node serves the new offer. The deposit and the
-# idle timeout are terms of the connection's money and lifetime only: an old
-# connection keeps the ones it was opened on.
+# further request once the node serves the new offer. The deposit, the idle
+# timeout and the eviction age are terms of the connection's money and
+# lifetime only: an old connection keeps the ones it was opened on.
 SECURITY_FIELDS = tuple(
     f
     for f in CONNECTION_FIELDS
-    if f not in ("connection_deposit_msat", "idle_timeout_s")
+    if f not in ("connection_deposit_msat", "idle_timeout_s", "evict_unused_after_s")
 )
 
 
@@ -1307,6 +1327,7 @@ async def build_offer() -> dict[str, Any]:
     images = images_offer_block(side, pct)
     h2 = h2_offer_block(side, images is not None)
     deposit, idle = connection_deposit_msat(), idle_timeout_s(side)
+    evict_after = evict_unused_after_s()
     offer: dict[str, Any] = {
         # Exactly this version: there is no list and no fallback.
         "v": CONFIDENTIAL_VERSION,
@@ -1318,6 +1339,10 @@ async def build_offer() -> dict[str, Any]:
         # connection may have no request in flight.
         "connection_deposit_msat": deposit,
         "idle_timeout_s": idle,
+        # How old an unused connection must be before a newer setup may
+        # close it under slot pressure (its deposit is then charged); 0:
+        # never.
+        "evict_unused_after_s": evict_after,
         "upstream_host": str(side.get("upstream_host", "")),
         "ws": confidential_ws_public_url(),
         "notary_pubkey": node_pubkey_hex() or "",
@@ -1372,6 +1397,7 @@ async def build_offer() -> dict[str, Any]:
         connection_fields(offer),
         upstream_models,
         context_lengths,
+        evict_after,
     )
     payload = canonical_json(offer).decode("utf-8")
     last = _LAST_OFFER["offer"]

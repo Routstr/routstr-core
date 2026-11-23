@@ -103,28 +103,15 @@ class Settings(BaseSettings):
     # Slot pressure on unused connections. When a setup finds the node or its
     # address full and no idle used connection to close, it closes an unused
     # connection (no settled request: armed, or open and idle) at least this
-    # many seconds old (from its setup), of the address holding the most, and
-    # never one whose 2PC, handshake or request is still under way (``closed``
-    # reason ``evicted``, ``unused: true``; its deposit is charged only as
-    # ``confidential_evict_charge_from`` says).
-    # Applies only when a setup needs the slot, never on a timer. 0 never
-    # closes an unused connection (the behaviour before this setting).
+    # many seconds old (from its setup), and never one whose 2PC, handshake
+    # or request is still under way (``closed`` reason ``evicted``,
+    # ``unused: true``). Its deposit is always charged: the deposit pays for
+    # the handshake the node did for it. Which connection goes first:
+    # ``_claim_slot``. Applies only when a setup needs the slot, never on a
+    # timer. 0 never closes an unused connection. Published in the signed
+    # offer (``evict_unused_after_s``).
     confidential_evict_unused_after_s: int = Field(
         default=60, ge=0, env="CONFIDENTIAL_EVICT_UNUSED_AFTER_S"
-    )
-    # An evicted unused connection's deposit is charged only when its address
-    # held at least this many evictable unused connections (past the minimum
-    # age, not busy) at that moment; below it the connection is closed and
-    # its deposit released (``evicted_released``). Honest clients hold fewer:
-    # the SDK and routstrd keep at most ``prewarm.maxTotal`` (default 4)
-    # armed spares per process, one per pool key; the browser library one per
-    # key; connections being opened are busy and not counted. So the default
-    # is 5: a lone spare can lose its slot under pressure, never its deposit,
-    # and an address hoarding slots pays. At least 2: at 1 any setup could
-    # make another address's single spare pay, and the clients report such
-    # a charge as a deviation.
-    confidential_evict_charge_from: int = Field(
-        default=5, ge=2, env="CONFIDENTIAL_EVICT_CHARGE_FROM"
     )
     # Pricing of confidential connections (fees off by default). A connection
     # moves ~16 MB of 2PC data and costs the node CPU before the provider
