@@ -100,6 +100,18 @@ class Settings(BaseSettings):
     confidential_max_active_per_ip: int = Field(
         default=16, ge=0, env="CONFIDENTIAL_MAX_ACTIVE_PER_IP"
     )
+    # Slot pressure on unused connections. When a setup finds the node or its
+    # address full and no idle used connection to close, it closes the oldest
+    # unused connection (no settled request: armed, open and idle, or with a
+    # first request accepted but stalled before the provider had it) once that
+    # connection is this many seconds old (from its setup), and never one
+    # whose 2PC, handshake or first request is still moving. That connection's
+    # deposit is charged (``closed`` reason ``evicted``, ``unused: true``).
+    # Applies only when a setup needs the slot, never on a timer. 0 never
+    # closes an unused connection (the behaviour before this setting).
+    confidential_evict_unused_after_s: int = Field(
+        default=60, ge=0, env="CONFIDENTIAL_EVICT_UNUSED_AFTER_S"
+    )
     # Pricing of confidential connections (fees off by default). A connection
     # moves ~16 MB of 2PC data and costs the node CPU before the provider
     # sees anything. The session fee is charged once per connection, with its

@@ -1888,15 +1888,15 @@ async def test_reserve_deposit_refusals(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(auth, "pay_for_request", broke)
 
     with pytest.raises(conf.BillingError) as unknown:
-        await conf.reserve_deposit("sk-x", SIG)
+        await cws.reserve_deposit("sk-x", SIG)
     assert unknown.value.status == 409
     # No deposit in the offer: nothing is reserved.
     conf._remember_offer(SIG, conf.OfferTerms({}, connection_deposit_msat=0))
-    assert await conf.reserve_deposit("sk-x", SIG) is None and seen == {}
+    assert await cws.reserve_deposit("sk-x", SIG) is None and seen == {}
     # Too little balance: the node's 402 body, marked as the deposit's.
     conf._remember_offer(SIG, conf.OfferTerms({}, connection_deposit_msat=700))
     with pytest.raises(conf.BillingError) as unfunded:
-        await conf.reserve_deposit("sk-x", SIG)
+        await cws.reserve_deposit("sk-x", SIG)
     assert seen == {"bearer": "sk-x", "min_cost": 700}
     assert unfunded.value.status == 402
     error = unfunded.value.detail["error"]
@@ -2584,8 +2584,9 @@ async def test_a_full_node_evicts_the_longest_idle_used_connection(
 ) -> None:
     """Load: 32 connections, each settled one request and idles. A 33rd
     setup closes the one idle longest (its deposit was already released)
-    instead of being refused; connections with a request in flight or not
-    yet used are never evicted, and with only those left the node refuses."""
+    instead of being refused; connections with a request in flight or
+    unused and younger than ``confidential_evict_unused_after_s`` are never
+    evicted, and with only those left the node refuses."""
     monkeypatch.setattr(cws, "EVICT_WAIT_S", 0.01)
     monkeypatch.setattr(settings, "confidential_max_active_per_ip", 0)
     states = [_holder(f"198.51.100.{i}", 100.0 + i) for i in range(cws.MAX_SESSIONS)]
@@ -2658,6 +2659,297 @@ async def test_an_evicted_idle_connection_closes_in_order(
     await cws._run_h2_session(client, sidecar, state, loop.time())  # type: ignore[arg-type]
     assert client.sent[-1] == {"type": "closed", "reason": "evicted"}
     assert ledger.calls == []
+
+
+def _unused(addr: str, age: float, **kw: Any) -> cws.SessionState:
+    """A slot holder with no settled request whose slot was claimed ``age``
+    seconds ago (set after ``_claim``)."""
+    s = _holder(addr, kw.pop("idle_since", None), settled=0)
+    s._age = age  # type: ignore[attr-defined]
+    for k, v in kw.items():
+        setattr(s, k, v)
+    return s
+
+
+async def _claim_aged(states: list[cws.SessionState]) -> None:
+    now = asyncio.get_running_loop().time()
+    for s in states:
+        await cws._claim_slot(s)
+        s.h2_slot_at = now - getattr(s, "_age", 0.0)
+
+
+async def test_a_full_node_evicts_the_oldest_unused_connection_past_the_minimum_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slot pressure (§8.4): with no idle used connection left, a setup on a
+    full node closes the oldest unused connection that is at least
+    ``confidential_evict_unused_after_s`` old; younger ones are safe, and
+    with the setting at 0 nothing unused is ever closed."""
+    monkeypatch.setattr(cws, "EVICT_WAIT_S", 0.01)
+    monkeypatch.setattr(settings, "confidential_max_active_per_ip", 0)
+    monkeypatch.setattr(settings, "confidential_max_unused_per_ip", 0)
+    monkeypatch.setattr(settings, "confidential_evict_unused_after_s", 60)
+    ages = [70.0, 200.0, 61.0] + [10.0] * (cws.MAX_SESSIONS - 3)
+    states = [_unused(f"198.51.100.{i}", a) for i, a in enumerate(ages)]
+    await _claim_aged(states)
+    await cws._claim_slot(_holder("203.0.113.9", None, settled=0))
+    # The oldest past the minimum age: 200 s.
+    assert [s.h2_evicted for s in states[:3]] == [False, True, False]
+    assert states[1] not in cws._slot_holders
+    await cws._claim_slot(_holder("203.0.113.10", None, settled=0))
+    assert states[0].h2_evicted and not states[2].h2_evicted
+    # Off: the 61 s one stays, the setup is refused.
+    monkeypatch.setattr(settings, "confidential_evict_unused_after_s", 0)
+    with pytest.raises(cws.SetupError) as exc:
+        await cws._claim_slot(_holder("203.0.113.11", None, settled=0))
+    assert exc.value.status == 503 and not states[2].h2_evicted
+
+
+async def test_an_idle_used_connection_goes_before_an_unused_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The victim order: the longest-idle used connection first (it holds no
+    deposit), an unused one only when there is none."""
+    monkeypatch.setattr(cws, "EVICT_WAIT_S", 0.01)
+    monkeypatch.setattr(settings, "confidential_max_active_per_ip", 0)
+    monkeypatch.setattr(settings, "confidential_max_unused_per_ip", 0)
+    old_unused = _unused("198.51.100.200", 500.0)
+    used = [_holder(f"198.51.100.{i}", 100.0 + i) for i in range(cws.MAX_SESSIONS - 1)]
+    await _claim_aged([old_unused, *used])
+    for s in used:
+        cws._mark_used(s)
+    await cws._claim_slot(_holder("203.0.113.9", None, settled=0))
+    assert used[0].h2_evicted and not old_unused.h2_evicted
+
+
+async def test_an_unused_connection_still_setting_up_is_not_evicted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the minimum age an unused connection is still safe while its
+    handshake runs, its 2PC moves bytes (up to the 2PC limit), a request is
+    queued or being reserved, or its first request is young for its body or
+    reached ``body_released``. Each protection is bounded."""
+    monkeypatch.setattr(settings, "confidential_evict_unused_after_s", 60)
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+
+    def mk(**kw: Any) -> cws.SessionState:
+        s = cws.SessionState()
+        s.h2_slot_at = now - kw.pop("age", 100.0)
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s
+
+    assert not cws._unused_busy(mk(), now)
+    # Handshake: ClientHello relayed 5 s ago, head not written; not after 60 s.
+    assert cws._unused_busy(mk(h2_hello_at=now - 5), now)
+    assert not cws._unused_busy(mk(h2_hello_at=now - 61), now)
+    assert not cws._unused_busy(mk(h2_hello_at=now - 5, h2_idle_since=now - 1), now)
+    # The 2PC moved a byte 3 s ago: busy, but only below the 2PC limit.
+    assert cws._unused_busy(mk(zk_active_at=now - 3), now)
+    assert not cws._unused_busy(mk(zk_active_at=now - 20), now)
+    assert not cws._unused_busy(mk(age=200.0, zk_active_at=now - 1), now)
+    # A request being reserved or queued.
+    assert cws._unused_busy(mk(h2_reserving=True), now)
+    queued = mk()
+    queued.h2_requests.put_nowait(({}, loop.create_future()))
+    assert cws._unused_busy(queued, now)
+    # A first request in flight: young for its body, or the provider has it.
+    billing = object()
+    big = 8 << 20  # 262 s at the slow uplink, plus the 60 s
+    assert cws._unused_busy(
+        mk(billing=billing, h2_request_at=now - 30, h2_body_len=100), now
+    )
+    assert not cws._unused_busy(
+        mk(billing=billing, h2_request_at=now - 70, h2_body_len=100), now
+    )
+    assert cws._unused_busy(
+        mk(billing=billing, h2_request_at=now - 300, h2_body_len=big), now
+    )
+    assert not cws._unused_busy(
+        mk(billing=billing, h2_request_at=now - 330, h2_body_len=big), now
+    )
+    assert cws._unused_busy(
+        mk(billing=billing, h2_request_at=now - 500, body_released=True), now
+    )
+
+
+async def test_an_address_at_its_unused_limit_evicts_its_own_oldest_unused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unused limit per address also yields to an unused connection of
+    that address past the minimum age, never one of another address."""
+    monkeypatch.setattr(cws, "EVICT_WAIT_S", 0.01)
+    monkeypatch.setattr(settings, "confidential_max_active_per_ip", 0)
+    monkeypatch.setattr(settings, "confidential_max_unused_per_ip", 2)
+    monkeypatch.setattr(settings, "confidential_evict_unused_after_s", 60)
+    other = _unused("198.51.100.1", 900.0)
+    mine = [_unused("203.0.113.1", 90.0), _unused("203.0.113.1", 30.0)]
+    await _claim_aged([other, *mine])
+    assert cws._unused_victim("203.0.113.1") is mine[0]
+    await cws._claim_slot(_holder("203.0.113.1", None, settled=0))
+    assert mine[0].h2_evicted and not other.h2_evicted and not mine[1].h2_evicted
+    assert cws._unused_by_ip["203.0.113.1"] == 2
+    with pytest.raises(cws.SetupError) as exc:
+        await cws._claim_slot(_holder("203.0.113.1", None, settled=0))
+    assert exc.value.status == 429 and "unused" in str(exc.value)
+
+
+async def test_an_evicted_unused_connection_is_charged_its_deposit(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The connection a setup closed while it held its slot unused ends with
+    ``closed`` reason ``evicted``, ``unused: true``, and a signed deposit
+    outcome: charged, reason ``evicted``."""
+    _secret, pub_hex = node_identity
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    state = cws.SessionState()
+    state.framing, state.sid, state.h2_ready = "2", SID, True
+    state.h2_idle_since = asyncio.get_running_loop().time()
+    state.h2_deposit = await cws.reserve_deposit("sk-x", SIG)
+    state.h2_deposit_msat = DEP
+    sidecar = _QueueSidecar([_ready("2"), _HEAD], [])
+    client = _IdleClient()
+
+    async def evict_soon() -> None:
+        await asyncio.sleep(0.1)
+        await cws._evict_idle(state)
+
+    asyncio.ensure_future(evict_soon())
+    loop = asyncio.get_running_loop()
+    await cws._run_h2_session(client, sidecar, state, loop.time())  # type: ignore[arg-type]
+    last = client.sent[-1]
+    assert (
+        last["type"] == "closed"
+        and last["reason"] == "evicted"
+        and last["unused"] is True
+    )
+    assert _deposit(last) == ("charged", "evicted", DEP)
+    assert _verify_schnorr(last["deposit_json"], last["deposit_sig"], pub_hex)
+    assert "request_outcome" not in last
+    assert ledger.calls[-1] == "charge:dep"
+
+
+async def test_an_evicted_stalled_first_request_is_released_and_signed(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """A first request accepted and never written in full, on a connection
+    evicted under pressure: the deposit is charged (``evicted``) and the
+    request's reservation released in full, both stated signed."""
+    _secret, pub_hex = node_identity
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    state = cws.SessionState()
+    state.framing, state.sid, state.h2_ready = "2", SID, True
+    loop = asyncio.get_running_loop()
+    state.h2_idle_since = loop.time()
+    state.h2_deposit = await cws.reserve_deposit("sk-x", SIG)
+    state.h2_deposit_msat = DEP
+    state.billing = await cws.reserve("sk-x", "m", 10, SIG, session_fee_due=True)
+    state.h2_n, state.engaged, state.h2_request_at = 1, True, loop.time()
+    sidecar = _QueueSidecar([], [])
+    client = _IdleClient()
+
+    async def evict_soon() -> None:
+        await asyncio.sleep(0.1)
+        await cws._evict_idle(state)
+
+    asyncio.ensure_future(evict_soon())
+    await cws._run_h2_session(client, sidecar, state, loop.time())  # type: ignore[arg-type]
+    last = client.sent[-1]
+    assert last["reason"] == "evicted" and last["unused"] is True
+    assert _deposit(last) == ("charged", "evicted", DEP)
+    out = last["request_outcome"]
+    assert out["outcome"] == "released" and out["reason"] == "evicted"
+    assert out["cost_msats"] == 0 and out["n"] == 1 and out["sid"] == SID
+    assert _verify_schnorr(
+        last["request_outcome_json"], last["request_outcome_sig"], pub_hex
+    )
+    assert json.loads(last["request_outcome_json"]) == out
+    assert ledger.calls[-2:] == ["charge:dep", "release:rel-1"]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_a_request_charged_without_a_settlement_has_a_signed_outcome(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """The provider had the request in full and no settlement followed: the
+    reservation is charged, and the last frame states it, signed: the sid,
+    ``n``, the reason, the cost (the announced reservation) and the balance."""
+    _secret, pub_hex = node_identity
+    _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    frames = [
+        _request_ok(1, http),
+        _released(1),
+        {"type": "error", "reason": "the client did not disclose"},
+    ]
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        ok = conn.until("request_ok")
+        err = conn.until("error")
+    out = err["request_outcome"]
+    assert out == json.loads(err["request_outcome_json"])
+    assert _verify_schnorr(
+        err["request_outcome_json"], err["request_outcome_sig"], pub_hex
+    )
+    assert (out["outcome"], out["reason"], out["n"], out["http"]) == (
+        "charged",
+        "request_received",
+        1,
+        http,
+    )
+    assert out["cost_msats"] == out["reserved_msats"] == ok["reserved_msats"]
+    assert out["sid"] == SID and out["v"] == 1
+    assert _deposit(err) == ("released", "request_received", DEP)
+
+
+def test_an_abandoned_request_after_a_settlement_has_a_signed_outcome(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Request 2, accepted on a connection whose deposit went back with
+    request 1, ends before ``body_released``: the abandon fee is kept and
+    stated, signed, with no deposit outcome."""
+    _secret, pub_hex = node_identity
+    _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+
+    def script(n: int) -> list[dict[str, Any]]:
+        if n == 1:
+            return [f for f in _settled(1, "2") if f["type"] != "closed"]
+        return [_request_ok(2, "2"), {"type": "error", "reason": "proof failed"}]
+
+    with _Conn(monkeypatch, script, "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        conn.until("receipt")
+        conn.send(_request(2, **_FEE))
+        err = conn.until("error")
+    out = err["request_outcome"]
+    assert _verify_schnorr(
+        err["request_outcome_json"], err["request_outcome_sig"], pub_hex
+    )
+    assert (out["outcome"], out["reason"], out["n"]) == (
+        "charged",
+        "request_abandoned",
+        2,
+    )
+    assert out["cost_msats"] == FEES[1]
+    assert "deposit" not in err
+
+
+def test_a_refused_request_has_no_outcome(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """A request the sidecar refused is told by ``request_refused``; the
+    connection's last frame names no request outcome for it."""
+    _Ledger(monkeypatch, deposit=DEP)
+    refused = {"type": "request_refused", "n": 1, "status": 400, "reason": "cap"}
+    last = {"type": "closed", "reason": "idle"}
+    with _Conn(monkeypatch, lambda n: [refused, last], "2") as conn:
+        conn.open()
+        conn.send(_request())
+        assert conn.recv1()["type"] == "request_refused"
+        closed = conn.until("closed")
+    assert "request_outcome" not in closed
 
 
 # ---------------------------------------------------------------------------
@@ -2891,5 +3183,5 @@ async def test_a_busy_wallet_is_a_retryable_refusal(
 
     monkeypatch.setattr(auth, "validate_bearer_key", short)
     with pytest.raises(conf.BillingError) as unfunded:
-        await conf.reserve_deposit("sk-x", SIG)
+        await cws.reserve_deposit("sk-x", SIG)
     assert unfunded.value.detail["error"]["type"] == "connection_deposit_unfunded"

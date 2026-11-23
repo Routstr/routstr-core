@@ -196,6 +196,21 @@ cannot write after three retries, is the node's own failure: the client gets
 `error` with `fault: "node"` instead of a receipt. Each reservation is
 finalized exactly once, before the connection's last frame is sent.
 
+A request the node finalized without a receipt (any row above but a
+settlement: the reservation charged after `body_released`, the abandon fee,
+the session fee of an early provider close, a release in full, a settlement
+whose write failed) is stated on the connection's last frame (`closed` or
+`error`), signed like a receipt: `request_outcome {v: 1, sid, http, n,
+outcome: "charged" | "released", reason, cost_msats, reserved_msats,
+balance_msats, time}` with `request_outcome_json` (the signed bytes),
+`request_outcome_sig` and `sig_scheme`. `reason` is `request_received`,
+`settlement_failed`, `settled_without_receipt` (charged its usage, but the
+deposit could not be released, so no receipt), `provider_refused`,
+`provider_unreachable`, `sidecar_failure`, `request_abandoned`, `evicted`,
+`unattested` or `not_started` (the sidecar never accepted it). A refused
+request (`request_refused`) has none. A client that left first receives
+nothing; the charge is the same.
+
 ### Fees, deposit and surcharge
 
 A connection costs the node far more than a plain request: about 16 MB of 2PC
@@ -249,6 +264,7 @@ first matching row:
 | 10 | no request in flight for `idle_timeout_s` | **charged** | `idle` |
 | 11 | `head_written` not reached within 10 minutes | **charged** | `setup_timeout` |
 | 12 | anything else: the client left, a failed handshake or π_NK, a protocol error, only refused requests | **charged** | `unused` |
+| 13 | a newer setup closed the connection under slot pressure while it had no settled request (above; checked before rows 9 to 12) | **charged**; a first request in flight is released in full | `evicted` |
 
 A 5xx refusal of the node returns the deposit only while no later request of
 the connection was accepted (`request_ok`): after that, the connection's end
@@ -321,9 +337,24 @@ signed.
   and at most `CONFIDENTIAL_MAX_ACTIVE_PER_IP` (16) per client address, used
   or not. A setup that finds either full first closes the longest-idle *used*
   connection there (one that settled a request, has none in flight, and so
-  holds no deposit): `closed` with reason `evicted`. Only when there is none
-  is it refused (503 node, 429 address) and its deposit released. A client
-  can therefore not hold every slot with cheap, mostly idle connections.
+  holds no deposit): `closed` with reason `evicted`. With no such
+  connection it closes the oldest *unused* one there (no settled request)
+  that is at least `CONFIDENTIAL_EVICT_UNUSED_AFTER_S` (60 s) old and is not
+  still setting up: not in its handshake (60 s at most after the
+  ClientHello), its 2PC or proof channel quiet for 15 s (protected only
+  while younger than the 180 s 2PC limit), no request queued or being
+  reserved, and a first request in flight only once it is older than the
+  minimum age plus its `body_len` at 32 kB/s and has not reached
+  `body_released`. That connection's deposit is charged: `closed` with
+  reason `evicted`, `"unused": true`, and the signed deposit outcome
+  `charged`, reason `evicted` (a stalled first request is released in full).
+  A full address at `CONFIDENTIAL_MAX_UNUSED_PER_IP` closes its own oldest
+  unused connection the same way. Only when there is none is the setup
+  refused (503 node, 429 address) and its deposit released. Eviction happens
+  only when a setup needs the slot, never on a timer. Holding slots with
+  unused connections therefore costs a deposit per slot about every minute
+  while others try to connect, not every 600 s; an honest pre-warmed spare
+  risks its deposit only on a node or address that is full.
 - Requests refused in a row on one connection (by the node or the sidecar)
   are capped at 8: the ninth ends the connection (`error` 429; a connection
   that carried only refused requests loses its deposit, row 12).
@@ -399,7 +430,8 @@ signed.
 | `CONFIDENTIAL_RATE_SURCHARGE_PCT` | percentage added to the per-token rates and image prices; the signed offer carries the surcharged prices | `0` (off) |
 | `CONFIDENTIAL_RESERVE_MARGIN_TOKENS` | completion tokens reserved beyond the pinned `max_tokens` (a provider may bill a few more than the cap, and the charge never exceeds the reservation); only the hold grows; a usage with more completion tokens than `max_tokens` plus this is logged as a warning; in the signed offer as `reserve_margin_tokens` | `16` |
 | `CONFIDENTIAL_MAX_ACTIVE_PER_IP` | connections per client address in total (used or not); at the limit a setup closes the address's longest-idle used connection, else is refused (429); 0 disables | `16` |
-| `CONFIDENTIAL_MAX_UNUSED_PER_IP` | refuse (429) a new connection from a client address (IPv6: its /64) that already has this many unused ones (setup reserved, no request released yet; armed connections count); 0 disables | `12` |
+| `CONFIDENTIAL_MAX_UNUSED_PER_IP` | a new connection from a client address (IPv6: its /64) that already has this many unused ones (setup reserved, no request released yet; armed connections count) closes the address's oldest unused one past `CONFIDENTIAL_EVICT_UNUSED_AFTER_S`, else is refused (429); 0 disables | `12` |
+| `CONFIDENTIAL_EVICT_UNUSED_AFTER_S` | under slot pressure (the node, the address's total or its unused limit full, no idle used connection to close) a setup closes the oldest unused connection at least this old (from its setup) that is not still setting up; its deposit is charged (`closed` `evicted`, `unused: true`); never on a timer; 0 never closes an unused connection | `60` |
 | `CONFIDENTIAL_TRUSTED_PROXIES` | comma-separated peers whose client-address header is believed (e.g. `127.0.0.1,::1` for nginx on the same host); `self` adds the node's own addresses (enable only behind a reverse proxy that always sets the header) | empty (no peer is trusted) |
 | `CONFIDENTIAL_CLIENT_IP_HEADER` | header a trusted proxy puts the client address in; for `X-Forwarded-For` the rightmost entry over all its header lines is used; another header is read from its last line | `x-forwarded-for` |
 | `NSEC` | node key; signs offer, attestation, receipt and deposit outcome (required) | |
