@@ -1,0 +1,88 @@
+# Multi-stage Dockerfile for Routstr (includes UI build) — Enclava/TEE variant.
+#
+# Identical to Dockerfile.full except that every path the node writes at
+# runtime is declared as a VOLUME, which is what enclava-init bind-mounts on
+# top of the read-only root filesystem, and the runtime env defaults point
+# database/secret/loss-journal writes at the encrypted /data volume.
+ARG PYTHON_VERSION=3.14
+
+# Stage 1: Build the UI
+FROM node:23-alpine AS ui-builder
+WORKDIR /app/ui
+
+# Install pnpm
+RUN corepack enable pnpm && corepack prepare pnpm@10.15.0 --activate
+
+# Copy UI source
+COPY ui/package.json ui/pnpm-lock.yaml* ui/pnpm-workspace.yaml* ./
+RUN pnpm install --frozen-lockfile
+
+COPY ui/ ./
+ENV NEXT_TELEMETRY_DISABLED=1
+# Next.js build produces a static export in 'out' directory
+RUN pnpm run build
+
+# Stage 2: Build the Routstr Node
+FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS runner
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git \
+        build-essential \
+        pkg-config \
+        libffi-dev \
+        libsecp256k1-dev \
+        autoconf \
+        automake \
+        libtool \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY uv.lock pyproject.toml ./
+
+RUN uv sync --no-dev --no-install-project
+
+WORKDIR /app
+
+COPY . .
+
+# Copy the built UI from the ui-builder stage
+COPY --from=ui-builder /app/ui/out ./ui_out
+
+ARG GIT_COMMIT=""
+ARG GIT_TAG=""
+ENV GIT_COMMIT=${GIT_COMMIT}
+ENV GIT_TAG=${GIT_TAG}
+ENV PORT=8000
+ENV PYTHONUNBUFFERED=1
+# routstr is not installed into the venv (--no-install-project); make it importable
+# for `python scripts/<name>.py` run via `docker compose exec`.
+ENV PYTHONPATH=/app
+
+# --- Enclava / TEE wiring -------------------------------------------------
+# Enclava runs the container on a read-only root filesystem and bind-mounts
+# only the paths declared as VOLUME (one per [storage].paths entry). The node
+# writes relative to its working directory (/app), so every such path is
+# declared here:
+#   /data            SQLite database, vault secret key, terminal-loss journal
+#   /app/logs        app.log, usage_analytics.db (log_manager keeps them here)
+#   /app/.wallet     cashu proofs/keysets + the wallet operation lock
+# Losing /app/.wallet loses sats, so it must be on encrypted storage too.
+#
+# PYTHONDONTWRITEBYTECODE: /app is read-only at runtime; don't try to write
+# __pycache__ into it.
+# AUTO_GENERATE_NSEC: self-provision a Nostr identity on first boot so the node
+# announces itself without an operator pasting an nsec (override via config).
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    DATABASE_URL="sqlite+aiosqlite:////data/keys.db" \
+    ROUTSTR_SECRET_KEY_FILE="/data/routstr_secret.key" \
+    TERMINAL_OUTCOME_LOSS_DIR="/data/terminal-outcome-losses" \
+    AUTO_GENERATE_NSEC=true
+
+RUN mkdir -p /app/logs /app/.wallet /data
+
+VOLUME ["/data", "/app/logs", "/app/.wallet"]
+
+EXPOSE 8000
+
+# Run the application
+CMD ["/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]
