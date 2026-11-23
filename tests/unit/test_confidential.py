@@ -141,7 +141,7 @@ async def test_offer_signed_and_verifiable(
         return {
             "upstream_host": "api.venice.ai",
             "v": 3,
-            "twopc": "split-public-2",
+            "twopc": "split-public-3",
             "head_template": "POST / HTTP/1.1\r\n\r\n",
             "key_length": 42,
             "suffix_keys": ["model", "max_tokens", "stream", "stream_options"],
@@ -347,7 +347,7 @@ H2 = {
 # What a scripted sidecar's offer says (the node's own view of it).
 SIDE_OFFER = {
     "v": 3,
-    "twopc": "split-public-2",
+    "twopc": "split-public-3",
     "node_settles": True,
     "upstream_host": "api.venice.ai",
     "head_template": "POST /api/v1/chat/completions HTTP/1.1\r\n\r\n",
@@ -1121,7 +1121,7 @@ async def test_sidecar_of_another_protocol_version_is_refused(
     offer: dict[str, Any] = {
         "upstream_host": "api.venice.ai",
         "head_template": "x",
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
         "node_settles": True,
     }
     if version is not None:
@@ -1743,7 +1743,7 @@ async def test_sidecar_without_node_settles_is_refused(
     offer: dict[str, Any] = {
         "upstream_host": "api.venice.ai",
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
         "head_template": "x",
     }
     if node_settles is not None:
@@ -1785,7 +1785,7 @@ async def test_last_good_sidecar_offer_survives_a_failed_refresh(
         "upstream_host": "api.venice.ai",
         "head_template": "x",
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
     }
     state = {"fail": False}
 
@@ -1813,7 +1813,7 @@ async def test_models_field_and_price_list_share_one_predicate(
             "upstream_host": "api.venice.ai",
             "head_template": "x",
             "v": 3,
-            "twopc": "split-public-2",
+            "twopc": "split-public-3",
         }
 
     def entry(mid: str, cand: Any) -> dict[str, float]:
@@ -1841,7 +1841,7 @@ async def test_signed_offers_are_remembered_by_sig(
             "upstream_host": "api.venice.ai",
             "head_template": "x",
             "v": 3,
-            "twopc": "split-public-2",
+            "twopc": "split-public-3",
         }
 
     rates = {"m": dict(RATES)}
@@ -2309,7 +2309,7 @@ async def _sidecar_v3() -> dict[str, Any]:
     return {
         "upstream_host": "api.venice.ai",
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
         "head_template": "POST / HTTP/1.1\r\n\r\n",
         "key_length": 42,
         "suffix_keys": ["model", "max_tokens"],
@@ -2538,7 +2538,7 @@ async def test_sidecar_offer_fetch_sends_the_token(
             json={
                 "head_template": "x",
                 "v": 3,
-                "twopc": "split-public-2",
+                "twopc": "split-public-3",
                 "node_settles": True,
             },
         )
@@ -2719,7 +2719,7 @@ async def _offer_with(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             "upstream_host": "api.venice.ai",
             "head_template": "x",
             "v": 3,
-            "twopc": "split-public-2",
+            "twopc": "split-public-3",
         }
 
     monkeypatch.setattr(conf, "cached_sidecar_offer", side)
@@ -2800,7 +2800,7 @@ async def test_models_field_carries_the_pricing(
     monkeypatch: pytest.MonkeyPatch, fee_settings: None
 ) -> None:
     async def side() -> dict[str, Any]:
-        return {"upstream_host": "api.venice.ai", "v": 3, "twopc": "split-public-2"}
+        return {"upstream_host": "api.venice.ai", "v": 3, "twopc": "split-public-3"}
 
     monkeypatch.setattr(conf, "cached_sidecar_offer", side)
     monkeypatch.setattr(conf, "priced_models", lambda s: {"m": None})
@@ -3284,7 +3284,7 @@ async def test_malformed_sidecar_offer_is_refused(
     offer: dict[str, Any] = {
         "upstream_host": "api.venice.ai",
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
         "head_template": "x",
         "node_settles": True,
         **patch,
@@ -3326,7 +3326,7 @@ async def test_refused_sidecar_offer_drops_the_last_good_one(
         "upstream_host": "api.venice.ai",
         "head_template": "x",
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
     }
     state: dict[str, Any] = {"exc": None}
 
@@ -3818,7 +3818,7 @@ async def test_offer_publishes_signed_image_variants(
     side = {
         "upstream_host": "api.venice.ai",
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
         "head_template": "x",
         "endpoints": {"images": _IMAGES_EP},
     }
@@ -3852,7 +3852,7 @@ async def test_offer_signs_the_sidecars_lower_image_count(
     side = {
         "upstream_host": "api.venice.ai",
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
         "head_template": "x",
         "endpoints": {"images": {**_IMAGES_EP, "max_count": 1}},
     }
@@ -3869,7 +3869,7 @@ async def test_offer_without_the_images_endpoint_is_unchanged(
             "upstream_host": "api.venice.ai",
             "head_template": "x",
             "v": 3,
-            "twopc": "split-public-2",
+            "twopc": "split-public-3",
         },
     )
     offer = await conf.build_offer()
@@ -3909,7 +3909,7 @@ async def test_reserve_image_is_the_flat_price_times_count(
     side = {
         "upstream_host": "api.venice.ai",
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
         "head_template": "x",
         "endpoints": {"images": _IMAGES_EP},
     }
@@ -3980,7 +3980,7 @@ async def test_reserve_image_honours_the_variant_count_and_whole_prices(
     side = {
         "upstream_host": "api.venice.ai",
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
         "head_template": "x",
         "endpoints": {"images": _IMAGES_EP},
     }

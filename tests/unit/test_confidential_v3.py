@@ -87,7 +87,7 @@ async def _offer(monkeypatch: pytest.MonkeyPatch, extra: dict[str, Any]) -> Any:
     async def sidecar_offer() -> dict[str, Any]:
         return {
             "v": 3,
-            "twopc": "split-public-2",
+            "twopc": "split-public-3",
             "upstream_host": "api.venice.ai",
             "head_template": "POST /api/v1/chat/completions HTTP/1.1\r\n\r\n",
             "key_length": 42,
@@ -112,7 +112,7 @@ async def test_offer_is_a_v3_offer(
     for o in (offer, signed):
         # Exactly this version (no list), the sidecar's framings in its
         # order, its h2 block and key-schedule protocol.
-        assert o["v"] == 3 and o["twopc"] == "split-public-2"
+        assert o["v"] == 3 and o["twopc"] == "split-public-3"
         assert o["http"] == ["2", "1.1"] and o["h2"] == H2
         # Connection terms are top-level: they hold for both framings.
         assert o["connection_deposit_msat"] == 1000 and o["idle_timeout_s"] == 120
@@ -282,7 +282,7 @@ def test_nostr_listing_carries_the_confidential_version(
 def test_connection_fields_leave_out_what_belongs_to_a_request() -> None:
     offer = {
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
         "upstream_host": "h",
         "head_template": "t",
         "chat": {"cap_keys": ["max_tokens"]},
@@ -375,7 +375,7 @@ def test_a_security_relevant_offer_change_retires_live_connections(
     deposit or the idle timeout, or framing "2" withdrawn, does not retire it."""
     base = {
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
         "upstream_host": "api.venice.ai",
         "head_template": "POST /x HTTP/1.1\r\n\r\n",
         "chat": {"cap_keys": ["max_tokens"]},
@@ -409,7 +409,7 @@ def test_a_withdrawn_framing_ends_no_live_connection() -> None:
     h2: dict[str, Any] = {"probe_path": "/api/v1/models"}
     base: dict[str, Any] = {
         "v": 3,
-        "twopc": "split-public-2",
+        "twopc": "split-public-3",
         "upstream_host": "api.venice.ai",
         "h2": h2,
         "connection_deposit_msat": 1000,
