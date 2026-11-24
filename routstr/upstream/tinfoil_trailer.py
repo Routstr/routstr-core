@@ -5,9 +5,13 @@ decoding. Tinfoil returns ``X-Tinfoil-Usage-Metrics`` as a trailer on
 streaming responses, so we need a lower-level HTTP client that preserves
 trailers from the h11 ``EndOfMessage`` event.
 
-Because EHBP response bodies are opaque encrypted blobs, buffering the full
-response is acceptable — the client decrypts the complete body regardless of
-whether it arrived streamed or buffered.
+EHBP response bodies are opaque encrypted blobs, but that does **not**
+require buffering them. The EHBP client decrypts the body with a streaming
+``ReadableStream`` (one frame per encrypted chunk), so forwarding each
+ciphertext chunk as it arrives gives the caller real time-to-first-token.
+``stream_with_trailer`` does exactly that, exposing usage/trailer headers
+only once the body completes. ``forward_with_trailer`` remains the buffered
+variant for error paths that must inspect the whole body before replying.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import ssl
 from dataclasses import dataclass, field
+from typing import AsyncIterator, Callable
 from urllib.parse import urlsplit
 
 import h11
@@ -50,6 +55,27 @@ class TrailerResponse:
     trailers: list[tuple[str, str]] = field(default_factory=list)
 
 
+@dataclass
+class StreamedTrailerResponse:
+    """Response whose body is still arriving, plus a trailers future.
+
+    ``body`` yields ciphertext as the upstream produces it. ``trailers``
+    resolves once the body is exhausted, mirroring ``TrailerResponse.trailers``
+    for callers that need usage metadata before settling payment.
+    """
+
+    status_code: int
+    headers: list[tuple[str, str]]
+    body: AsyncIterator[bytes]
+    trailers: "asyncio.Future[list[tuple[str, str]]]"
+    _on_abandon: "Callable[[], None]" = field(default=lambda: None)
+
+    async def aclose(self) -> None:
+        """Stop reading and release the upstream connection immediately."""
+        self._on_abandon()
+        await self.body.aclose()  # type: ignore[attr-defined]
+
+
 def _get_header(headers: list[tuple[str, str]], name: str) -> str | None:
     name_lower = name.lower()
     for k, v in headers:
@@ -71,20 +97,18 @@ def _strip_hop_by_hop_headers(headers: dict[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if key.lower() not in excluded}
 
 
-async def forward_with_trailer(
+async def _connect_and_send(
     *,
     method: str,
     url: str,
     headers: dict[str, str],
     body: bytes,
-    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-    max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES,
-    close_timeout_seconds: float = _DEFAULT_CLOSE_TIMEOUT_SECONDS,
-) -> TrailerResponse:
-    """Send an HTTP/1.1 request via h11 and capture HTTP trailers.
+    timeout_seconds: float,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, h11.Connection, str]:
+    """Open the TLS connection and write the request, sharing the error mapping.
 
-    Returns a :class:`TrailerResponse` with the full buffered body and any
-    trailer headers from the ``EndOfMessage`` event.
+    Returns the reader/writer, an h11 client connection ready to parse the
+    response, and the host (for timeout messages).
     """
     parsed = urlsplit(url)
     host = parsed.hostname
@@ -126,37 +150,102 @@ async def forward_with_trailer(
             f"Unable to connect to EHBP upstream {host}: {type(exc).__name__}"
         ) from exc
 
+    # Build HTTP/1.1 request
+    header_lines = [f"{method} {path} HTTP/1.1"]
+    has_host = any(k.lower() == "host" for k in headers)
+    if not has_host:
+        header_lines.append(f"Host: {host}")
+    header_lines.append("Connection: close")
+
+    for key, value in headers.items():
+        if key.lower() == "host":
+            continue
+        header_lines.append(f"{key}: {value}")
+
+    if body and not any(k.lower() == "content-length" for k in headers):
+        header_lines.append(f"Content-Length: {len(body)}")
+
+    request_data = "\r\n".join(header_lines).encode() + b"\r\n\r\n"
+    if body:
+        request_data += body
+
+    writer.write(request_data)
     try:
-        # Build HTTP/1.1 request
-        header_lines = [f"{method} {path} HTTP/1.1"]
-        has_host = any(k.lower() == "host" for k in headers)
-        if not has_host:
-            header_lines.append(f"Host: {host}")
-        header_lines.append("Connection: close")
+        await asyncio.wait_for(writer.drain(), timeout=timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        _close_writer(writer)
+        raise EhbpTimeoutError(
+            f"EHBP upstream {host} timed out after {timeout_seconds:g}s sending request"
+        ) from exc
 
-        for key, value in headers.items():
-            if key.lower() == "host":
-                continue
-            header_lines.append(f"{key}: {value}")
+    return reader, writer, h11.Connection(h11.CLIENT), host
 
-        if body and not any(k.lower() == "content-length" for k in headers):
-            header_lines.append(f"Content-Length: {len(body)}")
 
-        request_data = "\r\n".join(header_lines).encode() + b"\r\n\r\n"
-        if body:
-            request_data += body
+def _close_writer(writer: asyncio.StreamWriter) -> None:
+    writer.close()
 
-        writer.write(request_data)
+
+async def _close_writer_and_wait(
+    writer: asyncio.StreamWriter, close_timeout_seconds: float
+) -> None:
+    _close_writer(writer)
+    if close_timeout_seconds > 0:
         try:
-            await asyncio.wait_for(writer.drain(), timeout=timeout_seconds)
+            await asyncio.wait_for(writer.wait_closed(), timeout=close_timeout_seconds)
+        except Exception:
+            pass
+
+
+async def _read_event(
+    conn: h11.Connection,
+    reader: asyncio.StreamReader,
+    *,
+    host: str,
+    timeout_seconds: float,
+) -> "h11.Event | type[h11.NEED_DATA] | type[h11.PAUSED]":
+    """Next h11 event, pulling more bytes from the socket when needed."""
+    while True:
+        event = conn.next_event()
+        if event is not h11.NEED_DATA:
+            return event
+        try:
+            data = await asyncio.wait_for(
+                reader.read(_READ_BUFSIZE), timeout=timeout_seconds
+            )
         except asyncio.TimeoutError as exc:
             raise EhbpTimeoutError(
                 f"EHBP upstream {host} timed out after "
-                f"{timeout_seconds:g}s sending request"
+                f"{timeout_seconds:g}s waiting for response data"
             ) from exc
+        conn.receive_data(data if data else b"")
 
-        # Parse response with h11
-        conn = h11.Connection(h11.CLIENT)
+
+async def forward_with_trailer(
+    *,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES,
+    close_timeout_seconds: float = _DEFAULT_CLOSE_TIMEOUT_SECONDS,
+) -> TrailerResponse:
+    """Send an HTTP/1.1 request via h11 and capture HTTP trailers.
+
+    Returns a :class:`TrailerResponse` with the full buffered body and any
+    trailer headers from the ``EndOfMessage`` event. Use this only when the
+    whole body is needed before replying (error paths); it withholds every
+    byte until the upstream finishes. ``stream_with_trailer`` streams instead.
+    """
+    reader, writer, conn, host = await _connect_and_send(
+        method=method,
+        url=url,
+        headers=headers,
+        body=body,
+        timeout_seconds=timeout_seconds,
+    )
+
+    try:
         status_code = 0
         resp_headers: list[tuple[str, str]] = []
         body_chunks: list[bytes] = []
@@ -164,21 +253,9 @@ async def forward_with_trailer(
         trailers: list[tuple[str, str]] = []
 
         while True:
-            event = conn.next_event()
-
-            if event is h11.NEED_DATA:
-                try:
-                    data = await asyncio.wait_for(
-                        reader.read(_READ_BUFSIZE),
-                        timeout=timeout_seconds,
-                    )
-                except asyncio.TimeoutError as exc:
-                    raise EhbpTimeoutError(
-                        f"EHBP upstream {host} timed out after "
-                        f"{timeout_seconds:g}s waiting for response data"
-                    ) from exc
-                conn.receive_data(data if data else b"")
-                continue
+            event = await _read_event(
+                conn, reader, host=host, timeout_seconds=timeout_seconds
+            )
 
             if isinstance(event, h11.Response):
                 status_code = event.status_code
@@ -212,11 +289,141 @@ async def forward_with_trailer(
             trailers=trailers,
         )
     finally:
-        writer.close()
-        if close_timeout_seconds > 0:
-            try:
-                await asyncio.wait_for(
-                    writer.wait_closed(), timeout=close_timeout_seconds
+        await _close_writer_and_wait(writer, close_timeout_seconds)
+
+
+async def stream_with_trailer(
+    *,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES,
+    close_timeout_seconds: float = _DEFAULT_CLOSE_TIMEOUT_SECONDS,
+) -> StreamedTrailerResponse:
+    """Send an HTTP/1.1 request via h11 and stream the body as it arrives.
+
+    Differences from :func:`forward_with_trailer`:
+
+    * ``body`` yields upstream ciphertext chunks immediately, so the caller's
+      client sees real time-to-first-token instead of one blob at the end.
+    * ``trailers`` is a future that resolves with the ``EndOfMessage`` trailer
+      headers only once the body is exhausted. Await it after streaming to
+      settle payment from ``X-Tinfoil-Usage-Metrics``.
+    * ``max_response_bytes`` is enforced incrementally, so an oversized
+      response is aborted without first buffering it.
+
+    Response headers are only available after the status line is parsed, which
+    is why they are resolved before this coroutine returns.
+    """
+    reader, writer, conn, host = await _connect_and_send(
+        method=method,
+        url=url,
+        headers=headers,
+        body=body,
+        timeout_seconds=timeout_seconds,
+    )
+
+    trailers_future: asyncio.Future[list[tuple[str, str]]] = (
+        asyncio.get_running_loop().create_future()
+    )
+    released = False
+
+    def _release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        _close_writer(writer)
+
+    try:
+        # Read up to and including the response headers before returning, so
+        # callers can decide on status-code handling without consuming the body.
+        status_code = 0
+        resp_headers: list[tuple[str, str]] = []
+        while True:
+            event = await _read_event(
+                conn, reader, host=host, timeout_seconds=timeout_seconds
+            )
+            if isinstance(event, h11.Response):
+                status_code = event.status_code
+                resp_headers = [(k.decode(), v.decode()) for k, v in event.headers]
+                break
+            if isinstance(event, h11.EndOfMessage):
+                # No body at all (e.g. 204): settle trailers now.
+                trailers_future.set_result(
+                    [(k.decode(), v.decode()) for k, v in event.headers]
                 )
-            except Exception:
-                pass
+                await _close_writer_and_wait(writer, close_timeout_seconds)
+
+                async def _empty() -> AsyncIterator[bytes]:
+                    return
+                    yield b""  # pragma: no cover - makes this an async generator
+
+                return StreamedTrailerResponse(
+                    status_code=status_code,
+                    headers=resp_headers,
+                    body=_empty(),
+                    trailers=trailers_future,
+                )
+            if isinstance(event, h11.ConnectionClosed):
+                break
+
+        async def _iter_body() -> AsyncIterator[bytes]:
+            body_size = 0
+            try:
+                while True:
+                    event = await _read_event(
+                        conn, reader, host=host, timeout_seconds=timeout_seconds
+                    )
+                    if isinstance(event, h11.Data):
+                        body_size += len(event.data)
+                        if body_size > max_response_bytes:
+                            raise ValueError(
+                                f"EHBP response exceeded {max_response_bytes} bytes"
+                            )
+                        yield event.data
+                    elif isinstance(event, h11.EndOfMessage):
+                        pairs = [(k.decode(), v.decode()) for k, v in event.headers]
+                        if not trailers_future.done():
+                            trailers_future.set_result(pairs)
+                        return
+                    elif isinstance(event, h11.PAUSED):
+                        logger.warning("h11 PAUSED event during EHBP response parsing")
+                        break
+                    elif isinstance(event, h11.ConnectionClosed):
+                        break
+            except GeneratorExit:
+                # The consumer closed the stream (client disconnected).
+                # Propagate the close but do not fault the trailers future: it
+                # resolved to "no trailers observed", which is what settlement
+                # must read. Marking it failed would surface a spurious error
+                # from a read nobody is going to make.
+                raise
+            except BaseException as exc:  # noqa: BLE001 - must not leak
+                if not trailers_future.done():
+                    trailers_future.set_exception(exc)
+                    # A caller that abandons the stream never awaits this
+                    # future, and asyncio logs "exception was never retrieved"
+                    # for that. Consume it here; awaiting callers still see the
+                    # exception through their own await.
+                    trailers_future.exception()
+                raise
+            finally:
+                await _close_writer_and_wait(writer, close_timeout_seconds)
+                if not trailers_future.done():
+                    # Aborted before EndOfMessage: callers awaiting trailers
+                    # must not hang.
+                    trailers_future.set_result([])
+
+        return StreamedTrailerResponse(
+            status_code=status_code,
+            headers=resp_headers,
+            body=_iter_body(),
+            trailers=trailers_future,
+            _on_abandon=_release,
+        )
+    except BaseException:
+        await _close_writer_and_wait(writer, close_timeout_seconds)
+        raise

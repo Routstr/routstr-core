@@ -8,7 +8,10 @@ import pytest
 
 from routstr.core.error_scope import ERROR_SCOPE_UPSTREAM, UPSTREAM_ERROR_STATUS
 from routstr.core.exceptions import EhbpConnectionError, EhbpTimeoutError, UpstreamError
-from routstr.upstream.tinfoil_trailer import forward_with_trailer
+from routstr.upstream.tinfoil_trailer import (
+    forward_with_trailer,
+    stream_with_trailer,
+)
 
 
 class FakeReader:
@@ -285,3 +288,133 @@ def test_ehbp_connection_error_forwards_details() -> None:
     exc = EhbpConnectionError("boom", details={"provider": "tinfoil"})
     assert exc.details == {"provider": "tinfoil"}
     assert exc.code == "UPSTREAM_UNAVAILABLE"
+
+
+class GatedReader:
+    """A reader that only releases bytes when the test allows it.
+
+    Lets a test prove that a chunk reaches the consumer *before* the rest of
+    the body (and the trailer) has arrived.
+    """
+
+    def __init__(self, parts: list[bytes]) -> None:
+        self._parts = parts
+        self.gate = asyncio.Event()
+
+    async def read(self, _size: int) -> bytes:
+        if not self._parts:
+            return b""
+        if len(self._parts) == len(getattr(self, "_initial", self._parts)):
+            self._initial = list(self._parts)
+        # Release one part per gate opening.
+        await self.gate.wait()
+        self.gate.clear()
+        return self._parts.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_stream_with_trailer_yields_body_before_the_trailer_arrives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first chunk must be delivered while later bytes are still in flight."""
+    head = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"Trailer: X-Tinfoil-Usage-Metrics\r\n"
+        b"\r\n"
+        b"5\r\nhello\r\n"
+    )
+    tail = (
+        b"5\r\nworld\r\n"
+        b"0\r\n"
+        b"X-Tinfoil-Usage-Metrics: prompt=1,completion=2,total=3\r\n"
+        b"\r\n"
+    )
+    reader = GatedReader([head, tail])
+    writer = FakeWriter()
+    monkeypatch.setattr(
+        "routstr.upstream.tinfoil_trailer.asyncio.open_connection",
+        AsyncMock(return_value=(reader, writer)),
+    )
+
+    reader.gate.set()  # release the head
+    result = await stream_with_trailer(
+        method="POST",
+        url="https://enclave.tinfoil.sh/v1/chat/completions",
+        headers={},
+        body=b"opaque",
+    )
+    assert result.status_code == 200
+
+    body_iter = result.body.__aiter__()
+    first = await anext(body_iter)
+    assert first == b"hello"
+    # The trailer cannot be known yet: the rest of the body is still gated.
+    assert not result.trailers.done()
+
+    reader.gate.set()  # release the tail
+    rest = [chunk async for chunk in body_iter]
+    assert rest == [b"world"]
+    trailers = await result.trailers
+    assert trailers == [("x-tinfoil-usage-metrics", "prompt=1,completion=2,total=3")]
+    writer.close.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_trailer_enforces_the_size_limit_incrementally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized response must abort instead of being buffered first."""
+    response = (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nabcdef\r\n0\r\n\r\n"
+    )
+    writer = FakeWriter()
+    monkeypatch.setattr(
+        "routstr.upstream.tinfoil_trailer.asyncio.open_connection",
+        AsyncMock(return_value=(FakeReader([response]), writer)),
+    )
+
+    result = await stream_with_trailer(
+        method="POST",
+        url="https://enclave.tinfoil.sh/v1/chat/completions",
+        headers={},
+        body=b"opaque",
+        max_response_bytes=4,
+    )
+
+    with pytest.raises(ValueError, match="exceeded"):
+        async for _ in result.body:
+            pass
+    writer.close.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_trailer_closing_early_still_releases_the_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client disconnect must not leave the upstream socket open."""
+    response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"\r\n"
+        b"5\r\nhello\r\n"
+        b"5\r\nworld\r\n"
+        b"0\r\n\r\n"
+    )
+    writer = FakeWriter()
+    monkeypatch.setattr(
+        "routstr.upstream.tinfoil_trailer.asyncio.open_connection",
+        AsyncMock(return_value=(FakeReader([response]), writer)),
+    )
+
+    result = await stream_with_trailer(
+        method="POST",
+        url="https://enclave.tinfoil.sh/v1/chat/completions",
+        headers={},
+        body=b"opaque",
+    )
+    body_iter = result.body.__aiter__()
+    assert await anext(body_iter) == b"hello"
+    await result.aclose()
+    # Waiting on trailers after an abandoned stream must not hang.
+    assert await result.trailers == []
