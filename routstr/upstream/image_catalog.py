@@ -22,6 +22,7 @@ from ..payment.image_pricing import (
     ImagePriceTier,
     ImagePricing,
     produces_images,
+    select_image_price_usd,
 )
 from ..payment.models import Model
 
@@ -184,13 +185,44 @@ def _rate(value: Any) -> float | None:
     return rate
 
 
+def _listed_resolutions(parameters: dict[str, dict]) -> list[str]:
+    """The ``resolution`` values an endpoint takes, as it lists them."""
+    descriptor = parameters.get("resolution", {})
+    values = descriptor.get("values")
+    if descriptor.get("type") != "enum" or not isinstance(values, list):
+        return []
+    return [value for value in values if isinstance(value, str)]
+
+
+def _resolution_tiers(
+    variants: dict[str | None, float], parameters: dict[str, dict]
+) -> list[ImagePriceTier]:
+    """Tiers for output prices that are each named after a listed resolution.
+
+    OpenRouter names a variant after the ``resolution`` value it prices
+    (``"1k"`` for ``"1K"``), so a request naming that resolution is billed
+    it. A price without a variant, or a variant that is not a resolution
+    (``low_1k``, ``high_resolution``), is not tied to anything the request
+    names: no tiers.
+    """
+    labels = {value.lower(): value.upper() for value in _listed_resolutions(parameters)}
+    if not set(variants) <= set(labels):
+        return []
+    return [
+        ImagePriceTier(resolution=labels[variant], usd=usd)
+        for variant, usd in variants.items()
+        if variant is not None
+    ]
+
+
 def _quotable_endpoint_book(endpoint: dict[str, Any]) -> ImagePricing | None:
     """The book of one endpoint, or ``None`` if its prices do not bound a request.
 
     Token and megapixel lines depend on quantities the node cannot cap before
     dispatch, and a billable line listed in two units is ambiguous. Variants
-    are alternatives that no request field reliably names, so the dearest one
-    is reserved and the cheapest one is billed when no cost is reported.
+    named after the endpoint's resolutions price those resolutions; any other
+    request is reserved at the dearest variant, and the cheapest one is billed
+    when no cost is reported.
     """
     lines = endpoint.get("pricing")
     if not isinstance(lines, list) or not lines:
@@ -198,6 +230,7 @@ def _quotable_endpoint_book(endpoint: dict[str, Any]) -> ImagePricing | None:
     units: dict[str, str] = {}
     rates: dict[tuple[str, str], float] = {}
     cheapest_output_usd: float | None = None
+    variants: dict[str | None, float] = {}
     for line in lines:
         if not isinstance(line, dict):
             return None
@@ -212,6 +245,9 @@ def _quotable_endpoint_book(endpoint: dict[str, Any]) -> ImagePricing | None:
             cheapest_output_usd = (
                 rate if cheapest_output_usd is None else min(cheapest_output_usd, rate)
             )
+            variant = line.get("variant")
+            name = variant.lower() if isinstance(variant, str) and variant else None
+            variants[name] = max(variants.get(name, 0.0), rate)
 
     output_usd = 0.0
     reference_usd = 0.0
@@ -226,20 +262,25 @@ def _quotable_endpoint_book(endpoint: dict[str, Any]) -> ImagePricing | None:
         return None
 
     supported = endpoint.get("supported_parameters")
-    return ImagePricing(
-        max_usd=output_usd,
-        tiers=[ImagePriceTier(usd=output_usd)],
-        unit="image",
-        input_image_usd=reference_usd,
-        trust_upstream_cost=True,
-        unreported_cost_usd=cheapest_output_usd,
-        parameters={
+    parameters = (
+        {
             str(name): descriptor
             for name, descriptor in supported.items()
             if isinstance(descriptor, dict)
         }
         if isinstance(supported, dict)
-        else {},
+        else {}
+    )
+    tiers = _resolution_tiers(variants, parameters)
+    return ImagePricing(
+        max_usd=output_usd,
+        tiers=[ImagePriceTier(usd=output_usd), *tiers],
+        resolutions=[tier.resolution for tier in tiers if tier.resolution],
+        unit="image",
+        input_image_usd=reference_usd,
+        trust_upstream_cost=True,
+        unreported_cost_usd=cheapest_output_usd,
+        parameters=parameters,
     )
 
 
@@ -276,9 +317,26 @@ def openrouter_book_from_endpoints(
         )
         return None
     max_usd = max(book.max_usd for book in quotable.values())
+    accepting: dict[str, list[ImagePricing]] = {}
+    for book in quotable.values():
+        for value in _listed_resolutions(book.parameters):
+            accepting.setdefault(value.upper(), []).append(book)
     return ImagePricing(
         max_usd=max_usd,
-        tiers=[ImagePriceTier(usd=max_usd)],
+        # A resolution costs at most what the dearest endpoint taking it
+        # lists; the request is quoted on one of them.
+        tiers=[ImagePriceTier(usd=max_usd)]
+        + [
+            ImagePriceTier(
+                resolution=label,
+                usd=max(
+                    select_image_price_usd(book, {"resolution": label})
+                    for book in books
+                ),
+            )
+            for label, books in accepting.items()
+        ],
+        resolutions=list(accepting),
         unit="image",
         input_image_usd=max(book.input_image_usd for book in quotable.values()),
         trust_upstream_cost=True,

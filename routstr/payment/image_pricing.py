@@ -147,7 +147,7 @@ class ImagePricing(BaseModel):
     endpoint_tag: str | None = None
     parameters: dict[str, dict] = {}
     # On an endpoint's book: USD per image billed when the response reports no
-    # cost. Variants stay unnamed in the request, so this is the cheapest one.
+    # cost. It does not say which variant was made, so this is the cheapest.
     unreported_cost_usd: float | None = None
 
     class Config:
@@ -300,6 +300,19 @@ def _resolution_from_size(body: dict) -> str | None:
     return _LARGEST_RESOLUTION_LABEL
 
 
+def _named_resolution(body: dict) -> str | None:
+    """The resolution ``body`` names, upper-cased: ``resolution``, or a
+    ``size`` in its shorthand. Beside a pixel or ``auto`` size it names none,
+    as the router then picks."""
+    size = body.get("size")
+    if size is not None and size not in _SIZE_TIERS:
+        return None
+    resolution = body.get("resolution")
+    if isinstance(resolution, str) and resolution:
+        return resolution.upper()
+    return size
+
+
 def resolution_label(body: dict) -> str | None:
     """The resolution class a request asks for, upper-cased, or ``None``.
 
@@ -331,7 +344,13 @@ def output_megapixels(body: dict) -> float:
 
 def select_image_price_usd(image_pricing: ImagePricing, body: dict) -> float:
     """USD for one image, priced at the tier this request asks for."""
-    label = resolution_label(body)
+    # OpenRouter maps a pixel size onto its resolutions itself, so on its
+    # books only a named resolution picks a variant.
+    label = (
+        _named_resolution(body)
+        if image_pricing.endpoint_tag is not None or image_pricing.endpoints
+        else resolution_label(body)
+    )
     quality = body.get("quality")
     quality_label = quality.lower() if isinstance(quality, str) and quality else None
 
@@ -449,8 +468,8 @@ def settle_image_sats(
 
     Step 3 is the contract for ``image`` and ``megapixel`` books without
     ``trust_upstream_cost``. An endpoint's book that got no cost bills its
-    cheapest listed variant per image: the request does not name the variant,
-    so anything dearer could overcharge the key. Any other book that
+    cheapest listed variant per image: the response does not say which was
+    made, so anything dearer could overcharge the key. Any other book that
     trusts the upstream's cost but got none, or a ``token`` book whose response reports no usable tokens, cannot
     be metered; ``None`` tells the caller to release the reservation rather
     than bill an estimate as if it were authoritative.
