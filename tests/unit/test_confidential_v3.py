@@ -3028,6 +3028,55 @@ async def test_a_first_request_cut_by_an_eviction_is_released_in_full(
         assert not any(c.startswith("fee:") for c in ledger.calls), ledger.calls
 
 
+def _const_status(status: str | None) -> Any:
+    async def read(_billing: Any) -> str | None:
+        return status
+
+    return read
+
+
+async def test_a_deposit_that_could_not_be_charged_does_not_pay_for_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An abandoned first request is paid by the connection's deposit, and
+    its reservation released in full. When the database refuses the deposit's
+    charge, the request is not released as if the deposit had paid for it:
+    it keeps its own outcome (the abandon fee). A charge that did commit
+    before its error (the reservation row says ``charged``) counts as made."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    monkeypatch.setattr(cws, "SETTLE_RETRY_DELAYS", (0.0,))
+    real_charge = cws.charge_reservation
+
+    async def failing_charge(billing: Any) -> Any:
+        if getattr(billing, "reservation_id", None) == "dep" or billing is state.h2_deposit:
+            raise RuntimeError("database unavailable")
+        return await real_charge(billing)
+
+    for fail, committed in ((False, False), (True, False), (True, True)):
+        monkeypatch.setattr(
+            cws, "_reservation_status", _const_status("charged" if committed else None)
+        )
+        state = cws.SessionState()
+        state.framing, state.sid, state.h2_ready, state.h2_n = "2", SID, True, 1
+        state.h2_deposit = await cws.reserve_deposit("sk-x", SIG)
+        state.billing = await cws.reserve(
+            "sk-x", "test-model", 16, SIG, session_fee_due=True
+        )
+        state.engaged = True
+        monkeypatch.setattr(cws, "charge_reservation", failing_charge if fail else real_charge)
+        ledger.calls.clear()
+        deposit = await cws._h2_end_deposit(state, "client_gone")
+        await cws._finalize(state)
+        out = state.h2_unsettled
+        assert out is not None and out["reason"] == "request_abandoned"
+        if fail and not committed:
+            assert deposit is None and state.h2_deposit is not None
+            assert out["outcome"] == "charged" and out["cost_msats"] == FEES[1]
+        else:
+            assert deposit is not None and deposit["outcome"] == "charged"
+            assert (out["outcome"], out["cost_msats"]) == ("released", 0)
+
+
 async def test_a_failed_settlement_before_the_body_is_released_keeps_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

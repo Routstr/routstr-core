@@ -1925,6 +1925,22 @@ def _h2_deposit_verdict(state: SessionState, ended: str) -> tuple[bool, str]:
     return True, ended
 
 
+async def _reservation_status(billing: Any) -> str | None:
+    """The durable state of a reservation (``active``, ``charged``,
+    ``released``), or ``None`` when it cannot be read."""
+    from .core.db import ReservationRelease, create_session
+
+    release_id = getattr(getattr(billing, "snapshot", None), "release_id", None)
+    if not isinstance(release_id, str):
+        return None
+    try:
+        async with create_session() as session:
+            row = await session.get(ReservationRelease, release_id)
+            return None if row is None else str(row.status)
+    except Exception:
+        return None
+
+
 async def _h2_finish_deposit(
     state: SessionState, charge: bool, reason: str
 ) -> dict[str, Any] | None:
@@ -1954,6 +1970,13 @@ async def _h2_finish_deposit(
                     },
                 )
                 if delay is None:
+                    # A write that did commit before its error leaves the
+                    # reservation row in the wanted state (a retry then finds
+                    # nothing to claim): the deposit is final after all.
+                    if await _reservation_status(deposit) == (
+                        "charged" if charge else "released"
+                    ):
+                        break
                     # Kept: the deposit is still the connection's, and a later
                     # attempt (the connection's end) tries again. Failing that,
                     # its lease ends with this task and the stale-reservation
@@ -2467,10 +2490,13 @@ async def _h2_end_deposit(state: SessionState, ended: str) -> dict[str, Any] | N
     if state.h2_deposit is None:
         return None
     charge, reason = _h2_deposit_verdict(state, ended)
-    if charge and state.billing is not None:
+    out = await _h2_finish_deposit(state, charge, reason)
+    if charge and out is not None and state.billing is not None:
+        # Only a deposit the database charged pays for the request: one that
+        # could not be charged leaves the request to its own outcome (the
+        # abandon fee when the sidecar ran it).
         state.engaged = False
         state.h2_deposit_for_request = True
-    out = await _h2_finish_deposit(state, charge, reason)
     if out is not None and reason == "evicted":
         # Why: the evictable unused connections its address held (signed
         # with the outcome).
