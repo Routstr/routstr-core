@@ -1444,11 +1444,13 @@ def test_deposit_when_the_first_request_was_received_and_never_settled(
 
 
 @pytest.mark.parametrize("http", ["1.1", "2"])
-def test_deposit_when_the_provider_refused_the_first_request_early(
+def test_deposit_when_the_provider_closed_early_with_nothing_disclosed(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
 ) -> None:
-    """Row 8: the provider answered and closed before the body was complete:
-    the request keeps the session fee, the deposit goes back."""
+    """Row 9: the provider sent bytes and closed before the body was complete,
+    and no answer was disclosed. The bytes may be a TLS alert for a record the
+    client corrupted, so they are no refusal: the deposit is charged, the
+    reservation released in full."""
     ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
     frames = [
         _request_ok(1, http),
@@ -1459,13 +1461,58 @@ def test_deposit_when_the_provider_refused_the_first_request_early(
         conn.open()
         conn.send(_request(**_FEE))
         err = conn.until("error")
-    assert _deposit(err) == ("released", "provider_refused", DEP)
+    assert _deposit(err) == ("charged", "request_abandoned", DEP)
+    assert err["request_outcome"]["reason"] == "request_abandoned"
+    assert err["request_outcome"]["cost_msats"] == 0
     assert ledger.calls == [
         "check",
         "deposit",
         "reserve",
+        "charge:dep",
+        "release:rel-1",
+    ]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+@pytest.mark.parametrize(
+    "status,cost",
+    [(429, 2000), (400, 5000), (502, 5000)],
+)
+def test_an_error_head_disclosed_after_an_early_close_settles_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+    node_identity: tuple[str, str],
+    http: str,
+    status: int,
+    cost: int,
+) -> None:
+    """The provider answered the request's head with an error head and closed
+    before the body was complete; the client discloses the head (the sidecar
+    waits for it). It is settled by its status like any error head, except
+    that a 5xx before ``body_released`` costs the abandon fee, not the
+    reservation (the provider never had the complete request). The
+    settlement releases the deposit."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    frames = [
+        _request_ok(1, http),
+        {"type": "upstream_closed_early", "n": 1, "response_bytes": 517},
+        _attest(1, http),
+        _usage(1, http, usage={"error_status": status, "choices": []}),
+        _closed("error_settled"),
+    ]
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        receipt = conn.until("receipt")["receipt"]
+        last = conn.recv1()
+    assert last["reason"] == "error_settled" and "deposit" not in last
+    assert receipt["cost_msats"] == cost
+    assert receipt["deposit_released_msat"] == DEP
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        f"fee:rel-1:{cost}",
         "release:dep",
-        "fee:rel-1:2000",
     ]
 
 

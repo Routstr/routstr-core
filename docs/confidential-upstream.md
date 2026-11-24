@@ -186,10 +186,10 @@ EHBP), at rates fixed when the request is accepted:
 | error head 429/503 (the provider's capacity) or 401/402/403 (the node's own provider key or account) | the session fee if still due |
 | framing `"2"`: the provider refused the stream unprocessed (`RST_STREAM(REFUSED_STREAM)`, or GOAWAY with `NO_ERROR` below it), proven by the client (`disclose_reset`, before or after `body_released`) | the session fee if still due; the connection closes and the client runs the request again elsewhere |
 | error head, any other 4xx (a request the provider rejected) | the abandon fee |
-| error head, any other 5xx | the reservation (the provider may have billed work) |
+| error head, any other 5xx | the reservation (the provider may have billed work); the abandon fee when it came before `body_released` (the provider never had the complete request) |
 | accepted, and the connection ends before `body_released` (a failed π_WIN, the client leaves, the time limit) | the abandon fee; nothing when the deposit is charged for it (below), and nothing when the sidecar named the provider or itself as the cause (`fault`) |
-| before `body_released`, the provider answered and closed (`upstream_closed_early` with response bytes, not marked `client_caused`) | the session fee if still due |
-| before `body_released`, the provider closed after the client held the request back or had a control frame written inside it (the sidecar's `upstream_closed_early` carries `client_caused: true`) | as an abandoned request: the abandon fee, or the deposit on a connection with no settlement |
+| before `body_released`, the provider closed (`upstream_closed_early`) and the client disclosed its answer within 60 s (its error head, or a refusal) | settled by that answer, as the rows above |
+| before `body_released`, the provider closed and no answer was disclosed, whatever `response_bytes` and `client_caused` say (the bytes may be a TLS alert for a record the client corrupted on purpose) | as an abandoned request: the abandon fee, or the deposit on a connection with no settlement |
 | after `body_released` with no settlement | the reservation. (EHBP can charge nothing here because the node reads the usage itself; in this mode the client controls the disclosure.) |
 
 A usage disclosed before the sidecar's attestation, or a settlement the node
@@ -199,8 +199,7 @@ finalized exactly once, before the connection's last frame is sent.
 
 A request the node finalized without a receipt (any row above but a
 settlement: the reservation charged after `body_released`, the abandon fee,
-the session fee of an early provider close, a release in full, a settlement
-whose write failed) is stated on the connection's last frame (`closed` or
+a release in full, a settlement whose write failed) is stated on the connection's last frame (`closed` or
 `error`), signed like a receipt: `request_outcome {v: 1, sid, http, n,
 outcome: "charged" | "released", reason, cost_msats, reserved_msats,
 balance_msats, time}` with `request_outcome_json` (the signed bytes),
@@ -208,7 +207,8 @@ balance_msats, time}` with `request_outcome_json` (the signed bytes),
 (the reservation), `settlement_failed` (the reservation after
 `body_released`, released in full before it), `settled_without_receipt`
 (charged what its settlement says, but the deposit could not be released, so
-no receipt), `provider_refused` (the session fee if still due),
+no receipt), `provider_refused` (only from a node before 2026-11-24: the
+session fee of an early provider close; this node never names it),
 `provider_unreachable`, `sidecar_failure`, `request_abandoned` (the abandon
 fee, or released when the deposit is charged for it), `evicted`,
 `unattested` or `not_started` (the sidecar never accepted it). The clients
@@ -265,8 +265,8 @@ first matching row:
 | 5 | the provider closed the open, idle connection before any request | released | `provider_closed` |
 | 6 | the node refused a request of this connection with a 5xx and accepted none after it, or a settlement's billing write failed | released | `node_failure` |
 | 7 | a request was written in full (`body_released`) and never settled | released (the reservation is charged) | `request_received` |
-| 8 | the provider answered a request and closed before its body was complete | released (the request keeps the session fee) | `provider_refused` |
-| 9 | a request was accepted and the connection ended before its `body_released` for any other reason | **charged**; the reservation is released in full | `request_abandoned` |
+| 8 | not used since 2026-11-24: an early provider close settles only by a disclosed answer (a settlement), else row 9 | (released, before 2026-11-24) | `provider_refused` |
+| 9 | a request was accepted and the connection ended before its `body_released` for any other reason, an early provider close with no disclosed answer included | **charged**; the reservation is released in full | `request_abandoned` |
 | 10 | no request in flight for `idle_timeout_s` | **charged** | `idle` |
 | 11 | `head_written` not reached within 10 minutes | **charged** | `setup_timeout` |
 | 12 | anything else: the client left, a failed handshake or π_NK, a protocol error, only refused requests | **charged** | `unused` |

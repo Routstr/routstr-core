@@ -387,10 +387,6 @@ class SessionState:
         # The sidecar accepted the setup (``ready``): from here on the node is
         # doing the session's 2PC work and an abandoned session keeps its fee.
         self.engaged = False
-        # The sidecar reported that the provider closed the connection after
-        # answering, before the final body record was released (a refusal
-        # from the head alone): the session fee is charged, not the abandon fee.
-        self.upstream_refused = False
         # Set once the reservation is charged or released; ``lock`` makes
         # settlement and abort handling finalize it exactly once.
         self.finalized = False
@@ -406,7 +402,7 @@ class SessionState:
         self.zk_open = 0
         # A connection carries requests, one at a time. The
         # fields above that describe a reservation (``billing``,
-        # ``body_released``, ``released_at``, ``engaged``, ``upstream_refused``,
+        # ``body_released``, ``released_at``, ``engaged``,
         # ``finalized``, ``attestation_hash``) then describe the request in
         # flight, and ``billing`` is ``None`` between requests.
         # The framing of the inner connection (``setup.http``): "2" or "1.1".
@@ -1346,20 +1342,17 @@ async def _on_sidecar_text(
             msg["reserved_msats"] = state.billing.reserved_msats
             return json.dumps(msg)
     if kind == "upstream_closed_early":
-        # The provider closed before the final body record was released. With
-        # response bytes it answered first (a refusal from the head alone,
-        # which the client cannot disclose); with none it never answered.
-        # ``client_caused``: the sidecar saw the client hold the rest of the
-        # request back, or have a control frame written inside it, before the
-        # close. That is an abandoned request, not the provider's refusal.
+        # The provider closed before the final body record was released. Its
+        # bytes alone settle nothing: N cannot read them, and they may be no
+        # answer to the request at all (a TLS alert for a record the client
+        # corrupted, the provider's reaction to a control frame). Only a
+        # proven answer settles the request: a refusal (``disclose_reset``)
+        # or an error head (``disclose_head``) the client discloses within
+        # the sidecar's grace, settled as any disclosure. Without one the
+        # sidecar's ``error`` follows and the request is an abandoned one
+        # (§12.10 row 9), whatever ``response_bytes`` and ``client_caused``
+        # say; both are logged only.
         n = msg.get("response_bytes")
-        if (
-            _is_int(n)
-            and n > 0
-            and not state.body_released
-            and msg.get("client_caused") is not True
-        ):
-            state.upstream_refused = True
         logger.info(
             "confidential ws: provider closed before the request was complete",
             extra={
@@ -1436,6 +1429,7 @@ async def _apply_settlement(
     usage: dict[str, Any],
     model: Any = None,
     reported_model: Any = None,
+    released: bool = True,
 ) -> tuple[int, int | None]:
     """Finalize the reservation for a disclosed usage event: (cost, balance).
 
@@ -1443,7 +1437,8 @@ async def _apply_settlement(
     carries it there rather than in ``usage``); ``reported_model`` is the
     model the provider's usage event named when it differs from the pinned
     one (sent by newer sidecars; older ones put the provider's spelling in
-    ``model``)."""
+    ``model``). ``released``: the request's ``body_released`` arrived (the
+    provider had all of it)."""
     images = getattr(billing, "kind", "chat") == "images"
     if usage.get("flat") is True:
         reported = usage.get("model", model)
@@ -1468,6 +1463,11 @@ async def _apply_settlement(
             # did the session's 2PC for a request that could not run.
             if error_status in PROVIDER_REFUSAL_STATUSES:
                 return await _release_keeping_fee(billing, "session_fee_msat")
+            return await _release_keeping_fee(billing, "abandon_fee_msat")
+        if not released:
+            # A 5xx before the body was written in full (the provider answered
+            # the head, often closing): it never had a complete request, so no
+            # inference ran. Priced as a request it rejected.
             return await _release_keeping_fee(billing, "abandon_fee_msat")
         # 500/502/504 …: work may have been billed upstream.
         return billing.reserved_msats, await charge_reservation(billing)
@@ -1502,6 +1502,7 @@ async def _apply_settlement_retrying(
     usage: dict[str, Any],
     model: Any = None,
     reported_model: Any = None,
+    released: bool = True,
 ) -> tuple[int, int | None]:
     """``_apply_settlement``, retried on a failure of the node's own (a busy or
     dropped database). The usage is already verified, so a retry repeats only
@@ -1510,7 +1511,9 @@ async def _apply_settlement_retrying(
     the caller's fallback finds nothing left to finalize)."""
     for delay in SETTLE_RETRY_DELAYS:
         try:
-            return await _apply_settlement(billing, usage, model, reported_model)
+            return await _apply_settlement(
+                billing, usage, model, reported_model, released
+            )
         except Exception:
             logger.warning(
                 "confidential ws: settlement failed, retrying",
@@ -1518,7 +1521,7 @@ async def _apply_settlement_retrying(
                 extra={"model": billing.model_id, "retry_in_s": delay},
             )
             await asyncio.sleep(delay)
-    return await _apply_settlement(billing, usage, model, reported_model)
+    return await _apply_settlement(billing, usage, model, reported_model, released)
 
 
 async def _settle(
@@ -1544,7 +1547,11 @@ async def _settle(
             return
         try:
             cost, balance = await _apply_settlement_retrying(
-                billing, usage, msg.get("model"), msg.get("reported_model")
+                billing,
+                usage,
+                msg.get("model"),
+                msg.get("reported_model"),
+                state.body_released,
             )
         except Exception:
             logger.exception(
@@ -1720,13 +1727,6 @@ async def _finalize_unsettled(
             # the node's failure, so nothing of the request is kept.
             balance = await release(billing)
             cost, outcome, reason = 0, "released", "settlement_failed"
-        elif state.upstream_refused:
-            # The provider answered from the head alone and closed (a refusal
-            # of the node's key or account, a rate limit): the session fee,
-            # as for a disclosed refusal, never the abandon fee.
-            cost, balance = await _release_keeping_fee(billing, "session_fee_msat")
-            outcome = f"charged_session_fee:{cost}" if cost else "released"
-            reason = "provider_refused"
         elif state.h2_fault in _H2_SIDECAR_FAULTS.values():
             # The provider could not be reached or the sidecar failed while
             # the request was open: not the client's doing, nothing is kept.
@@ -1891,7 +1891,7 @@ def _h2_deposit_verdict(state: SessionState, ended: str) -> tuple[bool, str]:
     settlement's billing write failed (``node_failure``); the sidecar never
     accepted the setup (``not_started``); the node refused a request with a
     5xx and accepted none since (``node_failure``); a request reached the
-    provider (``request_received``, ``provider_refused``). Charged otherwise:
+    provider (``request_received``). Charged otherwise:
     the node garbled a key schedule for a connection that carried no request
     (``ended`` says how it ended: ``unused``, ``idle``, ``setup_timeout``; a
     connection whose requests were all refused is ``unused``), or whose
@@ -1915,8 +1915,6 @@ def _h2_deposit_verdict(state: SessionState, ended: str) -> tuple[bool, str]:
             return False, "node_failure"
         if state.body_released:
             return False, "request_received"
-        if state.upstream_refused:
-            return False, "provider_refused"
     if ended == "evicted":
         # Row 13, before rows 9 to 12: closed for a newer setup while it held
         # a slot unused past the minimum age (§8.4). Always charged: the
@@ -2030,7 +2028,6 @@ async def _h2_request_refused(state: SessionState) -> None:
     state.billing = None
     state.body_released = False
     state.released_at = None
-    state.upstream_refused = False
     state.finalized = False
     state.attestation_hash = ""
     state.h2_lifetime = None
@@ -2056,7 +2053,6 @@ def _h2_request_done(state: SessionState) -> None:
     state.body_released = False
     state.released_at = None
     state.engaged = False
-    state.upstream_refused = False
     state.finalized = False
     state.attestation_hash = ""
     state.h2_lifetime = None
@@ -2165,7 +2161,6 @@ async def _h2_reserve(msg: Any, state: SessionState) -> str:
     state.body_released = False
     state.released_at = None
     state.engaged = False
-    state.upstream_refused = False
     state.attestation_hash = ""
     state.h2_n = msg["n"]
     state.h2_unsettled = None

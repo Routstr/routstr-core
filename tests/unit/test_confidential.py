@@ -3033,23 +3033,16 @@ def test_other_server_errors_charge_the_reservation(
     assert got[-1]["receipt"]["cost_msats"] == 9000
 
 
-@pytest.mark.parametrize(
-    "response_bytes,expected",
-    [
-        (517, "fee:rel-1:2000"),  # the provider answered: a refusal
-        (0, "fee:rel-1:5000"),  # it never answered: as an abandoned request
-        ("517", "fee:rel-1:5000"),  # malformed: no refusal is assumed
-    ],
-)
+@pytest.mark.parametrize("response_bytes", [517, 0, "517"])
 def test_provider_closing_before_the_body_completes(
     monkeypatch: pytest.MonkeyPatch,
     node_identity: tuple[str, str],
     response_bytes: Any,
-    expected: str,
 ) -> None:
-    """A provider that refuses from the head alone and closes before the
-    final body record is released: the client cannot disclose the error
-    head, so the node charges the session fee rather than the abandon fee."""
+    """A provider that closes before the final body record is released, with
+    no answer disclosed: an abandoned request (the abandon fee), whatever the
+    sidecar counted as response bytes. They may be a TLS alert for a record
+    the client corrupted, so they are no refusal by themselves."""
     ledger = _fee_ledger(monkeypatch)
     early = {"type": "upstream_closed_early", "n": 1, "response_bytes": response_bytes}
     err = {"type": "error", "reason": "upstream closed the connection"}
@@ -3057,44 +3050,19 @@ def test_provider_closing_before_the_body_completes(
         monkeypatch, [_request_ok(), early, err], 3, request=_FEE_REQUEST
     )
     assert [m["type"] for m in got] == ["request_ok", "upstream_closed_early", "error"]
-    assert ledger.calls == ["check", "reserve", expected]
+    assert ledger.calls == ["check", "reserve", "fee:rel-1:5000"]
 
 
-@pytest.mark.parametrize(
-    "fault,expected",
-    [
-        ("upstream", "release:rel-1"),  # the provider could not be reached
-        ("node", "release:rel-1"),  # the sidecar failed
-        (None, "fee:rel-1:5000"),  # a protocol error or failed proof: the client's
-    ],
-)
-def test_a_fault_before_the_release_keeps_no_abandon_fee(
-    monkeypatch: pytest.MonkeyPatch,
-    node_identity: tuple[str, str],
-    fault: str | None,
-    expected: str,
-) -> None:
-    """An accepted request that ends because the provider was unreachable or
-    the sidecar failed is released in full: the client did nothing wrong."""
-    ledger = _fee_ledger(monkeypatch)
-    err: dict[str, Any] = {"type": "error", "reason": "x"}
-    if fault:
-        err["fault"] = fault
-    _, got = _run_request(monkeypatch, [_request_ok(), err], 2, request=_FEE_REQUEST)
-    assert got[-1]["type"] == "error" and got[-1].get("fault") == fault
-    assert ledger.calls == ["check", "reserve", expected]
-
-
-async def test_early_close_after_release_still_charges_the_reservation() -> None:
-    st = cws.SessionState()
-    st.body_released = True
-    early = json.dumps({"type": "upstream_closed_early", "n": 1, "response_bytes": 9})
-    # Forwarded as it is; it changes nothing once the request was released.
-    assert await cws._on_sidecar_text(early, None, st) == early  # type: ignore[arg-type]
-    assert st.upstream_refused is False
-    st.body_released = False
-    await cws._on_sidecar_text(early, None, st)  # type: ignore[arg-type]
-    assert st.upstream_refused is True
+async def test_an_early_close_is_only_relayed() -> None:
+    """``upstream_closed_early`` is forwarded unchanged and settles nothing."""
+    for released in (True, False):
+        st = cws.SessionState()
+        st.body_released = released
+        early = json.dumps(
+            {"type": "upstream_closed_early", "n": 1, "response_bytes": 9}
+        )
+        assert await cws._on_sidecar_text(early, None, st) == early  # type: ignore[arg-type]
+        assert not hasattr(st, "upstream_refused")
 
 
 def test_error_status_classes() -> None:
