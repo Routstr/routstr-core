@@ -90,6 +90,22 @@ export type AnalyticsSharingStatus = {
   retry_in_seconds: number | null;
 };
 
+export type UnpublishedStatsEpoch = {
+  epoch: number;
+  coverage_start: string;
+  coverage_end: string;
+  publishable_days: number;
+  requests: number;
+  revenue_msats: number;
+  released: boolean;
+};
+
+export type AnalyticsSharingHistory = {
+  sharing_enabled: boolean;
+  generation: number;
+  epochs: UnpublishedStatsEpoch[];
+};
+
 export type CertifyProviderRequest = {
   model_id?: string;
   model_path?: string;
@@ -880,6 +896,22 @@ export class AdminService {
   static async getAnalyticsSharingStatus(): Promise<AnalyticsSharingStatus> {
     return await apiClient.get<AnalyticsSharingStatus>(
       '/admin/api/analytics-sharing/status'
+    );
+  }
+
+  static async getAnalyticsSharingHistory(): Promise<AnalyticsSharingHistory> {
+    return await apiClient.get<AnalyticsSharingHistory>(
+      '/admin/api/analytics-sharing/history'
+    );
+  }
+
+  static async releaseAnalyticsSharingHistory(
+    epochs: number[],
+    generation: number
+  ): Promise<{ released: number[] }> {
+    return await apiClient.post<{ released: number[] }>(
+      '/admin/api/analytics-sharing/history/release',
+      { epochs, generation }
     );
   }
 
