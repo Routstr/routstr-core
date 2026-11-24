@@ -9,10 +9,16 @@ from typing import Any, TypedDict
 
 import httpx
 from cashu.core.base import MeltQuoteState
+from cashu.core.models import PostMeltQuoteResponse
 from cashu.core.settings import settings as cashu_settings
 from cashu.wallet.wallet import Proof, Wallet
 
 from ..cashu_compat import install_cashu_httpx_shim, install_cashu_mint_compat
+from ..melt_change import (
+    forget_melt_change_outputs,
+    record_melt_change_outputs,
+    settle_melt_change,
+)
 from ..mint import (
     is_mint_rate_limited,
     is_mint_transport_error,
@@ -422,14 +428,19 @@ async def raw_send_to_lnurl(
     change_budget = sum(proof.amount for proof in proofs) - quoted_amount
     await wallet.set_reserved_for_send(proofs, reserved=True)
 
+    async def melt() -> PostMeltQuoteResponse:
+        # Each attempt derives fresh blank outputs, so record them every time.
+        await record_melt_change_outputs(wallet, melt_quote_resp.quote, change_budget)
+        return await wallet.melt(
+            proofs=proofs,
+            invoice=bolt11_invoice,
+            fee_reserve_sat=change_budget,
+            quote_id=melt_quote_resp.quote,
+        )
+
     try:
         melt_response = await run_mint_operation(
-            lambda: wallet.melt(
-                proofs=proofs,
-                invoice=bolt11_invoice,
-                fee_reserve_sat=change_budget,
-                quote_id=melt_quote_resp.quote,
-            ),
+            melt,
             op_name="lnurl_melt",
             mint_url=str(wallet.url),
             retry_timeouts=False,
@@ -440,6 +451,7 @@ async def raw_send_to_lnurl(
             # mint rejected the request. Neither outcome may keep proofs
             # reserved as though a Lightning payment could still settle.
             await wallet.set_reserved_for_send(proofs, reserved=False)
+            await forget_melt_change_outputs(melt_quote_resp.quote)
             raise
         if not is_mint_transport_error(error):
             raise
@@ -460,9 +472,12 @@ async def raw_send_to_lnurl(
 
     melt_state = getattr(melt_response, "state", None)
     if melt_state == MeltQuoteState.paid:
+        # cashu's melt stored the change itself.
+        await forget_melt_change_outputs(melt_quote_resp.quote)
         return final_amount
     if melt_state == MeltQuoteState.unpaid:
         await wallet.set_reserved_for_send(proofs, reserved=False)
+        await forget_melt_change_outputs(melt_quote_resp.quote)
         raise MeltUnpaidError("Cashu mint confirmed that the melt was unpaid")
 
     try:
@@ -481,6 +496,7 @@ async def raw_send_to_lnurl(
         ) from reconciliation_error
 
     if quote is not None and quote.state == MeltQuoteState.paid:
+        await settle_melt_change(wallet, quote)
         return final_amount
     if quote is not None and quote.state == MeltQuoteState.unpaid:
         # A just-dispatched quote can briefly report unpaid before transitioning.
