@@ -244,7 +244,7 @@ export function LightningPaymentWorkflow({
 
           const status: InvoiceStatus = await response.json();
 
-          if (status.status === 'paid' && status.api_key) {
+          if (status.status === 'paid') {
             onPaid(status);
             return;
           }
@@ -356,7 +356,8 @@ export function LightningPaymentWorkflow({
       return;
     }
 
-    if (!topupApiKey.trim()) {
+    const apiKey = topupApiKey.trim();
+    if (!apiKey) {
       toast.error('Please enter your API key');
       return;
     }
@@ -370,7 +371,7 @@ export function LightningPaymentWorkflow({
         body: JSON.stringify({
           amount_sats: amount,
           purpose: 'topup',
-          api_key: topupApiKey.trim(),
+          api_key: apiKey,
         }),
       });
 
@@ -389,25 +390,23 @@ export function LightningPaymentWorkflow({
       toast.success('Lightning topup invoice created - waiting for payment...');
 
       pollInvoiceStatus(invoice.invoice_id, (status) => {
-        if (status.api_key) {
-          const walletInfo: WalletSnapshot = {
-            apiKey: status.api_key,
-            balanceMsats: status.amount_sats * 1000,
-            reservedMsats: 0,
-            totalRequests: 0,
-            totalSpent: 0,
-            validityDate: null,
-          };
-          onApiKeyCreated?.(status.api_key, walletInfo);
-          setTopupApiKeyResult(status.api_key);
-          setIsWaitingTopupPayment(false);
-          toast.success(
-            `Payment received! Added ${formatSats(status.amount_sats * 1000)} sats.`
-          );
-          setTopupInvoice(null);
-          setTopupAmount('');
-          setTopupQRCode('');
-        }
+        const walletInfo: WalletSnapshot = {
+          apiKey,
+          balanceMsats: status.amount_sats * 1000,
+          reservedMsats: 0,
+          totalRequests: 0,
+          totalSpent: 0,
+          validityDate: null,
+        };
+        onApiKeyCreated?.(apiKey, walletInfo);
+        setTopupApiKeyResult(apiKey);
+        setIsWaitingTopupPayment(false);
+        toast.success(
+          `Payment received! Added ${formatSats(status.amount_sats * 1000)} sats.`
+        );
+        setTopupInvoice(null);
+        setTopupAmount('');
+        setTopupQRCode('');
       });
     } catch (error) {
       console.error(error);
@@ -458,6 +457,9 @@ export function LightningPaymentWorkflow({
         onApiKeyCreated?.(status.api_key, walletInfo);
         setRecoveredApiKey(status.api_key);
         toast.success('API key recovered successfully!');
+        setRecoverInvoice('');
+      } else if (status.status === 'paid') {
+        toast.success('Payment received! Your API key was topped up.');
         setRecoverInvoice('');
       } else {
         toast.error(`Invoice status: ${status.status}`);
