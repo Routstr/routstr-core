@@ -268,21 +268,42 @@ def reference_image_count(body: dict) -> int:
 
 
 def _edges(body: dict) -> list[int]:
-    """Pixel edges from an OpenAI-style ``size`` or explicit dimensions."""
-    edges: list[int] = []
+    """Pixel edges from an OpenAI-style ``size`` or explicit dimensions.
+
+    Upstreams differ in which of the two they read (Together takes
+    ``width``/``height``, OpenAI ``size``), so a request sending both is
+    priced at the larger area.
+    """
+    from_size: list[int] = []
     size = body.get("size")
-    if isinstance(size, str) and "x" in size.lower():
-        for part in size.lower().split("x"):
-            try:
-                edges.append(int(part.strip()))
-            except ValueError:
-                return []
-        return edges
-    for dimension in ("width", "height"):
-        value = body.get(dimension)
-        if isinstance(value, int) and not isinstance(value, bool):
-            edges.append(value)
-    return edges
+    if isinstance(size, str):
+        parts = size.lower().split("x")
+        edges = [edge for edge in map(_pixels, parts) if edge is not None]
+        if len(parts) == len(edges) == 2:
+            from_size = edges
+    from_dimensions = [
+        edge
+        for edge in map(_pixels, (body.get("width"), body.get("height")))
+        if edge is not None
+    ]
+    return max(from_size, from_dimensions, key=_area)
+
+
+def _pixels(value: object) -> int | None:
+    """An edge read the way a lenient upstream reads it: 2048, 2048.0, "2048"."""
+    if isinstance(value, bool):
+        return None
+    try:
+        edge = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return int(edge) if edge.is_integer() and edge > 0 else None
+
+
+def _area(edges: list[int]) -> int:
+    if len(edges) == 1:
+        return edges[0] * edges[0]
+    return math.prod(edges) if edges else 0
 
 
 def _resolution_from_size(body: dict) -> str | None:
@@ -291,9 +312,7 @@ def _resolution_from_size(body: dict) -> str | None:
     if not edges:
         return None
 
-    area = 1
-    for edge in edges:
-        area *= edge
+    area = _area(edges)
     for limit, label in _RESOLUTION_AREAS:
         if area < limit:
             return label

@@ -259,6 +259,12 @@ def test_megapixel_book_prices_the_requested_area() -> None:
     assert output_megapixels({"size": "2048x2048"}) == pytest.approx(4.194304)
     assert output_megapixels({"width": 1024, "height": 768}) == pytest.approx(0.786432)
     assert output_megapixels({"resolution": "4K"}) == 16.0
+    # Upstreams read size or width/height, so both sent prices the larger.
+    big = pytest.approx(4.194304)
+    assert output_megapixels({"size": "1x1", "width": 2048, "height": 2048}) == big
+    assert output_megapixels({"size": "2048x2048", "width": 1, "height": 1}) == big
+    assert output_megapixels({"width": 2048.0, "height": "2048"}) == big
+    assert output_megapixels({"size": "4096x4096x1", "width": 2048}) == big
     assert per_image_sats(model, {}) == pytest.approx(30.0)
     assert per_image_sats(model, {"resolution": "2K"}) == pytest.approx(120.0)
     assert per_image_sats(model, {"width": 1024, "height": 768}) == pytest.approx(
