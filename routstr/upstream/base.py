@@ -118,6 +118,7 @@ from .terminal_outcome_tracking import (
     record_x_cashu_terminal_outcome,
     terminal_outcome_context,
 )
+from .tinfoil_trailer import _strip_hop_by_hop_headers
 
 if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
@@ -892,7 +893,7 @@ class BaseUpstreamProvider:
         response_json["cost"]["remaining_balance_msats"] = key.balance
 
     def prepare_headers(self, request_headers: dict) -> dict:
-        """Prepare headers for upstream request by removing proxy-specific headers and adding authentication.
+        """Prepare headers for upstream request by removing proxy-specific and hop-by-hop headers and adding authentication.
 
         Args:
             request_headers: Original request headers from the client
@@ -908,7 +909,7 @@ class BaseUpstreamProvider:
             },
         )
 
-        headers = dict(request_headers)
+        headers = _strip_hop_by_hop_headers(request_headers)
         removed_headers = []
 
         for header in [
