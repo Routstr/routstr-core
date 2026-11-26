@@ -355,6 +355,18 @@ async def calculate_discounted_max_cost(
             discounts["completion_delta_msats"] = delta
             adjusted = adjusted - delta
 
+    # ``n`` and ``best_of`` make the upstream generate (and bill) one completion
+    # per choice, each up to the cap, so the hold covers every extra choice.
+    choices = completion_choice_count(body)
+    discounts["completion_choices"] = choices
+    if choices > 1:
+        per_choice_sats = max_completion_allowed_sats
+        if max_tokens_int is not None:
+            per_choice_sats = min(
+                per_choice_sats, max(0, max_tokens_int) * model_pricing.completion
+            )
+        adjusted += math.ceil((choices - 1) * per_choice_sats * 1000)
+
     # Settlement scales every token rate when the response reports fast mode
     # or US-only inference, so the hold scales by the same factor up front.
     multiplier = usage_multiplier(
@@ -416,6 +428,20 @@ def reserved_web_searches(body: dict) -> int:
         else:
             total += settings.web_search_default_max_uses
     return total
+
+
+def completion_choice_count(body: dict) -> int:
+    """Number of completions the upstream may generate: the larger of ``n`` and ``best_of``."""
+    count = 1
+    for field in ("n", "best_of"):
+        raw = body.get(field)
+        if raw is None:
+            continue
+        try:
+            count = max(count, int(raw))
+        except (TypeError, ValueError):
+            continue
+    return count
 
 
 def estimate_tokens(messages: list) -> int:
