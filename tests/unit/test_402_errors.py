@@ -157,8 +157,11 @@ async def test_discount_trace_does_not_change_cost(
         "max_completion_tokens": 3,
     }
     trail = build_pricing_trail(m, 114000)
-    expected = await calculate_discounted_max_cost(114000, body, m)
-    result = await calculate_discounted_max_cost(114000, body, m, pricing_trail=trail)
+    path = "v1/chat/completions"
+    expected = await calculate_discounted_max_cost(114000, body, m, path=path)
+    result = await calculate_discounted_max_cost(
+        114000, body, m, path=path, pricing_trail=trail
+    )
     assert expected == result == trail["required_msats"]
     d = trail["discounts"]
     assert d["completion_cap_used"] == 3

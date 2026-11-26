@@ -41,6 +41,28 @@ from .usage_multipliers import pricing_dimensions, usage_multiplier
 
 logger = get_logger(__name__)
 
+# A completion cap's spellings, and the ones each text endpoint reads. An
+# upstream drops a spelling its API does not have (OpenRouter ignores fields
+# it does not know), so a cap only bounds it when the endpoint reads one.
+_COMPLETION_CAP_FIELDS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+_ENDPOINT_CAP_FIELDS: dict[str, tuple[str, ...]] = {
+    "chat/completions": ("max_tokens", "max_completion_tokens"),
+    "completions": ("max_tokens",),
+    "responses": ("max_output_tokens",),
+    "messages": ("max_tokens",),
+}
+
+
+def _whole_number(value: Any) -> int | None:
+    """Read a count the way a lenient upstream does: 8, 8.0 and "8" are 8."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if number.is_integer() else None
+
 
 def check_token_balance(
     headers: dict, body: dict, max_cost_for_model: int, *, pricing: dict | None = None
@@ -209,8 +231,8 @@ async def calculate_discounted_max_cost(
     """Calculate the discounted max cost for a request using model pricing when available.
 
     Completion discounts are trimmed from the largest declared cap among
-    ``max_tokens`` and ``max_completion_tokens`` (chat/completions) or
-    ``max_output_tokens`` (responses).
+    ``max_tokens``, ``max_completion_tokens`` and ``max_output_tokens``, when
+    the endpoint reads one of those sent.
     """
 
     def finish(required: int, adjusted: int | None = None) -> int:
@@ -323,27 +345,18 @@ async def calculate_discounted_max_cost(
     # (Responses API). When a request declares more than one, reserve against
     # the largest: upstream precedence between the fields varies by provider,
     # so the smaller cap may not be honored and the reservation must never
-    # under-cover what the upstream could bill.
-    max_tokens_int: int | None = None
-    for cap_field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
-        cap_raw = body.get(cap_field)
-        if cap_raw is None:
-            continue
-        try:
-            cap_int = int(cap_raw)
-        except (TypeError, ValueError):
-            logger.warning(
-                "Invalid completion token cap; ignoring in cost adjustment",
-                extra={
-                    "field": cap_field,
-                    "value": str(cap_raw)[:64],
-                    "model": model,
-                },
-            )
-            continue
-        max_tokens_int = (
-            cap_int if max_tokens_int is None else max(max_tokens_int, cap_int)
-        )
+    # under-cover what the upstream could bill. For the same reason a cap
+    # counts only when the endpoint reads one of the names sent and every
+    # value reads as a positive count.
+    endpoint = path.strip("/").removeprefix("v1/")
+    caps = [
+        _whole_number(body[f])
+        for f in _COMPLETION_CAP_FIELDS
+        if body.get(f) is not None
+    ]
+    valid = [cap for cap in caps if cap is not None and cap > 0]
+    read = any(body.get(f) is not None for f in _ENDPOINT_CAP_FIELDS.get(endpoint, ()))
+    max_tokens_int = max(valid) if read and len(valid) == len(caps) else None
 
     discounts["completion_cap_used"] = max_tokens_int
     if max_tokens_int is not None:

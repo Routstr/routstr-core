@@ -153,7 +153,9 @@ async def test_discounted_max_cost_floors_at_min_request_msat() -> None:
         patch.object(settings, "tolerance_percentage", 0),
         patch.object(settings, "min_request_msat", 1000),
     ):
-        cost = await calculate_discounted_max_cost(150_000, body, model_obj)
+        cost = await calculate_discounted_max_cost(
+            150_000, body, model_obj, path="v1/chat/completions"
+        )
 
     assert cost == 1000
 
@@ -601,7 +603,9 @@ async def test_discounted_max_cost_body_max_output_tokens_fallback() -> None:
         patch.object(settings, "tolerance_percentage", 0),
         patch.object(settings, "min_request_msat", 1000),
     ):
-        cost = await calculate_discounted_max_cost(100_000, body, model_obj)
+        cost = await calculate_discounted_max_cost(
+            100_000, body, model_obj, path="v1/responses"
+        )
 
     assert cost == 80_000
 
@@ -628,7 +632,9 @@ async def test_discounted_max_cost_body_max_completion_tokens_fallback() -> None
         patch.object(settings, "tolerance_percentage", 0),
         patch.object(settings, "min_request_msat", 1000),
     ):
-        cost = await calculate_discounted_max_cost(100_000, body, model_obj)
+        cost = await calculate_discounted_max_cost(
+            100_000, body, model_obj, path="v1/chat/completions"
+        )
 
     assert cost == 80_000
 
@@ -664,14 +670,16 @@ async def test_discounted_max_cost_uses_largest_completion_cap() -> None:
         patch.object(settings, "tolerance_percentage", 0),
         patch.object(settings, "min_request_msat", 1000),
     ):
-        cost = await calculate_discounted_max_cost(100_000, body, model_obj)
+        cost = await calculate_discounted_max_cost(
+            100_000, body, model_obj, path="v1/chat/completions"
+        )
 
     # 80_000 is the largest declared cap: 100.0 - 80.0 = 20 sats discount.
     assert cost == 80_000
 
 
 async def test_discounted_max_cost_invalid_completion_cap_ignored() -> None:
-    """Unparseable caps yield no completion discount rather than under-reserving."""
+    """A cap the upstream may not apply yields no completion discount."""
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
@@ -691,16 +699,32 @@ async def test_discounted_max_cost_invalid_completion_cap_ignored() -> None:
         patch.object(settings, "min_request_msat", 1000),
     ):
         # No valid cap at all -> no completion discount.
-        cost = await calculate_discounted_max_cost(
-            100_000, {"max_completion_tokens": "sixty-four-k"}, model_obj
-        )
-        assert cost == 100_000
+        for cap in ("sixty-four-k", 0, -100_000_000, False):
+            cost = await calculate_discounted_max_cost(
+                100_000,
+                {"max_completion_tokens": cap},
+                model_obj,
+                path="v1/chat/completions",
+            )
+            assert cost == 100_000
 
-        # An invalid sibling does not poison a valid cap on another field.
+        # An unreadable sibling may leave the upstream uncapped, and chat
+        # does not read max_output_tokens.
+        for body in (
+            {"max_tokens": "bad", "max_completion_tokens": 80_000},
+            {"max_output_tokens": 80_000},
+        ):
+            cost = await calculate_discounted_max_cost(
+                100_000, body, model_obj, path="v1/chat/completions"
+            )
+            assert cost == 100_000
+
+        # A whole float reads as the count a lenient upstream applies.
         cost = await calculate_discounted_max_cost(
             100_000,
-            {"max_tokens": "bad", "max_completion_tokens": 80_000},
+            {"max_completion_tokens": 80_000.0},
             model_obj,
+            path="v1/chat/completions",
         )
         assert cost == 80_000
 
