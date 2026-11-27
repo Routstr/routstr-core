@@ -211,10 +211,15 @@ def test_idle_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     side = {"http": ["2", "1.1"], "h2": H2}
     monkeypatch.setattr(settings, "confidential_idle_timeout_s", 90)
     assert conf.idle_timeout_s(side) == 90
-    # Never above the sidecar's own idle limit while it serves framing "2"…
+    # Below the sidecar's own idle limit while it serves framing "2", by a
+    # margin: the sidecar's idle time starts earlier, and a request the node
+    # accepts at its last moment must still reach the sidecar in time…
     monkeypatch.setattr(settings, "confidential_idle_timeout_s", 900)
-    assert conf.idle_timeout_s(side) == 300
-    assert conf.idle_timeout_s({**side, "h2": {**H2, "idle_secs": 45}}) == 45
+    assert conf.idle_timeout_s(side) == 300 - conf.SIDECAR_IDLE_MARGIN_S
+    assert conf.idle_timeout_s({**side, "h2": {**H2, "idle_secs": 45}}) == 35
+    monkeypatch.setattr(settings, "confidential_idle_timeout_s", 300)
+    assert conf.idle_timeout_s(side) == 290
+    monkeypatch.setattr(settings, "confidential_idle_timeout_s", 900)
     # …and unbounded by it otherwise; never below 10 s.
     assert conf.idle_timeout_s({"http": ["1.1"], "h2": H2}) == 900
     monkeypatch.setattr(settings, "confidential_idle_timeout_s", 3)
@@ -377,6 +382,40 @@ def test_a_request_cannot_keep_old_prices_past_the_offer_ttl(
     conf._remember_offer("aa", _terms("A"))
     conf.check_request_offer("aa", opened)
     conf.unpin_offer("aa")
+
+
+def test_ending_connections_does_not_extend_an_old_offers_prices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ten minutes an old offer's prices stay good count from when the
+    node last served it. A connection ending on it must not restart them:
+    otherwise a client opening one connection on the old offer every few
+    minutes would keep its prices for ever."""
+    now = {"t": 1000.0}
+    monkeypatch.setattr(conf.time, "monotonic", lambda: now["t"])
+    old = _terms("A")
+    conf._remember_offer("aa", old)
+    conf._remember_offer("bb", _terms("A"))  # re-priced: "aa" is served no more
+    for _ in range(3):
+        now["t"] += conf.SIGNED_OFFER_TTL_S / 2 - 1
+        terms = conf.pin_offer("aa")
+        if terms is None:
+            break
+        conf.unpin_offer("aa")
+    now["t"] += 1
+    assert conf.signed_offer_terms("aa") is None
+    with pytest.raises(conf.BillingError) as err:
+        conf.check_request_offer("aa", old)
+    assert err.value.detail["error"]["type"] == "offer_expired"
+    # A live connection keeps the offer remembered for the connection-level
+    # comparison, and the offer is forgotten once that connection ends.
+    conf._remember_offer("cc", _terms("A"))
+    assert conf.pin_offer("cc") is not None
+    conf._remember_offer("dd", _terms("A"))
+    now["t"] += conf.SIGNED_OFFER_TTL_S + 1
+    assert conf.signed_offer_terms("cc") is not None
+    conf.unpin_offer("cc")
+    assert conf.signed_offer_terms("cc") is None
 
 
 def test_a_security_relevant_offer_change_retires_live_connections(
@@ -551,6 +590,29 @@ def test_a_request_on_a_quiet_node_is_judged_against_its_current_offer(
     assert built == ["offer"] and len(ledger.reserved) == 1
 
 
+def test_a_setup_on_a_quiet_node_is_judged_against_its_current_offer(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The offer a setup names was last served 11 minutes ago and is still
+    the node's offer: the node builds its current offer first, so the setup
+    is not refused as expired."""
+    _Ledger(monkeypatch, deposit=DEP)
+    terms = _terms("A")
+    conf._SIGNED_OFFERS[SIG] = (time.monotonic() - 11 * 60, terms)
+    built: list[str] = []
+
+    async def build_offer() -> dict[str, Any]:
+        built.append("offer")
+        conf._remember_offer(SIG, terms)
+        return {"sig": SIG}
+
+    monkeypatch.setattr(conf, "build_offer", build_offer)
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+        assert conf._PINNED_OFFERS[SIG][1] is terms
+    assert built == ["offer"]
+
+
 def test_an_offer_stays_remembered_while_a_connection_is_open_on_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -565,12 +627,18 @@ def test_an_offer_stays_remembered_while_a_connection_is_open_on_it(
     conf.unpin_offer("aa")
     assert conf.signed_offer_terms("aa") is terms  # the second connection
     conf.unpin_offer("aa")
-    # Then it stays for the usual time, counted from the connection's end.
+    # Then it is remembered as if no connection had held it: the node last
+    # served it more than SIGNED_OFFER_TTL_S ago, so it is gone.
+    assert conf.signed_offer_terms("aa") is None
+    conf.unpin_offer("aa")  # idempotent
+    # Served again, it is good for the usual time from then on.
+    conf._remember_offer("aa", terms)
+    assert conf.pin_offer("aa") is terms
+    conf.unpin_offer("aa")
     now["t"] += conf.SIGNED_OFFER_TTL_S - 1
     assert conf.signed_offer_terms("aa") is terms
     now["t"] += 2
     assert conf.signed_offer_terms("aa") is None
-    conf.unpin_offer("aa")  # idempotent
 
 
 def _real_offers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -883,6 +951,44 @@ def test_a_request_the_sidecar_refuses_is_released_in_full(
         "reserve",
         "settle:rel-2",
         "release:dep",
+    ]
+
+
+def test_a_sidecar_refusal_whose_release_fails_is_not_forgotten(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The release of a refused request fails in the node's database: the
+    reservation stays the connection's, the node ends the connection (its
+    failure: the deposit goes back) and the end releases the request."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    real = cws.release
+    failed: list[str] = []
+
+    async def release(billing: Any) -> int | None:
+        if billing.snapshot.release_id == "rel-1" and not failed:
+            failed.append("rel-1")
+            raise RuntimeError("database is locked")
+        return await real(billing)
+
+    monkeypatch.setattr(cws, "release", release)
+    refusal = {"type": "request_refused", "n": 1, "status": 400, "reason": "no"}
+    with _Conn(monkeypatch, lambda n: [refusal], "2") as conn:
+        conn.open()
+        state = cws._live_sids[SID]
+        conn.send(_request(**_FEE))
+        assert conn.recv1() == refusal
+        assert state.h2_node_error is not None and state.billing is not None
+        last = conn.until("error")
+    assert last["status"] == 500 and last["fault"] == "node"
+    assert _deposit(last) == ("released", "node_failure", DEP)
+    assert last["request_outcome"]["outcome"] == "released"
+    assert failed == ["rel-1"]
+    assert ledger.calls == [
+        "check",
+        "deposit",
+        "reserve",
+        "release:dep",
+        "release:rel-1",
     ]
 
 
@@ -1317,7 +1423,8 @@ def test_deposit_when_only_refused_requests_were_sent(
     assert ledger.calls == ["check", "deposit", "reserve", "charge:dep"]
 
 
-_WALLET_BUSY = {1: conf.BillingError("wallet busy", 503)}
+_NODE_5XX = {1: conf.BillingError("reservation failed", 503)}
+_WALLET_BUSY = {1: conf.BillingError("wallet busy", 503, credential=True)}
 
 
 @pytest.mark.parametrize("http", ["1.1", "2"])
@@ -1339,7 +1446,7 @@ def test_a_sidecar_fault_after_a_node_refusal_releases_the_open_request(
     """A 5xx refusal of the node, then an accepted request that the sidecar's
     fault or its lost socket ends: the fault decides the request (released in
     full, no abandon fee) and the deposit's reason (rows 3, 4)."""
-    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES, reserve_errors=_WALLET_BUSY)
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES, reserve_errors=_NODE_5XX)
     with _Conn(monkeypatch, lambda n: [_request_ok(n, http), ending], http) as conn:
         conn.open()
         conn.send(_request(**_FEE))
@@ -1370,7 +1477,7 @@ def test_an_accepted_request_after_a_node_refusal_puts_the_deposit_at_risk_again
     """Row 6 holds only while no request was accepted after the node's 5xx
     refusal: a client that abandons the next, accepted request loses the
     deposit (row 9), as without the refusal."""
-    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES, reserve_errors=_WALLET_BUSY)
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES, reserve_errors=_NODE_5XX)
     with _Conn(monkeypatch, lambda n: [_request_ok(n, http)], http) as conn:
         conn.open()
         conn.send(_request(**_FEE))
@@ -1391,7 +1498,7 @@ def test_a_connection_left_idle_after_a_node_refusal_gets_its_deposit_back(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
 ) -> None:
     """Row 6: the node's 5xx refusal, then nothing until the idle limit."""
-    ledger = _Ledger(monkeypatch, deposit=DEP, reserve_errors=_WALLET_BUSY)
+    ledger = _Ledger(monkeypatch, deposit=DEP, reserve_errors=_NODE_5XX)
     conf._remember_offer(SIG, conf.OfferTerms({}, idle_timeout_s=1))
     with _Conn(monkeypatch, http="2") as conn:
         conn.open()
@@ -1401,6 +1508,25 @@ def test_a_connection_left_idle_after_a_node_refusal_gets_its_deposit_back(
     assert closed["type"] == "closed" and closed["reason"] == "idle"
     assert _deposit(closed) == ("released", "node_failure", DEP)
     assert ledger.calls == ["check", "deposit", "reserve", "release:dep"]
+
+
+def test_a_5xx_about_the_requests_credential_does_not_return_the_deposit(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """The request named a credential the node could not take right now (a
+    Cashu token: the wallet lock was busy, its mint did not answer). That
+    5xx is the credential's, which the client chose: the connection ends as
+    unused and its deposit is charged (row 12, not row 6)."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, reserve_errors=_WALLET_BUSY)
+    conf._remember_offer(SIG, conf.OfferTerms({}, idle_timeout_s=1))
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+        conn.send(_request())
+        assert conn.recv1()["status"] == 503
+        closed = conn.recv1()
+    assert closed["type"] == "closed" and closed["reason"] == "idle"
+    assert _deposit(closed) == ("charged", "idle", DEP)
+    assert ledger.calls == ["check", "deposit", "reserve", "charge:dep"]
 
 
 @pytest.mark.parametrize("http", ["1.1", "2"])
@@ -1420,6 +1546,54 @@ def test_deposit_when_a_settlement_cannot_be_written(
     assert err["detail"]["error"]["outcome"] == "charged_reservation"
     assert _deposit(err) == ("released", "node_failure", DEP)
     assert ledger.calls[-2:] == ["charge:rel-1", "release:dep"]
+
+
+@pytest.mark.parametrize("http", ["1.1", "2"])
+def test_a_settlement_that_committed_before_its_error_is_receipted(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
+) -> None:
+    """The settlement's write commits and then raises (after the commit, while
+    the session is refreshed). Its retries find the reservation already
+    claimed; the row says ``charged``, the state the settlement wanted, so the
+    request is settled after all: the normal receipt at the verified usage,
+    and the deposit goes back with it, never ``node_failure``."""
+    _secret, pub_hex = node_identity
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    monkeypatch.setattr(cws, "SETTLE_RETRY_DELAYS", (0, 0, 0))
+    committed: list[str] = []
+
+    async def settle(billing: Any, usage: dict[str, Any]) -> dict[str, Any]:
+        ledger.calls.append(f"settle:{billing.snapshot.release_id}")
+        if not committed:
+            committed.append(billing.snapshot.release_id)
+            raise RuntimeError("refresh failed after the commit")
+        raise conf.BillingError("reservation could not be charged", 500)
+
+    async def status(billing: Any) -> str | None:
+        return "charged" if billing.snapshot.release_id in committed else "active"
+
+    async def balance(billing: Any) -> int | None:
+        return 88000
+
+    monkeypatch.setattr(cws, "settle", settle)
+    monkeypatch.setattr(cws, "_reservation_status", status)
+    monkeypatch.setattr(cws, "_key_balance", balance)
+    monkeypatch.setattr(cws, "settle_cost", lambda b, u: 12 + b.session_fee_msat)
+    frames = _settled(1, http)
+    with _Conn(monkeypatch, lambda n: frames, http) as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        msg = conn.until("receipt")
+        last = conn.recv1() if http == "1.1" else None
+    assert _verify_schnorr(msg["receipt_json"], msg["sig"], pub_hex)
+    receipt = msg["receipt"]
+    assert receipt["cost_msats"] == 12 + FEES[0]
+    assert receipt["balance_msats"] == 88000
+    assert receipt["deposit_released_msat"] == DEP
+    if last is not None:
+        assert last == {"type": "closed", "reason": "done"}
+    assert "charge:rel-1" not in ledger.calls
+    assert ledger.calls[-1] == "release:dep"
 
 
 @pytest.mark.parametrize("http", ["1.1", "2"])
@@ -1600,6 +1774,34 @@ def test_an_oversized_client_frame_on_an_unused_connection_is_the_clients_doing(
     assert ledger.calls == ["check", "deposit", "charge:dep"]
 
 
+def test_a_client_text_frame_the_node_cannot_parse_is_the_clients_doing(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """Valid JSON whose integer has more digits than Python will convert
+    raises a plain ``ValueError``: it is a malformed client frame, the client
+    ends the connection (row 12), never a failure of the sidecar."""
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.open()
+        conn.ws.send_text('{"type":"x","n":' + "9" * 5000 + "}")
+        frame = conn.until("error")
+        last = frame if "deposit" in frame else conn.recv1()
+    assert frame["status"] == 400 and "fault" not in frame
+    assert _deposit(last) == ("charged", "unused", DEP)
+    assert ledger.calls == ["check", "deposit", "charge:dep"]
+
+
+def test_a_setup_frame_the_node_cannot_parse_is_refused(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    ledger = _Ledger(monkeypatch, deposit=DEP)
+    with _Conn(monkeypatch, http="2") as conn:
+        conn.ws.send_text('{"type":"setup","v":3,"n":' + "9" * 5000 + "}")
+        frame = conn.recv1()
+    assert frame["type"] == "error" and frame["status"] == 400
+    assert ledger.calls == []
+
+
 @pytest.mark.parametrize("http", ["1.1", "2"])
 def test_an_oversized_client_frame_with_a_request_open_is_the_clients_doing(
     monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str], http: str
@@ -1708,6 +1910,47 @@ def test_an_error_head_is_a_settlement_and_returns_the_deposit(
     assert receipt["deposit_released_msat"] == DEP
     assert receipt["usage"]["error_status"] == status
     assert ledger.calls == ["check", "deposit", "reserve", charge, "release:dep"]
+
+
+def test_a_settlement_still_writing_when_the_connection_is_cut_decides_the_deposit(
+    monkeypatch: pytest.MonkeyPatch, node_identity: tuple[str, str]
+) -> None:
+    """An error head disclosed before ``body_released`` is settled; its
+    database write is still being retried when the connection is cut. The
+    end waits for it: the deposit goes back with the receipt, never charged
+    as if the request had been abandoned."""
+    ledger = _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+    real_apply = cws._apply_settlement
+    real_deadline = cws._h2_deadline
+
+    async def slow_apply(*args: Any, **kw: Any) -> Any:
+        await asyncio.sleep(0.6)
+        return await real_apply(*args, **kw)
+
+    cut_at: list[float] = []
+
+    def deadline(state: Any, started: float) -> float:
+        if state.billing is not None:
+            # Cut 0.1 s after the request was accepted: inside the
+            # settlement's write.
+            if not cut_at:
+                cut_at.append(asyncio.get_running_loop().time() + 0.1)
+            return cut_at[0]
+        return real_deadline(state, started)
+
+    monkeypatch.setattr(cws, "_apply_settlement", slow_apply)
+    monkeypatch.setattr(cws, "_h2_deadline", deadline)
+    monkeypatch.setattr(cws, "SIDECAR_DRAIN_S", 0.05)
+    frames = [_request_ok(1, "2"), _attest(1, "2"), _error_usage(429, 1, "2")]
+    with _Conn(monkeypatch, lambda n: frames, "2") as conn:
+        conn.open()
+        conn.send(_request(**_FEE))
+        receipt = conn.until("receipt")["receipt"]
+        last = conn.recv1()
+    assert receipt["deposit_released_msat"] == DEP
+    assert "deposit" not in last
+    assert "charge:dep" not in ledger.calls
+    assert ledger.calls[-1] == "release:dep"
 
 
 def test_an_error_head_after_the_first_settlement_owes_no_session_fee(
@@ -2030,6 +2273,43 @@ async def test_a_deposit_and_a_request_are_held_together(
     assert (key.reserved_balance, key.total_spent) == (0, 14_960)
 
 
+async def test_a_settlement_write_that_raises_after_its_commit_counts(
+    monkeypatch: pytest.MonkeyPatch, billing_db: Any, fee_settings: None
+) -> None:
+    """The real billing write commits the charge, then raises: the retries
+    find the reservation claimed, and the settlement returns the cost it
+    committed (the usage at the frozen rates plus the session fee) and the
+    key's balance, charged once."""
+    import routstr.upstream.ehbp as ehbp
+
+    monkeypatch.setattr(cws, "SETTLE_RETRY_DELAYS", (0,))
+    real_stop = ehbp._stop_reservation_heartbeat
+    raised: list[str] = []
+
+    async def stop_then_fail(release_id: str) -> None:
+        await real_stop(release_id)
+        if not raised:
+            raised.append(release_id)
+            raise RuntimeError("failed after the commit")
+
+    monkeypatch.setattr(ehbp, "_stop_reservation_heartbeat", stop_then_fail)
+    billing = await conf.reserve("hk", "ctx-model", 8, _current_sig(), 2000, 10000)
+    usage = {
+        "model": "ctx-model",
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 8},
+    }
+    cost, balance = await cws._apply_settlement_retrying(billing, usage, released=True)
+    assert raised
+    assert cost == 12_960 + 2000
+    assert balance == 3_000_000 - cost
+    key = await billing_db.key()
+    assert (key.balance, key.reserved_balance, key.total_spent) == (
+        3_000_000 - cost,
+        0,
+        cost,
+    )
+
+
 async def test_the_session_fee_is_charged_once_per_connection(
     monkeypatch: pytest.MonkeyPatch, billing_db: Any, fee_settings: None
 ) -> None:
@@ -2228,7 +2508,7 @@ async def test_the_idle_time_never_exceeds_the_sidecars(
     st.h2_idle_timeout, st.h2_idle_secs = 120.0, 300.0
     assert cws._h2_deadline(st, now - 50) == now + 120
     st.h2_idle_secs = 45.0
-    assert cws._h2_deadline(st, now - 50) == now + 45
+    assert cws._h2_deadline(st, now - 50) == now + 45 - cws.SIDECAR_IDLE_MARGIN_S
 
 
 async def test_request_time_limit_charges_a_released_request(
@@ -3048,7 +3328,10 @@ async def test_a_deposit_that_could_not_be_charged_does_not_pay_for_the_request(
     real_charge = cws.charge_reservation
 
     async def failing_charge(billing: Any) -> Any:
-        if getattr(billing, "reservation_id", None) == "dep" or billing is state.h2_deposit:
+        if (
+            getattr(billing, "reservation_id", None) == "dep"
+            or billing is state.h2_deposit
+        ):
             raise RuntimeError("database unavailable")
         return await real_charge(billing)
 
@@ -3063,7 +3346,9 @@ async def test_a_deposit_that_could_not_be_charged_does_not_pay_for_the_request(
             "sk-x", "test-model", 16, SIG, session_fee_due=True
         )
         state.engaged = True
-        monkeypatch.setattr(cws, "charge_reservation", failing_charge if fail else real_charge)
+        monkeypatch.setattr(
+            cws, "charge_reservation", failing_charge if fail else real_charge
+        )
         ledger.calls.clear()
         deposit = await cws._h2_end_deposit(state, "client_gone")
         await cws._finalize(state)
@@ -3075,6 +3360,66 @@ async def test_a_deposit_that_could_not_be_charged_does_not_pay_for_the_request(
         else:
             assert deposit is not None and deposit["outcome"] == "charged"
             assert (out["outcome"], out["cost_msats"]) == ("released", 0)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        # (body released, failed settlement, engaged, reason, cost)
+        (True, False, True, "request_received", "reserved"),
+        (True, True, True, "settlement_failed", "reserved"),
+        (False, False, True, "request_abandoned", "abandon"),
+    ],
+)
+@pytest.mark.parametrize("committed", [True, False])
+async def test_an_unsettled_request_whose_charge_committed_before_its_error(
+    monkeypatch: pytest.MonkeyPatch, case: tuple[Any, ...], committed: bool
+) -> None:
+    """Finalizing a request without a receipt charges it (the reservation, or
+    the abandon fee); that write commits and then raises. The reservation row
+    says ``charged``, the state the write wanted: the request is final after
+    all, and its signed outcome is still recorded for the last frame. A write
+    that did not commit leaves it open, as before."""
+    released, failed_settlement, engaged, reason, cost_kind = case
+    _Ledger(monkeypatch, deposit=DEP, fees=FEES)
+
+    async def fails(*_: Any) -> Any:
+        raise RuntimeError("failed after the commit")
+
+    async def status(_billing: Any) -> str | None:
+        return "charged" if committed else "active"
+
+    async def balance(_billing: Any) -> int | None:
+        return 55000
+
+    monkeypatch.setattr(cws, "charge_reservation", fails)
+    monkeypatch.setattr(cws, "charge_fee", fails)
+    monkeypatch.setattr(cws, "_reservation_status", status)
+    monkeypatch.setattr(cws, "_key_balance", balance)
+    state = cws.SessionState()
+    state.framing, state.sid, state.h2_ready, state.h2_n = "2", SID, True, 1
+    state.billing = await cws.reserve(
+        "sk-x", "test-model", 16, SIG, session_fee_due=True
+    )
+    state.engaged, state.body_released = engaged, released
+    async with state.lock:
+        outcome = await cws._finalize_unsettled(
+            state, failed_settlement=failed_settlement
+        )
+    if not committed:
+        assert outcome is None and not state.finalized
+        assert state.h2_unsettled is None
+        return
+    cost = state.billing.reserved_msats if cost_kind == "reserved" else FEES[1]
+    assert state.finalized and outcome is not None
+    out = state.h2_unsettled
+    assert out is not None
+    assert (out["outcome"], out["reason"], out["cost_msats"]) == (
+        "charged",
+        reason,
+        cost,
+    )
+    assert out["balance_msats"] == 55000
 
 
 async def test_a_failed_settlement_before_the_body_is_released_keeps_nothing(
@@ -3462,6 +3807,7 @@ async def test_a_busy_wallet_is_a_retryable_refusal(
             await call("cashuAtoken", SIG)
         assert refused.value.status == 503
         assert refused.value.detail["error"]["type"] == "wallet_busy"
+        assert refused.value.credential is True
     assert bounds == [conf.WALLET_LOCK_TIMEOUT_S] * 2
 
     async def short(bearer: str, session: Any, **kw: Any) -> Any:

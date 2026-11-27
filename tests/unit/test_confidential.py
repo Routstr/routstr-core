@@ -1684,6 +1684,27 @@ async def test_post_release_window_stays_inside_the_lease() -> None:
     assert cws._h2_deadline(st, now) == now + 900 - cws.SETTLE_GRACE_S
 
 
+async def test_a_held_deposit_is_never_outlived_by_its_connection() -> None:
+    """While the connection deposit is held, no deadline passes its lease
+    (less the settlement grace): a slow reservation of the first request
+    (a long Cashu redemption) must not let the lease end before the
+    connection's end charges or releases the deposit."""
+    from routstr.core.lifecycle import RequestLifetime
+
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    st = cws.SessionState()
+    st.h2_deposit_lifetime = RequestLifetime(deadline=now + 700)
+    st.h2_deposit = _Billing()  # type: ignore[assignment]
+    st.billing = _Billing()  # type: ignore[assignment]
+    st.h2_idle_since = now + 50
+    st.h2_request_at = now + 300
+    assert cws._h2_deadline(st, now) == now + 700 - cws.SETTLE_GRACE_S
+    # Settled: the deposit went back, the request's own limits apply.
+    st.h2_deposit = None
+    assert cws._h2_deadline(st, now) == now + 300 + cws.SESSION_TIMEOUT_S
+
+
 # ---------------------------------------------------------------------------
 # offer URLs, sidecar offer cache, advertised set
 # ---------------------------------------------------------------------------
@@ -2104,6 +2125,28 @@ async def test_reservation_covers_the_full_context(billing_db: Any) -> None:
         billing_db.model,
     )
     assert metadata_only < 10_000 < billing.reserved_msats
+
+
+async def test_a_refused_request_credential_is_marked_as_the_credentials(
+    billing_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 5xx from validating the request's credential (a Cashu token whose
+    mint does not answer) is the credential's refusal, not a failure of the
+    node's reservation; an unfunded key at reservation time is not marked."""
+    from fastapi import HTTPException
+
+    import routstr.auth as auth_module
+
+    async def mint_down(auth: str, session: Any, **_: Any) -> Any:
+        raise HTTPException(
+            status_code=503, detail={"error": {"type": "mint_unreachable"}}
+        )
+
+    monkeypatch.setattr(auth_module, "validate_bearer_key", mint_down)
+    with pytest.raises(conf.BillingError) as refused:
+        await conf.reserve("cashuAtoken", "ctx-model", 8, _current_sig())
+    assert refused.value.status == 503 and refused.value.credential is True
+    assert conf.BillingError("x", 503).credential is False
 
 
 async def test_reservation_ignores_the_models_completion_limit(

@@ -105,6 +105,13 @@ DEFAULT_IMAGE_COUNT_KEY = "variants"
 # model).
 DEFAULT_IDLE_TIMEOUT_S = 120
 DEFAULT_SIDECAR_IDLE_S = 300
+# How much earlier than the sidecar the node ends an idle connection. The
+# sidecar's idle time starts at its own ``head_written``, before the node
+# hears of it, and a request the node accepts must still reach the sidecar
+# (after its reservation) before the sidecar's limit: else the sidecar closes
+# the connection as idle under a request the client sent in time, which
+# would read as the client abandoning it.
+SIDECAR_IDLE_MARGIN_S = 10
 MIN_DEFAULT_DEPOSIT_MSAT = 1000
 DEPOSIT_MODEL_ID = "confidential-connection"
 
@@ -187,7 +194,7 @@ def idle_timeout_s(side: dict[str, Any]) -> int:
     """Seconds without a request in flight after which the node closes a
     framing-``"2"`` connection: the configured value (at least 10), never
     above the sidecar's own idle limit when it offers that framing
-    (``side`` is the sidecar offer)."""
+    (``side`` is the sidecar offer), less ``SIDECAR_IDLE_MARGIN_S``."""
     try:
         idle = max(10, int(settings.confidential_idle_timeout_s))
     except (TypeError, ValueError):
@@ -196,7 +203,7 @@ def idle_timeout_s(side: dict[str, Any]) -> int:
     if block is not None:
         side_idle = block.get("idle_secs", DEFAULT_SIDECAR_IDLE_S)
         if _is_int(side_idle) and side_idle > 0:
-            idle = max(10, min(idle, side_idle))
+            idle = max(10, min(idle, side_idle - SIDECAR_IDLE_MARGIN_S))
     return idle
 
 
@@ -1169,15 +1176,18 @@ def pin_offer(sig: str) -> OfferTerms | None:
 
 
 def unpin_offer(sig: str) -> None:
-    """A connection opened on the offer ``sig`` ended. The offer then stays
-    for the usual time, counted from now."""
+    """A connection opened on the offer ``sig`` ended. Once no connection
+    holds it, the offer is remembered only as long as it would have been
+    without connections: for ``SIGNED_OFFER_TTL_S`` after the node last
+    served it. The end of a connection does not restamp it, so a client that
+    keeps opening connections on an old offer cannot keep its prices alive
+    (``check_request_offer`` and ``signed_offer_terms`` read that time)."""
     entry = _PINNED_OFFERS.get(sig)
     if entry is None:
         return
     entry[0] -= 1
     if entry[0] <= 0:
         del _PINNED_OFFERS[sig]
-        _remember_offer(sig, entry[1])
 
 
 def _remember_offer(sig: str, terms: OfferTerms | dict[str, Any]) -> None:
@@ -1505,11 +1515,23 @@ class BillingError(Exception):
     """A setup or request refused (unknown model, insufficient balance, bad
     credential)."""
 
-    def __init__(self, message: str, status: int = 400, detail: Any = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status: int = 400,
+        detail: Any = None,
+        credential: bool = False,
+    ) -> None:
         super().__init__(message)
         self.status = status
         # FastAPI-style detail, so clients parse it like a normal proxy error.
         self.detail: Any = detail if detail is not None else message
+        # The refusal comes from validating the credential the caller chose
+        # (an unknown key, a Cashu token that cannot be redeemed now, the
+        # wallet lock its redemption waited for), whatever the status: a
+        # caller can bring such a 5xx about at will, so it is no failure of
+        # the node's own reservation path.
+        self.credential = credential
 
 
 def _billing_error(exc: HTTPException) -> BillingError:
@@ -1521,6 +1543,13 @@ def _billing_error(exc: HTTPException) -> BillingError:
     if not isinstance(message, str) or not message:
         message = str(detail)
     return BillingError(message, exc.status_code, detail)
+
+
+def _credential_error(exc: HTTPException) -> BillingError:
+    """``_billing_error`` for a refusal of the credential itself."""
+    out = _billing_error(exc)
+    out.credential = True
+    return out
 
 
 def prompt_token_limit(model_obj: Any) -> int | None:
@@ -1836,6 +1865,7 @@ async def _validate_bearer(auth: str, session: Any, min_cost: int = 0) -> Any:
                     "retry_after_s": 1,
                 }
             },
+            credential=True,
         ) from exc
 
 
@@ -2007,7 +2037,7 @@ async def reserve(
         try:
             key = await _validate_bearer(auth, session)
         except HTTPException as exc:
-            raise _billing_error(exc) from exc
+            raise _credential_error(exc) from exc
         # The limit the named offer signed (the client checks the reservation
         # against it), else the catalogue's: an offer without the field, or a
         # model it lists none for.
@@ -2118,6 +2148,27 @@ def _warn_priced_variant(billing: Billing, usage: Any) -> None:
         )
 
 
+def settle_cost(billing: Billing, usage_event: dict[str, Any]) -> int:
+    """What ``settle`` charges for ``usage_event``: the usage at the frozen
+    rates plus the session fee the request owes, capped at the reservation;
+    the reservation when the event has no token counts."""
+    usage_cost = frozen_cost_msats(
+        billing.rates, usage_event.get("usage"), billing.reserved_msats
+    )
+    if usage_cost is None:
+        return billing.reserved_msats
+    return min(usage_cost + billing.session_fee_msat, billing.reserved_msats)
+
+
+def flat_cost(billing: Billing) -> int:
+    """What ``settle_flat`` charges: the frozen price × count plus the session
+    fee the request owes, capped at the reservation."""
+    return min(
+        billing.msat_per_image * billing.count + billing.session_fee_msat,
+        billing.reserved_msats,
+    )
+
+
 async def settle(billing: Billing, usage_event: dict[str, Any]) -> dict[str, Any]:
     """Charge the π_C3S-verified usage at the frozen rates, plus the session
     fee the request owes (0 after the connection's first settlement).
@@ -2128,13 +2179,7 @@ async def settle(billing: Billing, usage_event: dict[str, Any]) -> dict[str, Any
     """
     _warn_completion_overshoot(billing, usage_event.get("usage"))
     _warn_priced_variant(billing, usage_event.get("usage"))
-    usage_cost = frozen_cost_msats(
-        billing.rates, usage_event.get("usage"), billing.reserved_msats
-    )
-    if usage_cost is None:
-        cost = billing.reserved_msats
-    else:
-        cost = min(usage_cost + billing.session_fee_msat, billing.reserved_msats)
+    cost = settle_cost(billing, usage_event)
     if cost == 0:
         return {"cost_msats": 0, "balance_msats": await release(billing)}
     return {"cost_msats": cost, "balance_msats": await _charge(billing, cost)}
@@ -2198,7 +2243,7 @@ async def reserve_image(
         try:
             key = await _validate_bearer(auth, session)
         except HTTPException as exc:
-            raise _billing_error(exc) from exc
+            raise _credential_error(exc) from exc
         max_cost = per_image * count + max(fee, abandon)
         try:
             snapshot = await pay_for_request(key, max_cost, session)
@@ -2226,10 +2271,7 @@ async def reserve_image(
 async def settle_flat(billing: Billing) -> dict[str, Any]:
     """Charge a flat image request: the frozen price × count plus the session
     fee the request owes, capped at the reservation. Returns ``{"cost_msats", "balance_msats"}``."""
-    cost = min(
-        billing.msat_per_image * billing.count + billing.session_fee_msat,
-        billing.reserved_msats,
-    )
+    cost = flat_cost(billing)
     if cost == 0:
         return {"cost_msats": 0, "balance_msats": await release(billing)}
     return {"cost_msats": cost, "balance_msats": await _charge(billing, cost)}
