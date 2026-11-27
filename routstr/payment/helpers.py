@@ -1,8 +1,11 @@
+import asyncio
 import base64
 import json
 import math
+from contextlib import contextmanager
+from contextvars import ContextVar
 from io import BytesIO
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 from fastapi import HTTPException, Response
@@ -44,7 +47,7 @@ logger = get_logger(__name__)
 
 def check_token_balance(
     headers: dict, body: dict, max_cost_for_model: int, *, pricing: dict | None = None
-) -> None:
+) -> int | None:
     if x_cashu := headers.get("x-cashu", None):
         cashu_token = x_cashu
         logger.debug(
@@ -62,7 +65,7 @@ def check_token_balance(
                 "auth_preview": auth[:20] + "..." if len(auth) > 20 else auth,
             },
         )
-        return
+        return None
     else:
         logger.error("No authentication token provided")
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -83,7 +86,7 @@ def check_token_balance(
 
     # Handle regular API keys (sk-*)
     if cashu_token.startswith("sk-"):
-        return
+        return None
 
     try:
         token_obj = deserialize_token_from_string(cashu_token)
@@ -129,6 +132,8 @@ def check_token_balance(
                 "type": "minimum_balance_required",
             },
         )
+
+    return amount_msat
 
 
 async def get_max_cost_for_model(
@@ -196,6 +201,38 @@ async def get_max_cost_for_model(
         },
     )
     return max(settings.min_request_msat, settings.fixed_cost_per_request * 1000)
+
+
+class RequestBodyEstimateCache:
+    """Request-local memoization for candidate-independent body estimates."""
+
+    def __init__(self, body: dict) -> None:
+        self._body = body
+        self._estimate_task: asyncio.Task[tuple[int, int]] | None = None
+
+    async def get(self) -> tuple[int, int]:
+        if self._estimate_task is None:
+            self._estimate_task = asyncio.create_task(
+                _estimate_request_prompt_and_image_tokens(self._body)
+            )
+        return await self._estimate_task
+
+
+_request_body_estimates: ContextVar[RequestBodyEstimateCache | None] = ContextVar(
+    "request_body_estimates", default=None
+)
+
+
+@contextmanager
+def use_request_body_estimates(
+    estimates: RequestBodyEstimateCache,
+) -> Iterator[None]:
+    """Make request-local estimates available without changing call signatures."""
+    token = _request_body_estimates.set(estimates)
+    try:
+        yield
+    finally:
+        _request_body_estimates.reset(token)
 
 
 async def calculate_discounted_max_cost(
@@ -274,25 +311,13 @@ async def calculate_discounted_max_cost(
 
     adjusted = max_cost_for_model
 
-    messages = body.get("messages")
-    # Estimated over the whole body: a discount driven by message text alone lets
-    # a caller hide prompt weight elsewhere, shrink the reservation, and be billed
-    # for work the reservation never covered.
-    prompt_tokens = estimate_prompt_tokens(body)
-
-    # Images are billed as tokens by the upstream but carry no text for
-    # ``estimate_prompt_tokens`` to count, so they are estimated separately and
-    # added on both the chat (``messages``) and Responses (``input``) paths.
-    image_tokens = 0
-    if isinstance(messages, list):
-        image_tokens += await estimate_image_tokens_in_messages(messages)
-    input_data = body.get("input")
-    if isinstance(input_data, list):
-        converted = responses_input_to_messages(input_data)
-        if converted is None:
-            image_tokens += count_input_images(input_data) * _MAX_ORIGINAL_IMAGE_TOKENS
-        else:
-            image_tokens += await estimate_image_tokens_in_messages(converted)
+    # Prompt and image estimates depend only on the provider-bound request body.
+    # Candidate pricing remains below, but remote image fetches must share the
+    # proxy request's single fetch budget rather than restarting per candidate.
+    request_estimates = _request_body_estimates.get()
+    if request_estimates is None:
+        request_estimates = RequestBodyEstimateCache(body)
+    prompt_tokens, image_tokens = await request_estimates.get()
     if image_tokens > 0:
         logger.debug(
             "Found images in request",
@@ -301,7 +326,6 @@ async def calculate_discounted_max_cost(
                 "image_tokens": image_tokens,
             },
         )
-        prompt_tokens += image_tokens
 
     discounts.update(
         prompt_tokens_estimated=prompt_tokens,
@@ -354,6 +378,20 @@ async def calculate_discounted_max_cost(
             delta = math.floor(estimated_completion_delta_sats * 1000)
             discounts["completion_delta_msats"] = delta
             adjusted = adjusted - delta
+
+    # ``n`` and ``best_of`` make the upstream generate (and bill) one completion
+    # per choice. Legacy /completions additionally generates that set once for
+    # every prompt in a prompt batch.
+    choices = generated_completion_count(body, path)
+    discounts["completion_choices"] = choices
+    discounts["completion_prompt_count"] = legacy_completion_prompt_count(body, path)
+    if choices > 1:
+        per_choice_sats = max_completion_allowed_sats
+        if max_tokens_int is not None:
+            per_choice_sats = min(
+                per_choice_sats, max(0, max_tokens_int) * model_pricing.completion
+            )
+        adjusted += math.ceil((choices - 1) * per_choice_sats * 1000)
 
     # Settlement scales every token rate when the response reports fast mode
     # or US-only inference, so the hold scales by the same factor up front.
@@ -418,6 +456,43 @@ def reserved_web_searches(body: dict) -> int:
     return total
 
 
+def completion_choice_count(body: dict) -> int:
+    """Number of completions the upstream may generate: the larger of ``n`` and ``best_of``."""
+    count = 1
+    for field in ("n", "best_of"):
+        raw = body.get(field)
+        if raw is None:
+            continue
+        try:
+            count = max(count, int(raw))
+        except (TypeError, ValueError):
+            continue
+    return count
+
+
+def legacy_completion_prompt_count(body: dict, path: str) -> int:
+    """Prompt count for legacy /completions, where prompt arrays may be batches."""
+    canonical_path = path.strip("/")
+    if canonical_path.startswith("v1/"):
+        canonical_path = canonical_path[3:]
+    if canonical_path != "completions":
+        return 1
+
+    prompt = body.get("prompt")
+    if not isinstance(prompt, list) or not prompt:
+        return 1
+    if all(isinstance(token, int) and not isinstance(token, bool) for token in prompt):
+        return 1
+    if all(isinstance(item, (str, list)) for item in prompt):
+        return len(prompt)
+    return 1
+
+
+def generated_completion_count(body: dict, path: str) -> int:
+    """Total generated completions after choice and legacy prompt multiplicity."""
+    return completion_choice_count(body) * legacy_completion_prompt_count(body, path)
+
+
 def estimate_tokens(messages: list) -> int:
     """Estimate tokens for text content, excluding image_url fields."""
     total = 0
@@ -475,6 +550,26 @@ def estimate_prompt_tokens(body: dict) -> int:
         + _count_prompt_token_ids(body.get("prompt"))
         + _count_prompt_token_ids(body.get("input"))
     )
+
+
+async def _estimate_request_prompt_and_image_tokens(body: dict) -> tuple[int, int]:
+    """Return candidate-independent prompt and image token estimates."""
+    prompt_tokens = estimate_prompt_tokens(body)
+    image_tokens = 0
+
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        image_tokens += await estimate_image_tokens_in_messages(messages)
+
+    input_data = body.get("input")
+    if isinstance(input_data, list):
+        converted = responses_input_to_messages(input_data)
+        if converted is None:
+            image_tokens += count_input_images(input_data) * _MAX_ORIGINAL_IMAGE_TOKENS
+        else:
+            image_tokens += await estimate_image_tokens_in_messages(converted)
+
+    return prompt_tokens + image_tokens, image_tokens
 
 
 IMAGE_FETCH_TIMEOUT_SECONDS = 10.0

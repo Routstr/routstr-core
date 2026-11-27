@@ -11,6 +11,14 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def get_effective_forwarded_model_id(model: "Model") -> str | None:
+    """Ignore legacy self-aliases so they keep the model's base identity."""
+    forwarded_model_id = model.forwarded_model_id
+    if forwarded_model_id == model.id:
+        return None
+    return forwarded_model_id
+
+
 def calculate_model_cost_score(model: "Model") -> float:
     """Calculate a representative cost score for a model.
 
@@ -74,6 +82,41 @@ def calculate_model_reservation_score(model: "Model") -> float:
     except Exception:
         # Pricing shape missing/invalid; per-token score keeps order deterministic
         return calculate_model_cost_score(model)
+
+
+def candidate_alias_priority(model: "Model", alias: str) -> int:
+    """Rank how directly a candidate serves the requested alias."""
+    model_base = model.id.split("/", 1)[1] if "/" in model.id else model.id
+    if (model.id and model.id.lower() == alias) or model_base.lower() == alias:
+        return 4
+
+    forwarded_model_id = get_effective_forwarded_model_id(model)
+    if forwarded_model_id and forwarded_model_id.lower() == alias:
+        return 3
+    if model.canonical_slug:
+        canonical_base = (
+            model.canonical_slug.split("/", 1)[1]
+            if "/" in model.canonical_slug
+            else model.canonical_slug
+        )
+        if canonical_base.lower() == alias:
+            return 2
+    return 1
+
+
+def candidate_routing_sort_key(
+    model: "Model",
+    provider: "BaseUpstreamProvider",
+    alias: str,
+) -> tuple[int, float, float]:
+    """Routing key preserving alias priority and provider penalties."""
+    priority = candidate_alias_priority(model, alias)
+    penalty = get_provider_penalty(provider)
+    return (
+        priority,
+        -(calculate_model_reservation_score(model) * penalty),
+        -(calculate_model_cost_score(model) * penalty),
+    )
 
 
 def get_provider_penalty(provider: "BaseUpstreamProvider") -> float:
@@ -188,13 +231,6 @@ def create_model_mappings(
         provider_type = str(getattr(upstream, "provider_type", "") or "").lower()
         base_url = str(getattr(upstream, "base_url", "") or "").lower()
         return f"{provider_type}|{base_url}"
-
-    def get_effective_forwarded_model_id(model: "Model") -> str | None:
-        """Ignore legacy self-aliases so they keep the model's base identity."""
-        forwarded_model_id = model.forwarded_model_id
-        if forwarded_model_id == model.id:
-            return None
-        return forwarded_model_id
 
     def _add_candidate(
         alias: str, model: "Model", provider: "BaseUpstreamProvider"
@@ -386,50 +422,13 @@ def create_model_mappings(
     model_instances: dict[str, "Model"] = {}
     provider_map: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
 
-    def alias_priority(model: "Model", alias: str) -> int:
-        """Rank how strong the mapping of alias->model is.
-
-        A provider that serves the requested ID directly is authoritative and
-        must be cost-ranked before providers that only reach it through a
-        forwarded alias, so a forwarded ID cannot shadow a directly available,
-        cheaper model with the requested ID.
-
-        "Directly served" covers both the exact model ID and the same ID behind
-        a provider prefix (e.g. ``gpt-oss-120b`` on Tinfoil vs
-        ``openai/gpt-oss-120b`` on OpenRouter). Both name the same model, so
-        they share the top tier and cost decides between them; otherwise the
-        provider whose catalog omits the org prefix would always win on ID
-        spelling regardless of price.
-        """
-        model_base = get_base_model_id(model.id)
-        if (model.id and model.id.lower() == alias) or model_base.lower() == alias:
-            return 4
-
-        forwarded_model_id = get_effective_forwarded_model_id(model)
-        if forwarded_model_id and forwarded_model_id.lower() == alias:
-            return 3
-        if model.canonical_slug:
-            canonical_base = get_base_model_id(model.canonical_slug)
-            if canonical_base.lower() == alias:
-                return 2
-        return 1
-
     for alias, items in candidates.items():
-        # Sort key: (priority DESC, reservation ASC, cost ASC)
-        # Using negative costs for DESC sort overall to keep high priority first
-        def sort_key(
-            item: tuple["Model", "BaseUpstreamProvider"],
-        ) -> tuple[int, float, float]:
-            model, provider = item
-            priority = alias_priority(model, alias)
-            penalty = get_provider_penalty(provider)
-            # Rank on the reservation ceiling the balance gate enforces, with
-            # per-token typical-usage cost as tiebreaker
-            adjusted_reservation = calculate_model_reservation_score(model) * penalty
-            adjusted_cost = calculate_model_cost_score(model) * penalty
-            return (priority, -adjusted_reservation, -adjusted_cost)
-
-        items.sort(key=sort_key, reverse=True)
+        # Rank on the reservation ceiling the balance gate enforces, with
+        # per-token typical-usage cost as tiebreaker.
+        items.sort(
+            key=lambda item: candidate_routing_sort_key(item[0], item[1], alias),
+            reverse=True,
+        )
 
         best_model, best_provider = items[0]
         model_instances[alias] = best_model
