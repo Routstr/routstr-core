@@ -379,7 +379,12 @@ async def test_ambiguous_send_failure_is_not_retried(
             await _pay("chat", _completion(), cost_sats=5)
     elif sender == "ehbp":
         with patch.object(ehbp_module, "send_token", send):
-            await _ehbp_pay(AsyncMock(return_value=_ehbp_ok()), cost_msats=5000)
+            response = await _ehbp_pay(
+                AsyncMock(return_value=_ehbp_ok()), cost_msats=5000
+            )
+        # Nothing will pay the change, so the response stays withheld.
+        assert response.status_code == 500
+        assert b"ciphertext" not in bytes(response.body)
     else:
         await _seed(integration_session, settlement=xs.PENDING, age=STALE)
         with patch.object(xs, "send_token", send):
@@ -472,6 +477,50 @@ async def test_failed_full_refund_mint_is_retried_by_recovery(
     assert wallet.mints == [AMOUNT, AMOUNT]
     assert await _refunds(integration_session) == [AMOUNT]
     assert (await _payment(integration_session)).settlement == xs.REFUNDED
+
+
+async def test_reopened_change_is_drained_after_retry_flag_is_turned_off(
+    wallet: FakeWallet,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet.fail = True
+    await _pay("chat", _completion(), cost_sats=5)
+    payment = await _payment(integration_session)
+    assert payment.settlement == xs.PENDING
+    assert payment.refund_amount == 15
+
+    monkeypatch.setattr(settings, "x_cashu_retry_unminted_refunds", False)
+    wallet.fail = False
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 1
+    assert await xs.recover_abandoned_payments() == 0
+    assert wallet.mints == [15, 15]
+    assert await _refunds(integration_session) == [15]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+
+
+@pytest.mark.parametrize("sender", ["chat", "responses", "ehbp"])
+async def test_ambiguous_full_refund_failure_points_to_the_operator(
+    wallet: FakeWallet, integration_session: AsyncSession, sender: str
+) -> None:
+    send = AsyncMock(side_effect=OSError("failed persisting proof reservation"))
+    if sender == "ehbp":
+        upstream_down = TrailerResponse(status_code=503, headers=[], body=b"down")
+        with patch.object(ehbp_module, "send_token", send):
+            response = await _ehbp_pay(AsyncMock(return_value=upstream_down), 5000)
+    else:
+        with patch("routstr.upstream.base.send_token", send):
+            response = await _pay(sender, httpx.Response(503, json={"error": "down"}))
+
+    assert response.status_code == 500
+    error = json.loads(bytes(response.body))["error"]
+    assert error["code"] == "refund_failed"
+    assert "contact the operator" in error["message"]
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    claimed = await _claim(integration_session)
+    assert claimed.status_code == 409
+    assert claimed.detail["error"]["code"] == "refund_unresolved"
 
 
 async def test_unstored_live_refund_token_is_terminal(
@@ -1258,8 +1307,15 @@ async def test_ehbp_failed_change_mint_is_retried_by_recovery_for_the_change(
     wallet: FakeWallet, integration_session: AsyncSession
 ) -> None:
     wallet.fail = True
-    await _ehbp_pay(AsyncMock(return_value=_ehbp_ok()), cost_msats=5000)
+    response = await _ehbp_pay(AsyncMock(return_value=_ehbp_ok()), cost_msats=5000)
 
+    # Inference was paid for, so it is served while recovery owes the change.
+    assert response.status_code == 200
+    assert response.headers[X_ROUTSTR_REFUND_ERROR_HEADER] == "refund_failed"
+    assert "X-Cashu" not in response.headers
+    assert b"".join([chunk async for chunk in response.body_iterator]) == (
+        b"ciphertext"
+    )
     payment = await _payment(integration_session)
     assert payment.settlement == xs.PENDING
     assert payment.refund_amount == 15

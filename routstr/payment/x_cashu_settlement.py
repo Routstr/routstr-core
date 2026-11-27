@@ -153,7 +153,9 @@ async def reopen_unminted_refund(request_id: str | None) -> bool:
     """Put a claimed refund that created no token back to pending.
 
     The claimed ``refund_amount`` is kept, so recovery pays the same amount.
-    True means recovery will retry the refund.
+    True means recovery will retry the refund. With
+    ``x_cashu_retry_unminted_refunds`` off the refund is marked FAILED instead
+    and False is returned.
     """
     if request_id is None:
         return False

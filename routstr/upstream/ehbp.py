@@ -69,6 +69,7 @@ from ..wallet import (
     recieve_token,
     send_token,
 )
+from .base import X_ROUTSTR_REFUND_ERROR_HEADER
 from .model_paths import exposed_model_id
 from .terminal_outcome_tracking import (
     record_x_cashu_terminal_outcome,
@@ -1641,7 +1642,7 @@ async def forward_ehbp_x_cashu_request(
             if refund_amount > 0:
                 try:
                     response_headers["X-Cashu"] = await refund(refund_amount)
-                except BaseException:
+                except BaseException as refund_error:
                     # The error handler never refunds a second time, so at most
                     # this refund leaves the node.
                     mark_terminal_outcome_unknown(
@@ -1649,8 +1650,13 @@ async def forward_ehbp_x_cashu_request(
                         "ehbp_x_cashu_refund_commit_ambiguous",
                         revenue_msats=cashu_retained_msats(amount, unit, refund_amount),
                     )
-                    raise
-                persisted_refund_amount = refund_amount
+                    if not (refund_reopened and isinstance(refund_error, Exception)):
+                        raise
+                    # Recovery pays only the change, so serve what was paid for;
+                    # withholding it would push clients to pay again.
+                    response_headers[X_ROUTSTR_REFUND_ERROR_HEADER] = "refund_failed"
+                else:
+                    persisted_refund_amount = refund_amount
             elif not await x_cashu_settlement.mark_charged(request_id):
                 return create_error_response(
                     "internal_error",
@@ -1663,13 +1669,14 @@ async def forward_ehbp_x_cashu_request(
                     error_scope=ERROR_SCOPE_NODE,
                 )
 
-            record_x_cashu_terminal_outcome(
-                terminal_outcome,
-                cost_info,
-                amount=amount,
-                unit=unit,
-                refund_amount=persisted_refund_amount,
-            )
+            if not refund_reopened:
+                record_x_cashu_terminal_outcome(
+                    terminal_outcome,
+                    cost_info,
+                    amount=amount,
+                    unit=unit,
+                    refund_amount=persisted_refund_amount,
+                )
 
             async def _stream_body_xcashu() -> AsyncIterator[bytes]:
                 yield resp.body
