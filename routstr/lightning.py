@@ -478,10 +478,6 @@ async def get_invoice_status(
     if invoice.status == "paid" and invoice.purpose == "create":
         if invoice.api_key_hash:
             api_key = f"sk-{invoice.api_key_hash}"
-    elif (
-        invoice.status == "paid" and invoice.purpose == "topup" and invoice.api_key_hash
-    ):
-        api_key = f"sk-{invoice.api_key_hash}"
 
     return InvoiceStatusResponse(
         status=invoice.status,
@@ -528,8 +524,6 @@ async def recover_invoice(
     api_key = None
     if invoice.status == "paid":
         if invoice.purpose == "create" and invoice.api_key_hash:
-            api_key = f"sk-{invoice.api_key_hash}"
-        elif invoice.purpose == "topup" and invoice.api_key_hash:
             api_key = f"sk-{invoice.api_key_hash}"
 
     return InvoiceStatusResponse(

@@ -690,3 +690,23 @@ async def test_public_invoice_endpoints_ignore_payout_rows(
         stored = await verify.get(LightningInvoice, payout.id)
         assert stored is not None
         assert stored.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_public_invoice_endpoints_return_a_key_only_for_create(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    paid = {"status": "paid", "paid_at": int(time.time())}
+    topup = _lightning_invoice(purpose="topup", api_key_hash="topped-up", **paid)
+    create = _lightning_invoice(api_key_hash="bought", **paid)
+    async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
+        seed.add_all([topup, create])
+        await seed.commit()
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as session:
+        for invoice, key in ((topup, None), (create, "sk-bought")):
+            request = InvoiceRecoverRequest(bolt11=invoice.bolt11)
+            recovered = await recover_invoice(request, session, False)
+            status = await get_invoice_status(invoice.id, session, False)
+            assert recovered.api_key == status.api_key == key
