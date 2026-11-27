@@ -459,6 +459,7 @@ export function LightningPaymentWorkflow({
         toast.success('API key recovered successfully!');
         setRecoverInvoice('');
       } else if (status.status === 'paid') {
+        setRecoveredApiKey('');
         toast.success('Payment received! Your API key was topped up.');
         setRecoverInvoice('');
       } else {
@@ -638,7 +639,8 @@ export function LightningPaymentWorkflow({
                 {isRecovering ? 'Recovering...' : 'Recover API Key'}
               </Button>
               <span className='text-muted-foreground text-xs'>
-                Recovers API key from a paid Lightning invoice.
+                Paid create invoices return an API key. Paid top-up invoices
+                confirm payment only.
               </span>
             </div>
           )}
