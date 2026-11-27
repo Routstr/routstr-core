@@ -60,8 +60,15 @@ def _upstream(name: str) -> MagicMock:
     return upstream
 
 
+@pytest.mark.parametrize(
+    ("token_balance_msats", "expected_upstream"),
+    [(30_000, "candidate-b"), (100_000, "candidate-a")],
+)
 @pytest.mark.asyncio
-async def test_balance_gate_uses_lower_n8_reservation_candidate() -> None:
+async def test_balance_gate_uses_first_affordable_n8_candidate(
+    token_balance_msats: int,
+    expected_upstream: str,
+) -> None:
     # A has the smaller one-completion ceiling (11 < 12 sats), but its large
     # completion allowance makes n=8 cost 81 sats versus B's 26 sats.
     candidate_a = _model("candidate-a", max_prompt=1, max_completion=10)
@@ -84,11 +91,12 @@ async def test_balance_gate_uses_lower_n8_reservation_candidate() -> None:
         reservation: int,
         *,
         pricing: dict | None = None,
-    ) -> None:
+    ) -> int:
         del pricing
         checked_reservations.append(reservation)
-        if reservation > 30_000:
+        if reservation > token_balance_msats:
             raise HTTPException(status_code=402, detail="Insufficient balance")
+        return token_balance_msats
 
     with (
         patch.object(
@@ -106,8 +114,12 @@ async def test_balance_gate_uses_lower_n8_reservation_candidate() -> None:
 
     assert response.status_code == 200
     assert checked_reservations == [26_000]
-    upstream_b.handle_x_cashu.assert_awaited_once()
-    upstream_a.handle_x_cashu.assert_not_awaited()
+    if expected_upstream == "candidate-a":
+        upstream_a.handle_x_cashu.assert_awaited_once()
+        upstream_b.handle_x_cashu.assert_not_awaited()
+    else:
+        upstream_b.handle_x_cashu.assert_awaited_once()
+        upstream_a.handle_x_cashu.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -162,7 +174,7 @@ async def test_remote_image_estimate_is_shared_across_candidate_reservations() -
             return_value=[(candidate_a, upstream_a), (candidate_b, upstream_b)],
         ),
         patch.object(proxy_module, "calculate_discounted_max_cost", record_reservation),
-        patch.object(proxy_module, "check_token_balance"),
+        patch.object(proxy_module, "check_token_balance", return_value=100_000),
         patch.object(payment_helpers, "_fetch_image_from_url", fetch_image),
         patch.object(settings, "fixed_pricing", False),
         patch.object(settings, "tolerance_percentage", 0),

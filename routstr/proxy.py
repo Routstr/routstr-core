@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlmodel import col, select
 
-from .algorithm import candidate_routing_sort_key, create_model_mappings
+from .algorithm import create_model_mappings
 from .auth import (
     ReservationSnapshot,
     pay_for_request,
@@ -180,17 +180,6 @@ def get_upstreams() -> list[BaseUpstreamProvider]:
     return _upstreams
 
 
-def _resolved_candidate_alias(model_id: str) -> str:
-    """Return the alias key whose priority tiers produced the candidate list."""
-    model_id_lower = model_id.lower()
-    if model_id_lower in _provider_map:
-        return model_id_lower
-    base_model_id = re.sub(r"-\d{8}$", "", model_id_lower)
-    if base_model_id in _provider_map:
-        return base_model_id
-    return model_id_lower
-
-
 def get_candidates(
     model_id: str,
 ) -> list[tuple[Model, BaseUpstreamProvider]] | None:
@@ -215,6 +204,18 @@ def get_candidates(
             return candidates
 
     return None
+
+
+def _first_affordable_candidate_index(
+    candidates: list[tuple[Model, BaseUpstreamProvider, int, dict[str, Any]]],
+    available_msats: int,
+) -> int:
+    """Preserve routing order while skipping candidates the caller cannot fund."""
+    return next(
+        index
+        for index, (_, _, reservation_msats, _) in enumerate(candidates)
+        if reservation_msats <= available_msats
+    )
 
 
 def _model_ids_match(requested: str, selected: str) -> bool:
@@ -1092,9 +1093,10 @@ async def _proxy(
         # re-sent: one candidate, one POST, settle or refund.
         candidates = candidates[:1]
 
-    # Re-rank equal request candidates on the reservation this request will
-    # actually require. Alias priority and provider penalties stay identical to
-    # catalog routing; only the static single-completion ceiling is replaced.
+    # Price every candidate for this request, but preserve the catalog's routing
+    # order whenever the caller can fund its preferred candidate. A lower-ranked
+    # candidate only moves to the front to avoid a false insufficient-balance
+    # rejection.
     request_priced_candidates: list[
         tuple[Model, BaseUpstreamProvider, int, dict[str, Any]]
     ] = []
@@ -1121,20 +1123,48 @@ async def _proxy(
             )
         )
 
-    if (
-        len({candidate[2] for candidate in request_priced_candidates}) > 1
-        and request_body_dict
-        and not settings.fixed_pricing
-    ):
-        alias = _resolved_candidate_alias(model_id)
-        request_priced_candidates.sort(
-            key=lambda candidate: candidate_routing_sort_key(
-                candidate[0],
-                candidate[1],
-                alias,
-                reservation_score=float(candidate[2]),
-            ),
-            reverse=True,
+    minimum_candidate = min(
+        request_priced_candidates, key=lambda candidate: candidate[2]
+    )
+    _, _, minimum_reservation, minimum_pricing = minimum_candidate
+    x_cashu = headers.get("x-cashu", None)
+    auth = headers.get("authorization", None)
+    key: ApiKey | None = None
+
+    if x_cashu:
+        token_balance_msats = check_token_balance(
+            headers,
+            request_body_dict,
+            minimum_reservation,
+            pricing=minimum_pricing,
+        )
+        if isinstance(token_balance_msats, int):
+            affordable_index = _first_affordable_candidate_index(
+                request_priced_candidates, token_balance_msats
+            )
+            request_priced_candidates = request_priced_candidates[affordable_index:]
+    elif auth:
+        key = await get_bearer_token_key(
+            headers,
+            path,
+            session,
+            auth,
+            minimum_reservation,
+            model_id,
+            pricing=minimum_pricing,
+        )
+        mark(request, "auth")
+        if isinstance(key.total_balance, int):
+            affordable_index = _first_affordable_candidate_index(
+                request_priced_candidates, key.total_balance
+            )
+            request_priced_candidates = request_priced_candidates[affordable_index:]
+    else:
+        check_token_balance(
+            headers,
+            request_body_dict,
+            minimum_reservation,
+            pricing=minimum_pricing,
         )
 
     candidates = [
@@ -1142,11 +1172,7 @@ async def _proxy(
     ]
     model_obj, _, max_cost_for_model, pricing_trail = request_priced_candidates[0]
 
-    check_token_balance(
-        headers, request_body_dict, max_cost_for_model, pricing=pricing_trail
-    )
-
-    if x_cashu := headers.get("x-cashu", None):
+    if x_cashu:
         last_error = None
         for i, (model_obj, upstream) in enumerate(candidates):
             _attribute_request(request, model_obj, upstream)
@@ -1225,17 +1251,8 @@ async def _proxy(
             error_scope=ERROR_SCOPE_UPSTREAM,
         )
 
-    elif auth := headers.get("authorization", None):
-        key = await get_bearer_token_key(
-            headers,
-            path,
-            session,
-            auth,
-            max_cost_for_model,
-            model_id,
-            pricing=pricing_trail,
-        )
-        mark(request, "auth")
+    elif auth:
+        assert key is not None
 
     else:
         if request.method not in ["GET"]:

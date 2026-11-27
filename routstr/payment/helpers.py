@@ -47,7 +47,7 @@ logger = get_logger(__name__)
 
 def check_token_balance(
     headers: dict, body: dict, max_cost_for_model: int, *, pricing: dict | None = None
-) -> None:
+) -> int | None:
     if x_cashu := headers.get("x-cashu", None):
         cashu_token = x_cashu
         logger.debug(
@@ -65,7 +65,7 @@ def check_token_balance(
                 "auth_preview": auth[:20] + "..." if len(auth) > 20 else auth,
             },
         )
-        return
+        return None
     else:
         logger.error("No authentication token provided")
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -86,7 +86,7 @@ def check_token_balance(
 
     # Handle regular API keys (sk-*)
     if cashu_token.startswith("sk-"):
-        return
+        return None
 
     try:
         token_obj = deserialize_token_from_string(cashu_token)
@@ -132,6 +132,8 @@ def check_token_balance(
                 "type": "minimum_balance_required",
             },
         )
+
+    return amount_msat
 
 
 async def get_max_cost_for_model(

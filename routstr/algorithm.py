@@ -108,20 +108,13 @@ def candidate_routing_sort_key(
     model: "Model",
     provider: "BaseUpstreamProvider",
     alias: str,
-    *,
-    reservation_score: float | None = None,
 ) -> tuple[int, float, float]:
     """Routing key preserving alias priority and provider penalties."""
     priority = candidate_alias_priority(model, alias)
     penalty = get_provider_penalty(provider)
-    reservation = (
-        calculate_model_reservation_score(model)
-        if reservation_score is None
-        else reservation_score
-    )
     return (
         priority,
-        -(reservation * penalty),
+        -(calculate_model_reservation_score(model) * penalty),
         -(calculate_model_cost_score(model) * penalty),
     )
 
@@ -431,9 +424,7 @@ def create_model_mappings(
 
     for alias, items in candidates.items():
         # Rank on the reservation ceiling the balance gate enforces, with
-        # per-token typical-usage cost as tiebreaker. The shared helper also
-        # lets request-time routing substitute the request-specific reservation
-        # without changing alias priority or provider penalties.
+        # per-token typical-usage cost as tiebreaker.
         items.sort(
             key=lambda item: candidate_routing_sort_key(item[0], item[1], alias),
             reverse=True,
