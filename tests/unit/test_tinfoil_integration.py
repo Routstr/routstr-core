@@ -192,6 +192,25 @@ class TestPrepareEHBPUpstreamHeaders:
         assert clean["Ehbp-Encapsulated-Key"] == "abc123"
         assert clean["X-Tinfoil-Request-Usage-Metrics"] == "true"
 
+    def test_client_connection_header_cannot_drop_node_headers(self) -> None:
+        provider = TinfoilUpstreamProvider(api_key="upstream-key")
+        headers = provider.prepare_headers(
+            {
+                "connection": "X-Tinfoil-Request-Usage-Metrics, Authorization, X-Hop",
+                "x-hop": "1",
+                "ehbp-encapsulated-key": "abc123",
+            }
+        )
+
+        sent = _prepare_ehbp_upstream_headers(
+            headers, {"X-Tinfoil-Request-Usage-Metrics": "true"}
+        )
+
+        assert sent["X-Tinfoil-Request-Usage-Metrics"] == "true"
+        assert sent["Authorization"] == "Bearer upstream-key"
+        assert sent["ehbp-encapsulated-key"] == "abc123"
+        assert not {"connection", "x-hop"} & {name.lower() for name in sent}
+
 
 # ---------------------------------------------------------------------------
 # _resolve_ehbp_target_url
