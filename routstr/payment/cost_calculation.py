@@ -27,6 +27,7 @@ __all__ = [
     "calculate_cost",
     "calculate_flat_cost",
     "cost_field",
+    "flat_request_pricing_active",
     "parse_token_count",
 ]
 
@@ -223,8 +224,19 @@ async def calculate_cost(
     cache_read_tokens = usage.cache_read_tokens
     cache_creation_tokens = usage.cache_write_tokens
 
-    # Try USD cost first
     usd_cost = _resolve_usd_cost(usage_data, response_data)
+    if flat_request_pricing_active():
+        return _calculate_flat_request_cost(
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            usd_cost,
+            presence,
+            max_cost,
+        )
+
+    # Try USD cost first
     if usd_cost > 0:
         truly_empty = (
             input_tokens == 0
@@ -407,6 +419,68 @@ async def calculate_cost(
 # ============================================================================
 # Helper Functions (ordered by call sequence in calculate_cost)
 # ============================================================================
+
+
+def flat_request_pricing_active() -> bool:
+    """Whether fixed pricing bills a flat fee per request.
+
+    Fixed pricing without a per-1k token override reserves
+    ``fixed_cost_per_request`` and must settle at that same amount; with an
+    override set, tokens are priced at the override rates instead.
+    """
+    return bool(
+        settings.fixed_pricing
+        and not (
+            settings.fixed_per_1k_input_tokens or settings.fixed_per_1k_output_tokens
+        )
+    )
+
+
+def _calculate_flat_request_cost(
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_creation_tokens: int,
+    upstream_usd: float,
+    usage_presence: UsageFieldPresence,
+    max_cost: int,
+) -> CostData:
+    """Charge the flat per-request fee, whatever the tokens or upstream cost.
+
+    Token counts and the upstream-reported USD are kept for reporting only.
+    A response with no tokens in any bucket is empty and refunded in full,
+    matching the empty-response rule of the other pricing paths.
+    """
+    if (
+        input_tokens == 0
+        and output_tokens == 0
+        and cache_read_tokens == 0
+        and cache_creation_tokens == 0
+    ):
+        return _empty_cost(usage_presence=usage_presence)
+
+    # The configured fee can change while an upstream response is in flight.
+    total_msats = max(0, min(settings.fixed_cost_per_request * 1000, max_cost))
+    try:
+        total_usd = total_msats / 1000 * sats_usd_price()
+    except Exception:
+        total_usd = 0.0
+    # As in ``calculate_flat_cost``, the fee is shown as output so a dashboard
+    # rendering I / O / T still sees ``input + output == total``.
+    return CostData(
+        base_msats=total_msats,
+        input_msats=0,
+        output_msats=total_msats,
+        total_msats=total_msats,
+        total_usd=total_usd,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read_tokens,
+        cache_creation_input_tokens=cache_creation_tokens,
+        upstream_usd=upstream_usd,
+        pricing_source="fixed_request",
+        **usage_presence.sources_dict(),
+    )
 
 
 def _coerce_usd(value: object) -> float:
