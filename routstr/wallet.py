@@ -1150,6 +1150,10 @@ def preferred_trusted_mint() -> str:
     raise ValueError("No trusted mint is configured")
 
 
+class NoSpendableMint(ValueError):
+    """Mint selection failed before send touched any proofs."""
+
+
 async def find_trusted_mint_with_funds(
     amount: int,
     unit: str,
@@ -1186,7 +1190,7 @@ async def find_trusted_mint_with_funds(
         if balances[mint_url] >= amount:
             return mint_url
 
-    raise ValueError(
+    raise NoSpendableMint(
         f"No trusted mint has {amount} {unit} available; balances={balances}"
     )
 

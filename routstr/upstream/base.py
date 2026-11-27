@@ -75,6 +75,7 @@ from ..payment.price import sats_usd_price
 from ..payment.usage import UsageFieldPresence
 from ..wallet import (
     SPENT_TOKEN_CODES,
+    NoSpendableMint,
     classify_redemption_error,
     recieve_token,
     send_token,
@@ -150,7 +151,7 @@ class _XCashuRefundError(Exception):
 
 
 class _XCashuRefundNotCreated(HTTPException):
-    """send_token raised, so no refund token exists."""
+    """Mint selection failed before the wallet started creating the refund."""
 
 
 class _XCashuRefundUnavailable(Exception):
@@ -4953,7 +4954,12 @@ class BaseUpstreamProvider:
                     "mint": mint,
                 },
             )
-            raise _XCashuRefundNotCreated(
+            error_type = (
+                _XCashuRefundNotCreated
+                if isinstance(error, NoSpendableMint)
+                else HTTPException
+            )
+            raise error_type(
                 status_code=401,
                 detail={
                     "error": {

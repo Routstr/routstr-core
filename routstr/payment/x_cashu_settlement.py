@@ -5,7 +5,7 @@ finished (restart, crash, cancellation) can be told apart from one that was
 charged in full, and refunded later.
 
 pending -> refunding -> refunded | failed
-refunding -> pending (no token left the node: none was created, or it was reclaimed)
+refunding -> pending (mint selection failed with retries enabled, or token reclaimed)
 pending -> charged
 
 Every X-Cashu path settles before the response starts, so a payment still
@@ -31,7 +31,9 @@ from ..core.db import (
     store_cashu_transaction_with_retry,
     x_cashu_abandoned_after_seconds,
 )
+from ..core.settings import settings
 from ..wallet import (
+    NoSpendableMint,
     recieve_token,
     send_token,
     token_mint_url,
@@ -74,8 +76,16 @@ async def _transition(
         "settlement": to,
         "settlement_at": int(time.time()),
     }
+    amount_guard = []
     if refund_amount is not None:
         values["refund_amount"] = refund_amount
+        # A reopened change claim may have superseded recovery's snapshot.
+        amount_guard.append(
+            or_(
+                col(CashuTransaction.refund_amount).is_(None),
+                col(CashuTransaction.refund_amount) == refund_amount,
+            )
+        )
     async with create_session() as session:
         result = await session.exec(  # type: ignore[call-overload]
             update(CashuTransaction)
@@ -83,6 +93,7 @@ async def _transition(
                 col(CashuTransaction.type) == "in",
                 col(CashuTransaction.request_id) == request_id,
                 col(CashuTransaction.settlement).in_(list(from_states)),
+                *amount_guard,
             )
             .values(**values)
         )
@@ -145,6 +156,9 @@ async def reopen_unminted_refund(request_id: str | None) -> bool:
     True means recovery will retry the refund.
     """
     if request_id is None:
+        return False
+    if not settings.x_cashu_retry_unminted_refunds:
+        await finish_refund(request_id, refunded=False)
         return False
     try:
         return await _transition(request_id, (REFUNDING,), PENDING)
@@ -261,14 +275,16 @@ async def _refund_abandoned(payment: CashuTransaction) -> bool:
     amount = (
         payment.refund_amount if payment.refund_amount is not None else payment.amount
     )
-    if not await claim_refund(request_id, amount):
+    if not await _transition(request_id, (PENDING,), REFUNDING, amount):
         return False
     try:
         token = await send_token(amount, unit=payment.unit, mint_url=payment.mint_url)
+    except NoSpendableMint:
+        await reopen_unminted_refund(request_id)
+        return False
     except Exception:
-        # send_token returns the token only on success, so nothing left the node.
         logger.error(
-            "Failed to refund abandoned X-Cashu payment; will retry",
+            "Ambiguous wallet failure refunding abandoned X-Cashu payment",
             extra={
                 "request_id": request_id,
                 "amount": amount,
@@ -277,7 +293,7 @@ async def _refund_abandoned(payment: CashuTransaction) -> bool:
             },
             exc_info=True,
         )
-        await reopen_unminted_refund(request_id)
+        await finish_refund(request_id, refunded=False)
         return False
     try:
         await store_cashu_transaction_with_retry(
@@ -330,6 +346,16 @@ async def _reclaim_unstored_refund(payment: CashuTransaction, token: str) -> Non
             exc_info=True,
         )
         await finish_refund(request_id, refunded=False)
+        return
+    if (
+        payment.refund_amount not in (None, payment.amount)
+        and not settings.x_cashu_retry_unminted_refunds
+    ):
+        # While draining for rollback, do not write another pending change row.
+        await finish_refund(request_id, refunded=False)
+        logger.error(
+            "Reclaimed change requires reconciliation", extra={"request_id": request_id}
+        )
         return
     logger.error(
         "Could not store the refund for an abandoned X-Cashu payment; "

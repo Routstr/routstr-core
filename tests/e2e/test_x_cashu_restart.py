@@ -28,6 +28,7 @@ import json
 import os
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -124,7 +125,9 @@ class Stack:
         self.routstr: subprocess.Popen[bytes] | None = None
         self.starts = 0
 
-    def start(self, graceful_timeout: int | None = None) -> None:
+    def start(
+        self, graceful_timeout: int | None = None, *, refund_cooldown: bool = False
+    ) -> None:
         self.starts += 1
         # A clean environment: provider API keys in the caller's shell would
         # otherwise be seeded as live upstreams.
@@ -149,12 +152,15 @@ class Stack:
             sys.executable,
             "-m",
             "uvicorn",
-            "routstr.core.main:app",
+            "refund_cooldown_app:app" if refund_cooldown else "routstr.core.main:app",
             "--host",
             "127.0.0.1",
             "--port",
             str(self.port),
         ]
+        if refund_cooldown:
+            env["X_CASHU_RETRY_UNMINTED_REFUNDS"] = "true"
+            command += ["--app-dir", str(ROOT / "tests/e2e")]
         if graceful_timeout is not None:
             command += ["--timeout-graceful-shutdown", str(graceful_timeout)]
         log = open(self.directory / f"routstr-{self.starts}.log", "wb")
@@ -404,6 +410,52 @@ async def test_change_and_full_charge_are_terminal_across_restarts(
     error = charged.json()["detail"]["error"]
     assert error["type"] == "token_already_spent"
     assert error["code"] == "payment_fully_charged"
+
+
+def recover_change_after_cooldown(stack: Stack, paid: str) -> str:
+    response = httpx.post(
+        f"{stack.url}/v1/chat/completions",
+        headers={"X-Cashu": paid},
+        json={
+            "model": MODEL,
+            "max_tokens": 50,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+        timeout=90,
+    )
+    assert response.status_code == 200
+    assert response.headers["X-Routstr-Refund-Error"] == "refund_failed"
+    assert claim(stack, paid).status_code == 425
+    with sqlite3.connect(stack.directory / "routstr.db") as db:
+        amount, owed = db.execute(
+            "SELECT amount, refund_amount FROM cashu_transactions WHERE type='in' AND token=?",
+            (paid,),
+        ).fetchone()
+    assert 0 < owed < amount
+    stack.stop(signal.SIGTERM)
+    # A reader with retry writes disabled must still drain existing change.
+    stack.start()
+    deadline = time.monotonic() + RECOVERY_DEADLINE
+    while time.monotonic() < deadline:
+        result = claim(stack, paid)
+        if result.status_code == 200:
+            change = str(result.json()["token"])
+            assert proofs_amount(change) == owed
+            assert claim(stack, paid).json()["token"] == change
+            return change
+        assert result.status_code == 425
+        time.sleep(2)
+    raise AssertionError("change was not recovered before deadline")
+
+
+async def test_cooldown_change_is_recoverable_after_restart(tmp_path: Path) -> None:
+    stack = Stack(tmp_path)
+    try:
+        stack.start(refund_cooldown=True)
+        stack.add_model()
+        recover_change_after_cooldown(stack, await mint_token(60))
+    finally:
+        stack.close()
 
 
 def proofs_amount(token: str) -> int:

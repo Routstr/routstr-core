@@ -60,12 +60,15 @@ class FakeWallet:
         if self.gate is not None:
             await self.gate.wait()
         if self.fail:
-            raise RuntimeError("mint unreachable")
+            raise wallet_module.NoSpendableMint("mint unavailable before selection")
         return f"cashuBrefund{len(self.mints)}x{amount}"
 
 
 @pytest.fixture
-def wallet(patched_db_engine: None) -> Iterator[FakeWallet]:
+def wallet(
+    patched_db_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[FakeWallet]:
+    monkeypatch.setattr(settings, "x_cashu_retry_unminted_refunds", True)
     fake = FakeWallet()
     with (
         patch("routstr.upstream.base.send_token", fake.send_token),
@@ -337,6 +340,55 @@ async def test_cancellation_during_refund_mint_never_mints_twice(
     assert wallet.mints == [15]
     assert (await _payment(integration_session)).settlement == xs.REFUNDED
     assert await _refunds(integration_session) == [15]
+
+
+async def test_disabled_rollout_does_not_reopen_change(
+    wallet: FakeWallet,
+    integration_session: AsyncSession,
+    api: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "x_cashu_retry_unminted_refunds", False)
+    wallet.fail = True
+    await _pay(api, _completion(), cost_sats=5)
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 0
+
+
+async def test_recovery_discards_snapshot_superseded_by_change_claim(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    await _seed(integration_session, settlement=xs.PENDING, age=STALE)
+    snapshot = await _payment(integration_session)
+    assert await xs.claim_refund(snapshot.request_id, 15)
+    assert await xs.reopen_unminted_refund(snapshot.request_id)
+    assert not await xs._refund_abandoned(snapshot)
+    assert not wallet.mints
+    assert await xs.recover_abandoned_payments() == 1
+    assert wallet.mints == [15]
+
+
+@pytest.mark.parametrize("sender", ["chat", "ehbp", "recovery"])
+async def test_ambiguous_send_failure_is_not_retried(
+    wallet: FakeWallet, integration_session: AsyncSession, sender: str
+) -> None:
+    send = AsyncMock(side_effect=OSError("failed persisting proof reservation"))
+    if sender == "chat":
+        with patch("routstr.upstream.base.send_token", send):
+            await _pay("chat", _completion(), cost_sats=5)
+    elif sender == "ehbp":
+        with patch.object(ehbp_module, "send_token", send):
+            await _ehbp_pay(AsyncMock(return_value=_ehbp_ok()), cost_msats=5000)
+    else:
+        await _seed(integration_session, settlement=xs.PENDING, age=STALE)
+        with patch.object(xs, "send_token", send):
+            assert await xs.recover_abandoned_payments() == 0
+    send.assert_awaited_once()
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 0
+    assert not wallet.mints
 
 
 async def test_failed_change_mint_is_retried_by_recovery_for_the_change(
@@ -754,6 +806,28 @@ async def test_unacknowledged_refund_commit_is_never_reclaimed(
     assert (await _claim(integration_session))["token"] == f"cashuBrefund1x{AMOUNT}"
 
 
+async def test_disabled_writer_does_not_reopen_reclaimed_change(
+    wallet: FakeWallet,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet.fail = True
+    await _pay("chat", _completion(), cost_sats=5)
+    wallet.fail = False
+    monkeypatch.setattr(settings, "x_cashu_retry_unminted_refunds", False)
+    await _age(integration_session, STALE)
+    with (
+        patch.object(
+            xs, "store_cashu_transaction_with_retry", AsyncMock(side_effect=OSError())
+        ),
+        patch.object(xs, "recieve_token", AsyncMock()) as reclaim,
+    ):
+        assert await xs.recover_abandoned_payments() == 0
+    reclaim.assert_awaited_once()
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    assert await xs.recover_abandoned_payments() == 0
+
+
 async def test_reclaimed_refund_reopens_despite_a_transient_failure(
     wallet: FakeWallet, integration_session: AsyncSession
 ) -> None:
@@ -815,7 +889,7 @@ async def test_failed_recovery_mint_is_retried(
     wallet.fail = True
     await _seed(integration_session, settlement=xs.PENDING, age=STALE)
 
-    # send_token raised, so no token exists and the refund stays retryable.
+    # Mint selection failed before the wallet touched any proofs.
     assert await xs.recover_abandoned_payments() == 0
     assert (await _payment(integration_session)).settlement == xs.PENDING
     assert (await _claim(integration_session)).status_code == 425

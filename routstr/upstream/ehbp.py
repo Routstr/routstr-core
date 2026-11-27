@@ -64,6 +64,7 @@ from ..payment.models import Model
 from ..payment.usage import UsageFieldPresence, usage_field_presence
 from ..wallet import (
     SPENT_TOKEN_CODES,
+    NoSpendableMint,
     classify_redemption_error,
     recieve_token,
     send_token,
@@ -1438,13 +1439,12 @@ async def forward_ehbp_x_cashu_request(
         except Exception as error:
             if isinstance(error, EhbpRefundStorageError):
                 refund_token_sent = error.token
-                if claimed:
-                    await x_cashu_settlement.finish_refund(request_id, refunded=False)
-            elif claimed:
-                # send_token raised, so no refund token exists.
+            if claimed and isinstance(error, NoSpendableMint):
                 refund_reopened = await x_cashu_settlement.reopen_unminted_refund(
                     request_id
                 )
+            elif claimed:
+                await x_cashu_settlement.finish_refund(request_id, refunded=False)
             raise
         await x_cashu_settlement.finish_refund(request_id, refunded=True)
         return refund_token_sent
