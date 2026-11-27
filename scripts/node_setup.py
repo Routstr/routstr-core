@@ -431,8 +431,8 @@ def _start(args: argparse.Namespace, local_url: str) -> int:
             )
 
     print(
-        "Phase 2 — back up before configuring: routstr_secret.key, keys.db and "
-        ".wallet/. The key decrypts the nsec stored in keys.db."
+        "Phase 2 — back up before configuring: routstr_secret.key, a pg_dump of "
+        "the database and .wallet/. The key decrypts the nsec stored in the database."
     )
     print(
         "   Reveal the nsec: docker compose -f compose.node.yml exec routstr "

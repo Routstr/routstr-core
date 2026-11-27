@@ -2,6 +2,10 @@
 # reverse proxy. Identity is generated automatically; whether the node is
 # published depends only on HTTP_URL — set it (public mode) or leave it unset
 # (private, nothing advertised until a URL is configured later).
+#
+# The node stores its data in the bundled PostgreSQL. On the first start an
+# existing ./keys.db is copied into it once and renamed to
+# keys.db.imported-<timestamp>. A DATABASE_URL in .env still wins.
 services:
   ui:
     env_file: .env
@@ -15,14 +19,23 @@ services:
     command: ["sh", "-c", "mkdir -p /output && cp -r /app/built/. /output/ && echo 'UI built and ready' && tail -f /dev/null"]
     restart: unless-stopped
 
+  postgres:
+    extends:
+      file: compose.postgres.yml
+      service: postgres
+
   routstr:
     build: .
     depends_on:
-      - ui
+      ui:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     volumes:
       - .:/app:z
       - ./logs:/app/logs:z
       - ./ui_out:/app/ui_out:ro,z
+      - postgres-secret:/run/routstr-postgres:ro
     env_file: .env
     environment:
       # Generate the Nostr identity on first boot; it is stored encrypted and
@@ -30,8 +43,15 @@ services:
       AUTO_GENERATE_NSEC: "true"
       # First-boot default only: the saved setting wins afterwards (Settings).
       ENABLE_ANALYTICS_SHARING: "true"
+      # Used only while DATABASE_URL is unset.
+      BUNDLED_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-routstr}@postgres:5432/${POSTGRES_DB:-routstr}
+      BUNDLED_DATABASE_PASSWORD_FILE: /run/routstr-postgres/password
     ports:
       - "127.0.0.1:${ROUTSTR_NODE_PORT:-8000}:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+
+volumes:
+  postgres-data:
+  postgres-secret:
