@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 import httpx
 import websockets
 from fastapi import APIRouter, HTTPException
+from nostr_sdk import Event
 
 from ..core.logging import get_logger
 from ..core.settings import settings
@@ -21,6 +22,13 @@ providers_router = APIRouter(prefix="/v1/providers")
 # In-memory providers cache and lock
 _PROVIDERS_CACHE: list[dict[str, Any]] = []
 _PROVIDERS_CACHE_LOCK = asyncio.Lock()
+
+
+def _is_signed(event: Any) -> bool:
+    try:
+        return bool(Event.from_json(json.dumps(event)).verify())
+    except Exception:
+        return False
 
 
 def generate_subscription_id() -> str:
@@ -65,6 +73,8 @@ async def query_nostr_relay_for_providers(
 
                     if data[0] == "EVENT" and data[1] == sub_id:
                         event = data[2]
+                        if not _is_signed(event):
+                            continue
                         logger.debug(
                             f"Found provider announcement: {event['id'][:6]}...{event['id'][-6:]}"
                         )
@@ -417,7 +427,7 @@ async def get_providers(
 
     cache = await get_cache()
     if not cache:
-        await refresh_providers_cache(pubkey=pubkey)
+        await refresh_providers_cache()
         cache = await get_cache()
     if pubkey:
         cache = [c for c in cache if c.get("provider", {}).get("pubkey") == pubkey]

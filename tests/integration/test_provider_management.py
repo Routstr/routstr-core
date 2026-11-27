@@ -3,6 +3,7 @@ Integration tests for provider management functionality.
 Tests GET /v1/providers/ endpoint for listing and managing providers.
 """
 
+import json
 import time
 from types import TracebackType
 from typing import Any, Generator
@@ -10,10 +11,12 @@ from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient
+from nostr_sdk import Keys
 
 from routstr.core.admin import admin_sessions
 from routstr.core.db import UpstreamProviderRow
 from routstr.nostr.discovery import _PROVIDERS_CACHE
+from routstr.nostr.sdk import create_signed_event
 
 from .utils import ResponseValidator
 
@@ -666,6 +669,75 @@ async def test_providers_endpoint_parameter_validation(
                         # Should be list of provider objects
                         for provider in providers:
                             assert isinstance(provider, dict)
+
+
+def _announcement(url: str) -> dict[str, Any]:
+    return create_signed_event(
+        Keys.generate().secret_key().to_hex(),
+        kind=38421,
+        content="{}",
+        tags=[["d", url], ["u", url]],
+    )
+
+
+class _Relay:
+    def __init__(self, events: list[dict[str, Any]]) -> None:
+        self.events = events
+        self.outbox: list[str] = []
+
+    async def __aenter__(self) -> "_Relay":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def send(self, message: str) -> None:
+        kind, sub, *rest = json.loads(message)
+        if kind == "REQ":
+            authors = rest[0].get("authors")
+            self.outbox = [
+                json.dumps(["EVENT", sub, e])
+                for e in self.events
+                if not authors or e["pubkey"] in authors
+            ] + [json.dumps(["EOSE", sub])]
+
+    async def recv(self) -> str:
+        return self.outbox.pop(0)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pubkey_filter_and_forged_events_do_not_shape_the_directory(
+    integration_client: AsyncClient,
+) -> None:
+    good = _announcement("https://good.example")
+    attacker = _announcement("https://attacker.example")
+    forged = {**_announcement("https://forged.example"), "pubkey": good["pubkey"]}
+    events = [good, attacker, forged]
+
+    with (
+        patch("routstr.core.settings.settings.relays", ["wss://relay.example"]),
+        patch(
+            "routstr.nostr.discovery.websockets.connect",
+            side_effect=lambda *a, **kw: _Relay(events),
+        ),
+        patch(
+            "routstr.nostr.discovery.fetch_provider_health",
+            return_value={"status_code": 200, "json": {}},
+        ),
+    ):
+        filtered = await integration_client.get(
+            f"/v1/providers/?pubkey={attacker['pubkey']}"
+        )
+        listed = await integration_client.get("/v1/providers/")
+
+    assert [p["endpoint_url"] for p in filtered.json()["providers"]] == [
+        "https://attacker.example"
+    ]
+    assert sorted(p["endpoint_url"] for p in listed.json()["providers"]) == [
+        "https://attacker.example",
+        "https://good.example",
+    ]
 
 
 @pytest.mark.integration
