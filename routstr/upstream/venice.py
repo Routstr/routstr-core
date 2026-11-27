@@ -331,7 +331,7 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("venice/")
 
-    def check_image_request(self, body: dict) -> None:
+    def check_image_request(self, body: dict, model: Model) -> None:
         enabled = sorted(
             field
             for field in _UNPRICED_IMAGE_OPTIONS
@@ -343,6 +343,16 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
             )
         if requested_image_count(body) > _MAX_VARIANTS:
             raise ImageRequestRefused(f"Venice makes at most {_MAX_VARIANTS} images")
+        # A quality the book does not list is held at the ceiling, but Venice
+        # makes it at the model's default.
+        qualities = model.image_pricing.qualities if model.image_pricing else []
+        quality = body.get("quality")
+        if (
+            qualities
+            and quality is not None
+            and (not isinstance(quality, str) or quality.lower() not in qualities)
+        ):
+            raise ImageRequestRefused(f"quality must be one of: {', '.join(qualities)}")
 
     def adapt_image_request(
         self, path: str, body: bytes | None, model_obj: Model | None

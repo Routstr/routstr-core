@@ -621,10 +621,36 @@ async def test_venice_refuses_options_it_charges_extra_credits_for(
     forward.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_venice_refuses_a_quality_the_model_does_not_price() -> None:
+    upstream = VeniceUpstreamProvider(api_key="k")
+    request = MagicMock(method="POST", headers={"authorization": "Bearer sk-x"})
+    request.state.request_id = "req-image"
+    body = {"model": TIERED_MODEL.id, "prompt": "a cat", "n": 2, "quality": "hd"}
+    mock_request_stream(request, json.dumps(body).encode())
+
+    with (
+        patch.object(
+            proxy_module, "get_candidates", return_value=[(TIERED_MODEL, upstream)]
+        ),
+        patch.object(proxy_module, "pay_for_request", AsyncMock()) as hold,
+        patch.object(upstream, "forward_request", AsyncMock()) as forward,
+        patch_proxy_session(MagicMock()),
+    ):
+        response = await proxy_module.proxy(request, "v1/images/generations")
+
+    assert response.status_code == 400
+    assert "quality must be one of" in bytes(response.body).decode()
+    hold.assert_not_awaited()
+    forward.assert_not_awaited()
+
+
 def test_venice_forwards_those_options_when_disabled() -> None:
     upstream = VeniceUpstreamProvider(api_key="k")
-    upstream.check_image_request({"enhance_prompt": False, "enable_web_search": False})
-    upstream.check_image_request({"prompt": "a cat"})
+    upstream.check_image_request(
+        {"enhance_prompt": False, "enable_web_search": False}, IMAGE_MODEL
+    )
+    upstream.check_image_request({"prompt": "a cat"}, IMAGE_MODEL)
 
 
 @pytest.mark.asyncio
@@ -706,9 +732,8 @@ async def test_venice_keeps_a_plain_request_on_its_openai_route() -> None:
 @pytest.mark.parametrize(
     ("book", "body", "native"),
     [
-        # A pixel size or a step the model does not price: made as billed.
+        # A pixel size the model does not price: made as billed.
         (PRICE_BOOK, {"size": "1024x1024"}, None),
-        (PRICE_BOOK, {"quality": "hd"}, None),
         (None, {"quality": "high"}, None),
         (
             PRICE_BOOK,
@@ -728,5 +753,5 @@ def test_venice_refuses_more_pictures_than_it_makes() -> None:
     upstream = VeniceUpstreamProvider(api_key="k")
     for body in ({"n": 5}, {"n": "5"}, {"variants": 5}):
         with pytest.raises(ImageRequestRefused):
-            upstream.check_image_request(body)
-    upstream.check_image_request({"n": 4})
+            upstream.check_image_request(body, IMAGE_MODEL)
+    upstream.check_image_request({"n": 4}, IMAGE_MODEL)

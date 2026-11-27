@@ -1093,7 +1093,7 @@ class BaseUpstreamProvider:
             return True
         return "openrouter.ai" in (self.base_url or "")
 
-    def check_image_request(self, body: dict) -> None:
+    def check_image_request(self, body: dict, model: Model) -> None:
         """Raise ``ImageRequestRefused`` for options the image quote does not cover."""
 
     def adapt_image_request(
