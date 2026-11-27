@@ -58,8 +58,8 @@ def test_openrouter_flat_per_image_book() -> None:
     assert select_image_price_usd(book, {"resolution": "4K"}) == pytest.approx(0.04)
 
 
-def test_openrouter_variants_are_reserved_at_the_dearest() -> None:
-    """No request field reliably names a variant, so none is mapped to one."""
+def test_openrouter_resolution_variants_price_their_resolution() -> None:
+    """A variant named after a listed resolution prices that resolution."""
     book = openrouter_book_from_endpoints(
         _endpoints(
             {
@@ -84,7 +84,34 @@ def test_openrouter_variants_are_reserved_at_the_dearest() -> None:
     assert endpoint.parameters == {
         "resolution": {"type": "enum", "values": ["2K", "4K"]}
     }
-    assert select_image_price_usd(endpoint, {"resolution": "2K"}) == pytest.approx(0.10)
+    assert select_image_price_usd(endpoint, {"resolution": "2K"}) == pytest.approx(0.05)
+    assert select_image_price_usd(endpoint, {"size": "4K"}) == pytest.approx(0.10)
+    # Unnamed, or a pixel size the router maps itself: the dearest.
+    for body in ({}, {"size": "1024x1024"}, {"resolution": "2K", "size": "auto"}):
+        assert select_image_price_usd(endpoint, body) == pytest.approx(0.10)
+    # The model's book lists what each resolution is quoted at.
+    assert select_image_price_usd(book, {"resolution": "2K"}) == pytest.approx(0.05)
+    assert book.resolutions == ["2K", "4K"]
+
+    # A price beside the variants is not tied to a resolution: the dearest.
+    based = openrouter_book_from_endpoints(
+        _endpoints(
+            {"billable": "output_image", "unit": "image", "cost_usd": 0.15},
+            {
+                "billable": "output_image",
+                "unit": "image",
+                "cost_usd": 0.10,
+                "variant": "2k",
+            },
+            supported={"resolution": {"type": "enum", "values": ["1K", "2K"]}},
+        ),
+        "sourceful/riverflow",
+    )
+    assert based is not None
+    based_endpoint = based.endpoints["p"]
+    assert select_image_price_usd(based_endpoint, {"resolution": "2K"}) == (
+        pytest.approx(0.15)
+    )
 
 
 @pytest.mark.parametrize(
