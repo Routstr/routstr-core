@@ -19,6 +19,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlmodel import col, select, update
 
+from routstr import wallet as wallet_module
 from routstr.balance import refund_wallet_endpoint
 from routstr.core.db import (
     AsyncSession,
@@ -28,10 +29,11 @@ from routstr.core.db import (
     user_liability_for_mint_and_unit,
 )
 from routstr.core.settings import settings
+from routstr.mint import MintRateGuard
 from routstr.payment import x_cashu_settlement as xs
 from routstr.payment.cost_calculation import MaxCostData
 from routstr.upstream import ehbp as ehbp_module
-from routstr.upstream.base import BaseUpstreamProvider
+from routstr.upstream.base import X_ROUTSTR_REFUND_ERROR_HEADER, BaseUpstreamProvider
 from routstr.upstream.tinfoil_trailer import TrailerResponse
 from routstr.wallet import _refund_sweep_once
 
@@ -58,12 +60,15 @@ class FakeWallet:
         if self.gate is not None:
             await self.gate.wait()
         if self.fail:
-            raise RuntimeError("mint unreachable")
+            raise wallet_module.NoSpendableMint("mint unavailable before selection")
         return f"cashuBrefund{len(self.mints)}x{amount}"
 
 
 @pytest.fixture
-def wallet(patched_db_engine: None) -> Iterator[FakeWallet]:
+def wallet(
+    patched_db_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[FakeWallet]:
+    monkeypatch.setattr(settings, "x_cashu_retry_unminted_refunds", True)
     fake = FakeWallet()
     with (
         patch("routstr.upstream.base.send_token", fake.send_token),
@@ -337,28 +342,204 @@ async def test_cancellation_during_refund_mint_never_mints_twice(
     assert await _refunds(integration_session) == [15]
 
 
-async def test_failed_mint_is_terminal_and_never_retried(
+async def test_disabled_rollout_does_not_reopen_change(
+    wallet: FakeWallet,
+    integration_session: AsyncSession,
+    api: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "x_cashu_retry_unminted_refunds", False)
+    wallet.fail = True
+    await _pay(api, _completion(), cost_sats=5)
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 0
+
+
+async def test_recovery_discards_snapshot_superseded_by_change_claim(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    await _seed(integration_session, settlement=xs.PENDING, age=STALE)
+    snapshot = await _payment(integration_session)
+    assert await xs.claim_refund(snapshot.request_id, 15)
+    assert await xs.reopen_unminted_refund(snapshot.request_id)
+    assert not await xs._refund_abandoned(snapshot)
+    assert not wallet.mints
+    assert await xs.recover_abandoned_payments() == 1
+    assert wallet.mints == [15]
+
+
+@pytest.mark.parametrize("sender", ["chat", "ehbp", "recovery"])
+async def test_ambiguous_send_failure_is_not_retried(
+    wallet: FakeWallet, integration_session: AsyncSession, sender: str
+) -> None:
+    send = AsyncMock(side_effect=OSError("failed persisting proof reservation"))
+    if sender == "chat":
+        with patch("routstr.upstream.base.send_token", send):
+            await _pay("chat", _completion(), cost_sats=5)
+    elif sender == "ehbp":
+        with patch.object(ehbp_module, "send_token", send):
+            response = await _ehbp_pay(
+                AsyncMock(return_value=_ehbp_ok()), cost_msats=5000
+            )
+        # Nothing will pay the change, so the response stays withheld.
+        assert response.status_code == 500
+        assert b"ciphertext" not in bytes(response.body)
+    else:
+        await _seed(integration_session, settlement=xs.PENDING, age=STALE)
+        with patch.object(xs, "send_token", send):
+            assert await xs.recover_abandoned_payments() == 0
+    send.assert_awaited_once()
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 0
+    assert not wallet.mints
+
+
+async def test_failed_change_mint_is_retried_by_recovery_for_the_change(
     wallet: FakeWallet, integration_session: AsyncSession, api: str
 ) -> None:
     wallet.fail = True
-    await _pay(api, _completion(), cost_sats=5)
+    response = await _pay(api, _completion(), cost_sats=5)
 
+    assert response.headers[X_ROUTSTR_REFUND_ERROR_HEADER] == "refund_failed"
     payment = await _payment(integration_session)
-    assert payment.settlement == xs.FAILED
+    assert payment.settlement == xs.PENDING
     assert payment.refund_amount == 15
-    assert await total_user_liability(integration_session) == 15_000
+    # A pending payment counts in full until recovery settles it.
+    assert await total_user_liability(integration_session) == AMOUNT * 1000
     assert (
         await user_liability_for_mint_and_unit(integration_session, MINT, "sat")
-        == 15_000
+        == AMOUNT * 1000
     )
-    error = await _claim(integration_session)
-    assert error.status_code == 409
-    assert error.detail["error"]["code"] == "refund_unresolved"
-    assert error.detail["payment_request_id"] == "req-876"
+    assert (await _claim(integration_session)).status_code == 425
 
+    wallet.fail = False
     await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 1
+    assert await xs.recover_abandoned_payments() == 0
+    # Only the change is refunded; the inference charge stands.
+    assert wallet.mints == [15, 15]
+    assert await _refunds(integration_session) == [15]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+    assert await total_user_liability(integration_session) == 0
+    assert (await _claim(integration_session))["sats"] == "15"
+
+
+async def test_change_refund_waits_out_mint_cooldown(
+    wallet: FakeWallet,
+    integration_session: AsyncSession,
+    api: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "primary_mint", MINT)
+    monkeypatch.setattr(settings, "cashu_mints", [MINT])
+    get_wallet = AsyncMock(side_effect=AssertionError("mint contacted"))
+    monkeypatch.setattr(wallet_module, "get_wallet", get_wallet)
+    MintRateGuard.get(MINT).apply_cooldown(300, reason="rate_limited")
+
+    # The real send_token finds no trusted mint out of cooldown.
+    with patch("routstr.upstream.base.send_token", wallet_module.send_token):
+        response = await _pay(api, _completion(), cost_sats=5)
+
+    assert response.headers[X_ROUTSTR_REFUND_ERROR_HEADER] == "refund_failed"
+    assert get_wallet.await_count == 0
+    payment = await _payment(integration_session)
+    assert payment.settlement == xs.PENDING
+    assert payment.refund_amount == 15
+
+    MintRateGuard.get(MINT)._cooldown_until = 0.0
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 1
     assert await xs.recover_abandoned_payments() == 0
     assert wallet.mints == [15]
+    assert await _refunds(integration_session) == [15]
+    assert (await _claim(integration_session))["sats"] == "15"
+
+
+async def test_failed_full_refund_mint_is_retried_by_recovery(
+    wallet: FakeWallet, integration_session: AsyncSession, api: str
+) -> None:
+    wallet.fail = True
+    response = await _pay(api, httpx.Response(503, json={"error": "down"}))
+
+    assert response.status_code == 500
+    error = json.loads(bytes(response.body))["error"]
+    assert error["code"] == "refund_failed"
+    assert "/v1/balance/refund" in error["message"]
+    payment = await _payment(integration_session)
+    assert payment.settlement == xs.PENDING
+    assert (await _claim(integration_session)).status_code == 425
+
+    wallet.fail = False
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 1
+    assert wallet.mints == [AMOUNT, AMOUNT]
+    assert await _refunds(integration_session) == [AMOUNT]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+
+
+async def test_reopened_change_is_drained_after_retry_flag_is_turned_off(
+    wallet: FakeWallet,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet.fail = True
+    await _pay("chat", _completion(), cost_sats=5)
+    payment = await _payment(integration_session)
+    assert payment.settlement == xs.PENDING
+    assert payment.refund_amount == 15
+
+    monkeypatch.setattr(settings, "x_cashu_retry_unminted_refunds", False)
+    wallet.fail = False
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 1
+    assert await xs.recover_abandoned_payments() == 0
+    assert wallet.mints == [15, 15]
+    assert await _refunds(integration_session) == [15]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+
+
+@pytest.mark.parametrize("sender", ["chat", "responses", "ehbp"])
+async def test_ambiguous_full_refund_failure_points_to_the_operator(
+    wallet: FakeWallet, integration_session: AsyncSession, sender: str
+) -> None:
+    send = AsyncMock(side_effect=OSError("failed persisting proof reservation"))
+    if sender == "ehbp":
+        upstream_down = TrailerResponse(status_code=503, headers=[], body=b"down")
+        with patch.object(ehbp_module, "send_token", send):
+            response = await _ehbp_pay(AsyncMock(return_value=upstream_down), 5000)
+    else:
+        with patch("routstr.upstream.base.send_token", send):
+            response = await _pay(sender, httpx.Response(503, json={"error": "down"}))
+
+    assert response.status_code == 500
+    error = json.loads(bytes(response.body))["error"]
+    assert error["code"] == "refund_failed"
+    assert "contact the operator" in error["message"]
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    claimed = await _claim(integration_session)
+    assert claimed.status_code == 409
+    assert claimed.detail["error"]["code"] == "refund_unresolved"
+
+
+async def test_unstored_live_refund_token_is_terminal(
+    wallet: FakeWallet, integration_session: AsyncSession, api: str
+) -> None:
+    async def out_row_fails(**kwargs: Any) -> bool:
+        if kwargs["typ"] == "out":
+            raise RuntimeError("database unavailable")
+        return await store_cashu_transaction(**kwargs)
+
+    with patch("routstr.upstream.base.store_cashu_transaction", out_row_fails):
+        response = await _pay(api, httpx.Response(503, json={"error": "down"}))
+
+    # The token was minted and handed out, so it must never be minted again.
+    assert response.headers["X-Cashu"] == f"cashuBrefund1x{AMOUNT}"
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 0
+    assert wallet.mints == [AMOUNT]
 
 
 async def test_refund_claim_body_names_the_payments_request_id(
@@ -674,6 +855,28 @@ async def test_unacknowledged_refund_commit_is_never_reclaimed(
     assert (await _claim(integration_session))["token"] == f"cashuBrefund1x{AMOUNT}"
 
 
+async def test_disabled_writer_does_not_reopen_reclaimed_change(
+    wallet: FakeWallet,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet.fail = True
+    await _pay("chat", _completion(), cost_sats=5)
+    wallet.fail = False
+    monkeypatch.setattr(settings, "x_cashu_retry_unminted_refunds", False)
+    await _age(integration_session, STALE)
+    with (
+        patch.object(
+            xs, "store_cashu_transaction_with_retry", AsyncMock(side_effect=OSError())
+        ),
+        patch.object(xs, "recieve_token", AsyncMock()) as reclaim,
+    ):
+        assert await xs.recover_abandoned_payments() == 0
+    reclaim.assert_awaited_once()
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    assert await xs.recover_abandoned_payments() == 0
+
+
 async def test_reclaimed_refund_reopens_despite_a_transient_failure(
     wallet: FakeWallet, integration_session: AsyncSession
 ) -> None:
@@ -729,16 +932,17 @@ async def test_unstored_refund_that_cannot_be_reclaimed_is_terminal(
     assert wallet.mints == [AMOUNT]
 
 
-async def test_failed_recovery_mint_is_terminal(
+async def test_failed_recovery_mint_is_retried(
     wallet: FakeWallet, integration_session: AsyncSession
 ) -> None:
     wallet.fail = True
     await _seed(integration_session, settlement=xs.PENDING, age=STALE)
 
+    # Mint selection failed before the wallet touched any proofs.
     assert await xs.recover_abandoned_payments() == 0
-    assert (await _payment(integration_session)).settlement == xs.FAILED
-    assert (await _claim(integration_session)).status_code == 409
-    # Still owed until reconciled, so payouts cannot spend the proofs.
+    assert (await _payment(integration_session)).settlement == xs.PENDING
+    assert (await _claim(integration_session)).status_code == 425
+    # Still owed until refunded, so payouts cannot spend the proofs.
     assert await total_user_liability(integration_session) == AMOUNT * 1000
     assert (
         await user_liability_for_mint_and_unit(integration_session, MINT, "sat")
@@ -746,7 +950,62 @@ async def test_failed_recovery_mint_is_terminal(
     )
 
     wallet.fail = False
+    assert await xs.recover_abandoned_payments() == 1
+    assert wallet.mints == [AMOUNT, AMOUNT]
+    assert await _refunds(integration_session) == [AMOUNT]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+    assert (await _claim(integration_session))["sats"] == str(AMOUNT)
+
+
+async def test_recovery_refund_waits_out_mint_cooldown(
+    wallet: FakeWallet,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "primary_mint", MINT)
+    monkeypatch.setattr(settings, "cashu_mints", [MINT])
+    get_wallet = AsyncMock(side_effect=AssertionError("mint contacted"))
+    monkeypatch.setattr(wallet_module, "get_wallet", get_wallet)
+    guard = MintRateGuard.get(MINT)
+    guard.apply_cooldown(300, reason="rate_limited")
+    await _seed(integration_session, settlement=xs.PENDING, age=STALE)
+
+    # The real send_token finds no trusted mint out of cooldown.
+    with patch.object(xs, "send_token", wallet_module.send_token):
+        assert await xs.recover_abandoned_payments() == 0
+
+    assert get_wallet.await_count == 0
+    assert (await _payment(integration_session)).settlement == xs.PENDING
+    assert (await _claim(integration_session)).status_code == 425
+
+    guard._cooldown_until = 0.0
+    assert await xs.recover_abandoned_payments() == 1
+    assert wallet.mints == [AMOUNT]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+    assert (await _claim(integration_session))["sats"] == str(AMOUNT)
+
+
+async def test_refund_that_cannot_be_reopened_is_closed_as_failed(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    transition = xs._transition
+
+    async def reopen_fails(request_id: str, from_states: Any, to: str, *a: Any) -> bool:
+        if to == xs.PENDING:
+            raise RuntimeError("database unavailable")
+        return await transition(request_id, from_states, to, *a)
+
+    wallet.fail = True
+    await _seed(integration_session, settlement=xs.PENDING, age=STALE)
+    with patch.object(xs, "_transition", reopen_fails):
+        assert await xs.recover_abandoned_payments() == 0
+    assert (await _payment(integration_session)).settlement == xs.REFUNDING
+
+    # A stale refunding row is closed without minting again.
+    wallet.fail = False
+    await _age(integration_session, STALE)
     assert await xs.recover_abandoned_payments() == 0
+    assert (await _payment(integration_session)).settlement == xs.FAILED
     assert wallet.mints == [AMOUNT]
 
 
@@ -1023,6 +1282,72 @@ async def test_ehbp_full_charge_is_withheld_when_it_cannot_be_recorded(
 
     assert response.status_code == 503
     assert b"ciphertext" not in bytes(response.body)
+
+
+async def test_ehbp_failed_full_refund_mint_is_retried_by_recovery(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    wallet.fail = True
+    response = await _ehbp_pay(
+        AsyncMock(side_effect=RuntimeError("upstream down")), 5000
+    )
+
+    assert response.status_code == 500
+    assert b"/v1/balance/refund" in bytes(response.body)
+    assert (await _payment(integration_session)).settlement == xs.PENDING
+
+    wallet.fail = False
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 1
+    assert wallet.mints == [AMOUNT, AMOUNT]
+    assert (await _payment(integration_session)).settlement == xs.REFUNDED
+
+
+async def test_ehbp_failed_change_mint_is_retried_by_recovery_for_the_change(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    wallet.fail = True
+    response = await _ehbp_pay(AsyncMock(return_value=_ehbp_ok()), cost_msats=5000)
+
+    # Inference was paid for, so it is served while recovery owes the change.
+    assert response.status_code == 200
+    assert response.headers[X_ROUTSTR_REFUND_ERROR_HEADER] == "refund_failed"
+    assert "X-Cashu" not in response.headers
+    assert b"".join([chunk async for chunk in response.body_iterator]) == (
+        b"ciphertext"
+    )
+    payment = await _payment(integration_session)
+    assert payment.settlement == xs.PENDING
+    assert payment.refund_amount == 15
+
+    wallet.fail = False
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 1
+    assert await xs.recover_abandoned_payments() == 0
+    assert wallet.mints == [15, 15]
+    assert await _refunds(integration_session) == [15]
+    assert (await _claim(integration_session))["sats"] == "15"
+
+
+async def test_ehbp_unstored_refund_token_is_terminal(
+    wallet: FakeWallet, integration_session: AsyncSession
+) -> None:
+    async def out_row_fails(**kwargs: Any) -> bool:
+        if kwargs["typ"] == "out":
+            raise RuntimeError("database unavailable")
+        return await store_cashu_transaction(**kwargs)
+
+    with patch.object(ehbp_module, "store_cashu_transaction", out_row_fails):
+        response = await _ehbp_pay(
+            AsyncMock(side_effect=RuntimeError("upstream down")), 5000
+        )
+
+    # The token was minted and handed out, so it must never be minted again.
+    assert response.headers["X-Cashu"] == f"cashuBrefund1x{AMOUNT}"
+    assert (await _payment(integration_session)).settlement == xs.FAILED
+    await _age(integration_session, STALE)
+    assert await xs.recover_abandoned_payments() == 0
+    assert wallet.mints == [AMOUNT]
 
 
 async def test_ehbp_cancellation_refunds_in_full(

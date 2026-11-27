@@ -166,6 +166,9 @@ class Settings(BaseSettings):
         default=604_800, env="DEAD_KEY_MIN_AGE_SECONDS"
     )
 
+    x_cashu_retry_unminted_refunds: bool = Field(
+        default=False, env="X_CASHU_RETRY_UNMINTED_REFUNDS"
+    )
     max_request_lifetime_seconds: float = Field(
         default=1800, gt=0, env="MAX_REQUEST_LIFETIME_SECONDS"
     )
@@ -328,6 +331,9 @@ ENV_ONLY_FIELDS = frozenset(
         # credential can be spent against. Keeping it env-only also lets the
         # proxy parse it once at import without going stale.
         "proxy_extra_allowed_paths",
+        # Workers sharing a database must agree on whether a failed refund is
+        # reopened for recovery or marked failed.
+        "x_cashu_retry_unminted_refunds",
         "database_pool_size",
         "database_max_overflow",
         "database_pool_timeout",

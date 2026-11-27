@@ -205,6 +205,10 @@ def test_env_only_settings_are_documented() -> None:
     assert aliases <= documented
 
 
+def test_x_cashu_retry_unminted_refunds_is_env_only() -> None:
+    assert "x_cashu_retry_unminted_refunds" in ENV_ONLY_FIELDS
+
+
 @pytest.mark.parametrize(
     ("field", "bad_value"),
     [

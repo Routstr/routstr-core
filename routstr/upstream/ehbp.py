@@ -64,10 +64,12 @@ from ..payment.models import Model
 from ..payment.usage import UsageFieldPresence, usage_field_presence
 from ..wallet import (
     SPENT_TOKEN_CODES,
+    NoSpendableMint,
     classify_redemption_error,
     recieve_token,
     send_token,
 )
+from .base import X_ROUTSTR_REFUND_ERROR_HEADER
 from .model_paths import exposed_model_id
 from .terminal_outcome_tracking import (
     record_x_cashu_terminal_outcome,
@@ -1057,7 +1059,7 @@ async def send_cashu_refund(
 
 
 def _ehbp_refund_failed_response(
-    request: Request, refund_token: str | None
+    request: Request, refund_token: str | None, refund_reopened: bool
 ) -> Response:
     if refund_token is not None:
         response = create_error_response(
@@ -1071,7 +1073,10 @@ def _ehbp_refund_failed_response(
         return response
     return create_error_response(
         "internal_error",
-        "Refund failed; contact the operator with this request_id. "
+        "Refund failed; claim it later at /v1/balance/refund with the original "
+        "X-Cashu token. Do not resend it as payment."
+        if refund_reopened
+        else "Refund failed; contact the operator with this request_id. "
         "Do not resend the original payment token.",
         500,
         request=request,
@@ -1419,10 +1424,11 @@ async def forward_ehbp_x_cashu_request(
     # Minting may already have consumed proofs, so a request refunds at most once.
     refund_attempted = False
     refund_token_sent: str | None = None
+    refund_reopened = False
     minting: asyncio.Future[str] | None = None
 
     async def mint_refund(refund_amount: int) -> str:
-        nonlocal refund_token_sent
+        nonlocal refund_token_sent, refund_reopened
         claimed = False
         try:
             claimed = await x_cashu_settlement.claim_refund(request_id, refund_amount)
@@ -1434,7 +1440,11 @@ async def forward_ehbp_x_cashu_request(
         except Exception as error:
             if isinstance(error, EhbpRefundStorageError):
                 refund_token_sent = error.token
-            if claimed:
+            if claimed and isinstance(error, NoSpendableMint):
+                refund_reopened = await x_cashu_settlement.reopen_unminted_refund(
+                    request_id
+                )
+            elif claimed:
                 await x_cashu_settlement.finish_refund(request_id, refunded=False)
             raise
         await x_cashu_settlement.finish_refund(request_id, refunded=True)
@@ -1632,7 +1642,7 @@ async def forward_ehbp_x_cashu_request(
             if refund_amount > 0:
                 try:
                     response_headers["X-Cashu"] = await refund(refund_amount)
-                except BaseException:
+                except BaseException as refund_error:
                     # The error handler never refunds a second time, so at most
                     # this refund leaves the node.
                     mark_terminal_outcome_unknown(
@@ -1640,8 +1650,13 @@ async def forward_ehbp_x_cashu_request(
                         "ehbp_x_cashu_refund_commit_ambiguous",
                         revenue_msats=cashu_retained_msats(amount, unit, refund_amount),
                     )
-                    raise
-                persisted_refund_amount = refund_amount
+                    if not (refund_reopened and isinstance(refund_error, Exception)):
+                        raise
+                    # Recovery pays only the change, so serve what was paid for;
+                    # withholding it would push clients to pay again.
+                    response_headers[X_ROUTSTR_REFUND_ERROR_HEADER] = "refund_failed"
+                else:
+                    persisted_refund_amount = refund_amount
             elif not await x_cashu_settlement.mark_charged(request_id):
                 return create_error_response(
                     "internal_error",
@@ -1654,13 +1669,14 @@ async def forward_ehbp_x_cashu_request(
                     error_scope=ERROR_SCOPE_NODE,
                 )
 
-            record_x_cashu_terminal_outcome(
-                terminal_outcome,
-                cost_info,
-                amount=amount,
-                unit=unit,
-                refund_amount=persisted_refund_amount,
-            )
+            if not refund_reopened:
+                record_x_cashu_terminal_outcome(
+                    terminal_outcome,
+                    cost_info,
+                    amount=amount,
+                    unit=unit,
+                    refund_amount=persisted_refund_amount,
+                )
 
             async def _stream_body_xcashu() -> AsyncIterator[bytes]:
                 yield resp.body
@@ -1695,7 +1711,9 @@ async def forward_ehbp_x_cashu_request(
         )
 
         if redeemed and amount > 0 and refund_attempted:
-            return _ehbp_refund_failed_response(request, refund_token_sent)
+            return _ehbp_refund_failed_response(
+                request, refund_token_sent, refund_reopened
+            )
         if redeemed and amount > 0:
             try:
                 refund_token = await refund(amount)
@@ -1717,7 +1735,9 @@ async def forward_ehbp_x_cashu_request(
                         "original_error": str(e),
                     },
                 )
-                return _ehbp_refund_failed_response(request, refund_token_sent)
+                return _ehbp_refund_failed_response(
+                    request, refund_token_sent, refund_reopened
+                )
 
         return create_error_response(
             "upstream_timeout",
@@ -1746,7 +1766,9 @@ async def forward_ehbp_x_cashu_request(
                 "EHBP X-Cashu refund already attempted; not refunding again",
                 extra={"request_id": request_id, "has_token": bool(refund_token_sent)},
             )
-            return _ehbp_refund_failed_response(request, refund_token_sent)
+            return _ehbp_refund_failed_response(
+                request, refund_token_sent, refund_reopened
+            )
         if redeemed and amount > 0:
             try:
                 refund_token = await refund(amount)
@@ -1767,7 +1789,9 @@ async def forward_ehbp_x_cashu_request(
                         "original_error": error_message,
                     },
                 )
-                return _ehbp_refund_failed_response(request, refund_token_sent)
+                return _ehbp_refund_failed_response(
+                    request, refund_token_sent, refund_reopened
+                )
 
         if not redeemed:
             classified = classify_redemption_error(e)
