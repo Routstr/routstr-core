@@ -120,8 +120,6 @@ Connect to your AI provider:
 
 | Field | Description |
 |-------|-------------|
-| **Fixed Pricing** | Toggle flat-rate vs. per-token pricing |
-| **Fixed Cost** | Sats per request (when fixed pricing enabled) |
 | **Exchange Fee** | Multiplier for BTC volatility buffer |
 | **Upstream Fee** | Your profit margin multiplier |
 

@@ -634,11 +634,8 @@ class TestEdgeCaseCombinations:
         a single request (which costs 1000 msats). It then makes 5 concurrent requests
         to verify that all requests fail with 402 Payment Required errors.
 
-        Note: The test enables fixed pricing to avoid model lookup errors
-        since the test environment doesn't have models configured.
         """
-        # Disable model-based pricing for this test to avoid model lookup issues
-        monkeypatch.setattr("routstr.core.settings.settings.fixed_pricing", True)
+        monkeypatch.setattr("routstr.core.settings.settings.min_request_msat", 1000)
 
         # Create a new API key with very low balance
         # Generate a unique API key
@@ -648,7 +645,7 @@ class TestEdgeCaseCombinations:
         # Create the API key with only 500 msats (less than one request cost)
         new_key = ApiKey(
             hashed_key=api_key_hash,
-            balance=500,  # Less than fixed cost per request (1000 msats)
+            balance=500,  # Less than the minimum reservation (1000 msats)
             reserved_balance=0,
             total_spent=0,
             total_requests=0,

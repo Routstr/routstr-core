@@ -18,6 +18,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from routstr.core.db import ModelRow, UpstreamProviderRow
 from routstr.core.error_scope import ERROR_SCOPE_HEADER, ERROR_SCOPE_UPSTREAM
 from routstr.core.exceptions import EhbpEncryptedUpstreamError
+from routstr.payment import price
 from routstr.proxy import reinitialize_upstreams
 
 MODEL_ID = "tinfoil-kimi-k2-6"
@@ -91,7 +92,9 @@ def _encrypted_error() -> EhbpEncryptedUpstreamError:
 async def test_encrypted_ehbp_error_is_relayed_verbatim(
     authenticated_client: AsyncClient,
     integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(price, "SATS_USD_PRICE", 0.001)
     await _seed_tinfoil_model(integration_session)
 
     with patch(

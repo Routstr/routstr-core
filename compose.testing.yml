@@ -19,7 +19,6 @@ services:
       - "ONION_URL=http://test.onion"
       - "CORS_ORIGINS=*"
       - "RECEIVE_LN_ADDRESS=test@routstr.com"
-      - "FIXED_COST_PER_REQUEST=10"
       - "FIXED_PER_1K_INPUT_TOKENS=0"
       - "FIXED_PER_1K_OUTPUT_TOKENS=0"
       - "FIXED_PRICING=false"

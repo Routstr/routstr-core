@@ -176,7 +176,9 @@ def test_middleware_logger_state_is_restored(
 
 
 def _model(model_id: str) -> MagicMock:
-    return MagicMock(id=model_id)
+    from routstr.payment.models import Pricing
+
+    return MagicMock(id=model_id, sats_pricing=Pricing(prompt=0, completion=0))
 
 
 def _upstream(provider_type: str) -> MagicMock:
@@ -284,6 +286,38 @@ async def test_request_without_a_model_is_not_attributed(
 
     assert response.status_code == 400
     assert captured == {}
+
+
+@pytest.mark.parametrize("has_priced_fallback", [False, True])
+@pytest.mark.asyncio
+async def test_unpriced_candidate_is_not_dispatched(
+    proxy_app: FastAPI, routing: dict[str, Any], has_priced_fallback: bool
+) -> None:
+    unpriced = _upstream("unpriced")
+    unpriced.forward_request = AsyncMock()
+    unroutable_model = _model("unpriced/model")
+    unroutable_model.sats_pricing = None
+    routing["candidates"] = [(unroutable_model, unpriced)]
+    if has_priced_fallback:
+        free = _upstream("free")
+        free.forward_request = AsyncMock(return_value=Response(status_code=200))
+        routing["candidates"].append((_model("free/model"), free))
+
+    response = await _send(
+        proxy_app,
+        "POST",
+        "/v1/chat/completions",
+        json={"model": "model"},
+        headers={"authorization": "Bearer sk-test"},
+    )
+
+    unpriced.forward_request.assert_not_awaited()
+    if has_priced_fallback:
+        assert response.status_code == 200
+        free.forward_request.assert_awaited_once()
+    else:
+        assert response.status_code == 503
+        routing["pay"].assert_not_awaited()
 
 
 @pytest.mark.asyncio

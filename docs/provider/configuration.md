@@ -148,7 +148,6 @@ Control your profit margins:
 
 | Setting           | Description                                | Default      |
 | ----------------- | ------------------------------------------ | ------------ |
-| **Fixed Pricing** | Charge flat rate per request vs. per-token | Off          |
 | **Exchange Fee**  | Buffer for BTC volatility                  | 1.005 (0.5%) |
 | **Upstream Fee**  | Your profit markup                         | 1.10 (10%)   |
 

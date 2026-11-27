@@ -130,14 +130,8 @@ def test_pricing_formulas(
         )
 
 
-def test_fixed_fallback_and_invalid_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings, "fixed_pricing", True)
-    monkeypatch.setattr(settings, "fixed_cost_per_request", 1)
-    monkeypatch.setattr(settings, "min_request_msat", 2000)
-    assert build_pricing_trail(None, 2000)["base_source"] == "fixed_pricing"
-    assert build_pricing_trail(None, 2000)["min_request_applied"] is True
-    monkeypatch.setattr(settings, "fixed_pricing", False)
-    assert build_pricing_trail(None, 2000)["base_source"] == "fallback_fixed"
+def test_missing_and_invalid_pricing_trails_are_unavailable() -> None:
+    assert build_pricing_trail(None, 2000)["base_source"] == "unavailable"
     m = _model()
     m.pricing.prompt = float("nan")
     assert build_pricing_trail(m, 2000)["formula"] == "unavailable"

@@ -49,7 +49,7 @@ from .payment.image_pricing import (
     quote_image_endpoint,
     requested_image_count,
 )
-from .payment.models import Model, is_decision_model
+from .payment.models import Model, has_model_reservation_pricing, is_decision_model
 from .payment.price import sats_usd_price
 from .payment.pricing_trail import build_pricing_trail
 from .upstream import BaseUpstreamProvider
@@ -1057,6 +1057,19 @@ async def _proxy(
                 400,
                 request=request,
             )
+
+    candidates = [
+        (model, upstream)
+        for model, upstream in candidates
+        if has_model_reservation_pricing(model)
+    ]
+    if not candidates:
+        return create_error_response(
+            "pricing_unavailable",
+            f"Pricing unavailable for model '{model_id}'",
+            503,
+            request=request,
+        )
 
     # A provider that just failed this model repeatedly is skipped while some
     # other candidate can serve it. An explicit route is never rerouted.

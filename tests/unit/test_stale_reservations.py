@@ -471,6 +471,7 @@ async def test_proxy_reverts_reservation_on_client_disconnect() -> None:
             "get_candidates",
             return_value=[(MagicMock(), upstream)],
         ),
+        patch.object(proxy_module, "has_model_reservation_pricing", return_value=True),
         patch.object(
             proxy_module, "get_max_cost_for_model", AsyncMock(return_value=1_000)
         ),

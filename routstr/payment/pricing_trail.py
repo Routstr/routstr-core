@@ -4,7 +4,13 @@ import json
 from typing import Any
 
 from ..core.settings import settings
-from .models import Model, _calculate_usd_max_costs, has_usable_pricing
+from .models import (
+    Model,
+    _calculate_usd_max_costs,
+    has_model_reservation_pricing,
+    has_usable_pricing,
+    model_reservation_pricing,
+)
 
 
 def _build_pricing_trail(model: Model | None, base_msats: int) -> dict[str, Any]:
@@ -15,22 +21,10 @@ def _build_pricing_trail(model: Model | None, base_msats: int) -> dict[str, Any]
         "min_request_applied": False,
         "discounts": {},
     }
-    if settings.fixed_pricing:
-        trail.update(base_source="fixed_pricing", formula="fixed_request_cost")
-        trail["fixed_cost_per_request_sats"] = settings.fixed_cost_per_request
-        trail["min_request_applied"] = (
-            settings.fixed_cost_per_request * 1000 < settings.min_request_msat
-        )
-        return trail
-    if model is None or model.sats_pricing is None:
-        trail.update(base_source="fallback_fixed", formula="fixed_request_cost")
-        trail["fixed_cost_per_request_sats"] = settings.fixed_cost_per_request
-        trail["min_request_applied"] = (
-            settings.fixed_cost_per_request * 1000 < settings.min_request_msat
-        )
-        return trail
-    if not has_usable_pricing(model.pricing) or not has_usable_pricing(
-        model.sats_pricing
+    if (
+        model is None
+        or not has_model_reservation_pricing(model)
+        or not has_usable_pricing(model.pricing)
     ):
         trail.update(
             base_source="unavailable",
@@ -80,6 +74,8 @@ def _build_pricing_trail(model: Model | None, base_msats: int) -> dict[str, Any]
             web_search=1000,
             internal_reasoning=100,
         )
+    rates = model_reservation_pricing(model)
+    assert rates is not None and model.sats_pricing is not None
     p, c, total = _calculate_usd_max_costs(model)
     trail["max_cost_computed"] = {
         "max_prompt_cost_usd": p,
@@ -87,19 +83,17 @@ def _build_pricing_trail(model: Model | None, base_msats: int) -> dict[str, Any]
         "max_cost_usd": total,
         "cached_max_cost_usd": model.pricing.max_cost,
         "usd_formula_source": "current_model_inputs_not_cached_reservation",
-        "max_cost_msats": model.sats_pricing.max_cost * 1000,
+        "max_cost_msats": rates.max_cost * 1000,
         "cached_sats_pricing": model.sats_pricing.dict(),
         # A cache may have been computed at an earlier exchange rate or contain
         # provider-supplied max costs. Do not claim today's FX produced it.
         "exchange_rate_source": "not_recorded_in_model_cache",
     }
+    if rates is not model.sats_pricing:
+        trail["max_cost_computed"]["reservation_sats_pricing"] = rates.dict()
     trail["discounts"]["tolerance_percentage"] = settings.tolerance_percentage
     trail["min_request_applied"] = (
-        int(
-            model.sats_pricing.max_cost
-            * 1000
-            * (1 - settings.tolerance_percentage / 100)
-        )
+        int(rates.max_cost * 1000 * (1 - settings.tolerance_percentage / 100))
         < settings.min_request_msat
     )
     return trail

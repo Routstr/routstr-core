@@ -31,6 +31,7 @@ from ..wallet import (
     is_trusted_source_mint,
 )
 from .image_pricing import image_reservation_msats
+from .models import has_model_reservation_pricing, model_reservation_pricing
 from .responses_input import (
     FILE_ID_URL_PREFIX,
     count_input_images,
@@ -136,66 +137,20 @@ async def get_max_cost_for_model(
     session: AsyncSession,
     model_obj: Any | None = None,
 ) -> int:
-    """Get the maximum cost for a specific model from providers with overrides."""
-    logger.debug(
-        "Getting max cost for model",
-        extra={
-            "model": model,
-            "fixed_pricing": settings.fixed_pricing,
-        },
-    )
-
-    if settings.fixed_pricing:
-        default_cost_msats = settings.fixed_cost_per_request * 1000
-        logger.debug(
-            "Using fixed cost pricing",
-            extra={"cost_msats": default_cost_msats, "model": model},
-        )
-        return max(settings.min_request_msat, default_cost_msats)
-
-    if not model_obj:
+    """Get the model's reservation ceiling, including any token-rate overrides."""
+    if model_obj is None:
         from ..proxy import get_model_instance
 
         model_obj = get_model_instance(model)
 
-    if not model_obj:
-        fallback_msats = settings.fixed_cost_per_request * 1000
-        logger.warning(
-            "Model not found in providers or overrides",
-            extra={
-                "requested_model": model,
-                "using_default_cost": fallback_msats,
-            },
+    if model_obj is None or not has_model_reservation_pricing(model_obj):
+        raise HTTPException(
+            status_code=503, detail=f"Pricing unavailable for model '{model}'"
         )
-        return max(settings.min_request_msat, fallback_msats)
-
-    if model_obj.sats_pricing:
-        try:
-            max_cost = (
-                model_obj.sats_pricing.max_cost
-                * 1000
-                * (1 - settings.tolerance_percentage / 100)
-            )
-            logger.debug(
-                "Found model-specific max cost",
-                extra={"model": model, "max_cost_msats": max_cost},
-            )
-            calculated_msats = int(max_cost)
-            return max(settings.min_request_msat, calculated_msats)
-        except Exception as e:
-            logger.error(
-                "Error calculating max cost from model pricing",
-                extra={"model": model, "error": str(e)},
-            )
-
-    logger.warning(
-        "Model pricing not found, using fixed cost",
-        extra={
-            "model": model,
-            "default_cost_msats": settings.fixed_cost_per_request * 1000,
-        },
-    )
-    return max(settings.min_request_msat, settings.fixed_cost_per_request * 1000)
+    rates = model_reservation_pricing(model_obj)
+    assert rates is not None
+    max_cost = rates.max_cost * 1000 * (1 - settings.tolerance_percentage / 100)
+    return max(settings.min_request_msat, int(max_cost))
 
 
 async def calculate_discounted_max_cost(
@@ -224,12 +179,9 @@ async def calculate_discounted_max_cost(
         return required
 
     discounts = pricing_trail["discounts"] if pricing_trail is not None else {}
-    if settings.fixed_pricing:
-        return finish(max_cost_for_model)
-
     model = body.get("model", "unknown")
 
-    model_pricing = model_obj.sats_pricing if model_obj else None
+    model_pricing = model_reservation_pricing(model_obj) if model_obj else None
     if not model_pricing:
         return finish(max_cost_for_model)
 

@@ -10,9 +10,9 @@ Section 3.4 remains a deferred, separate pricing behavior proposal.
   are integers in `msat`; reservations are subtracted once by the serializer.
 - The proxy captures discount inputs/deltas during the actual calculation,
   including image estimates, without re-running estimation or fetching images.
-- Pricing uses `base_source`, `max_cost_formula`, and a `formula` alias. Fixed
-  and fallback pricing use `formula: "fixed_request_cost"`. Direct auth checks
-  receive only `min_cost`, not a model/body, and explicitly report `unavailable`;
+- Pricing uses `base_source`, `max_cost_formula`, and a `formula` alias. No
+  priced route returns HTTP 503 before dispatch. Direct auth checks receive
+  only `min_cost`, not a model/body, and explicitly report `unavailable`;
   proxy-driven early rejection is enriched with its already computed model/trail.
 - Cached sat pricing is authoritative. The model cache does not store historical
   FX; the implementation does not invent an exchange rate or imply today's rate
@@ -213,13 +213,10 @@ required_msats = calculate_discounted_max_cost(
 )
 ```
 
-1. **Base source** — `get_max_cost_for_model()` (`payment/helpers.py:125`)
-   picks the ceiling: fixed pricing, the model's cached `sats_pricing.max_cost`,
-   or a fallback fixed cost.
-2. **Max-cost formula** — only when the base is `model_sats_pricing`, the
-   ceiling came from `_calculate_usd_max_costs()` (`payment/models.py:540`).
-   That function has six branches (below), not seven. `fixed_request_cost` is
-   **not** one of them; it is a separate base source.
+1. **Base source** — `get_max_cost_for_model()` uses the model's cached sat
+   ceiling, increased if a node-wide per-token override requires it.
+2. **Max-cost formula** — the model formula uses context and token limits when
+   available, and weighted model rates otherwise.
 3. **Discounts** — `calculate_discounted_max_cost()` (`payment/helpers.py:191`)
    subtracts prompt and completion deltas from the base, then floors at
    `min_request_msat`.
@@ -266,9 +263,8 @@ required_msats = calculate_discounted_max_cost(
 
 | `base_source` | Condition | Base amount |
 |---|---|---|
-| `fixed_pricing` | `settings.fixed_pricing` is on | `max(min_request_msat, fixed_cost_per_request * 1000)` |
-| `model_sats_pricing` | `model_obj.sats_pricing` exists | `max(min_request_msat, int(sats_pricing.max_cost * 1000 * (1 - tolerance/100)))` |
-| `fallback_fixed` | model not found, or no `sats_pricing` | `max(min_request_msat, fixed_cost_per_request * 1000)` |
+| `model_sats_pricing` | A model has usable sat pricing | `max(min_request_msat, int(max_cost_sats * 1000 * (1 - tolerance/100)))` |
+| `unavailable` | No request context in a direct auth check, or the audit inputs cannot be serialized | Use the reservation amount supplied by the caller |
 
 #### Stage 2 — `pricing.max_cost_formula`
 
@@ -316,9 +312,7 @@ Notes on reachability (verified against the upstream classes):
   `max_completion_allowed_sats`.
 - Final `required_msats = max(min_request_msat, adjusted)`.
 
-When `settings.fixed_pricing` is on, `calculate_discounted_max_cost()` returns
-its input unchanged — no discounts run. The `pricing` object must say so via
-`base_source: "fixed_pricing"` and an empty `discounts` object.
+When an enabled token override raises either rate, the reservation estimates use the higher rates and the trail includes `max_cost_computed.reservation_sats_pricing`.
 
 #### Notes
 
@@ -741,7 +735,7 @@ def test_build_payment_required_error_shape():
 
 - One test per `formula` variant (`context_plus_completion`,
   `context_le_completion`, `context_only`, `completion_only`,
-  `model_context_only`, `flat_estimate`, `fixed_request_cost`) asserting the
+  `model_context_only`, `flat_estimate`) asserting the
   reported `inputs` and `computed.max_cost_msats` match
   `_calculate_usd_max_costs()` and `_update_model_sats_pricing()`.
 - A test that `min_request_applied` is `true` when the computed cost is below

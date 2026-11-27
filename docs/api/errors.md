@@ -267,8 +267,8 @@ X-Cashu shortfalls use `code: "minimum_balance_required"` and the same canonical
 `detail.model`, and `detail.type` remain. Concurrent depletion also retains
 `error.available_balance`.
 
-`pricing.base_source` is `fixed_pricing`, `fallback_fixed`,
-`model_sats_pricing`, or `unavailable`. `formula` is a convenience alias for
+`pricing.base_source` is `model_sats_pricing` or `unavailable`. A request with
+no priced route returns HTTP 503 before dispatch. `formula` is a convenience alias for
 `max_cost_formula` on model-priced requests:
 
 | Formula | USD ceiling from current model inputs |
@@ -279,13 +279,13 @@ X-Cashu shortfalls use `code: "minimum_balance_required"` and the same canonical
 | `completion_only` | Provider completion limit times completion rate |
 | `model_context_only` | Model context times the larger token rate |
 | `flat_estimate` | Weighted rates; coefficients included in `max_cost_inputs` |
-| `fixed_request_cost` | Fixed sats per request, floored at the minimum |
 | `unavailable` | No request context or unusable pricing; `error` explains why |
 
 The trail records `base_max_cost_msats`, final `required_msats`, minimum floor,
 and actual `discounts` (prompt/image estimates, largest completion cap, deltas,
 or image reservation). Model trails also include `max_cost_inputs` and
-`max_cost_computed`. Cached sat pricing is authoritative: USD formula values
+`max_cost_computed`. When token overrides raise the reservation rates,
+`max_cost_computed.reservation_sats_pricing` records the effective rates. USD formula values
 are explicitly labeled as calculations from current model inputs, not a
 reconstruction of the cached reservation. The cache does not retain historical
 FX, so no current exchange rate is substituted. Direct bearer validation knows

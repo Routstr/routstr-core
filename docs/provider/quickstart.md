@@ -210,7 +210,7 @@ Don't capture those logs in automated output.
    enabled and has enabled models. With public mode you are already listed; a
    zero-model catalog self-heals as soon as models are discovered.
 3. **Pricing** — per-provider **Fee** (multiplier on upstream cost), or per-model
-   prices, or a flat `FIXED_PRICING` rate. See [Pricing](pricing.md).
+   prices, or node-wide per-token overrides. See [Pricing](pricing.md).
 4. **Review** node name, payout address, mints and relays in
    **Settings → Admin Settings**.
 

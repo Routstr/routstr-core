@@ -14,7 +14,7 @@ import pytest
 
 from routstr import proxy as proxy_module
 from routstr.core.db import ApiKey
-from routstr.payment.models import Model
+from routstr.payment.models import Model, Pricing
 from routstr.upstream.ehbp import (
     _PROXY_ONLY_HEADERS,
     EHBPForwardingTarget,
@@ -765,8 +765,6 @@ class TestComputeEhbpActualCost:
         string silently swapped in the cheaper candidate's full input rate and
         the cache discount vanished. Billing must use the routed model's own
         discounted cache rate."""
-        from routstr.payment.models import Pricing
-
         model_obj = MagicMock()
         model_obj.id = "deepseek-v4-1-flash"
         model_obj.forwarded_model_id = "tinfoil-deepseek-v4-1-flash"
@@ -1792,7 +1790,7 @@ async def test_bearer_key_config_422_releases_reservation_and_passes_through() -
     request.body = AsyncMock(return_value=b"sealed-body")
     request.query_params = {}
 
-    model_obj = MagicMock()
+    model_obj = MagicMock(sats_pricing=Pricing(prompt=0, completion=0))
     model_obj.id = "tinfoil/llama3-3-70b"
     upstream = _ehbp_tinfoil_upstream()
 
@@ -1932,7 +1930,7 @@ async def test_proxy_reaches_the_enclaves_versioned_route_for_both_spellings(
     request.body = AsyncMock(return_value=b"sealed-body")
     request.query_params = {}
 
-    model_obj = MagicMock()
+    model_obj = MagicMock(sats_pricing=Pricing(prompt=0, completion=0))
     model_obj.id = "tinfoil-deepseek-v4-1-flash"
     model_obj.forwarded_model_id = "deepseek-v4-1-flash"
     upstream = TinfoilUpstreamProvider(api_key="upstream-key")

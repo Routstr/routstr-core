@@ -12,6 +12,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr import proxy as proxy_module
 from routstr.core.db import ApiKey
+from routstr.payment.models import Pricing
 
 
 @pytest.mark.asyncio
@@ -36,7 +37,7 @@ async def test_authenticated_proxy_releases_db_connection_before_upstream_header
     request.url.path = "/v1/chat/completions"
     request.state.request_id = "pool-hold-regression"
 
-    model = MagicMock()
+    model = MagicMock(sats_pricing=Pricing(prompt=0, completion=0))
     upstream = MagicMock()
     upstream.provider_type = "test"
     upstream.prepare_headers.return_value = {}

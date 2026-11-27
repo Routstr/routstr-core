@@ -544,19 +544,16 @@ async def list_models(
 
 
 def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
-    """Calculate max costs in USD based on model context/token limits.
-
-    Args:
-        model: Model object
-
-    Returns:
-        Tuple of (max_prompt_cost, max_completion_cost, max_cost) in USD
-    """
     min_req_msat = max(1, int(getattr(settings, "min_request_msat", 1)))
-    min_req_usd = float(min_req_msat) / 1_000_000.0
+    return _calculate_max_costs(model, model.pricing, min_req_msat / 1_000_000.0)
 
-    prompt_price = model.pricing.prompt
-    completion_price = model.pricing.completion
+
+def _calculate_max_costs(
+    model: Model, pricing: Pricing, minimum: float
+) -> tuple[float, float, float]:
+    """Return prompt, completion, and combined ceilings in the rates' currency."""
+    prompt_price = pricing.prompt
+    completion_price = pricing.completion
 
     if model.top_provider and (
         model.top_provider.context_length or model.top_provider.max_completion_tokens
@@ -596,11 +593,40 @@ def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
 
     p = prompt_price * 1_000_000
     c = completion_price * 32_000
-    r = model.pricing.request * 100_000
-    i = model.pricing.image * 100
-    w = model.pricing.web_search * 1000
-    ir = model.pricing.internal_reasoning * 100
-    return (p, c, max(p + c + r + i + w + ir, min_req_usd))
+    r = pricing.request * 100_000
+    i = pricing.image * 100
+    w = pricing.web_search * 1000
+    ir = pricing.internal_reasoning * 100
+    return (p, c, max(p + c + r + i + w + ir, minimum))
+
+
+def has_model_reservation_pricing(model: Model) -> bool:
+    rates = model.sats_pricing
+    return (
+        rates is not None
+        and has_usable_pricing(rates)
+        and is_usable_rate(rates.max_cost)
+    )
+
+
+def model_reservation_pricing(model: Model) -> Pricing | None:
+    rates = model.sats_pricing
+    if rates is None or not settings.fixed_pricing:
+        return rates
+
+    # Upstream-reported cost can still take precedence over the token override.
+    prompt = max(rates.prompt, settings.fixed_per_1k_input_tokens / 1000)
+    completion = max(rates.completion, settings.fixed_per_1k_output_tokens / 1000)
+    if (prompt, completion) == (rates.prompt, rates.completion):
+        return rates
+
+    effective = rates.copy(update={"prompt": prompt, "completion": completion})
+    old = _calculate_max_costs(model, rates, 0.0)
+    new = _calculate_max_costs(model, effective, 0.0)
+    effective.max_prompt_cost = rates.max_prompt_cost + (new[0] - old[0])
+    effective.max_completion_cost = rates.max_completion_cost + (new[1] - old[1])
+    effective.max_cost = max(rates.max_cost + (new[2] - old[2]), new[2])
+    return effective
 
 
 def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:

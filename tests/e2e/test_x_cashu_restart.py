@@ -139,7 +139,6 @@ class Stack:
             "ADMIN_PASSWORD": ADMIN_PASSWORD,
             "ROUTSTR_SECRET_KEY": "l_Tkp-7xmjcQ-IFhr6qhILrU8HPRbEmYMrfSbo_5srU=",
             "FIXED_PRICING": "true",
-            "FIXED_COST_PER_REQUEST": "10",
             "FIXED_PER_1K_INPUT_TOKENS": "500",
             "FIXED_PER_1K_OUTPUT_TOKENS": "500",
             "MAX_REQUEST_LIFETIME_SECONDS": str(LIFETIME),

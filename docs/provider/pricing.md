@@ -24,17 +24,6 @@ Passes through upstream costs plus your percentage markup.
 - Price: $30 × 1.005 × 1.10 = $33.17/1M tokens
 - At $60k BTC: ~55,000 sats/1M tokens
 
-### Fixed Pricing
-
-Charge a flat rate per request, regardless of model or token count.
-
-| Setting | Description |
-|---------|-------------|
-| **Fixed Pricing** | Enable flat-rate mode |
-| **Fixed Cost** | Sats per request |
-
-**Best for**: Simple proxies, internal tools, or subscription-like access.
-
 ---
 
 ## Per-Model Pricing
@@ -53,12 +42,11 @@ This overrides both the upstream cost and your global markup for that model.
 
 ## Token-Based Overrides
 
-Set global fixed rates per token (overrides dynamic pricing for all models):
+For token-based settlement, set `FIXED_PRICING=true` and configure `FIXED_PER_1K_INPUT_TOKENS` and `FIXED_PER_1K_OUTPUT_TOKENS` in sats per 1,000 tokens. The override is active when either rate is nonzero. An upstream-reported cost may still take precedence.
 
-| Setting | Description |
-|---------|-------------|
-| **Fixed Per 1K Input** | Sats per 1,000 prompt tokens |
-| **Fixed Per 1K Output** | Sats per 1,000 completion tokens |
+### Upgrading from a flat per-request rate
+
+Remove `FIXED_COST_PER_REQUEST` (or its legacy name, `COST_PER_REQUEST`); the node no longer reads it. If both token overrides are zero, the node uses model pricing. Configure prices for previously unpriced models before upgrading: the node no longer dispatches paid requests to those models. Explicitly zero-priced models are still supported.
 
 ---
 

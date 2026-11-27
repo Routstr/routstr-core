@@ -3,6 +3,9 @@ import os
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
+from fastapi import HTTPException
+
 # Set required env vars before importing
 os.environ["UPSTREAM_BASE_URL"] = "http://test"
 os.environ["UPSTREAM_API_KEY"] = "test"
@@ -70,36 +73,40 @@ async def test_get_max_cost_for_model_known() -> None:
             assert cost == 500000  # 500 sats * 1000 = msats
 
 
-async def test_get_max_cost_for_model_unknown() -> None:
-    mock_session = AsyncMock()
-
-    # Mock the exec results to return no model override
-    async def async_mock_exec(query: Any) -> Any:
-        result = Mock()
-        result.first = Mock(return_value=None)
-        result.all = Mock(return_value=[])
-        return result
-
-    mock_session.exec = AsyncMock(side_effect=async_mock_exec)
-    mock_session.get = AsyncMock(return_value=None)
-
-    # Mock get_upstreams to return empty list
-    with patch("routstr.proxy.get_upstreams", return_value=[]):
-        with patch.object(settings, "fixed_cost_per_request", 100):
-            with patch.object(settings, "tolerance_percentage", 0):
-                cost = await get_max_cost_for_model(
-                    "unknown-model", session=mock_session, model_obj=None
-                )
-                assert cost == 100000
-
-
-async def test_get_max_cost_for_model_disabled() -> None:
-    mock_session = AsyncMock()
+async def test_get_max_cost_without_model_pricing_is_unavailable() -> None:
+    unpriced = Mock(sats_pricing=None)
     with patch.object(settings, "fixed_pricing", True):
-        with patch.object(settings, "fixed_cost_per_request", 200):
-            with patch.object(settings, "tolerance_percentage", 0):
-                cost = await get_max_cost_for_model("any-model", session=mock_session)
-                assert cost == 200000
+        with pytest.raises(HTTPException) as exc:
+            await get_max_cost_for_model("unpriced", AsyncMock(), unpriced)
+    assert exc.value.status_code == 503
+
+
+@pytest.mark.parametrize(("override", "expected"), [(0, 17), (500, 4013)])
+async def test_token_override_but_not_flat_pricing_changes_the_hold(
+    monkeypatch: pytest.MonkeyPatch, override: int, expected: int
+) -> None:
+    from routstr.payment.helpers import calculate_discounted_max_cost
+    from routstr.payment.models import Pricing, TopProvider
+
+    model = Mock(
+        sats_pricing=Pricing(
+            prompt=0.001,
+            completion=0.002,
+            max_cost=1.1,
+            max_prompt_cost=1,
+            max_completion_cost=0.2,
+        ),
+        top_provider=TopProvider(context_length=1000, max_completion_tokens=100),
+        usage_multipliers=None,
+    )
+    monkeypatch.setattr(settings, "fixed_pricing", True)
+    monkeypatch.setattr(settings, "fixed_per_1k_input_tokens", 0)
+    monkeypatch.setattr(settings, "fixed_per_1k_output_tokens", override)
+    monkeypatch.setattr(settings, "tolerance_percentage", 0)
+    monkeypatch.setattr("routstr.payment.helpers.estimate_prompt_tokens", lambda _: 13)
+    body = {"model": "test-model", "max_tokens": 8 if override else 2}
+    base = await get_max_cost_for_model("test-model", AsyncMock(), model)
+    assert await calculate_discounted_max_cost(base, body, model) == expected
 
 
 async def test_get_max_cost_for_model_tolerance() -> None:

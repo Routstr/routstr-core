@@ -16,39 +16,15 @@ By default, Routstr:
 
 ---
 
-## Strategy 1: Fixed Per-Request
-
-Charge a flat fee regardless of model or tokens used.
-
-**Configure in Dashboard** → **Settings** → **Pricing**:
-
-- Enable **Fixed Pricing**
-- Set **Fixed Cost Per Request** (in sats)
-
-**Use cases**:
-
-- Internal tools with predictable usage
-- Simple "pay once, get response" APIs
-- Subscription-like tiers
-
----
-
-## Strategy 2: Fixed Per-Token
+## Strategy 1: Fixed Per-Token
 
 Override dynamic pricing with global per-token rates.
 
-**Configure in Dashboard** → **Settings** → **Pricing**:
-
-| Setting | Description |
-|---------|-------------|
-| **Fixed Per 1K Input** | Sats per 1,000 prompt tokens |
-| **Fixed Per 1K Output** | Sats per 1,000 completion tokens |
-
-When set to non-zero values, these override model-specific pricing for all models.
+Enable `FIXED_PRICING` and set `FIXED_PER_1K_INPUT_TOKENS` and `FIXED_PER_1K_OUTPUT_TOKENS` in sats per 1,000 tokens. With either rate nonzero, the configured pair overrides the model's rates when settlement uses token counts rather than an upstream-reported cost.
 
 ---
 
-## Strategy 3: Per-Model Custom Pricing
+## Strategy 2: Per-Model Custom Pricing
 
 Set specific prices for individual models, overriding both upstream cost and global fees.
 
@@ -76,12 +52,7 @@ If a request's calculated cost falls below this (e.g., very short prompts), the 
 
 ## Combining Strategies
 
-Strategies apply in order of specificity:
-
-1. **Per-model override** (highest priority)
-2. **Fixed per-token rates**
-3. **Dynamic pricing with fees** (default)
-4. **Fixed per-request** (overrides all above if enabled)
+Use per-model prices to override dynamic pricing with fees. Global per-token rates, when enabled, supersede the model's token rates for fallback token-based settlement.
 
 **Example setup**:
 

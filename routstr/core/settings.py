@@ -127,10 +127,8 @@ class Settings(BaseSettings):
 
     # Pricing
     # Default behavior: derive pricing from MODELS
-    # If fixed_pricing is True -> use fixed_cost_per_request and ignore tokens
-    # If fixed_per_1k_* are set (non-zero) -> override model token pricing when model-based
+    # Enable the node-wide token rates when at least one is nonzero.
     fixed_pricing: bool = Field(default=False, env="FIXED_PRICING")
-    fixed_cost_per_request: int = Field(default=1, env="FIXED_COST_PER_REQUEST")
     fixed_per_1k_input_tokens: int = Field(default=0, env="FIXED_PER_1K_INPUT_TOKENS")
     fixed_per_1k_output_tokens: int = Field(default=0, env="FIXED_PER_1K_OUTPUT_TOKENS")
     exchange_fee: float = Field(default=1.005, env="EXCHANGE_FEE")
@@ -418,17 +416,6 @@ def resolve_bootstrap() -> Settings:
             mbp_raw = os.environ.get("MODEL_BASED_PRICING", "").strip().lower()
             mbp = mbp_raw in {"1", "true", "yes", "on"}
             base.fixed_pricing = not mbp
-        # Map COST_PER_REQUEST -> fixed_cost_per_request if new not provided
-        if (
-            "COST_PER_REQUEST" in os.environ
-            and "FIXED_COST_PER_REQUEST" not in os.environ
-        ):
-            try:
-                base.fixed_cost_per_request = int(
-                    os.environ["COST_PER_REQUEST"].strip()
-                )
-            except Exception:
-                pass
         # Map COST_PER_1K_* -> FIXED_PER_1K_*
         if (
             "COST_PER_1K_INPUT_TOKENS" in os.environ

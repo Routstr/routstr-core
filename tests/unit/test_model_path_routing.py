@@ -62,6 +62,7 @@ async def _run_proxy(
     )
     with (
         patch.object(proxy_module, "get_candidates", return_value=candidates),
+        patch.object(proxy_module, "has_model_reservation_pricing", return_value=True),
         patch.object(
             proxy_module, "get_max_cost_for_model", AsyncMock(return_value=1_000)
         ),

@@ -38,6 +38,7 @@ def _key(balance: int, reserved: int = 0) -> ApiKey:
 # Test 1 — simplest case: balance < model cost → pay_for_request raises 402
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_pay_for_request_raises_402_when_balance_too_low(
     integration_session: AsyncSession,
@@ -76,6 +77,7 @@ async def test_pay_for_request_raises_402_when_balance_too_low(
 # Test 2 — balance is zero
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_pay_for_request_raises_402_on_zero_balance(
     integration_session: AsyncSession,
@@ -99,6 +101,7 @@ async def test_pay_for_request_raises_402_on_zero_balance(
 # ---------------------------------------------------------------------------
 # Test 3 — all balance is reserved (total_balance = balance - reserved = 0)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_pay_for_request_raises_402_when_all_balance_reserved(
@@ -162,6 +165,7 @@ async def test_balance_info_matches_chat_available_balance(
 # Test 4 — balance just one msat below model cost
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_pay_for_request_raises_402_one_msat_short(
     integration_session: AsyncSession,
@@ -179,13 +183,14 @@ async def test_pay_for_request_raises_402_one_msat_short(
 
     assert exc_info.value.status_code == 402
     await integration_session.refresh(key)
-    assert key.balance == model_cost - 1   # untouched
+    assert key.balance == model_cost - 1  # untouched
     assert key.reserved_balance == 0
 
 
 # ---------------------------------------------------------------------------
 # Test 5 — balance exactly equal to model cost → succeeds
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_pay_for_request_succeeds_when_balance_equals_cost(
@@ -204,7 +209,7 @@ async def test_pay_for_request_succeeds_when_balance_equals_cost(
 
     await integration_session.refresh(key)
     assert key.reserved_balance == model_cost
-    assert key.balance == model_cost   # balance unchanged, only reserved goes up
+    assert key.balance == model_cost  # balance unchanged, only reserved goes up
 
 
 @pytest.mark.asyncio
@@ -238,6 +243,7 @@ async def test_full_model_maximum_is_required_and_reserved(
 # HTTP layer returns 402 JSON with the right shape
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_http_402_response_shape_on_insufficient_balance(
     integration_client: AsyncClient,
@@ -252,6 +258,8 @@ async def test_http_402_response_shape_on_insufficient_balance(
     """
     from unittest.mock import AsyncMock, MagicMock
 
+    from routstr.payment.models import Pricing
+
     model_cost = 622_888
     user_balance = 20_320
 
@@ -259,9 +267,10 @@ async def test_http_402_response_shape_on_insufficient_balance(
     integration_session.add(key)
     await integration_session.commit()
 
-    # Minimal model stub so proxy routing doesn't 400 before reaching balance check
-    mock_model = MagicMock()
-    mock_model.sats_pricing = None
+    mock_model = MagicMock(sats_pricing=Pricing(prompt=0, completion=0))
+    mock_model.top_provider = None
+    mock_model.context_length = 0
+    mock_model.usage_multipliers = None
 
     # Upstream stub — never reached because balance check fires first
     mock_upstream = MagicMock()

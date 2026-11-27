@@ -386,6 +386,7 @@ async def test_proxy_loop_surfaces_rate_limit_and_reverts_once() -> None:
             "get_candidates",
             return_value=[(MagicMock(), upstream)],
         ),
+        patch.object(proxy_module, "has_model_reservation_pricing", return_value=True),
         patch.object(
             proxy_module, "get_max_cost_for_model", AsyncMock(return_value=1_000)
         ),
