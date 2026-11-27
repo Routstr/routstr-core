@@ -35,6 +35,7 @@ export interface BalanceDetail {
   wallet_balance: number;
   user_balance: number;
   owner_balance: number;
+  withdrawable_balance?: number;
   error?: string;
   error_code?: 'rate_limited' | 'unreachable' | 'cooldown' | 'mint_error';
   retry_after_seconds?: number;

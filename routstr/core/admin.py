@@ -25,10 +25,12 @@ from ..payment.models import (
 from ..payment.rates import BILLABLE_PRICING_FIELDS, coerce_rate
 from ..proxy import get_candidates, refresh_model_maps, reinitialize_upstreams
 from ..wallet import (
+    InsufficientOwnerCashuBalance,
     get_cached_balances,
-    invalidate_balance_cache,
-    send_token,
+    send_token_from_owner_locked,
     token_mint_url,
+    wallet_operation_guard,
+    with_withdrawable_balances,
 )
 from . import vault
 from .db import (
@@ -246,7 +248,7 @@ async def get_balances_api(
     request: Request, refresh: bool = False
 ) -> list[dict[str, object]]:
     balance_details, _tw, _tu, _ow = await get_cached_balances(force_refresh=refresh)
-    return [dict(d) for d in balance_details]
+    return [dict(d) for d in await with_withdrawable_balances(balance_details)]
 
 
 @admin_router.get("/api/settings", dependencies=[Depends(require_admin_api)])
@@ -504,19 +506,23 @@ async def withdraw(
             status_code=400, detail="Withdrawal amount must be positive"
         )
 
+    if withdraw_request.unit not in ("sat", "msat"):
+        raise HTTPException(status_code=400, detail="Unsupported Cashu unit")
+
     try:
-        token = await send_token(
-            withdraw_request.amount, withdraw_request.unit, effective_mint
-        )
+        async with wallet_operation_guard():
+            token = await send_token_from_owner_locked(
+                withdraw_request.amount,
+                withdraw_request.unit,
+                effective_mint,
+                fallback_on_owner_shortfall=True,
+            )
+    except InsufficientOwnerCashuBalance as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     except ValueError as error:
         if str(error).startswith("Too many small coins"):
             raise HTTPException(status_code=400, detail=str(error)) from error
-        if not str(error).startswith("No trusted mint has "):
-            raise
-        raise HTTPException(
-            status_code=400, detail="Insufficient wallet balance"
-        ) from error
-    invalidate_balance_cache()
+        raise
     actual_mint = token_mint_url(token, effective_mint)
     await store_cashu_transaction(
         token=token,

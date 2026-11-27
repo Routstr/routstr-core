@@ -21,7 +21,7 @@ async def test_withdraw_uses_effective_mint_and_records_outgoing_transaction(
     send_token = AsyncMock(return_value=token)
     store_transaction = AsyncMock(return_value=True)
 
-    monkeypatch.setattr(admin, "send_token", send_token)
+    monkeypatch.setattr(admin, "send_token_from_owner_locked", send_token)
     monkeypatch.setattr(admin, "token_mint_url", Mock(return_value=effective_mint))
     monkeypatch.setattr(admin, "store_cashu_transaction", store_transaction)
     monkeypatch.setattr(admin.settings, "primary_mint", primary_mint)
@@ -32,7 +32,9 @@ async def test_withdraw_uses_effective_mint_and_records_outgoing_transaction(
     )
 
     assert result == {"token": token, "mint_url": effective_mint}
-    send_token.assert_awaited_once_with(75, "sat", effective_mint)
+    send_token.assert_awaited_once_with(
+        75, "sat", effective_mint, fallback_on_owner_shortfall=True
+    )
     store_transaction.assert_awaited_once_with(
         token=token,
         amount=75,
@@ -51,7 +53,9 @@ async def test_withdraw_propagates_audit_storage_failure(
     mint = "https://primary.example"
     token = "cashuBrecoverable"
 
-    monkeypatch.setattr(admin, "send_token", AsyncMock(return_value=token))
+    monkeypatch.setattr(
+        admin, "send_token_from_owner_locked", AsyncMock(return_value=token)
+    )
     monkeypatch.setattr(admin, "token_mint_url", Mock(return_value=mint))
     monkeypatch.setattr(
         admin,
@@ -65,12 +69,12 @@ async def test_withdraw_propagates_audit_storage_failure(
 
 
 @pytest.mark.asyncio
-async def test_withdraw_falls_back_from_insufficient_preferred_mint(
+async def test_withdraw_falls_back_past_customer_backed_mint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requested_mint = "https://primary.example"
     actual_mint = "https://secondary.example"
-    proofs = [SimpleNamespace(amount=100, reserved=False, id="00")]
+    proofs = [SimpleNamespace(amount=75, reserved=False, id="00")]
     token_payload = {
         "token": [
             {
@@ -87,23 +91,32 @@ async def test_withdraw_falls_back_from_insufficient_preferred_mint(
         ],
         "unit": "sat",
     }
-    token = "cashuA" + base64.urlsafe_b64encode(
-        json.dumps(token_payload).encode()
-    ).decode()
+    token = (
+        "cashuA" + base64.urlsafe_b64encode(json.dumps(token_payload).encode()).decode()
+    )
     wallet = SimpleNamespace(
-        keysets={},
-        proofs=proofs,
-        select_to_send=AsyncMock(return_value=(proofs, 0)),
+        active_proofs=Mock(return_value=proofs),
+        split=AsyncMock(),
         serialize_proofs=AsyncMock(return_value=token),
         set_reserved_for_send=AsyncMock(),
     )
-    find_funded = AsyncMock(return_value=actual_mint)
+    customer_wallet = Mock(serialize_proofs=AsyncMock())
+    get_wallet = AsyncMock(side_effect=[customer_wallet, wallet])
     store_transaction = AsyncMock(return_value=True)
 
-    monkeypatch.setattr(wallet_module, "find_trusted_mint_with_funds", find_funded)
-    monkeypatch.setattr(wallet_module, "get_wallet", AsyncMock(return_value=wallet))
+    monkeypatch.setattr(admin.settings, "primary_mint", requested_mint)
+    monkeypatch.setattr(admin.settings, "cashu_mints", [requested_mint, actual_mint])
+    monkeypatch.setattr(wallet_module, "get_wallet", get_wallet)
     monkeypatch.setattr(
         wallet_module, "get_proofs_per_mint_and_unit", Mock(return_value=proofs)
+    )
+    monkeypatch.setattr(
+        wallet_module, "slow_filter_spend_proofs", AsyncMock(return_value=proofs)
+    )
+    monkeypatch.setattr(
+        wallet_module,
+        "_owner_balance_for_mint_and_unit",
+        AsyncMock(side_effect=[0, 75]),
     )
     monkeypatch.setattr(admin, "store_cashu_transaction", store_transaction)
 
@@ -112,10 +125,14 @@ async def test_withdraw_falls_back_from_insufficient_preferred_mint(
     )
 
     assert result == {"token": token, "mint_url": actual_mint}
-    find_funded.assert_awaited_once_with(
-        75, "sat", requested_mint, force_reload=True
-    )
-    wallet.select_to_send.assert_awaited_once()
+    assert [call.args[0] for call in get_wallet.await_args_list] == [
+        requested_mint,
+        actual_mint,
+    ]
+    assert all(call.kwargs["force_reload"] for call in get_wallet.await_args_list)
+    customer_wallet.serialize_proofs.assert_not_awaited()
+    wallet.split.assert_not_awaited()
+    wallet.set_reserved_for_send.assert_awaited_once_with(proofs, reserved=True)
     store_transaction.assert_awaited_once_with(
         token=token,
         amount=75,
@@ -128,24 +145,21 @@ async def test_withdraw_falls_back_from_insufficient_preferred_mint(
 
 
 @pytest.mark.asyncio
-async def test_withdraw_maps_true_aggregate_insufficient_funds_to_400(
+async def test_withdraw_maps_insufficient_owner_funds_to_400(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        admin,
-        "send_token",
-        AsyncMock(
-            side_effect=ValueError(
-                "No trusted mint has 75 sat available; balances={'mint': 0}"
-            )
-        ),
+    send = AsyncMock(
+        side_effect=wallet_module.InsufficientOwnerCashuBalance(
+            "Insufficient withdrawable owner balance"
+        )
     )
+    monkeypatch.setattr(admin, "send_token_from_owner_locked", send)
 
     with pytest.raises(HTTPException) as exc_info:
         await admin.withdraw(Mock(), admin.WithdrawRequest(amount=75))
 
     assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == "Insufficient wallet balance"
+    assert exc_info.value.detail == "Insufficient withdrawable owner balance"
 
 
 @pytest.mark.asyncio
@@ -153,7 +167,11 @@ async def test_withdraw_reports_too_many_small_coins_as_400(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     message = "Too many small coins: selected proofs cover 86648 sat after swap fees"
-    monkeypatch.setattr(admin, "send_token", AsyncMock(side_effect=ValueError(message)))
+    monkeypatch.setattr(
+        admin,
+        "send_token_from_owner_locked",
+        AsyncMock(side_effect=ValueError(message)),
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         await admin.withdraw(Mock(), admin.WithdrawRequest(amount=87628))
