@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlmodel import col, select
 
-from .algorithm import create_model_mappings
+from .algorithm import candidate_routing_sort_key, create_model_mappings
 from .auth import (
     ReservationSnapshot,
     pay_for_request,
@@ -37,11 +37,13 @@ from .core.middleware import mark
 from .core.not_found import build_not_found_response
 from .core.settings import settings
 from .payment.helpers import (
+    RequestBodyEstimateCache,
     calculate_discounted_max_cost,
     check_token_balance,
     create_error_response,
     create_upstream_error_response,
     get_max_cost_for_model,
+    use_request_body_estimates,
 )
 from .payment.image_pricing import (
     ImageRequestRefused,
@@ -176,6 +178,17 @@ def get_upstreams() -> list[BaseUpstreamProvider]:
         List of upstream provider instances
     """
     return _upstreams
+
+
+def _resolved_candidate_alias(model_id: str) -> str:
+    """Return the alias key whose priority tiers produced the candidate list."""
+    model_id_lower = model_id.lower()
+    if model_id_lower in _provider_map:
+        return model_id_lower
+    base_model_id = re.sub(r"-\d{8}$", "", model_id_lower)
+    if base_model_id in _provider_map:
+        return base_model_id
+    return model_id_lower
 
 
 def get_candidates(
@@ -1079,22 +1092,55 @@ async def _proxy(
         # re-sent: one candidate, one POST, settle or refund.
         candidates = candidates[:1]
 
-    # Reserve/max-cost checks use the best-ranked candidate; the failover loop
-    # below rebinds (model_obj, upstream) per candidate so forwarding and
-    # settlement always use the model of the provider actually being tried.
-    model_obj = candidates[0][0]
+    # Re-rank equal request candidates on the reservation this request will
+    # actually require. Alias priority and provider penalties stay identical to
+    # catalog routing; only the static single-completion ceiling is replaced.
+    request_priced_candidates: list[
+        tuple[Model, BaseUpstreamProvider, int, dict[str, Any]]
+    ] = []
+    request_estimates = RequestBodyEstimateCache(request_body_dict)
+    for candidate_model, candidate_upstream in candidates:
+        candidate_envelope = await get_max_cost_for_model(
+            model=model_id, session=session, model_obj=candidate_model
+        )
+        candidate_pricing = build_pricing_trail(candidate_model, candidate_envelope)
+        with use_request_body_estimates(request_estimates):
+            candidate_reservation = await calculate_discounted_max_cost(
+                candidate_envelope,
+                request_body_dict,
+                model_obj=candidate_model,
+                path=path,
+                pricing_trail=candidate_pricing,
+            )
+        request_priced_candidates.append(
+            (
+                candidate_model,
+                candidate_upstream,
+                candidate_reservation,
+                candidate_pricing,
+            )
+        )
 
-    _max_cost_for_model = await get_max_cost_for_model(
-        model=model_id, session=session, model_obj=model_obj
-    )
-    pricing_trail = build_pricing_trail(model_obj, _max_cost_for_model)
-    max_cost_for_model = await calculate_discounted_max_cost(
-        _max_cost_for_model,
-        request_body_dict,
-        model_obj=model_obj,
-        path=path,
-        pricing_trail=pricing_trail,
-    )
+    if (
+        len({candidate[2] for candidate in request_priced_candidates}) > 1
+        and request_body_dict
+        and not settings.fixed_pricing
+    ):
+        alias = _resolved_candidate_alias(model_id)
+        request_priced_candidates.sort(
+            key=lambda candidate: candidate_routing_sort_key(
+                candidate[0],
+                candidate[1],
+                alias,
+                reservation_score=float(candidate[2]),
+            ),
+            reverse=True,
+        )
+
+    candidates = [
+        (model, upstream) for model, upstream, _, _ in request_priced_candidates
+    ]
+    model_obj, _, max_cost_for_model, pricing_trail = request_priced_candidates[0]
 
     check_token_balance(
         headers, request_body_dict, max_cost_for_model, pricing=pricing_trail
@@ -1275,17 +1321,8 @@ async def _proxy(
             # must be re-reserved at its own max cost before it is tried. A
             # candidate whose envelope the key cannot cover is rejected, just
             # as it would be had it been ranked first.
-            candidate_max = await get_max_cost_for_model(
-                model=model_id, session=session, model_obj=model_obj
-            )
-            candidate_pricing = build_pricing_trail(model_obj, candidate_max)
-            candidate_max = await calculate_discounted_max_cost(
-                candidate_max,
-                request_body_dict,
-                model_obj=model_obj,
-                path=path,
-                pricing_trail=candidate_pricing,
-            )
+            candidate_max = request_priced_candidates[i][2]
+            candidate_pricing = request_priced_candidates[i][3]
             if candidate_max > max_cost_for_model:
                 await revert_pay_for_request(
                     key, session, max_cost_for_model, reservation_snapshot

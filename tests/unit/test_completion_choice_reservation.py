@@ -18,6 +18,7 @@ from routstr.core.settings import settings  # noqa: E402
 from routstr.payment.helpers import (  # noqa: E402
     calculate_discounted_max_cost,
     completion_choice_count,
+    generated_completion_count,
 )
 from routstr.payment.models import Pricing  # noqa: E402
 
@@ -49,13 +50,15 @@ def _body(**fields: Any) -> dict[str, Any]:
     }
 
 
-async def _reservation(body: dict[str, Any]) -> int:
+async def _reservation(body: dict[str, Any], path: str = "chat/completions") -> int:
     with (
         patch.object(settings, "fixed_pricing", False),
         patch.object(settings, "tolerance_percentage", 0),
         patch.object(settings, "min_request_msat", 1),
     ):
-        return await calculate_discounted_max_cost(MAX_COST_MSATS, body, _model())
+        return await calculate_discounted_max_cost(
+            MAX_COST_MSATS, body, _model(), path=path
+        )
 
 
 @pytest.mark.asyncio
@@ -95,3 +98,40 @@ async def test_reservation_covers_n_capped_completions() -> None:
 )
 def test_completion_choice_count(fields: dict[str, Any], expected: int) -> None:
     assert completion_choice_count(fields) == expected
+
+
+@pytest.mark.asyncio
+async def test_legacy_completion_batch_reserves_each_prompt_choice() -> None:
+    body = {
+        "model": "gpt-4o",
+        "prompt": ["one", "two", "three"],
+        "max_tokens": 1000,
+        "n": 4,
+    }
+    reserved = await _reservation(body, path="v1/completions")
+
+    assert generated_completion_count(body, "v1/completions") == 12
+    assert reserved >= 12 * 1000 * COMPLETION_SATS * 1000
+
+
+@pytest.mark.asyncio
+async def test_legacy_token_id_prompt_is_not_treated_as_a_batch() -> None:
+    body = {
+        "model": "gpt-4o",
+        "prompt": [101, 102, 103],
+        "max_tokens": 1000,
+        "n": 4,
+    }
+    single = await _reservation({**body, "n": 1}, path="completions")
+    multi = await _reservation(body, path="completions")
+
+    assert generated_completion_count(body, "completions") == 4
+    assert multi - single == 3 * 1000 * COMPLETION_SATS * 1000
+
+
+def test_prompt_batching_does_not_affect_other_completion_endpoints() -> None:
+    body = {"prompt": ["one", "two", "three"], "n": 4}
+
+    assert generated_completion_count(body, "chat/completions") == 4
+    assert generated_completion_count(body, "responses") == 4
+    assert generated_completion_count(body, "messages") == 4
