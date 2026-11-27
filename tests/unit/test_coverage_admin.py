@@ -41,17 +41,16 @@ async def test_withdraw_rejects_negative_amount() -> None:
 
 @pytest.mark.asyncio
 async def test_withdraw_rejects_insufficient_balance() -> None:
-    """withdraw returns 400 when wallet balance is insufficient."""
+    """withdraw returns 400 when owner balance is insufficient."""
     from routstr.core.admin import WithdrawRequest, withdraw
+    from routstr.wallet import InsufficientOwnerCashuBalance
 
     request = Request(scope={"type": "http", "method": "POST"})
 
     with patch(
-        "routstr.core.admin.send_token",
+        "routstr.core.admin.send_token_from_owner_locked",
         new=AsyncMock(
-            side_effect=ValueError(
-                "No trusted mint has 1000000 sat available; balances={}"
-            )
+            side_effect=InsufficientOwnerCashuBalance("Insufficient owner balance")
         ),
     ):
         with pytest.raises(HTTPException) as exc_info:
@@ -127,6 +126,7 @@ async def test_admin_login_requires_payload() -> None:
     import inspect
 
     from routstr.core.admin import admin_login
+
     sig = inspect.signature(admin_login)
     params = list(sig.parameters.keys())
     assert "request" in params

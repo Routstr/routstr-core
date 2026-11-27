@@ -25,6 +25,7 @@ from routstr.core.db import (
     total_user_liability,
 )
 from routstr.payment.lnurl import LNURLError, MeltOutcomeAmbiguousError
+from routstr.wallet import with_withdrawable_balances
 
 KEY_HASH = "refundclaimkey"
 ADDRESS = "user@ln.example.com"
@@ -878,6 +879,13 @@ async def test_liability_covers_claims_until_they_resolve(
     await integration_session.commit()
     expected = BALANCE_MSATS if counted else 0
     assert await total_user_liability(integration_session) == expected
+
+    sats = BALANCE_MSATS // 1000
+    with patch.object(refund.settings, "cashu_mints", [claim.mint_url]):
+        [row] = await with_withdrawable_balances(
+            [{"mint_url": claim.mint_url, "unit": "sat", "wallet_balance": sats}]
+        )
+    assert row["withdrawable_balance"] == (0 if counted else sats)
 
 
 @pytest.mark.asyncio

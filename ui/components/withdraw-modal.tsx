@@ -2,7 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { WalletService, BalanceDetail } from '@/lib/api/services/wallet';
+import {
+  WalletService,
+  type BalanceDetail,
+  type WithdrawResponse,
+} from '@/lib/api/services/wallet';
 import {
   Dialog,
   DialogContent,
@@ -43,24 +47,26 @@ export function WithdrawModal({
 }: WithdrawModalProps) {
   const [selectedMintUnit, setSelectedMintUnit] = useState('');
   const [amount, setAmount] = useState('');
-  const [withdrawnToken, setWithdrawnToken] = useState('');
+  const [receipt, setReceipt] = useState<WithdrawResponse>();
+  const withdrawnToken = receipt?.token ?? '';
   const [confirmedSaved, setConfirmedSaved] = useState(false);
   const { copied: copiedToken, copy } = useCopyToClipboard();
 
   const availableBalances = balances.filter(
-    (b) => !b.error && b.wallet_balance > 0
+    (b) => !b.error && (b.withdrawable_balance ?? 0) > 0
   );
-
   const selectedBalance = availableBalances.find(
     (b) => `${b.mint_url}|${b.unit}` === selectedMintUnit
   );
+  const maximum = selectedBalance?.withdrawable_balance ?? 0;
+  const amountNum = Number(amount);
+  const validAmount =
+    Number.isSafeInteger(amountNum) && amountNum > 0 && amountNum <= maximum;
 
   const withdrawMutation = useMutation({
     mutationFn: async () => {
-      if (!selectedBalance) throw new Error('No balance selected');
-      const amountNum = parseInt(amount);
-      if (isNaN(amountNum) || amountNum <= 0) {
-        throw new Error('Invalid amount');
+      if (!selectedBalance || !validAmount) {
+        throw new Error('Enter an amount within the available owner balance.');
       }
       return WalletService.withdraw(
         amountNum,
@@ -69,43 +75,42 @@ export function WithdrawModal({
       );
     },
     onSuccess: (data) => {
-      setWithdrawnToken(data.token);
+      setReceipt(data);
       onSuccess?.();
     },
   });
 
-  useEffect(() => {
-    if (selectedBalance) {
-      const recommendedAmount =
-        selectedBalance.owner_balance > 0 ? selectedBalance.owner_balance : 0;
-      setAmount(recommendedAmount.toString());
-    }
-  }, [selectedBalance]);
+  const selectMint = (value: string) => {
+    const balance = availableBalances.find(
+      (b) => `${b.mint_url}|${b.unit}` === value
+    );
+    setSelectedMintUnit(value);
+    setAmount(String(balance?.withdrawable_balance ?? ''));
+    withdrawMutation.reset();
+  };
 
   useEffect(() => {
     if (!open) {
-      setWithdrawnToken('');
+      setReceipt(undefined);
       setAmount('');
       setSelectedMintUnit('');
       setConfirmedSaved(false);
     }
   }, [open]);
 
-  // The token is a bearer instrument. Escape, backdrop, X and drag-dismiss all
-  // route through here; none of them may destroy it before the user confirms.
+  // Don't dismiss an in-flight withdrawal or an unsaved bearer token.
   const handleOpenChange = (next: boolean) => {
-    if (!next && withdrawnToken && !confirmedSaved) return;
+    if (
+      !next &&
+      (withdrawMutation.isPending || (withdrawnToken && !confirmedSaved))
+    ) {
+      return;
+    }
     onOpenChange(next);
   };
 
   const handleDownloadToken = () =>
     downloadText(`cashu-token-${Date.now()}.txt`, withdrawnToken);
-
-  const amountNum = parseInt(amount) || 0;
-  const showWarning =
-    selectedBalance &&
-    amountNum > selectedBalance.owner_balance &&
-    amountNum <= selectedBalance.wallet_balance;
 
   if (withdrawnToken) {
     return (
@@ -116,8 +121,8 @@ export function WithdrawModal({
           <DialogHeader>
             <DialogTitle>Withdrawal complete</DialogTitle>
             <DialogDescription>
-              This token is the money. Anyone holding it can redeem it, so save
-              it before closing.
+              Save this token before closing. Anyone holding it can redeem it.
+              Issued by {receipt?.mint_url}.
             </DialogDescription>
           </DialogHeader>
 
@@ -191,21 +196,30 @@ export function WithdrawModal({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className='sm:max-w-md'>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent
+        className='sm:max-w-md'
+        showCloseButton={!withdrawMutation.isPending}
+      >
         <DialogHeader>
-          <DialogTitle>Withdraw Balance</DialogTitle>
+          <DialogTitle>Withdraw Owner Funds</DialogTitle>
           <DialogDescription>
-            Select mint and currency, then enter the amount to withdraw.
+            Customer funds are reserved for refunds and cannot be withdrawn.
           </DialogDescription>
         </DialogHeader>
 
         <div className='space-y-4'>
+          {availableBalances.length === 0 && (
+            <p className='text-muted-foreground text-sm'>
+              No owner funds are currently available to withdraw.
+            </p>
+          )}
           <div className='space-y-2'>
             <Label htmlFor='mint-select'>Mint / Currency</Label>
             <Select
-              value={selectedMintUnit}
-              onValueChange={setSelectedMintUnit}
+              value={selectedBalance ? selectedMintUnit : ''}
+              onValueChange={selectMint}
+              disabled={!availableBalances.length || withdrawMutation.isPending}
             >
               <SelectTrigger id='mint-select'>
                 <SelectValue placeholder='Select mint and currency' />
@@ -219,7 +233,8 @@ export function WithdrawModal({
                     {balance.mint_url
                       .replace('https://', '')
                       .replace('http://', '')}{' '}
-                    • {balance.unit.toUpperCase()} ({balance.owner_balance})
+                    • {balance.unit.toUpperCase()} (
+                    {balance.withdrawable_balance})
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -231,37 +246,27 @@ export function WithdrawModal({
             <Input
               id='amount'
               type='number'
-              min='1'
+              min={1}
+              max={maximum}
+              step={1}
               value={amount}
+              disabled={!selectedBalance || withdrawMutation.isPending}
+              aria-describedby={
+                selectedBalance ? 'owner-withdrawal-limit' : undefined
+              }
               onChange={(e) => setAmount(e.target.value)}
               placeholder='Enter amount'
             />
             {selectedBalance && (
-              <div className='space-y-1 text-xs'>
-                <p className='text-muted-foreground'>
-                  Maximum:{' '}
-                  <span className='font-semibold'>
-                    {selectedBalance.wallet_balance} {selectedBalance.unit}
-                  </span>
-                </p>
-                <p className='text-muted-foreground'>
-                  Your recommended balance:{' '}
-                  <span className='font-semibold'>
-                    {selectedBalance.owner_balance} {selectedBalance.unit}
-                  </span>
-                </p>
-              </div>
+              <p
+                id='owner-withdrawal-limit'
+                className='text-muted-foreground text-xs'
+              >
+                Available before mint fees: {maximum} {selectedBalance.unit}.
+                The node checks the current balance when you withdraw.
+              </p>
             )}
           </div>
-
-          {showWarning && (
-            <Alert variant='destructive'>
-              <AlertCircle className='h-5 w-5' />
-              <AlertDescription>
-                Warning: Withdrawing more than your balance will use user funds.
-              </AlertDescription>
-            </Alert>
-          )}
 
           {withdrawMutation.isError && (
             <Alert variant='destructive'>
@@ -279,18 +284,14 @@ export function WithdrawModal({
             <Button
               onClick={() => withdrawMutation.mutate()}
               disabled={
-                !selectedMintUnit ||
-                !amount ||
-                withdrawMutation.isPending ||
-                amountNum <= 0 ||
-                (selectedBalance && amountNum > selectedBalance.wallet_balance)
+                !selectedBalance || !validAmount || withdrawMutation.isPending
               }
               className='flex-1'
             >
               {withdrawMutation.isPending ? 'Withdrawing...' : 'Withdraw'}
             </Button>
             <Button
-              onClick={() => onOpenChange(false)}
+              onClick={() => handleOpenChange(false)}
               variant='outline'
               disabled={withdrawMutation.isPending}
               className='w-full sm:w-auto'

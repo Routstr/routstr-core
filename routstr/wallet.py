@@ -726,11 +726,7 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
 
 
 async def _send_locked(
-    amount: int,
-    unit: str,
-    mint_url: str | None = None,
-    *,
-    owner_only: bool = False,
+    amount: int, unit: str, mint_url: str | None = None
 ) -> tuple[int, str]:
     effective_mint_url = await find_trusted_mint_with_funds(
         amount, unit, mint_url, force_reload=True
@@ -740,12 +736,6 @@ async def _send_locked(
         wallet, effective_mint_url, unit, not_reserved=True
     )
     proofs_for_mint = sum(proof.amount for proof in proofs)
-    if owner_only:
-        owner_balance = await _owner_balance_for_mint_and_unit(
-            effective_mint_url, unit, proofs_for_mint
-        )
-        if owner_balance < amount:
-            raise ValueError("Owner Cashu balance is insufficient for auto top-up")
     all_proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
     reserved_for_mint = sum(p.amount for p in all_proofs if p.reserved)
 
@@ -783,15 +773,19 @@ async def _send_locked(
         send_proofs = _largest_proofs_first(wallet, proofs, amount)
         if sum(proof.amount for proof in send_proofs) != amount:
             _, send_proofs = await wallet.split(send_proofs, amount)
+    return amount, await _reserve_send_token(wallet, send_proofs)
+
+
+async def _reserve_send_token(wallet: Wallet, proofs: list[Proof]) -> str:
     try:
         token = await wallet.serialize_proofs(
-            send_proofs, include_dleq=False, legacy=False, memo=None
+            proofs, include_dleq=False, legacy=False, memo=None
         )
     except Exception:
-        await wallet.set_reserved_for_send(send_proofs, reserved=False)
+        await wallet.set_reserved_for_send(proofs, reserved=False)
         raise
-    await wallet.set_reserved_for_send(send_proofs, reserved=True)
-    return amount, token
+    await wallet.set_reserved_for_send(proofs, reserved=True)
+    return token
 
 
 async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str:
@@ -799,11 +793,59 @@ async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str
     return token
 
 
+class InsufficientOwnerCashuBalance(ValueError):
+    """No trusted mint can fund the send and any split fee from owner surplus."""
+
+
 async def send_token_from_owner_locked(
-    amount: int, unit: str, mint_url: str | None = None
+    amount: int,
+    unit: str,
+    mint_url: str | None = None,
+    *,
+    fallback_on_owner_shortfall: bool = False,
 ) -> str:
-    _, token = await _send_locked(amount, unit, mint_url, owner_only=True)
-    return token
+    """Select and reserve an owner-funded token under the caller's wallet lock."""
+    selection_error: ValueError | None = None
+    async for mint, wallet, proofs in _trusted_wallets_for_send(
+        unit, mint_url, force_reload=True
+    ):
+        if sum(p.amount for p in proofs) < amount:
+            continue
+        try:
+            proofs = await slow_filter_spend_proofs(
+                proofs, wallet, retry_on_rate_limit=False
+            )
+        except Exception as error:
+            if not (is_mint_connection_error(error) or is_mint_rate_limited(error)):
+                raise
+            if not fallback_on_owner_shortfall:
+                break
+            continue
+        surplus = await _owner_balance_for_mint_and_unit(
+            mint, unit, sum(p.amount for p in proofs)
+        )
+        if surplus < amount:
+            if not fallback_on_owner_shortfall:
+                break
+            continue
+        try:
+            send_proofs = _largest_proofs_first(wallet, proofs, amount)
+        except ValueError as error:
+            selection_error = error
+            if not fallback_on_owner_shortfall:
+                break
+            continue
+        if sum(p.amount for p in send_proofs) != amount:
+            # A split burns the input fee out of the node's kept proofs.
+            if amount + wallet.get_fees_for_proofs(send_proofs) > surplus:
+                if not fallback_on_owner_shortfall:
+                    break
+                continue
+            _, send_proofs = await wallet.split(send_proofs, amount)
+        return await _reserve_send_token(wallet, send_proofs)
+    if selection_error is not None:
+        raise selection_error
+    raise InsufficientOwnerCashuBalance("Insufficient withdrawable owner balance")
 
 
 class Bolt11PaymentNotAttempted(Exception):
@@ -900,13 +942,23 @@ async def _owner_balance_for_mint_and_unit(
         )
         total_liability = await db.total_user_liability(session)
     proofs_msats = _to_msats(proofs_balance, unit)
-    surplus_msats = min(
-        proofs_msats - mint_liability,
-        proofs_msats + others_msats - total_liability,
+    return _owner_surplus(
+        unit, proofs_msats, proofs_msats + others_msats, mint_liability, total_liability
     )
-    # Cashu ``sat`` proofs are whole sats.
-    surplus = _msats_to_sats(surplus_msats) if unit == "sat" else surplus_msats
-    return max(0, surplus)
+
+
+def _owner_surplus(
+    unit: str,
+    proofs_msats: int,
+    total_proofs_msats: int,
+    mint_liability_msats: int,
+    total_liability_msats: int,
+) -> int:
+    surplus = min(
+        proofs_msats - mint_liability_msats,
+        total_proofs_msats - total_liability_msats,
+    )
+    return max(0, _msats_to_sats(surplus) if unit == "sat" else surplus)
 
 
 async def maximum_owner_cashu_balance_sats() -> int:
@@ -1191,15 +1243,27 @@ async def find_trusted_mint_with_funds(
     force_reload: bool = False,
 ) -> str:
     """Choose a trusted mint that can cover a refund without waiting on cooldown."""
-    trusted = list(dict.fromkeys([settings.primary_mint, *settings.cashu_mints]))
-    candidates: list[str] = []
-    if preferred_mint in trusted:
-        candidates.append(preferred_mint)
-    candidates.extend(mint for mint in trusted if mint not in candidates)
-
     balances: dict[str, int] = {}
-    for mint_url in candidates:
-        if mint_cooldown_remaining(mint_url) > 0:
+    async for mint_url, _, proofs in _trusted_wallets_for_send(
+        unit, preferred_mint, force_reload=force_reload
+    ):
+        balances[mint_url] = sum(proof.amount for proof in proofs)
+        if balances[mint_url] >= amount:
+            return mint_url
+    raise ValueError(
+        f"No trusted mint has {amount} {unit} available; balances={balances}"
+    )
+
+
+async def _trusted_wallets_for_send(
+    unit: str, preferred_mint: str | None, *, force_reload: bool
+) -> AsyncGenerator[tuple[str, Wallet, list[Proof]], None]:
+    trusted = list(dict.fromkeys([settings.primary_mint, *settings.cashu_mints]))
+    if preferred_mint is not None and preferred_mint in trusted:
+        trusted.remove(preferred_mint)
+        trusted.insert(0, preferred_mint)
+    for mint_url in trusted:
+        if not mint_url or mint_cooldown_remaining(mint_url) > 0:
             continue
         try:
             wallet = await get_wallet(
@@ -1210,18 +1274,10 @@ async def find_trusted_mint_with_funds(
             )
         except Exception as error:
             if is_mint_connection_error(error) or is_mint_rate_limited(error):
-                balances[mint_url] = 0
                 continue
             raise
-
         proofs = get_proofs_per_mint_and_unit(wallet, mint_url, unit, not_reserved=True)
-        balances[mint_url] = sum(proof.amount for proof in proofs)
-        if balances[mint_url] >= amount:
-            return mint_url
-
-    raise ValueError(
-        f"No trusted mint has {amount} {unit} available; balances={balances}"
-    )
+        yield mint_url, wallet, proofs
 
 
 def _trusted_destination_candidates(
@@ -1513,9 +1569,41 @@ class BalanceDetail(TypedDict, total=False):
     wallet_balance: int
     user_balance: int
     owner_balance: int
+    withdrawable_balance: int
     error: str
     error_code: str
     retry_after_seconds: float
+
+
+async def with_withdrawable_balances(
+    details: list[BalanceDetail],
+) -> list[BalanceDetail]:
+    """Project owner limits from checked proofs; issuing a token rechecks under lock."""
+    trusted = set(_mints_to_inspect())
+    available = {
+        (row["mint_url"], row["unit"]): _to_msats(row["wallet_balance"], row["unit"])
+        for row in details
+        if not row.get("error")
+        and row["mint_url"] in trusted
+        and row["unit"] in ("sat", "msat")
+        and row["wallet_balance"] > 0
+    }
+    total_available = sum(available.values())
+    limits: dict[tuple[str, str], int] = {}
+    if available:
+        async with db.create_session() as session:
+            total_liability = await db.total_user_liability(session)
+            for (mint, unit), proofs in available.items():
+                liability = await db.user_liability_for_mint_and_unit(
+                    session, mint, unit
+                )
+                limits[mint, unit] = _owner_surplus(
+                    unit, proofs, total_available, liability, total_liability
+                )
+    return [
+        {**row, "withdrawable_balance": limits.get((row["mint_url"], row["unit"]), 0)}
+        for row in details
+    ]
 
 
 _BALANCE_FETCH_RETRY_SECONDS = 60.0

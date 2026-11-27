@@ -511,30 +511,50 @@ async def test_send_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_owner_only_token_rejects_customer_backed_proofs() -> None:
+@pytest.mark.parametrize("surplus", [0, 100, 101])
+async def test_owner_send_requires_surplus_for_amount_and_split_fee(
+    surplus: int,
+) -> None:
+    from routstr.wallet import InsufficientOwnerCashuBalance
+
     mint = "http://mint:3338"
-    proof = Mock(amount=1000, reserved=False)
-    wallet = Mock(keysets={}, proofs=[proof], select_to_send=AsyncMock())
+    input_proof = Mock(amount=128, reserved=False)
+    outbound = [Mock(amount=100)]
+    wallet = Mock(
+        active_proofs=Mock(return_value=[input_proof]),
+        get_fees_for_proofs=Mock(return_value=1),
+        split=AsyncMock(return_value=([Mock(amount=27)], outbound)),
+        serialize_proofs=AsyncMock(return_value="test-token"),
+        set_reserved_for_send=AsyncMock(),
+    )
 
     with (
-        patch(
-            "routstr.wallet.find_trusted_mint_with_funds",
-            AsyncMock(return_value=mint),
-        ),
+        patch("routstr.wallet.settings.primary_mint", mint),
+        patch("routstr.wallet.settings.cashu_mints", [mint]),
         patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
         patch(
-            "routstr.wallet.get_proofs_per_mint_and_unit",
-            return_value=[proof],
+            "routstr.wallet.get_proofs_per_mint_and_unit", return_value=[input_proof]
+        ),
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            AsyncMock(return_value=[input_proof]),
         ),
         patch(
             "routstr.wallet._owner_balance_for_mint_and_unit",
-            AsyncMock(return_value=50),
+            AsyncMock(return_value=surplus),
         ),
-        pytest.raises(ValueError, match="Owner Cashu balance"),
     ):
-        await send_token_from_owner_locked(100, "sat", mint)
-
-    wallet.select_to_send.assert_not_awaited()
+        if surplus < 101:
+            with pytest.raises(InsufficientOwnerCashuBalance):
+                await send_token_from_owner_locked(100, "sat", mint)
+            wallet.split.assert_not_awaited()
+            wallet.set_reserved_for_send.assert_not_awaited()
+        else:
+            assert await send_token_from_owner_locked(100, "sat", mint) == "test-token"
+            wallet.split.assert_awaited_once_with([input_proof], 100)
+            wallet.set_reserved_for_send.assert_awaited_once_with(
+                outbound, reserved=True
+            )
 
 
 @pytest.mark.asyncio

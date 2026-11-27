@@ -24,6 +24,7 @@ input fees (``MINT_INPUT_FEE_PPK``).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import signal
@@ -122,10 +123,19 @@ class Stack:
             },
         )
         self.routstr: subprocess.Popen[bytes] | None = None
-        self.starts = 0
+        self.workers: list[subprocess.Popen[bytes]] = []
 
     def start(self, graceful_timeout: int | None = None) -> None:
-        self.starts += 1
+        self.routstr = self._start_worker(self.port, graceful_timeout)
+
+    def start_peer(self) -> str:
+        port = _free_port()
+        self._start_worker(port)
+        return f"http://127.0.0.1:{port}"
+
+    def _start_worker(
+        self, port: int, graceful_timeout: int | None = None
+    ) -> subprocess.Popen[bytes]:
         # A clean environment: provider API keys in the caller's shell would
         # otherwise be seeded as live upstreams.
         env = {
@@ -153,32 +163,36 @@ class Stack:
             "--host",
             "127.0.0.1",
             "--port",
-            str(self.port),
+            str(port),
         ]
         if graceful_timeout is not None:
             command += ["--timeout-graceful-shutdown", str(graceful_timeout)]
-        log = open(self.directory / f"routstr-{self.starts}.log", "wb")
         # The node wallet lives in the working directory; a shared one would
         # carry keysets of an earlier mint into this run. Alembic resolves its
         # script location against the working directory too.
         migrations = self.directory / "migrations"
         if not migrations.exists():
             migrations.symlink_to(ROOT / "migrations")
-        self.routstr = subprocess.Popen(
-            command,
-            cwd=self.directory,
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
+        with (self.directory / f"routstr-{len(self.workers) + 1}.log").open(
+            "wb"
+        ) as log:
+            process = subprocess.Popen(
+                command,
+                cwd=self.directory,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        self.workers.append(process)
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             try:
-                if httpx.get(f"{self.url}/v1/info", timeout=2).status_code == 200:
-                    return
+                url = f"http://127.0.0.1:{port}/v1/info"
+                if httpx.get(url, timeout=2).status_code == 200:
+                    return process
             except httpx.HTTPError:
                 pass
-            assert self.routstr.poll() is None, "routstr exited during startup"
+            assert process.poll() is None, "routstr exited during startup"
             time.sleep(0.5)
         raise AssertionError("routstr did not start")
 
@@ -225,8 +239,8 @@ class Stack:
         ]
 
     def close(self) -> None:
-        for process in (self.routstr, self.upstream):
-            if process is not None and process.poll() is None:
+        for process in (*self.workers, self.upstream):
+            if process.poll() is None:
                 process.kill()
                 process.wait(timeout=10)
 
@@ -404,6 +418,128 @@ async def test_change_and_full_charge_are_terminal_across_restarts(
     error = charged.json()["detail"]["error"]
     assert error["type"] == "token_already_spent"
     assert error["code"] == "payment_fully_charged"
+
+
+async def _admin_headers(client: httpx.AsyncClient) -> dict[str, str]:
+    response = await client.post("/admin/api/login", json={"password": ADMIN_PASSWORD})
+    return {"Authorization": f"Bearer {response.raise_for_status().json()['token']}"}
+
+
+async def _fund_customer_key(
+    client: httpx.AsyncClient, amount: int
+) -> tuple[dict[str, str], int]:
+    response = await client.post(
+        "/v1/balance/create", json={"initial_balance_token": await mint_token(amount)}
+    )
+    key = response.raise_for_status().json()
+    return {"Authorization": f"Bearer {key['api_key']}"}, key["balance"] // 1000
+
+
+async def _admin_sat_balance(
+    client: httpx.AsyncClient, headers: dict[str, str]
+) -> dict[str, Any]:
+    response = await client.get("/admin/api/balances", headers=headers)
+    [row] = [
+        row
+        for row in response.raise_for_status().json()
+        if row["mint_url"] == MINT_URL and row["unit"] == "sat"
+    ]
+    return row
+
+
+async def test_customer_only_wallet_cannot_fund_admin_withdrawal(stack: Stack) -> None:
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as client:
+        admin = await _admin_headers(client)
+        customer, sats = await _fund_customer_key(client, 16)
+        attempt = await client.post(
+            "/admin/withdraw",
+            json={"amount": sats, "mint_url": MINT_URL},
+            headers=admin,
+        )
+        assert attempt.status_code == 400
+        row = await _admin_sat_balance(client, admin)
+        assert row["wallet_balance"] == sats and row["withdrawable_balance"] == 0
+        refund = (
+            (await client.post("/v1/balance/refund", headers=customer))
+            .raise_for_status()
+            .json()
+        )
+        assert proofs_amount(refund["token"]) == int(refund["sats"]) == sats
+
+
+async def test_pending_x_cashu_payment_is_not_withdrawable(stack: Stack) -> None:
+    token = await mint_token(40)
+    pay_in_background(stack, token, *SLOW_REQUESTS[0])
+    wait_for_upstream(stack, 1)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as client:
+        admin = await _admin_headers(client)
+        row = await _admin_sat_balance(client, admin)
+        assert row["wallet_balance"] > 0 and row["withdrawable_balance"] == 0
+        attempt = await client.post(
+            "/admin/withdraw", json={"amount": 5}, headers=admin
+        )
+        assert attempt.status_code == 400
+        assert claim(stack, token).status_code == 425
+
+
+async def test_two_workers_cannot_withdraw_the_same_owner_surplus(stack: Stack) -> None:
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as client:
+        admin = await _admin_headers(client)
+        customer, customer_sats = await _fund_customer_key(client, 64)
+        paid = await client.post(
+            "/v1/chat/completions",
+            headers={"X-Cashu": await mint_token(60)},
+            json={
+                "model": MODEL,
+                "user": "greedy",
+                "max_tokens": 50,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert (
+            "X-Cashu" not in paid.raise_for_status().headers
+        )  # full charge, no liability
+        peer_url = stack.start_peer()
+        async with httpx.AsyncClient(base_url=peer_url, timeout=30) as peer:
+            # Warm both wallets so the loser must refresh proofs, not rely on the UI read.
+            for worker in (client, peer):
+                row = await _admin_sat_balance(worker, admin)
+                assert 36 <= row["withdrawable_balance"] < 72
+            claims = await asyncio.gather(
+                *(
+                    worker.post("/admin/withdraw", headers=admin, json={"amount": 36})
+                    for worker in (client, peer)
+                )
+            )
+        assert sorted(result.status_code for result in claims) == [200, 400]
+        [issued] = [result.json() for result in claims if result.is_success]
+        assert proofs_amount(issued["token"]) == 36
+
+        stack.stop(signal.SIGKILL)
+        stack.start()
+        history = await client.get(
+            "/admin/api/transactions",
+            headers=admin,
+            params={"source": "admin", "type": "out", "status": "issued"},
+        )
+        [receipt] = history.raise_for_status().json()["transactions"]
+        assert receipt["token"] == issued["token"]
+        refunded = (
+            (await client.post("/v1/balance/refund", headers=customer))
+            .raise_for_status()
+            .json()
+        )
+        assert proofs_amount(refunded["token"]) == customer_sats
+        with tempfile.TemporaryDirectory() as directory:
+            wallet = await _wallet(directory)
+            for receipt in (issued, refunded):
+                proofs = await _proofs(wallet, receipt["token"])
+                before = wallet.available_balance.amount
+                await wallet.redeem(proofs)
+                assert wallet.available_balance.amount - before == (
+                    sum(proof.amount for proof in proofs)
+                    - wallet.get_fees_for_proofs(proofs)
+                )
 
 
 def proofs_amount(token: str) -> int:

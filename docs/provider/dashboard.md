@@ -169,18 +169,13 @@ default mints preconfigured (`https://mint.minibits.cash/Bitcoin` and
 
 ---
 
-## Withdraw Tab
+## Withdraw owner funds
 
-Withdraw your profits to a Lightning wallet.
+Open **Balances → Withdraw** to issue a Cashu token from owner funds. Customer balances and pending refunds are not available for withdrawal.
 
-### Steps
-
-1. **Select Mint** — Choose which mint to withdraw from
-2. **Enter Amount** — How many sats to withdraw
-3. **Generate Token** — Creates a Cashu token
-4. **Redeem** — Paste the token into your Cashu wallet and melt to Lightning
-
-<!-- TODO: Screenshot of Withdraw tab -->
+1. Select a mint and denomination with an available owner balance.
+2. Enter the amount. The node rechecks the current surplus; a mint split fee may require a smaller amount.
+3. Save the token and redeem it in a wallet that supports the mint shown on the receipt. Find prior tokens under **Transactions → Withdrawals**.
 
 ### Alternative: Lightning Address
 

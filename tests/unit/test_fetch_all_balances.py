@@ -667,12 +667,14 @@ async def test_wallet_operation_drops_cached_balances(tmp_path: Path) -> None:
 async def test_balances_api_forwards_refresh_flag() -> None:
     from routstr.core.admin import get_balances_api
 
-    cached = AsyncMock(return_value=([{"mint_url": "m"}], 0, 0, 0))
+    row = {"mint_url": "m", "unit": "sat", "wallet_balance": 0}
+    cached = AsyncMock(return_value=([row], 0, 0, 0))
     with patch("routstr.core.admin.get_cached_balances", cached):
         polled = await get_balances_api(MagicMock())
         forced = await get_balances_api(MagicMock(), refresh=True)
 
-    assert polled == forced == [{"mint_url": "m"}]
+    assert polled == forced == [{**row, "withdrawable_balance": 0}]
+    assert "withdrawable_balance" not in row
     assert cached.await_args_list == [
         call(force_refresh=False),
         call(force_refresh=True),
