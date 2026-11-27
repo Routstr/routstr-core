@@ -187,6 +187,26 @@ def test_a_named_resolution_holds_its_variant_on_the_cheapest_endpoint() -> None
     assert image_reservation_msats(body, quoted) == _msats(0.607)
     reported = ImageUsage(image_count=1, upstream_cost_usd=0.048)
     assert settle_image_sats(quoted, body, reported) == pytest.approx(48.0)
+    # Off OpenRouter the request is not validated before it is priced.
+    unchecked = {"prompt": "x", "size": ["1K"]}
+    assert image_reservation_msats(unchecked, only_bfl) == _msats(0.607)
+
+    free_1k = _model(
+        _endpoint(
+            "p",
+            _per_image(0.0, variant="1k"),
+            _per_image(0.1, variant="4k"),
+            {"billable": "input_image", "unit": "image", "cost_usd": 0.02},
+            supported={
+                "resolution": {"type": "enum", "values": ["1K", "4K"]},
+                "input_references": {"type": "range", "min": 0, "max": 4},
+            },
+        )
+    )
+    ref = {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}
+    with_ref = {"prompt": "x", "resolution": "1K", "input_references": [ref]}
+    quoted = quote_image_endpoint(with_ref, free_1k)
+    assert image_reservation_msats(with_ref, quoted) == _msats(0.1) + _msats(0.02)
 
 
 def test_a_tag_listed_twice_is_not_quotable() -> None:

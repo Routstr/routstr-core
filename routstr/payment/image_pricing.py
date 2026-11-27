@@ -305,7 +305,7 @@ def _named_resolution(body: dict) -> str | None:
     ``size`` in its shorthand. Beside a pixel or ``auto`` size it names none,
     as the router then picks."""
     size = body.get("size")
-    if size is not None and size not in _SIZE_TIERS:
+    if size is not None and (not isinstance(size, str) or size not in _SIZE_TIERS):
         return None
     resolution = body.get("resolution")
     if isinstance(resolution, str) and resolution:

@@ -203,10 +203,11 @@ def _resolution_tiers(
     (``"1k"`` for ``"1K"``), so a request naming that resolution is billed
     it. A price without a variant, or a variant that is not a resolution
     (``low_1k``, ``high_resolution``), is not tied to anything the request
-    names: no tiers.
+    names: no tiers. Nor is a free variant: a zero hold refuses the request,
+    even when its references are paid.
     """
     labels = {value.lower(): value.upper() for value in _listed_resolutions(parameters)}
-    if not set(variants) <= set(labels):
+    if not set(variants) <= set(labels) or 0 in variants.values():
         return []
     return [
         ImagePriceTier(resolution=labels[variant], usd=usd)
