@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -7,7 +9,13 @@ import httpx
 
 from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
-from ..payment.image_pricing import ImagePriceTier, ImagePricing, ImageRequestRefused
+from ..payment.image_pricing import (
+    ImagePriceTier,
+    ImagePricing,
+    ImageRequestRefused,
+    requested_image_count,
+    resolution_label,
+)
 from ..payment.models import Architecture, Model, Pricing, TopProvider
 from . import messages_dispatch
 from .base import BaseUpstreamProvider
@@ -42,6 +50,69 @@ _ARCHITECTURES: dict[str, tuple[str, list[str], list[str]]] = {
 
 # Image options Venice bills as extra, unpublished credits.
 _UNPRICED_IMAGE_OPTIONS = ("enhance_prompt", "enable_web_search")
+
+# Venice's OpenAI-style images route makes one picture at the model's default
+# tier: it takes no resolution and ignores quality. A model's price book is the
+# native route's, so a request naming a priced tier or a batch is sent there
+# and answered in the OpenAI shape.
+_OPENAI_IMAGES_PATH = "images/generations"
+_NATIVE_IMAGES_PATH = "image/generate"
+_MAX_VARIANTS = 4
+# OpenAI fields the native route takes in another form or not at all.
+_OPENAI_IMAGE_FIELDS = frozenset(
+    {
+        "n",
+        "size",
+        "output_format",
+        "background",
+        "moderation",
+        "output_compression",
+        "quality",
+        "response_format",
+        "style",
+        "user",
+    }
+)
+
+
+def _is_openai_images(path: str) -> bool:
+    return path.rstrip("/").endswith(_OPENAI_IMAGES_PATH)
+
+
+def _native_image_request(request: dict, book: ImagePricing | None) -> dict | None:
+    """``request`` for the native route, or ``None`` if the OpenAI route makes it."""
+    quality = request.get("quality")
+    quality = quality.lower() if isinstance(quality, str) else None
+    count = requested_image_count(request)
+    resolutions = {r.upper() for r in book.resolutions} if book else set()
+    qualities = set(book.qualities) if book else set()
+    label = resolution_label(request)
+    priced = (label in resolutions and "resolution" in request) or quality in qualities
+    if not (count > 1 or priced):
+        return None
+
+    native = {k: v for k, v in request.items() if k not in _OPENAI_IMAGE_FIELDS}
+    if count > 1:
+        native["variants"] = count
+    if quality in qualities:
+        native["quality"] = quality
+    size = request.get("size")
+    width, _, height = (
+        size.lower().partition("x") if isinstance(size, str) else ("",) * 3
+    )
+    if width.isdigit() and height.isdigit():
+        native["width"], native["height"] = int(width), int(height)
+    if label in resolutions:
+        # Venice tiers a size by its long edge, the node by its area: name the
+        # tier billed so it is the one made.
+        native["resolution"] = label
+    native["format"] = request.get("output_format") or "png"
+    if request.get("background") == "transparent":
+        native["transparent_background"] = True
+    if request.get("moderation") == "low":
+        native["safe_mode"] = False
+    return native
+
 
 # Venice runs search itself and reports it back through ``venice_parameters``;
 # it has no Anthropic-shaped server tool and rejects the ``web_search_options``
@@ -260,7 +331,7 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("venice/")
 
-    def check_image_request(self, body: dict) -> None:
+    def check_image_request(self, body: dict, model: Model) -> None:
         enabled = sorted(
             field
             for field in _UNPRICED_IMAGE_OPTIONS
@@ -270,6 +341,58 @@ class VeniceUpstreamProvider(BaseUpstreamProvider):
             raise ImageRequestRefused(
                 f"Unsupported image request fields: {', '.join(enabled)}"
             )
+        if requested_image_count(body) > _MAX_VARIANTS:
+            raise ImageRequestRefused(f"Venice makes at most {_MAX_VARIANTS} images")
+        # A quality the book does not list is held at the ceiling, but Venice
+        # makes it at the model's default.
+        qualities = model.image_pricing.qualities if model.image_pricing else []
+        quality = body.get("quality")
+        if (
+            qualities
+            and quality is not None
+            and (not isinstance(quality, str) or quality.lower() not in qualities)
+        ):
+            raise ImageRequestRefused(f"quality must be one of: {', '.join(qualities)}")
+
+    def adapt_image_request(
+        self, path: str, body: bytes | None, model_obj: Model | None
+    ) -> tuple[str, bytes | None]:
+        if not _is_openai_images(path) or not body:
+            return path, body
+        try:
+            request = json.loads(body)
+        except ValueError:
+            return path, body
+        native = (
+            _native_image_request(
+                request, model_obj.image_pricing if model_obj else None
+            )
+            if isinstance(request, dict)
+            else None
+        )
+        if native is None:
+            return path, body
+        return _NATIVE_IMAGES_PATH, json.dumps(native).encode()
+
+    def adapt_image_response(
+        self, client_path: str, request_body: bytes | None, content: bytes
+    ) -> bytes:
+        if not _is_openai_images(client_path):
+            return content
+        try:
+            images = json.loads(content).get("images")
+            request = json.loads(request_body or b"{}")
+        except (ValueError, AttributeError):
+            return content
+        if not isinstance(images, list) or not isinstance(request, dict):
+            return content
+        if request.get("response_format") == "url":
+            # As the OpenAI route answers a url: the picture inline.
+            mime = f"image/{request.get('output_format') or 'png'}"
+            data = [{"url": f"data:{mime};base64,{image}"} for image in images]
+        else:
+            data = [{"b64_json": image} for image in images]
+        return json.dumps({"created": int(time.time()), "data": data}).encode()
 
     def transform_messages_stream(
         self, stream: AsyncIterator[Any]

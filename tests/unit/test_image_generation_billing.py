@@ -21,11 +21,15 @@ from routstr import proxy as proxy_module
 from routstr.auth import ReservationSnapshot, get_reservation_snapshot, pay_for_request
 from routstr.core.db import ApiKey, ModelRow, ReservationRelease
 from routstr.payment.helpers import calculate_discounted_max_cost
-from routstr.payment.image_pricing import ImagePriceTier, ImagePricing
+from routstr.payment.image_pricing import (
+    ImagePriceTier,
+    ImagePricing,
+    ImageRequestRefused,
+)
 from routstr.payment.models import Architecture, Model, Pricing, _row_to_model
 from routstr.upstream.base import BaseUpstreamProvider, _decoded_response_headers
 from routstr.upstream.openrouter import OpenRouterUpstreamProvider
-from routstr.upstream.venice import VeniceUpstreamProvider
+from routstr.upstream.venice import VeniceUpstreamProvider, _native_image_request
 
 from .proxy_test_utils import mock_request_stream, patch_proxy_session
 
@@ -617,7 +621,137 @@ async def test_venice_refuses_options_it_charges_extra_credits_for(
     forward.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_venice_refuses_a_quality_the_model_does_not_price() -> None:
+    upstream = VeniceUpstreamProvider(api_key="k")
+    request = MagicMock(method="POST", headers={"authorization": "Bearer sk-x"})
+    request.state.request_id = "req-image"
+    body = {"model": TIERED_MODEL.id, "prompt": "a cat", "n": 2, "quality": "hd"}
+    mock_request_stream(request, json.dumps(body).encode())
+
+    with (
+        patch.object(
+            proxy_module, "get_candidates", return_value=[(TIERED_MODEL, upstream)]
+        ),
+        patch.object(proxy_module, "pay_for_request", AsyncMock()) as hold,
+        patch.object(upstream, "forward_request", AsyncMock()) as forward,
+        patch_proxy_session(MagicMock()),
+    ):
+        response = await proxy_module.proxy(request, "v1/images/generations")
+
+    assert response.status_code == 400
+    assert "quality must be one of" in bytes(response.body).decode()
+    hold.assert_not_awaited()
+    forward.assert_not_awaited()
+
+
 def test_venice_forwards_those_options_when_disabled() -> None:
     upstream = VeniceUpstreamProvider(api_key="k")
-    upstream.check_image_request({"enhance_prompt": False, "enable_web_search": False})
-    upstream.check_image_request({"prompt": "a cat"})
+    upstream.check_image_request(
+        {"enhance_prompt": False, "enable_web_search": False}, IMAGE_MODEL
+    )
+    upstream.check_image_request({"prompt": "a cat"}, IMAGE_MODEL)
+
+
+@pytest.mark.asyncio
+async def test_venice_sends_a_tier_or_batch_to_its_native_route() -> None:
+    """Venice's OpenAI route makes one picture at the model's default tier."""
+    engine = await _engine()
+    native = {"id": "gen-1", "images": ["a", "b"]}
+    send = AsyncMock(
+        return_value=_upstream(json.dumps(native).encode(), "application/json")
+    )
+    body = {
+        "model": TIERED_MODEL.id,
+        "prompt": "a cat",
+        "quality": "low",
+        "n": 2,
+        "size": "1792x1024",
+        "response_format": "url",
+    }
+
+    out, snapshot = await _forward(
+        engine,
+        "v1/images/generations",
+        send.return_value,
+        model=TIERED_MODEL,
+        body=body,
+        provider=VeniceUpstreamProvider(api_key="k", provider_fee=1.0),
+        send=send,
+    )
+
+    assert send.await_args is not None
+    sent = send.await_args.args[0]
+    assert str(sent.url) == "https://api.venice.ai/api/v1/image/generate"
+    assert json.loads(sent.content) == {
+        "model": TIERED_MODEL.id,
+        "prompt": "a cat",
+        "quality": "low",
+        "variants": 2,
+        "width": 1792,
+        "height": 1024,
+        # The tier billed, so a long edge past 1536 is not made at 2K.
+        "resolution": "1K",
+        "format": "png",
+    }
+    answer = json.loads(out)
+    # As the OpenAI route answers a url: the picture inline.
+    assert answer["data"] == [
+        {"url": "data:image/png;base64,a"},
+        {"url": "data:image/png;base64,b"},
+    ]
+    _, spent, _, _ = await _ledger(engine, snapshot)
+    assert spent == math.ceil(2 * SATS_PER_IMAGE * (0.04 / 0.4) * 1000)
+
+
+@pytest.mark.asyncio
+async def test_venice_keeps_a_plain_request_on_its_openai_route() -> None:
+    engine = await _engine()
+    payload = {"created": 1, "data": [{"url": "http://x"}]}
+    send = AsyncMock(
+        return_value=_upstream(json.dumps(payload).encode(), "application/json")
+    )
+    body = {"model": IMAGE_MODEL.id, "prompt": "a cat", "response_format": "url"}
+
+    out, _ = await _forward(
+        engine,
+        "v1/images/generations",
+        send.return_value,
+        body=body,
+        provider=VeniceUpstreamProvider(api_key="k", provider_fee=1.0),
+        send=send,
+    )
+
+    assert send.await_args is not None
+    sent = send.await_args.args[0]
+    assert str(sent.url) == "https://api.venice.ai/api/v1/images/generations"
+    assert json.loads(sent.content) == body
+    assert json.loads(out) == payload
+
+
+@pytest.mark.parametrize(
+    ("book", "body", "native"),
+    [
+        # A pixel size the model does not price: made as billed.
+        (PRICE_BOOK, {"size": "1024x1024"}, None),
+        (None, {"quality": "high"}, None),
+        (
+            PRICE_BOOK,
+            {"resolution": "2K", "moderation": "low"},
+            {"resolution": "2K", "safe_mode": False, "format": "png"},
+        ),
+        (None, {"n": 2, "quality": "high"}, {"variants": 2, "format": "png"}),
+    ],
+)
+def test_venice_sends_only_what_its_openai_route_cannot_make_natively(
+    book: ImagePricing | None, body: dict, native: dict | None
+) -> None:
+    assert _native_image_request(body, book) == native
+
+
+def test_venice_refuses_more_pictures_than_it_makes() -> None:
+    upstream = VeniceUpstreamProvider(api_key="k")
+    for body in ({"n": 5}, {"n": "5"}, {"variants": 5}):
+        with pytest.raises(ImageRequestRefused):
+            upstream.check_image_request(body, IMAGE_MODEL)
+    upstream.check_image_request({"n": 4}, IMAGE_MODEL)

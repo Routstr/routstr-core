@@ -1093,8 +1093,20 @@ class BaseUpstreamProvider:
             return True
         return "openrouter.ai" in (self.base_url or "")
 
-    def check_image_request(self, body: dict) -> None:
+    def check_image_request(self, body: dict, model: Model) -> None:
         """Raise ``ImageRequestRefused`` for options the image quote does not cover."""
+
+    def adapt_image_request(
+        self, path: str, body: bytes | None, model_obj: Model | None
+    ) -> tuple[str, bytes | None]:
+        """The upstream path and body for an image request sent to ``path``."""
+        return path, body
+
+    def adapt_image_response(
+        self, client_path: str, request_body: bytes | None, content: bytes
+    ) -> bytes:
+        """An image response in the shape the route the client called answers in."""
+        return content
 
     def _apply_reasoning_effort(self, data: dict, model_obj: Model) -> bool:
         return apply_reasoning_effort(data, model_obj)
@@ -2678,7 +2690,7 @@ class BaseUpstreamProvider:
         headers["X-Routstr-Image-Count"] = str(usage.image_count)
 
         return Response(
-            content=content,
+            content=self.adapt_image_response(path, request_body, content),
             status_code=response.status_code,
             headers=headers,
             media_type=content_type,
@@ -4092,6 +4104,7 @@ class BaseUpstreamProvider:
         completion_path = _openai_completion_path(path)
         # Classify on the client route: providers may remap it upstream.
         image_generation = is_image_generation_path(path)
+        client_path = path
         path = self.normalize_request_path(path, model_obj)
         terminal_outcome = terminal_outcome_context(
             getattr(request.state, "request_id", None), model_obj
@@ -4125,8 +4138,6 @@ class BaseUpstreamProvider:
                 terminal_outcome=terminal_outcome,
             )
 
-        url = self.build_request_url(path, model_obj)
-
         original_model_id = (
             (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
         )
@@ -4136,6 +4147,11 @@ class BaseUpstreamProvider:
             model_obj,
             include_stream_usage=completion_path is not None,
         )
+        if image_generation:
+            path, transformed_body = self.adapt_image_request(
+                path, transformed_body, model_obj
+            )
+        url = self.build_request_url(path, model_obj)
 
         logger.debug(
             "Forwarding request to upstream",
@@ -4377,7 +4393,7 @@ class BaseUpstreamProvider:
                         model_obj,
                         reservation_snapshot=reservation_snapshot,
                         request_body=request_body,
-                        path=path,
+                        path=client_path,
                         terminal_outcome=terminal_outcome,
                     )
                 finally:
