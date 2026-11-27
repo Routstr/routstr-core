@@ -17,6 +17,7 @@ os.environ.setdefault("LIGHTNING_ADDRESS", "test@stm.to")
 from routstr.core.settings import settings
 from routstr.payment.cost_calculation import CostData, MaxCostData, calculate_cost
 from routstr.payment.models import Architecture, Model, Pricing
+from routstr.upstream.ehbp import _compute_ehbp_actual_cost
 
 FLAT_SATS = 7
 FLAT_MSATS = FLAT_SATS * 1000
@@ -80,6 +81,30 @@ async def test_small_usage_settles_at_flat_fee() -> None:
 
     assert result.input_tokens == 3
     assert result.output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_fee_raised_after_reservation_cannot_exceed_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "fixed_cost_per_request", 12)
+    response = {"usage": {"prompt_tokens": 3, "completion_tokens": 2}}
+
+    _assert_flat(await calculate_cost(response, FLAT_MSATS, model_obj=_priced_model()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt", "completion", "expected"), [(3, 2, FLAT_MSATS), (0, 0, 0)]
+)
+async def test_ehbp_flat_fee_is_not_raised_to_minimum(
+    monkeypatch: pytest.MonkeyPatch, prompt: int, completion: int, expected: int
+) -> None:
+    monkeypatch.setattr(settings, "min_request_msat", 9000)
+    result = await _compute_ehbp_actual_cost(
+        f"prompt={prompt},completion={completion}", _priced_model(), 9000
+    )
+    assert result["total_msats"] == expected
 
 
 @pytest.mark.asyncio

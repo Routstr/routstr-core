@@ -57,6 +57,7 @@ from ..payment.cost_calculation import (
     CostData,
     MaxCostData,
     calculate_cost,
+    flat_request_pricing_active,
     unpriced_cost,
 )
 from ..payment.helpers import create_error_response
@@ -567,8 +568,8 @@ async def _compute_ehbp_actual_cost(
 ) -> dict:
     """Compute the actual cost in msats from Tinfoil usage metrics.
 
-    When usage is present, the result is clamped to ``[min_request_msat,
-    max_cost_for_model]``. Missing or unpriceable usage returns zero: encrypted
+    When usage is present, non-flat pricing clamps the result to
+    ``[min_request_msat, max_cost_for_model]``. Missing or unpriceable usage returns zero: encrypted
     EHBP bodies cannot be estimated locally, and the authorization ceiling is
     not evidence of consumption.
 
@@ -736,7 +737,9 @@ async def _compute_ehbp_actual_cost(
             usage_presence=presence,
         )
     if isinstance(cost, CostData):
-        actual = max(int(cost.total_msats), int(settings.min_request_msat))
+        actual = int(cost.total_msats)
+        if not flat_request_pricing_active():
+            actual = max(actual, int(settings.min_request_msat))
         clamped = min(actual, max_cost_for_model)
         logger.info(
             "EHBP actual cost computed from usage metrics",

@@ -728,8 +728,15 @@ class TestFixedPricingCostRow:
         assert row["status"] == STATUS_OK, row["detail"]
         assert row["evidence"]["expected_total_msats"] == 3000 + 3500
 
+    @pytest.mark.parametrize(
+        ("prompt", "completion", "expected"), [(1000, 500, 7000), (0, 0, 0)]
+    )
     async def test_flat_request_pricing_node_certifies_ok(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        prompt: int,
+        completion: int,
+        expected: int,
     ) -> None:
         from routstr.core.settings import settings
         from routstr.payment import price as price_module
@@ -744,7 +751,11 @@ class TestFixedPricingCostRow:
         model = TestCostPromptCompletion()._model()
         payload = {
             "model": "test-model",
-            "usage": {"prompt_tokens": 1000, "completion_tokens": 500, "cost": 0.5},
+            "usage": {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "cost": 0.5,
+            },
         }
         cost_data = await calculate_cost(
             payload, 1_000_000, model_obj=model, provider_fee=1.0
@@ -759,5 +770,5 @@ class TestFixedPricingCostRow:
         )
         assert row["status"] == STATUS_OK, row["detail"]
         assert row["evidence"]["basis"] == "fixed_request_pricing"
-        assert row["evidence"]["expected_total_msats"] == 7000
-        assert row["evidence"]["actual_total_msats"] == 7000
+        assert row["evidence"]["expected_total_msats"] == expected
+        assert row["evidence"]["actual_total_msats"] == expected

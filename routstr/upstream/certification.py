@@ -764,7 +764,18 @@ def cost_prompt_completion_row(
         if flat_request_pricing_active():
             from ..core.settings import settings
 
-            expected_total = settings.fixed_cost_per_request * 1000
+            expected_total = (
+                settings.fixed_cost_per_request * 1000
+                if any(
+                    (
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_read_tokens,
+                        usage.cache_write_tokens,
+                    )
+                )
+                else 0
+            )
             expected_input = None
             expected_output = None
             basis = "fixed_request_pricing"

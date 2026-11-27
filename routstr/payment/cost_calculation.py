@@ -231,6 +231,7 @@ async def calculate_cost(
             cache_creation_tokens,
             usd_cost,
             presence,
+            max_cost,
         )
 
     # Try USD cost first
@@ -438,6 +439,7 @@ def _calculate_flat_request_cost(
     cache_creation_tokens: int,
     upstream_usd: float,
     usage_presence: UsageFieldPresence,
+    max_cost: int,
 ) -> CostData:
     """Charge the flat per-request fee, whatever the tokens or upstream cost.
 
@@ -453,9 +455,10 @@ def _calculate_flat_request_cost(
     ):
         return _empty_cost(usage_presence=usage_presence)
 
-    total_msats = settings.fixed_cost_per_request * 1000
+    # The configured fee can change while an upstream response is in flight.
+    total_msats = max(0, min(settings.fixed_cost_per_request * 1000, max_cost))
     try:
-        total_usd = settings.fixed_cost_per_request * sats_usd_price()
+        total_usd = total_msats / 1000 * sats_usd_price()
     except Exception:
         total_usd = 0.0
     # As in ``calculate_flat_cost``, the fee is shown as output so a dashboard
