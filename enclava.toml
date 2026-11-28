@@ -1,0 +1,42 @@
+# Enclava app definition for running routstr-core inside an AMD SEV-SNP enclave.
+# Deploy path: docs.enclava.dev/getting-started/manual-oci-deploy
+#
+# The image built by .github/workflows/enclava-deploy.yml (Dockerfile.enclava)
+# is the only one that satisfies this file: every entry in storage.paths below
+# is declared as a VOLUME there, because Enclava runs the container on a
+# read-only root filesystem and bind-mounts those paths from encrypted storage.
+
+[app]
+name = "routstr-core"
+port = 8000
+# Same argv as the image CMD; the venv lives at /.venv (uv sync runs before
+# WORKDIR /app) and cwd stays /app, which the node's relative paths rely on.
+command = ["/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]
+
+[storage]
+# /data            SQLite db, vault secret key, terminal-loss journal
+# /app/logs        app.log + usage_analytics.db
+# /app/.wallet     cashu proofs -- losing this loses sats, so it is encrypted
+paths = ["/data", "/app/logs", "/app/.wallet"]
+size = "5Gi"
+tls_size = "2Gi"
+
+[unlock]
+mode = "password"
+
+[resources]
+cpu = "1"
+memory = "2Gi"
+
+[health]
+# routstr has no /health route; /v1/info is the unauthenticated liveness read.
+path = "/v1/info"
+interval = 30
+timeout = 5
+
+[egress]
+# The node talks to cashu mints, Nostr relays, LLM upstreams and BTC price APIs;
+# none of them can be enumerated up front, so an allowlist is not viable.
+# `restricted` (the default) blocks all of it. Private, link-local and metadata
+# ranges stay blocked and there is no general IPv6 egress.
+mode = "public_internet"

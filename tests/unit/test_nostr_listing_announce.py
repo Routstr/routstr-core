@@ -9,6 +9,8 @@ singleton. The announcement task must therefore (a) already be running, and
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -209,3 +211,139 @@ async def test_relay_that_refuses_reads_still_receives_the_listing(
     if not readable_relay_matches:
         expected.append("wss://open")
     assert published == expected
+
+
+@pytest.mark.asyncio
+async def test_enclava_deploy_handoff_and_rotation(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A delayed mounted config rotates/removes the claim without admin edits."""
+    _quiet_settings(monkeypatch, nsec=NSEC_A)
+    monkeypatch.setattr(listing.settings, "http_url", "https://node.example.com")
+    monkeypatch.setenv("ROUTSTR_ENCLAVA_BUILD_ID", "1234-1")
+    mount = tmp_path / "ROUTSTR_ENCLAVA_LISTING"
+    monkeypatch.setattr(listing, "ENCLAVA_LISTING_FILE", mount)
+    published = _capture_publishes(monkeypatch)
+    monkeypatch.setattr(listing.settings, "relays", ["wss://relay.example"])
+    origin = "https://custom.example.com"
+    phases = [
+        ("1234-1", {origin: "a" * 64}),
+        ("1234-1", {origin: "b" * 64}),
+        ("1234-1", {}),
+    ]
+    # Persistent config from a previous build must not be used on first boot.
+    mount.write_text(json.dumps({"build_id": "older-1", "origins": {origin: "c" * 64}}))
+
+    async def query(*args: Any) -> listing.EventQueryResult:
+        return listing.EventQueryResult(published[-1:], listing.QueryStatus.COMPLETE)
+
+    async def change_config(seconds: float) -> None:
+        if not phases:
+            raise asyncio.CancelledError()
+        build, origins = phases.pop(0)
+        mount.write_text(json.dumps({"build_id": build, "origins": origins}))
+
+    monkeypatch.setattr(listing, "query_listing_events", query)
+    monkeypatch.setattr(listing.asyncio, "sleep", change_config)
+    await listing.announce_provider()
+    tags = [event["tags"] for event in published]
+    assert [[t for t in ts if t[0] == "attestation"] for ts in tags] == [
+        [],
+        [["attestation", "enclava-tee", origin, "a" * 64]],
+        [["attestation", "enclava-tee", origin, "b" * 64]],
+        [],
+    ]
+    assert ["u", origin] in tags[1] and ["u", origin] not in tags[-1]
+    assert all(["u", "https://node.example.com"] in ts for ts in tags)
+
+
+@pytest.mark.asyncio
+async def test_listing_reads_two_origins_without_an_http_url(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    _quiet_settings(monkeypatch, nsec=NSEC_A)
+    monkeypatch.setattr(listing.settings, "http_url", "")
+    monkeypatch.setenv("ROUTSTR_ENCLAVA_BUILD_ID", "1234-1")
+    mount = tmp_path / "ROUTSTR_ENCLAVA_LISTING"
+    monkeypatch.setattr(listing, "ENCLAVA_LISTING_FILE", mount)
+    a, b = "https://one.example", "https://two.example:8443"
+    origins = {a: "0" * 64, b: "1" * 64}
+    mount.write_text(json.dumps({"build_id": "1234-1", "origins": origins}))
+    published = _capture_publishes(monkeypatch)
+
+    async def stop(seconds: float) -> None:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(listing.asyncio, "sleep", stop)
+    await listing.announce_provider()
+    event = published[0]
+    for origin, eid in origins.items():
+        assert ["u", origin] in event["tags"]
+        assert ["attestation", "enclava-tee", origin, eid] in event["tags"]
+    changed = {**event, "tags": [list(tag) for tag in event["tags"]]}
+    claim = next(tag for tag in changed["tags"] if tag[0] == "attestation")
+    claim[2] = b
+    assert not listing.events_semantically_equal(event, changed)
+    assert listing.events_semantically_equal(
+        event, {**event, "tags": event["tags"][::-1]}
+    )
+
+
+@pytest.mark.parametrize(
+    "origin, event_id",
+    [
+        ("http://public.example", "a" * 64),
+        ("https://localhost", "a" * 64),
+        ("https://user@public.example", "a" * 64),
+        ("https://public.example/v1", "a" * 64),
+        ("https://public.example:70000", "a" * 64),
+        ("https://public.example", "not-an-id"),
+    ],
+)
+def test_invalid_config_never_advertises_an_attestation(
+    monkeypatch: Any, tmp_path: Path, origin: str, event_id: str
+) -> None:
+    mount = tmp_path / "ROUTSTR_ENCLAVA_LISTING"
+    monkeypatch.setattr(listing, "ENCLAVA_LISTING_FILE", mount)
+    monkeypatch.setenv("ROUTSTR_ENCLAVA_BUILD_ID", "1234-1")
+    mount.write_text(json.dumps({"build_id": "1234-1", "origins": {origin: event_id}}))
+    assert listing._read_enclava_origins() == {}
+
+
+def test_repeated_invalid_config_warns_once(monkeypatch: Any, tmp_path: Path) -> None:
+    """A persistently bad file must not warn on every 30 s poll tick."""
+    mount = tmp_path / "ROUTSTR_ENCLAVA_LISTING"
+    monkeypatch.setattr(listing, "ENCLAVA_LISTING_FILE", mount)
+    monkeypatch.setenv("ROUTSTR_ENCLAVA_BUILD_ID", "1234-1")
+    mount.write_text("{bad")
+    warnings: list[str] = []
+    monkeypatch.setattr(listing.logger, "warning", lambda msg, *a, **k: warnings.append(msg))
+    monkeypatch.setattr(listing.logger, "debug", lambda *a, **k: None)
+    for _ in range(5):
+        assert listing._read_enclava_origins() == {}
+    assert warnings == ["Ignoring unreadable or invalid Enclava listing config"]
+
+
+@pytest.mark.asyncio
+async def test_trailing_slash_endpoint_is_not_published_twice(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """HTTP_URL with a trailing slash must not duplicate the attested origin."""
+    _quiet_settings(monkeypatch, nsec=NSEC_A)
+    monkeypatch.setattr(listing.settings, "http_url", "https://node.example.com/")
+    monkeypatch.setattr(listing.settings, "relays", ["wss://relay.example"])
+    monkeypatch.setenv("ROUTSTR_ENCLAVA_BUILD_ID", "1234-1")
+    mount = tmp_path / "ROUTSTR_ENCLAVA_LISTING"
+    monkeypatch.setattr(listing, "ENCLAVA_LISTING_FILE", mount)
+    origin = "https://node.example.com"
+    mount.write_text(json.dumps({"build_id": "1234-1", "origins": {origin: "a" * 64}}))
+    published = _capture_publishes(monkeypatch)
+
+    async def cancel(seconds: float) -> None:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(listing.asyncio, "sleep", cancel)
+    await listing.announce_provider()
+    tags = published[0]["tags"]
+    assert [t[1] for t in tags if t[0] == "u"] == [origin]
+    assert ["attestation", "enclava-tee", origin, "a" * 64] in tags
