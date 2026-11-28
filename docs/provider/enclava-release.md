@@ -16,7 +16,7 @@ decoded object has these fields:
 {
   "schema": "routstr.enclava-image-release.v1",
   "scheme": "enclava-tee",
-  "image": "ghcr.io/sh1ftred/core@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "image": "ghcr.io/routstr/core-enclava@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }
 ```
@@ -39,12 +39,33 @@ single-deployment policy used to test a node is not a portable release policy.
 
 1. Configure the GitHub Actions **`enclava-release` environment** with a rule
    limiting deployments to `main` and required reviewer(s). Set its secret
-   `ENCLAVA_RELEASE_NSEC` to the dedicated release signing key (never the node
-   NSEC). Set environment variables `ENCLAVA_RELEASE_PUBKEY` to the expected
-   lowercase 64-hex public key and `ENCLAVA_RELEASE_RELAY` to a public `wss://`
-   relay URL without credentials. Distribute the release pubkey independently.
+   `ENCLAVA_RELEASE_NSEC` to the dedicated Routstr release signing key (never a
+   personal key and never the node NSEC). Set environment variables
+   `ENCLAVA_RELEASE_PUBKEY` to the expected lowercase 64-hex public key and
+   `ENCLAVA_RELEASE_RELAY` to a public `wss://` relay URL without credentials.
+   Distribute the release pubkey independently, out of band.
+
+   The release key is a trust anchor: whoever holds it can mint an image
+   release record for any digest. Hold it in the Routstr org (shared secret
+   store), rotate it deliberately, and pin the new pubkey in client releases
+   before the first record signed by the new key is published.
+
+   Current Routstr release identity:
+
+   ```
+   pubkey (hex): a6f1b316ef3ec567ecc2f3325461dce3ac46d086e5b326c12802834b1c67cef4
+   npub:         npub15mcmx9h08mzk0mxz7ve9gcwuuwkyd5yxukejdsfgq2p5k8r8em6qye9xyz
+   ```
+
+   The image package is `ghcr.io/routstr/core-enclava`, published with the
+   repository's own `GITHUB_TOKEN` (no personal PAT). A new package starts
+   private; GHCR visibility is UI-only, so make the package public before
+   deploying, or Enclava cannot pull it.
 2. Dispatch **Build signed image for Enclava** on `main` and enable
-   `publish_release`. Normal pushes and dispatches without opt-in still build
+   `publish_release`. Keep the workflow at this repository, path and ref:
+   `enclava create --signer-subject` and the trust policy pin its Fulcio
+   identity (`certificate_identity`, `workflow_ref`, `source_repository`).
+   Moving or renaming the workflow invalidates both and needs a policy re-pin. Normal pushes and dispatches without opt-in still build
    without Nostr publication. The release job requires the build, cosign
    signature, provenance and SBOM steps to have succeeded.
 3. After relay acknowledgement, the job summary prints the exact event ID and

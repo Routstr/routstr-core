@@ -385,7 +385,13 @@ _HTTPS_DNS_ORIGIN = re.compile(
 )
 
 
+# Last failure reported for the Enclava listing config, so a persistently bad
+# file warns once instead of on every IDENTITY_POLL_SECONDS tick (~2880/day).
+_enclava_listing_failure: str | None = None
+
+
 def _read_enclava_origins() -> dict[str, str]:
+    global _enclava_listing_failure
     build_id = os.getenv("ROUTSTR_ENCLAVA_BUILD_ID")
     if not build_id:
         return {}
@@ -413,11 +419,20 @@ def _read_enclava_origins() -> dict[str, str]:
                 or not re.fullmatch(r"[0-9a-f]{64}", event_id)
             ):
                 raise ValueError("invalid origin or event ID")
+        _enclava_listing_failure = None
         return origins
     except FileNotFoundError:
+        _enclava_listing_failure = None
         return {}
-    except (OSError, ValueError, RecursionError):
-        logger.warning("Ignoring unreadable or invalid Enclava listing config")
+    except (OSError, ValueError, RecursionError) as error:
+        # Repeat failures are expected while the file is bad or mid-write;
+        # log once per distinct failure so a poll loop cannot flood the log.
+        failure = f"{type(error).__name__}: {error}"
+        if failure != _enclava_listing_failure:
+            _enclava_listing_failure = failure
+            logger.warning("Ignoring unreadable or invalid Enclava listing config")
+        else:
+            logger.debug("Ignoring unreadable or invalid Enclava listing config")
         return {}
 
 
@@ -557,9 +572,15 @@ async def announce_provider() -> None:
                 continue
 
             enclava_origins = _read_enclava_origins()
-            endpoint_urls = _resolve_endpoint_urls()
-            endpoint_urls.extend(
-                url for url in enclava_origins if url not in endpoint_urls
+            # Normalise the trailing slash before de-duplicating: HTTP_URL
+            # "https://x.com/" and the canonical attestation origin
+            # "https://x.com" are the same endpoint, and publishing both would
+            # leave one `u` tag without an attestation claim.
+            endpoint_urls = list(
+                dict.fromkeys(
+                    url.rstrip("/")
+                    for url in [*_resolve_endpoint_urls(), *enclava_origins]
+                )
             )
             if not endpoint_urls:
                 logger.warning(

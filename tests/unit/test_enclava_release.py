@@ -9,7 +9,7 @@ from nostr_sdk import Event, Keys, RelayUrl
 
 from scripts import enclava_release as release
 
-IMAGE = "ghcr.io/sh1ftred/core"
+IMAGE = "ghcr.io/routstr/core-enclava"
 DIGEST = "sha256:" + "ab" * 32
 
 

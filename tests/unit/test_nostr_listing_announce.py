@@ -308,3 +308,42 @@ def test_invalid_config_never_advertises_an_attestation(
     monkeypatch.setenv("ROUTSTR_ENCLAVA_BUILD_ID", "1234-1")
     mount.write_text(json.dumps({"build_id": "1234-1", "origins": {origin: event_id}}))
     assert listing._read_enclava_origins() == {}
+
+
+def test_repeated_invalid_config_warns_once(monkeypatch: Any, tmp_path: Path) -> None:
+    """A persistently bad file must not warn on every 30 s poll tick."""
+    mount = tmp_path / "ROUTSTR_ENCLAVA_LISTING"
+    monkeypatch.setattr(listing, "ENCLAVA_LISTING_FILE", mount)
+    monkeypatch.setenv("ROUTSTR_ENCLAVA_BUILD_ID", "1234-1")
+    mount.write_text("{bad")
+    warnings: list[str] = []
+    monkeypatch.setattr(listing.logger, "warning", lambda msg, *a, **k: warnings.append(msg))
+    monkeypatch.setattr(listing.logger, "debug", lambda *a, **k: None)
+    for _ in range(5):
+        assert listing._read_enclava_origins() == {}
+    assert warnings == ["Ignoring unreadable or invalid Enclava listing config"]
+
+
+@pytest.mark.asyncio
+async def test_trailing_slash_endpoint_is_not_published_twice(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """HTTP_URL with a trailing slash must not duplicate the attested origin."""
+    _quiet_settings(monkeypatch, nsec=NSEC_A)
+    monkeypatch.setattr(listing.settings, "http_url", "https://node.example.com/")
+    monkeypatch.setattr(listing.settings, "relays", ["wss://relay.example"])
+    monkeypatch.setenv("ROUTSTR_ENCLAVA_BUILD_ID", "1234-1")
+    mount = tmp_path / "ROUTSTR_ENCLAVA_LISTING"
+    monkeypatch.setattr(listing, "ENCLAVA_LISTING_FILE", mount)
+    origin = "https://node.example.com"
+    mount.write_text(json.dumps({"build_id": "1234-1", "origins": {origin: "a" * 64}}))
+    published = _capture_publishes(monkeypatch)
+
+    async def cancel(seconds: float) -> None:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(listing.asyncio, "sleep", cancel)
+    await listing.announce_provider()
+    tags = published[0]["tags"]
+    assert [t[1] for t in tags if t[0] == "u"] == [origin]
+    assert ["attestation", "enclava-tee", origin, "a" * 64] in tags

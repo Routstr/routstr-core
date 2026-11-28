@@ -39,7 +39,7 @@ RUN apt-get update \
 
 COPY uv.lock pyproject.toml ./
 
-RUN uv sync --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project
 
 WORKDIR /app
 
