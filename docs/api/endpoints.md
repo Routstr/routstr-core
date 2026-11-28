@@ -727,6 +727,148 @@ Returns the change token in the body and in an `X-Cashu` response header. Other 
 
 If the node stops while a paid request is in flight and before its charge is settled, the payment is refunded in full, less the mint's input fee for redeeming it: at once on a graceful shutdown, otherwise once the request lifetime the node had when the payment was accepted (`MAX_REQUEST_LIFETIME_SECONDS` plus `REQUEST_CLEANUP_TIMEOUT_SECONDS` and a minute) has passed. Until then the endpoint answers `425`. If a change refund was already minting after inference completed, that refund is awaited and the charge stands; a second refund is never minted. If the mint's outcome is unknown, the refund is not retried and the endpoint answers `409` `refund_unresolved` for manual reconciliation.
 
+## Confidential Upstream
+
+Present only when the node sets `CONFIDENTIAL_SIDECAR_URL`. The node speaks
+protocol v3 only. This section lists the endpoints and messages; the money
+rules, limits and settings are in
+[Confidential upstream](../confidential-upstream.md), and the complete wire
+format is §12 of `PROTOCOL-V3.md` in the routstr-confidential repository.
+
+### Get Offer
+
+```http
+GET /v1/confidential/offer?v=3
+```
+
+The node's Nostr-signed offer (the query is ignored; clients send it). Fields:
+`v` (`3`), `http` (the framings the sidecar serves now, `"2"` and/or `"1.1"`,
+in the operator's order), `h2` (only when `http` lists `"2"`), `twopc`
+(`"split-public-3"`), `connection_deposit_msat`, `idle_timeout_s`,
+`evict_unused_after_s` (the minimum age of an unused connection before slot
+pressure may close it, its deposit then charged; 0: never), `upstream_host`, `ws` (the session socket URL; relative when `HTTP_URL` is
+unset), `head_template`, `key_length`, `key_alphabet`, `suffix_keys`, `chat`
+(the pinned chat suffix), `max_tokens_cap`, `price_list` (per model `in`,
+`cached_in`, `cache_write`, `out` in msats per 1k tokens, surcharge
+included), `mints`, `notary_pubkey`, `notary_pubkey_curve`, and when set
+`session_fee_msat`, `abandon_fee_msat`, `rate_surcharge_pct`,
+`reserve_margin_tokens`, `upstream_models`, `context_lengths` (per chat
+model, the prompt limit in tokens its reservation is sized by; absent for a
+model without a known context length), `capabilities` + `images`.
+`sig` is the node's BIP-340 signature and `sig_payload` the exact signed
+bytes. A request may name an offer while the node serves it and for 10
+minutes after.
+
+Errors: `502` sidecar unavailable, `503` under `FIXED_PRICING`.
+
+Models served this way carry an additive field in `GET /v1/models`:
+`"confidential_upstream": {"v": 3, "offer_url": "…/v1/confidential/offer"[, "session_fee_msat", "abandon_fee_msat", "rate_surcharge_pct"][, "kind": "images"]}`.
+
+### Connection
+
+```http
+GET /v1/confidential/ws?session_id=<uuid>&v=3   (WebSocket)
+```
+
+One **connection**: one two-party TLS handshake with the provider, carrying
+one request (framing `"1.1"`) or many in turn (framing `"2"`). Control
+messages are JSON text frames, TLS records binary frames. A socket without
+`v=3`, or a `setup` without `"v": 3`, gets
+`{"type":"error","status":426,"reason":"upgrade_required","min_v":3,…}` and
+is closed.
+
+**Setup** (first frame, within 10 s):
+
+```json
+{"type": "setup", "v": 3, "http": "2", "nonce_c": "<64 hex>", "armed": false,
+ "auth": "sk-…|cashu…", "offer_sig": "<sig of the offer>"}
+```
+
+It names no request terms (a setup with `model`, `max_tokens`, `len`, … is
+refused). The node checks that the sidecar serves `http`, that `offer_sig`
+names an offer it signed, that the credential has funds, and reserves the
+offer's connection deposit; only then it dials the sidecar. `ready`
+(`{"type":"ready","v":3,"http","sid","nonce_n","armed",…}`) adds the node's
+`pubkey`, `sig_scheme`, `zk_token` (for `/zk`) and `deposit_msat` (what was
+reserved).
+
+**Request** (framing `"2"`: after `head_written` and `settings_seen`;
+framing `"1.1"`: once, before the ClientHello):
+
+```json
+{"type": "request", "n": 1, "kind": "chat", "model": "…", "max_tokens": 256,
+ "body_len": 1834, "auth": "sk-…|cashu…", "offer_sig": "…",
+ "session_fee_msat": 0, "abandon_fee_msat": 0}
+```
+
+Images: `"kind": "images"`, `variant` and `count` instead of `max_tokens`.
+`n` is the last accepted request's number plus 1. `auth` and `offer_sig` may
+differ from the setup's; the fee fields echo the named offer's. The node
+reserves the model's full-context prompt (the named offer's
+`context_lengths` entry) plus `max_tokens` (images:
+`msat_per_image × count`) plus the larger fee, and forwards the request
+without the credential. Answers:
+
+- `{"type":"request_ok","sid","n","suffix",…,"reserved_msats"}`: accepted;
+  `reserved_msats` is the most this request can be charged.
+- `{"type":"request_refused","n","status","reason"[,"detail"]}`: nothing is
+  held, the connection stays, the next request reuses `n`. `400` bad request
+  or model, `401`/`402` credential or balance, `409` `offer_expired`,
+  `offer_changed` or `session_fee_not_accepted`, `5xx` the node could not
+  reserve. The ninth refusal in a row ends the connection.
+
+Then the TLS records, π_WIN batches (`zk_params`, `release`) and
+`body_released` (the provider has the complete request) pass through. The
+request ends with one of:
+
+- `disclose` (chat 2xx: the usage event, proven with π_C3S);
+- `accept` (images 2xx);
+- `disclose_head` (status ≥ 400: the response head);
+- `disclose_reset` (framing `"2"`: the provider refused the stream unprocessed,
+  `RST_STREAM(REFUSED_STREAM)` or GOAWAY `NO_ERROR`; settled like a 429).
+
+The node re-signs the sidecar's `attestation` and answers the settlement with
+`{"type":"receipt","receipt":{…},"receipt_json","sig","sig_scheme":"schnorr-secp256k1"}`.
+Receipt fields: `v`, `sid`, `http`, `n`, `model` (`upstream_model` when the
+provider's id differs), `usage`, `cost_msats`, `reserved_msats`,
+`balance_msats`, `rates` (chat) or `kind`, `variant`, `count`,
+`msat_per_image` (images), the offer's fees when set,
+`deposit_released_msat` (the connection's first settlement),
+`notary_pubkey`, `attestation_hash` and `time`. The node learns the status
+line and headers of an error response, never its body.
+
+**End.** The last frame is `{"type":"closed","reason"}` (`done`,
+`error_settled`, `idle`, `max_requests`, `max_lifetime`, `max_bytes`,
+`upstream_closed`, `evicted`, `ended`) or `error`. When the deposit was not
+released by a settlement, it carries the signed outcome:
+`deposit {sid, msat, outcome: "released"|"charged", reason, cost_msats, balance_msats, time}`,
+`deposit_json`, `deposit_sig`, `sig_scheme`.
+
+**Errors.** The node's own errors are
+`{"type":"error","status":<int>,"reason":"…","detail":…}`, and the socket
+closes: `400` bad setup or protocol error, `401`/`402` credential or balance
+(`detail.error.type = "connection_deposit_unfunded"` when the deposit cannot
+be reserved), `408` a time limit, `409` `offer_expired`, `413` frame too
+large, `426` another protocol version, `429`/`503` connection limits, `503`
+`wallet_busy` (a first-use Cashu token waited too long for the wallet lock;
+retry), `502` sidecar unreachable or lost, `500` settlement failed. The
+node's own failures carry `fault: "node"`; a sidecar `error` may carry
+`fault` (`"upstream"`, `"node"`) and `code` (`upgrade_required`,
+`twopc_version_mismatch`, `upstream_unreachable`, `h2_not_selected`,
+`h2_withdrawn`, `h2_table_size`).
+
+### Proof Channels
+
+```http
+GET /v1/confidential/zk?proof=<twopc|zkchan|pi_nk|pi_win|pi_c3s>&sid=<sid>&zk_token=<token>   (WebSocket)
+```
+
+A byte proxy to the sidecar: `twopc` (the two-party key schedule),
+`zkchan` (the connection's proof channel), or one proof per socket.
+`sid` and `zk_token` are those of `ready` (`session_id=<sid>` is accepted
+in place of `sid`). Only a connection live on this node process is admitted,
+with at most 6 sockets each; anything else is closed with code 1008.
+
 ## Provider Discovery
 
 ## Admin Settings

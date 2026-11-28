@@ -359,6 +359,31 @@ async def test_settings_initialize_discards_unknown_keys() -> None:
         assert "enable_analytics_collection" not in stored_data
 
 
+@pytest.mark.asyncio
+async def test_a_removed_confidential_setting_in_the_db_is_ignored() -> None:
+    """``confidential_evict_charge_from`` no longer exists: a node database
+    that still holds it (with any value, also one the old field refused)
+    starts, and the key is dropped from the stored blob."""
+    assert "confidential_evict_charge_from" not in Settings.__fields__
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        _ = await SettingsService.initialize(session)
+        await session.exec(  # type: ignore
+            text("UPDATE settings SET data = :data WHERE id = 1").bindparams(
+                data='{"name":"OldNode","confidential_evict_charge_from":1,"confidential_evict_unused_after_s":90}'
+            )
+        )
+        await session.commit()
+        reloaded = await SettingsService.initialize(session)
+        assert reloaded.name == "OldNode"
+        assert reloaded.confidential_evict_unused_after_s == 90
+        assert not hasattr(reloaded, "confidential_evict_charge_from")
+        await SettingsService.refresh(session, ("confidential_evict_charge_from",))
+        await SettingsService.reload_from_db(session)
+        row = await session.exec(text("SELECT data FROM settings WHERE id = 1"))  # type: ignore
+        assert "confidential_evict_charge_from" not in row.first()[0]
+
+
 # ── Secret fields are never written to the settings blob (issue #553) ────────
 
 

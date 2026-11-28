@@ -208,6 +208,22 @@ row (`cashu_swaps.change_token`). The caller should store that token because it
 remains redeemable on the foreign mint. Change is only returned on an immediate
 200; swaps the reconciler finishes later do not build or return change.
 
+### Confidential Upstream (optional)
+
+Lets clients that opt in use your upstream provider *through* your node,
+without your node seeing their prompts or responses, and without your
+provider API key leaving your node. It needs the separate **cu-sidecar**
+process ([routstr-confidential](https://github.com/jooray/routstr-confidential),
+`crypto/relay`) running next to the node on loopback.
+
+| Env | Description |
+| --- | ----------- |
+| `CONFIDENTIAL_SIDECAR_URL` | Base URL of the cu-sidecar (e.g. `http://127.0.0.1:7443`). Empty (default) disables the mode. |
+| `CONFIDENTIAL_SIDECAR_TOKEN` | Shared secret the node sends to the sidecar (its `CU_SIDECAR_TOKEN`). Required when the sidecar is not on loopback. Env-only; never stored in the database. |
+
+Requires `NSEC` (the node signs its offer and receipts). Billing, mints and
+refunds use your normal settings. See [Confidential upstream](../confidential-upstream.md).
+
 ### Lightning Withdrawals
 
 Automatic profit withdrawal:
