@@ -14,6 +14,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish the signed image release record (main only)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -28,6 +33,9 @@ env:
 
 jobs:
   deploy:
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      build_id: ${{ steps.gitmeta.outputs.build_id }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +52,9 @@ jobs:
 
       - name: Resolve git metadata
         id: gitmeta
-        run: echo "sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         id: build
@@ -56,6 +66,7 @@ jobs:
           build-args: |
             GIT_COMMIT=${{ steps.gitmeta.outputs.sha }}
             GIT_TAG=${{ github.ref_name }}
+            ROUTSTR_ENCLAVA_BUILD_ID=${{ steps.gitmeta.outputs.build_id }}
           tags: |
             ${{ env.IMAGE_NAME }}:enclava
             ${{ env.IMAGE_NAME }}:enclava-${{ steps.gitmeta.outputs.sha }}
@@ -96,5 +107,43 @@ jobs:
 
       - name: Print manual deploy image
         run: |
+          echo "Listing build ID: ${{ steps.gitmeta.outputs.build_id }}"
           echo "Deploy manually with:"
           echo "enclava deploy --image ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+
+  publish-release:
+    needs: deploy
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish_release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment: enclava-release
+    env:
+      IMAGE_DIGEST: ${{ needs.deploy.outputs.digest }}
+      ENCLAVA_RELEASE_PUBKEY: ${{ vars.ENCLAVA_RELEASE_PUBKEY }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install signing dependency (x86-64 Linux wheel hash from uv.lock)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/release-venv"
+          echo 'nostr-sdk==0.45.1 --hash=sha256:5e051a662fac81aa2e15e8221915a0ee4c38791fe6284bc286c5f4cc769cc22e' | \
+            "$RUNNER_TEMP/release-venv/bin/pip" install --require-hashes --only-binary=:all: --no-deps -r /dev/stdin
+      - name: Sign public release record
+        env:
+          ENCLAVA_RELEASE_NSEC: ${{ secrets.ENCLAVA_RELEASE_NSEC }}
+        run: '"$RUNNER_TEMP/release-venv/bin/python" scripts/enclava_release.py sign'
+      - name: Preserve exact signed record for deploy and relay retries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: enclava-release-event
+          path: enclava-release-event.json
+          if-no-files-found: error
+      - name: Publish signed record and report acknowledged ID and deploy image
+        env:
+          ENCLAVA_RELEASE_RELAY: ${{ vars.ENCLAVA_RELEASE_RELAY }}
+        run: |
+          set -o pipefail
+          echo "Listing build ID: ${{ needs.deploy.outputs.build_id }}" >> "$GITHUB_STEP_SUMMARY"
+          "$RUNNER_TEMP/release-venv/bin/python" scripts/enclava_release.py publish | tee -a "$GITHUB_STEP_SUMMARY"

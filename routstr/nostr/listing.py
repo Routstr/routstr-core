@@ -8,9 +8,12 @@ import asyncio
 import json
 import os
 import random
+import re
 import time
 import unicodedata
+from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from nostr_sdk import Event
 
@@ -64,6 +67,7 @@ def create_listing_event(
     mint_urls: list[str] | None = None,
     version: str | None = None,
     metadata: dict[str, Any] | None = None,
+    enclava_origins: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Create a listing provider announcement event (kind:38421).
@@ -75,6 +79,7 @@ def create_listing_event(
         mint_urls: Optional list of ecash mint URLs for payments
         version: Provider software version
         metadata: Optional metadata dictionary (name, picture, about, etc.)
+        enclava_origins: Validated advertised origins mapped to kind 8428 IDs.
 
     Returns:
         Complete signed nostr event as a dict ready for publishing
@@ -82,6 +87,8 @@ def create_listing_event(
     tags = [["d", provider_id]]
     for url in endpoint_urls:
         tags.append(["u", url])
+        if enclava_origins and url in enclava_origins:
+            tags.append(["attestation", "enclava-tee", url, enclava_origins[url]])
     if mint_urls:
         for m in mint_urls:
             if m:
@@ -133,6 +140,14 @@ def events_semantically_equal(a: dict[str, Any], b: dict[str, Any]) -> bool:
     urls_a = set(_get_tag_values(a, "u"))
     urls_b = set(_get_tag_values(b, "u"))
     if urls_a != urls_b:
+        return False
+
+    def attestation_tags(event: dict[str, Any]) -> list[list[str]]:
+        return sorted(
+            tag for tag in event.get("tags", []) if tag[:1] == ["attestation"]
+        )
+
+    if attestation_tags(a) != attestation_tags(b):
         return False
 
     mints_a = set(_get_tag_values(a, "mint"))
@@ -361,6 +376,51 @@ def _is_unroutable_url(url: str) -> bool:
     return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified
 
 
+# The config store delivers values as files, not as process environment.
+ENCLAVA_LISTING_FILE = Path("/state/.enclava/config/ROUTSTR_ENCLAVA_LISTING")
+_MAX_LISTING_BYTES = 16_384
+_DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_HTTPS_DNS_ORIGIN = re.compile(
+    rf"https://(?:{_DNS_LABEL}\.)+[a-z](?:[a-z0-9-]{{0,61}}[a-z0-9])?(?::[1-9][0-9]{{0,4}})?"
+)
+
+
+def _read_enclava_origins() -> dict[str, str]:
+    build_id = os.getenv("ROUTSTR_ENCLAVA_BUILD_ID")
+    if not build_id:
+        return {}
+    try:
+        with ENCLAVA_LISTING_FILE.open("rb") as handle:
+            raw = handle.read(_MAX_LISTING_BYTES + 1)
+        if len(raw) > _MAX_LISTING_BYTES:
+            raise ValueError("oversized listing")
+        config = json.loads(raw)
+        # Config storage survives redeploys. Don't reuse an older image's claim.
+        if not isinstance(config, dict) or config.get("build_id") != build_id:
+            return {}
+        origins = config.get("origins")
+        if not isinstance(origins, dict):
+            raise ValueError("expected origins map")
+        for origin, event_id in origins.items():
+            parsed = urlsplit(origin)
+            # Accept canonical DNS HTTPS origins (including an optional port),
+            # not arbitrary provider paths or URLs containing credentials.
+            if (
+                not _HTTPS_DNS_ORIGIN.fullmatch(origin)
+                or parsed.port == 443
+                or _is_unroutable_url(origin)
+                or not isinstance(event_id, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", event_id)
+            ):
+                raise ValueError("invalid origin or event ID")
+        return origins
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, RecursionError):
+        logger.warning("Ignoring unreadable or invalid Enclava listing config")
+        return {}
+
+
 def _resolve_endpoint_urls() -> list[str]:
     """Endpoints to advertise: a public HTTP URL and/or an onion URL."""
     endpoint_urls: list[str] = []
@@ -397,9 +457,11 @@ def _resolve_mint_urls() -> list[str] | None:
 
 
 async def _sleep_until_next_announcement(
-    seconds: float, parsed_nsec: str | None
+    seconds: float,
+    parsed_nsec: str | None,
+    enclava_origins: dict[str, str] | None = None,
 ) -> None:
-    """Sleep up to ``seconds``, returning early if the configured NSEC changes.
+    """Wake early on a changed NSEC or a newly delivered release mapping.
 
     Without the early wake, a node runner who replaces the NSEC in the admin UI
     would wait out the whole re-announce interval before the new identity (and,
@@ -408,6 +470,8 @@ async def _sleep_until_next_announcement(
     remaining = float(seconds)
     while remaining > 0:
         if (settings.nsec or "").strip() != (parsed_nsec or ""):
+            return
+        if enclava_origins is not None and _read_enclava_origins() != enclava_origins:
             return
         chunk = min(float(IDENTITY_POLL_SECONDS), remaining)
         await asyncio.sleep(chunk)
@@ -492,7 +556,11 @@ async def announce_provider() -> None:
                 await asyncio.sleep(DISABLED_POLL_SECONDS)
                 continue
 
+            enclava_origins = _read_enclava_origins()
             endpoint_urls = _resolve_endpoint_urls()
+            endpoint_urls.extend(
+                url for url in enclava_origins if url not in endpoint_urls
+            )
             if not endpoint_urls:
                 logger.warning(
                     "No valid endpoints configured (HTTP_URL/ONION_URL). "
@@ -520,6 +588,7 @@ async def announce_provider() -> None:
                 mint_urls=_resolve_mint_urls(),
                 version=get_app_version(),
                 metadata=metadata,
+                enclava_origins=enclava_origins,
             )
 
             # Fetch existing events for this provider_id
@@ -576,9 +645,9 @@ async def announce_provider() -> None:
                     f"{success_count}/{len(publish_relays)} relays"
                 )
 
-            # Re-announce periodically; wakes early if the NSEC changes.
+            # Re-announce periodically; also detect identity or release updates.
             await _sleep_until_next_announcement(
-                ANNOUNCEMENT_INTERVAL_SECONDS, parsed_nsec
+                ANNOUNCEMENT_INTERVAL_SECONDS, parsed_nsec, enclava_origins
             )
 
         except asyncio.CancelledError:

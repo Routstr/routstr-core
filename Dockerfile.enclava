@@ -50,6 +50,9 @@ COPY --from=ui-builder /app/ui/out ./ui_out
 
 ARG GIT_COMMIT=""
 ARG GIT_TAG=""
+# Match deployment-time listing metadata to this build, not a reused image tag.
+ARG ROUTSTR_ENCLAVA_BUILD_ID=""
+ENV ROUTSTR_ENCLAVA_BUILD_ID=${ROUTSTR_ENCLAVA_BUILD_ID}
 ENV GIT_COMMIT=${GIT_COMMIT}
 ENV GIT_TAG=${GIT_TAG}
 ENV PORT=8000
